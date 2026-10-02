@@ -363,10 +363,16 @@ def judge(phase, state, c, sd, skip=()):
     r = J.ask(c, state, questions)
     if r.get("tier") in ("jev", "emulated"):
         a = r["answers"]
-        tier = r["tier"]
-        if tier == "emulated" and calibrated(c):
-            tier = "emulated-calibrated"
-        return {"judge": tier, "provider": r.get("provider"), "model": r.get("model"),
+        tier, note = r["tier"], None
+        if tier == "emulated":  # a general model must never grade work written by its own model family
+            coder = load_json(sd / "coder.json").get("model") or ""
+            if not coder:
+                note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
+            elif J.family(coder) == J.family(r.get("model") or ""):
+                tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
+            elif calibrated(c):
+                tier = "emulated-calibrated"
+        return {"judge": tier, "judge_note": note, "provider": r.get("provider"), "model": r.get("model"),
                 "scores": {k: a[k]["noul"] for k in qs_text}, "drift": a["drift_direction"]["choice"],
                 "drift_conf": a["drift_direction"]["confidence"], "cost": r.get("cost")}
     jerr = r.get("error")
@@ -653,16 +659,23 @@ None
 }
 
 
-def cmd_start(sid):
+CLIENT_ENV = (("CLAUDECODE", "claude-code"), ("CURSOR_TRACE_ID", "cursor"), ("CODEX_SANDBOX", "codex"), ("GEMINI_CLI", "gemini"))
+
+
+def cmd_start(sid, client=None, model=None):
     sd = sdir(sid)
     sd.mkdir(parents=True, exist_ok=True)
+    client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
+    if client or model or not (sd / "coder.json").exists():
+        old = load_json(sd / "coder.json")  # who is coding: pilot metrics, and a judge must never be the coder's model
+        wj(sd / "coder.json", {"client": client or old.get("client", ""), "model": model or old.get("model", ""), "at": now()})
     for name, body in SKELETONS.items():
         p = sd / name
         if not p.exists() and name != "handoff.md":
             p.write_text(body.replace("{id}", sid), encoding="utf-8")
     # scoped to this branch; the start commit is the story's baseline if work is committed straight onto the base branch
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, current_branch(), git("rev-parse", "HEAD").strip()), encoding="utf-8")
-    emit("started", sid, {})
+    emit("started", sid, load_json(sd / "coder.json"))
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
 
 
@@ -820,7 +833,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     v = verdict(structural, judged, dec, wav, c)
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
-              "judge_model": judged.get("model"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
+              "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION})
     wj(sd / ("%s.json" % phase), v)
     failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED")]
@@ -959,6 +972,8 @@ def contained(sid, c):
 
 def print_verdict(v):
     print("story-gate %s %s: %s  (judge=%s, drift=%s)" % (v["story"], v["phase"].upper(), v["overall"], v["judge"], v["drift"]))
+    if v.get("judge_note"):
+        print("  note: " + v["judge_note"])
     for k, x in sorted(v["checks"].items(), key=lambda kv: (kv[1].get("group", ""), kv[0])):
         if x["status"] != "PASS":
             print("  %-10s %-24s %s" % (x["status"], k, x.get("why") or "score=%s" % x.get("score")))
@@ -1893,7 +1908,7 @@ def main(argv):
     if cmd == "install":
         return cmd_install(kv.get("clients", "all"), kv.get("python", "python" if os.name == "nt" else "python3")) or 0
     if cmd == "start":
-        return cmd_start(rest[0]) or 0
+        return cmd_start(rest[0], kv.get("client"), kv.get("model")) or 0
     if cmd == "source":
         return cmd_source(rest[0]) or 0
     if cmd == "score":

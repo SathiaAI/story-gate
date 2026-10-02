@@ -8,7 +8,8 @@ PY = sys.executable
 def run(repo, *args, stdin=None, env=None):
     e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo / "_home"))
     for k in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_ID", "PR_TITLE",
-              "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY"):
+              "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY",
+              "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI"):
         e.pop(k, None)  # tests never reach a real judge or read the CI runner's own pull request
     e.update(env or {})
     return subprocess.run([PY, str(repo / ".story-gate/gate.py"), *args], cwd=repo, input=stdin,
@@ -860,6 +861,70 @@ class TestRound6Fixes(Base):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         missing = g.trace(self.repo / ".story-gate/stories/SAT-1", g.cfg(), {"exit_code": 0}, {"test_ac1_x": "passed"})
         self.assertIn("AC-1", missing)   # JUnit says passed, but no such test exists in the repository's test files
+
+
+class TestJudgeIndependence(Base):
+    def score_emulated(self, coder_model, judge_model, allow=False):
+        m = MockJudge(model=judge_model)
+        try:
+            self.cfg(judge={"provider": "openai-compatible", "api_key_env": "JUDGE_API_KEY", "model": judge_model,
+                            "base_url": m.url, "emulated_allow_pass": allow})
+            args = ["start", "SAT-1"] + (["--model", coder_model] if coder_model else [])
+            run(self.repo, *args); self.fill_ready()
+            for f in ("ready.self.json", "done.self.json"):
+                (self.repo / ".story-gate/stories/SAT-1" / f).unlink(missing_ok=True)
+            if allow:  # pretend a calibration run passed for this judge
+                g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+                (self.repo / ".story-gate/judge-calibration.json").write_text(json.dumps({"ok": True, "identity": g.J.identity(g.cfg())}))
+            r = run(self.repo, "score", "SAT-1", "ready", env={"JUDGE_API_KEY": "k"})
+            return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r
+        finally:
+            m.close()
+
+    def test_family(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        self.assertEqual(J.family("anthropic/claude-sonnet-4.5"), "anthropic")
+        self.assertEqual(J.family("claude-opus-5-5"), "anthropic")
+        self.assertEqual(J.family("gpt-5.1-codex"), "openai")
+        self.assertEqual(J.family("x-ai/grok-4"), "xai")
+        self.assertEqual(J.family("gemini-2.5-pro"), "google")
+
+    def test_same_family_judge_is_self_review(self):
+        v, r = self.score_emulated("claude-sonnet-4.5", "anthropic/claude-opus-4", allow=True)
+        self.assertEqual(v["judge"], "self", r.stdout); self.assertIn("same model family", v["judge_note"])
+        self.assertNotEqual(v["overall"], "PASS")
+
+    def test_other_family_calibrated_judge_can_pass(self):
+        v, r = self.score_emulated("claude-sonnet-4.5", "gpt-5.1", allow=True)
+        self.assertEqual((v["judge"], v["overall"]), ("emulated-calibrated", "PASS"), r.stdout)
+
+    def test_unknown_coder_keeps_emulated_capped(self):
+        v, r = self.score_emulated("", "gpt-5.1", allow=True)
+        self.assertEqual(v["judge"], "emulated"); self.assertIn("coder model not recorded", v["judge_note"])
+
+    def test_presets(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        self.assertEqual(J.settings({"judge": {"provider": "xai", "model": "grok-4"}})["url"], "https://api.x.ai/v1")
+        self.assertEqual(J.settings({"judge": {"provider": "openai", "model": "gpt-5.1"}})["key_env"], "OPENAI_API_KEY")
+        os.environ["XAI_API_KEY"] = "k"
+        try:
+            self.assertIn("model is required", J.ask({"judge": {"provider": "xai"}}, {}, {})["error"])
+        finally:
+            os.environ.pop("XAI_API_KEY")
+
+    def test_agent_key_found_from_another_os(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        home = Path(tempfile.mkdtemp())
+        (home / "agent.json").write_text(json.dumps({"id": 1, "slug": "x", "key": "F:\\ENV\\agent\\x.pem"}))
+        (home / "x.pem").write_text("k")
+        os.environ["STORY_GATE_HOME"] = str(home)
+        try:
+            self.assertEqual(G.agent_record()["key"], str(home / "x.pem"))
+        finally:
+            os.environ.pop("STORY_GATE_HOME")
 
 
 class TestInstallV03(Base):

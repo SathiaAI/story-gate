@@ -280,6 +280,10 @@ def setup_repo(root, repo, owners, token, dry_run=False):
 
 # ------------------------------------------------------------------ agent identity (GitHub App via manifest)
 def config_dir():
+    if os.environ.get("STORY_GATE_HOME"):  # e.g. a folder an AI tool's sandbox can also reach
+        d = Path(os.environ["STORY_GATE_HOME"])
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     base = os.environ.get("APPDATA") if os.name == "nt" else os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     d = Path(base or os.path.expanduser("~")) / "story-gate"
     d.mkdir(parents=True, exist_ok=True)
@@ -423,7 +427,10 @@ def agent_record():
     p = config_dir() / "agent.json"
     if not p.exists():
         raise RuntimeError("no agent App yet. Run: gate.py setup-agent")
-    return json.loads(p.read_text(encoding="utf-8"))
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    if not os.path.isfile(rec.get("key", "")):  # same folder seen from another OS (e.g. F:\ENV from a Linux sandbox)
+        rec["key"] = str(config_dir() / Path(rec.get("key", "").replace("\\", "/")).name)
+    return rec
 
 
 def openssl():

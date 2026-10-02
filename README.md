@@ -122,7 +122,7 @@ We never use frontier models for gate work.
 
 **Day to day, the commands are the same everywhere:**
 ```bash
-gate.py start VIA-12          # the agent fills story.md, context.md, tests.json
+gate.py start VIA-12 --model gpt-5.1-codex   # records who codes; the agent fills story.md, context.md, tests.json
 gate.py score VIA-12 ready    # READY
 gate.py checkpoint VIA-12     # while building (automatic where hooks exist)
 gate.py record-tests VIA-12   # runs the pinned test command
@@ -227,7 +227,9 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | You don't have… | What happens |
 |---|---|
 | **Jev through OpenRouter** | Use the TypeSafe direct API (`judge.provider: "jev-direct"`, key in `TYPESAFE_API_KEY`), or LiteLLM passing Jev through (`"decisions-proxy"`). Still full trust, as long as the answer really comes from a Jev model |
-| **Any Jev access** | Any OpenAI-compatible model, including through LiteLLM or a local LM Studio or Ollama model of 7B or larger: `"openai-compatible"` with `base_url` and `model`. It's labelled **emulated** and capped at CONCERNS until `gate.py judge-calibrate` passes and you opt in. Use a different model from the one that writes the code |
+| **Any Jev access** | Use your own API account with another model: `"openai"` (`OPENAI_API_KEY`), `"xai"` for Grok (`XAI_API_KEY`), `"gemini"` (`GEMINI_API_KEY`), `"openrouter-chat"` for Claude and others, or `"openai-compatible"` with a `base_url` for LiteLLM, LM Studio or Ollama (7B or larger). Set `judge.model`. It's labelled **emulated** and capped at CONCERNS until `gate.py judge-calibrate` passes and you opt in |
+| **A judge that isn't the coder** | A non-Jev judge from the **same model family** as the coding model (Claude grading Claude, GPT grading Codex) counts as self-review and never passes. Record the coder with `gate.py start <ID> --model <model>`; if it isn't recorded, the judge stays capped |
+| **An API key at all** | A ChatGPT, SuperGrok or Claude subscription doesn't include API access, and Cursor has no model API, so none of them can be the judge. Without a key: |
 | **Any judge** | Structural checks, real test runs and traceability still apply. A human reviews the rest. Nothing PASSES on its own |
 | **Judge credit or availability** | The check says "judge unavailable" and blocks. It never quietly passes |
 | **A paid GitHub plan** (private repo) | Everything runs, but merges aren't blocked. Every check says **ADVISORY – NOT ENFORCED**, and the audit job flags unapproved merges |

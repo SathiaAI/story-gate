@@ -32,7 +32,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
 
 ## READY (before any code)
 
-1. `gate.py start <ID>` creates `.story-gate/stories/<ID>/` and makes `<ID>` the active story.
+1. `gate.py start <ID> --model <your model id>` creates `.story-gate/stories/<ID>/`, makes `<ID>` the active story and records which client and model is coding (a judge from the same model family never counts).
 
 2. **Intake** (model: `intake`). Fetch the story from the source in `config.json` → `sources`:
    - Linear issue, repo file, control-hub document, or a `command` source (`gate.py source <ID>`).

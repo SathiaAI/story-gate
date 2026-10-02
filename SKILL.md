@@ -30,7 +30,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-g
 - **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
 
 ## The moments
-1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
+1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start <ID> --model <your model id>`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
 2. **CHECKPOINT:** runs automatically in clients with after-edit hooks. Otherwise run `gate.py checkpoint <ID>` after each AC. If it says OFF_COURSE, stop and correct the work, or escalate.
 3. **DONE:**
    - Run `record-tests`.
