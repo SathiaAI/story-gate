@@ -108,7 +108,7 @@ DONE_Q = {
     "impl_matches_acs": "The code diff implements every acceptance criterion of the story.",
     "impl_no_unplanned_scope": "The code diff does not add behaviour beyond the story's scope.",
     "drift_trd_after": "The implementation follows the TRD / architecture with no unrecorded deviation.",
-    "tests_implemented": "The diff adds or updates automated tests matching the planned positive, negative, edge and regression cases.",
+    "tests_implemented": "The diff adds or updates automated tests covering the planned positive, negative and edge cases, plus regression cases where the plan lists them (a category the plan marks not applicable, with a reason, needs no test).",
     "no_deferrals": "The diff contains no TODO/FIXME/'temporary'/'later' markers or stubs that defer required work.",
     "handoff_out": "handoff.md lets the next story or agent use this work without asking: what changed, contracts/interfaces, how to verify, known limits, who consumes it.",
     "learnings_specific": "The recorded learnings for this story are specific and reusable (what happened, root cause, prevention rule); or 'no new learnings' is credible because nothing in the story, diff or test results went wrong or was surprising.",
@@ -244,6 +244,9 @@ HOOK_FILES = (".claude/settings.json", ".codex/hooks.json", ".codex/config.toml"
               ".devin/hooks.json", ".windsurf/hooks.json", ".grok/hooks/story-gate.json")
 
 
+STORY_DOCS = (".story-gate/stories/*/*.md", ".story-gate/stories/*/tests.json")
+
+
 def protected(path, c):
     """Gate implementation, config and verdict/record files: never editable by an agent's edit tools."""
     p = repo_rel(path)
@@ -254,7 +257,8 @@ def protected(path, c):
             or low.startswith(".github/workflows/story-gate") or low.startswith(".agents/skills/story-gate/")
             or low.startswith(".claude/skills/story-gate/")):
         return False
-    return not any(fnmatch.fnmatch(p, g) for g in c["exempt_globs"])
+    # Only the story documents agents must write stay editable; user exempt_globs (e.g. "*.md") never unprotect gate files.
+    return not any(fnmatch.fnmatch(p, g) for g in STORY_DOCS)
 
 
 def jsonl(p):
@@ -525,7 +529,9 @@ def verdict(structural, judged, decisions, waivers, c):
     if drift == "work_should_change":  # code is simply wrong vs agreed docs: a fix, not an escalation
         checks["drift_fix_work"] = {"status": "FAIL", "why": "code deviates from the story/TRD — fix the code (no spec change needed)", "kind": "decision"}
     elif drift != "none":
-        if decided:
+        if decided and decided.get("drift") == "story":
+            checks["drift_decision"] = {"status": "FAIL", "why": "decided by %s: the story or the work must change. Apply the decision, then re-score" % decided.get("by"), "kind": "decision"}
+        elif decided:
             checks["drift_decision"] = {"status": "PASS", "why": "decided: %s by %s%s" % (decided["drift"], decided["by"], "" if decided.get("_trusted") else " (proposal: needs a code owner's approval in CI)"), "kind": "decision"}
         else:
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
@@ -631,7 +637,8 @@ def cmd_start(sid):
         p = sd / name
         if not p.exists() and name != "handoff.md":
             p.write_text(body.replace("{id}", sid), encoding="utf-8")
-    ACTIVE.write_text("%s\n%s\n" % (sid, current_branch()), encoding="utf-8")  # scoped to this branch
+    # scoped to this branch; the start commit is the story's baseline if work is committed straight onto the base branch
+    ACTIVE.write_text("%s\n%s\n%s\n" % (sid, current_branch(), git("rev-parse", "HEAD").strip()), encoding="utf-8")
     emit("started", sid, {})
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
 
@@ -667,12 +674,25 @@ def work_fingerprint():
             continue
         f = ROOT / n
         mode = b"x" if f.is_file() and os.access(f, os.X_OK) else b"-"  # executable bit is part of the evidence
-        h.update(n.encode("utf-8", "replace") + b"\0" + mode + (hashlib.sha256(f.read_bytes()).digest() if f.is_file() else b"DELETED"))
+        if f.is_file():
+            body = hashlib.sha256(f.read_bytes()).digest()
+        elif f.is_dir():  # a submodule: its checked-out commit is the evidence
+            body = b"GITLINK:" + git("-C", str(f), "rev-parse", "HEAD").strip().encode()
+        else:
+            body = b"DELETED"
+        h.update(n.encode("utf-8", "replace") + b"\0" + mode + body)
     return h.hexdigest()[:16]
 
 
 def is_record(path):
     return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS)
+
+
+def partially_staged():
+    """Files whose staged version differs from both the last commit and the working copy (git add -p)."""
+    staged = set(zlist("diff", "--cached", "--name-only"))
+    unstaged = set(zlist("diff", "--name-only"))
+    return sorted(f for f in staged & unstaged if not is_record(f))
 
 
 def cmd_record_tests(sid, argv):
@@ -682,6 +702,10 @@ def cmd_record_tests(sid, argv):
         argv = pinned
     if not argv:
         sys.exit("usage: record-tests <ID> -- <test command...>   (or set test_command in .story-gate/config.json)")
+    split = partially_staged()
+    if split:
+        sys.exit("story-gate: %s staged differently from the working copy. Tests must run on exactly what you will commit: "
+                 "stage everything (git add) or unstage it, then re-run record-tests." % ", ".join(split[:5]))
     t0 = time.time()
     try:
         r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
@@ -711,7 +735,13 @@ def resolve_base(base):
             mb = git("merge-base", "HEAD", b).strip()
             if mb and mb == git("rev-parse", "HEAD").strip():  # on the base branch: compare with its upstream if ahead
                 up = git("rev-parse", "--verify", "--quiet", "@{upstream}").strip()
-                mb = git("merge-base", "HEAD", up).strip() if up else mb
+                if up:
+                    mb = git("merge-base", "HEAD", up).strip()
+                else:  # no upstream: compare with the commit where the active story started, so committed work stays visible
+                    act = rd(ACTIVE).split()
+                    if len(act) >= 3 and subprocess.run(["git", "merge-base", "--is-ancestor", act[2], "HEAD"], cwd=ROOT,
+                                                        capture_output=True).returncode == 0:
+                        mb = act[2]
             return mb or b
     raise RuntimeError("base branch %r not found (set base_branch in .story-gate/config.json)" % base)
 
@@ -805,6 +835,9 @@ DRIFT_CHOICE_MID = {
 }
 
 
+CHECKPOINT_BUDGET = 150  # seconds; post-edit hooks allow 180
+
+
 def cmd_checkpoint(sid, quiet=False):
     """Mid-story Jev check: per-AC progress, on course?, drift, deferrals, tests keeping pace. Never blocks by itself."""
     c = cfg()
@@ -822,13 +855,18 @@ def cmd_checkpoint(sid, quiet=False):
              "test_plan": rd(sd / "tests.json")[:mx // 8], "changed_files": files[:300], "diff": diff[:mx // 2]}
     scores, drift, conf, err = {}, "none", 0.0, None
     chunks = [items[i:i + 12] for i in range(0, len(items), 12)] or [[]]
+    deadline = time.time() + CHECKPOINT_BUDGET  # stays inside the clients' hook timeouts
     for n, chunk in enumerate(chunks):
+        left = deadline - time.time()
+        if left < 5:
+            err = "checkpoint ran out of time (%ds budget); run `gate.py checkpoint %s` by hand" % (CHECKPOINT_BUDGET, sid); break
+        cc = json.loads(json.dumps(c)); cc["judge"]["timeout"] = int(min(left, int(c["judge"].get("timeout", 90))))
         q = {"ac_%02d" % j: {"type": "noul", "instructions": "The code so far fully implements %s: %s" % (aid, text)}
              for j, (aid, text, _) in enumerate(chunk)}
         if n == 0:
             q.update({k: {"type": "noul", "instructions": v} for k, v in base_q.items()})
             q["drift_direction"] = {"type": "choice", "instructions": "Is the work drifting from the story/PRD/TRD?", "criteria": DRIFT_CHOICE_MID}
-        r = jev(state, q) if c["judge"].get("jev", True) else {"error": "jev disabled"}
+        r = jev(state, q, cc)
         if not isinstance(r.get("answers"), dict):
             err = r.get("error") or "unexpected Jev response"; break
         a = r["answers"]
@@ -1063,7 +1101,9 @@ def shell_writes(cmd):
 
 def touches_gate(cmd):
     """Any write-capable command that mentions .story-gate (outside the story docs) is refused, except a plain gate.py call."""
-    if GATE_CLI.fullmatch(cmd) and cmd.count(".story-gate") == 1:
+    plain = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)  # quoted free text (--summary "...") is data, not shell
+    if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and GATE_CLI.fullmatch(plain)
+            and plain.count(".story-gate") == 1):
         return False
     mentions = [m for m in re.finditer(r"\.story-gate(?:[/\\][^\s;|&'\"]*)?", cmd, re.I)]
     sensitive = [m.group(0) for m in mentions if not re.match(r"\.story-gate[/\\]stories[/\\][^/\\]+[/\\](?:[^/\\]+\.md|tests\.json)$", m.group(0), re.I)]
@@ -1505,11 +1545,11 @@ def client_configs(py):
     return {
         "claude": (".claude/settings.json", {"hooks": {
             "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": [{"type": "command", "command": cmd("claude", "pre", claude_pre), "timeout": 15}]}],
-            "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "post", claude_pre), "timeout": 60}]}],
+            "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "post", claude_pre), "timeout": 180}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd("claude", "stop", claude_pre), "timeout": 60}]}]}}),
         "codex": (".codex/hooks.json", {"hooks": {
             "PreToolUse": [{"matcher": "^(apply_patch|Edit|Write|Bash|shell|local_shell|exec_command)$", "hooks": [{"type": "command", "command": cmd("codex", "pre"), "timeout": 15}]}],
-            "PostToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "post"), "timeout": 60}]}],
+            "PostToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "post"), "timeout": 180}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd("codex", "stop"), "timeout": 60}]}]}}),
         "cursor": (".cursor/hooks.json", {"version": 1, "hooks": {
             "preToolUse": [{"command": cmd("cursor", "pre"), "matcher": "Write"}],
@@ -1518,7 +1558,7 @@ def client_configs(py):
             "stop": [{"command": cmd("cursor", "stop")}]}}),
         "gemini": (".gemini/settings.json", {"hooks": {
             "BeforeTool": [{"matcher": "write_file|replace|run_shell_command", "hooks": [{"type": "command", "command": cmd("gemini", "pre"), "timeout": 15000}]}],
-            "AfterTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "post"), "timeout": 60000}]}],
+            "AfterTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "post"), "timeout": 180000}]}],
             "AfterAgent": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "stop"), "timeout": 60000}]}]}}),
         "windsurf": (".devin/hooks.json", {"hooks": {
             "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],

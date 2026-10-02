@@ -243,6 +243,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 - **Teams in CODEOWNERS:** team entries (`@org/team`) aren't resolved yet. List people, or use `approvers`.
 - **Stop hook in enforce mode:** it blocks the agent from ending the session up to 3 times in a row, then lets it end so a stuck agent can't loop forever. The PR check still blocks the merge.
 - **First PR:** the PR that adds story-gate is checked by human review only, because CI never runs gate code taken from a PR.
+- **Untrusted branches:** hooks run `.story-gate/gate.py` from the checked-out branch, just as tests and package scripts do. Only run an AI agent with hooks on branches you trust. CI is unaffected: it always runs the base branch's copy.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests

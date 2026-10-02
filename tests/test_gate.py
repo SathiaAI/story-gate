@@ -6,8 +6,10 @@ PY = sys.executable
 
 
 def run(repo, *args, stdin=None, env=None):
-    e = dict(os.environ, STORY_GATE_ROOT=str(repo), OPENROUTER_API_KEY="", HOME=str(repo / "_home"))
-    e.pop("OPENROUTER_API_KEY")
+    e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo / "_home"))
+    for k in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_ID", "PR_TITLE",
+              "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY"):
+        e.pop(k, None)  # tests never reach a real judge or read the CI runner's own pull request
     e.update(env or {})
     return subprocess.run([PY, str(repo / ".story-gate/gate.py"), *args], cwd=repo, input=stdin,
                           capture_output=True, text=True, env=e, timeout=120)
@@ -720,6 +722,50 @@ class TestGitHubLogic(unittest.TestCase):
         m = self.G.manifest("x", "http://127.0.0.1:1/callback")
         self.assertNotIn("workflows", m["default_permissions"]); self.assertNotIn("administration", m["default_permissions"])
         self.assertFalse(m["public"]); self.assertFalse(m["hook_attributes"]["active"])
+
+
+class TestRound3Fixes(Base):
+    def test_jev_false_turns_the_judge_off(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        self.assertEqual(J.settings({"judge": {"provider": "openrouter", "jev": False}})["provider"], "none")
+        self.assertEqual(J.settings({"judge": {"provider": "none"}})["provider"], "none")
+
+    def test_quoted_free_text_in_gate_cli_is_allowed(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        ok = 'python3 .story-gate/gate.py learn SAT-1 --type error --summary "x" --root-cause "y; rm -rf z" --rule "write the regression test first"'
+        self.assertFalse(g.touches_gate(ok))
+        self.assertTrue(g.touches_gate('python3 .story-gate/gate.py learn SAT-1 --summary "$(rm .story-gate/config.json)"'))
+        self.assertTrue(g.touches_gate("python3 .story-gate/gate.py status; rm .story-gate/config.json"))
+
+    def test_story_drift_decision_keeps_failing_until_applied(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        v = g.verdict({}, {"judge": "jev", "scores": {}, "drift": "spec_should_change"}, [{"drift": "story", "by": "Paul"}], {}, g.cfg())
+        self.assertEqual(v["checks"]["drift_decision"]["status"], "FAIL")
+        v = g.verdict({}, {"judge": "jev", "scores": {}, "drift": "spec_should_change"}, [{"drift": "spec", "by": "Paul"}], {}, g.cfg())
+        self.assertEqual(v["checks"]["drift_decision"]["status"], "PASS")
+
+    def test_skill_files_stay_protected_with_md_exempt(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        c = g.cfg()
+        self.assertIn("*.md", c["exempt_globs"])
+        for p in (".claude/skills/story-gate/SKILL.md", ".story-gate/PROTOCOL.md", ".agents/skills/story-gate/SKILL.md"):
+            self.assertTrue(g.protected(str(self.repo / p), c), p)
+        self.assertFalse(g.protected(str(self.repo / ".story-gate/stories/SAT-1/story.md"), c))
+
+    def test_commits_on_base_branch_without_upstream_stay_visible(self):
+        run(self.repo, "start", "SAT-1")
+        (self.repo / "app.py").write_text("x = 9\n")
+        subprocess.run(["git", "add", "app.py"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "work"], cwd=self.repo)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        self.assertIn("app.py", g.diff_against("main")[1])
+
+    def test_record_tests_refuses_partially_staged_files(self):
+        (self.repo / "app.py").write_text("x = 5\n"); subprocess.run(["git", "add", "app.py"], cwd=self.repo)
+        (self.repo / "app.py").write_text("x = 2\n")
+        run(self.repo, "start", "SAT-1")
+        r = run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("staged differently", r.stdout + r.stderr)
 
 
 class TestInstallV03(Base):

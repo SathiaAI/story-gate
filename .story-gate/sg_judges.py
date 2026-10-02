@@ -40,7 +40,7 @@ def env_key(name):
 
 def settings(c):
     j = dict(c.get("judge") or {})
-    if j.get("jev") is False and not j.get("provider"):
+    if j.get("jev") is False or j.get("provider") == "none":  # an explicit opt-out always wins over the default provider
         return {"provider": "none"}
     prov = j.get("provider") or "openrouter"
     d = DEFAULTS.get(prov, {})
