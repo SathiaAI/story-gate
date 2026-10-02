@@ -1,65 +1,64 @@
 ---
 name: story-gate
-description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, tests traced to every AC and green, handoff, learnings). Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
+description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
 ---
 
 # Story Gate
 
 **Success criteria.** A story:
 - starts on defined specs,
-- is built and tested against those specs (acceptance criteria → test cases → automated tests → results),
-- ends on defined specs, complete and delivered.
-
-Anything else is a finding, never a quiet fix.
+- is built and tested against them (AC → test cases → automated tests → results),
+- ends on them, complete and delivered,
+- and is accepted by a human, not by you.
 
 Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-gate/gate.py` (`python` on Windows).
 
-## Sub-agents: use tiers, not model names
-`.story-gate/config.json` → `models` gives each step a **tier**:
+## Your identity
+- Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.
+- Never use the human's GitHub login.
+- If `gate.py doctor --repo owner/name` warns that this shell holds a code owner's login, stop and tell the human.
 
-| Tier | Meaning | Examples (pick what *your* client offers) |
+## Sub-agents: tiers, not model names
+
+| Tier | Use it for | Example models (pick what your client offers) |
 |---|---|---|
-| `small` | Cheapest fast model, for fetching, copying and logging | Claude: haiku · Gemini: a Flash model · Codex/Cursor: the "mini"/"luna"/fast tier |
-| `medium` | Mid-tier coding model, for reading specs and writing test plans and handoffs | Claude: sonnet · otherwise the client's standard coding model |
-| (never) | Frontier/top models are **not** used for gate work | — |
+| `small` | Fetch, copy, log | Claude haiku, a Gemini Flash model, a "mini" or "fast" tier model |
+| `medium` | Read specs, write test plans and handoffs | Claude sonnet, or your client's standard coding model |
+| never | Frontier models are not used for gate work | |
 
-- **Your client can spawn sub-agents with a chosen model** (Claude Code, Codex, Cursor, Gemini CLI): run the parallel steps as sub-agents on the tier's model.
-- **It can't** (e.g. Muse has one model family, Windsurf has no documented sub-agents): do the steps yourself, in order.
+- **If your client can't choose a model for sub-agents** (or has no sub-agents), do the steps yourself, in order.
+- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
 
-Either way the cost stays low, because **judging is not done by your model**. `gate.py` sends the evidence to **Jev** (a sub-second scoring model, fractions of a cent per check). The same judge is used in every client.
-
-## The four moments
-1. **READY:** `start` → fill `story.md`, `context.md`, `tests.json` → `score <ID> ready`.
-2. **CHECKPOINT** (while coding): runs automatically every N code edits in clients with after-edit hooks (Claude Code, Codex, Cursor, Gemini). In other clients, run `gate.py checkpoint <ID>` after each acceptance criterion or about every 30 minutes.
-   - It reports `ON_TRACK / AT_RISK / OFF_COURSE`, an estimated % complete, and per-AC status.
-   - **OFF_COURSE:** stop and correct the work, or escalate the drift. Don't keep coding.
+## The moments
+1. **READY:** run `start`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
+2. **CHECKPOINT:** runs automatically in clients with after-edit hooks. Otherwise run `gate.py checkpoint <ID>` after each AC. If it says OFF_COURSE, stop and correct the work, or escalate.
 3. **DONE:**
-   - `record-tests` (the configured test command).
-   - Map every acceptance criterion to its automated tests in `tests.json` → `test_refs`.
-   - Write `handoff.md`, then run `learn`, then `score <ID> done`.
-   - Check `trace.md`: AC → cases → tests → result.
-4. **DRIFT:** never resolved silently. Escalate to the architect/orchestrator and the owning session. A human records `gate.py decide`.
+   - Run `record-tests`.
+   - Set `test_refs` for every AC.
+   - Self-review the diff (`/engineering:code-review` in Claude clients).
+   - Write `handoff.md`, run `learn`, then run `score <ID> done`.
+4. **ACCEPTANCE:** open the PR as the agent. CI re-checks everything, and a code owner approves the latest commit and merges. You never approve or merge.
+5. **DRIFT:** never resolved silently.
+   - Escalate it.
+   - Waivers and decisions you record are only proposals until a code owner approves.
 
 ## Rules
-- Quote the `gate.py` verdict line. Never declare a pass yourself, and never edit `*.json` verdicts or config.
-- Jev gives scores, not reasons. For each failing check, explain the likely cause in one line from the check's wording and the evidence.
-- Only a human may `waive` a check or `decide` drift.
-- **If the judge is unavailable:** say so. The gate can't PASS without it.
-  - In Claude/Cowork, the **check-jev** skill diagnoses it.
-- **Cowork:** hooks don't fire there, so run `gate.py status` before your first edit and the checkpoints yourself. CI is the backstop.
+- Quote the `gate.py` verdict line. Never declare a pass yourself.
+- Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
+- The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.
+- If the judge is unavailable, say so. Nothing passes without it.
+- In Cowork, Cursor Cloud and Codex cloud, hooks don't run: run `gate.py status` before editing and run the checkpoints yourself. CI is the backstop.
 
 ## Claude / Cowork specifics
-- **If the repo has no `.story-gate/`:** copy it from github.com/sathiaai/story-gate (or `F:\ENV\story-gate\`), run `gate.py install`, and commit.
-- **Run `gate.py` where the repo and the OpenRouter key live.** On Paul's machine that is `device_bash`, with `F:\ENV` connected; the key is in `~/mnt/ENV/.env`.
-  - A cloud shell has no key, so verdicts there are self-scores and can never PASS. Say so.
-- **Sub-agents:** use the Agent tool with `model: haiku` for `small` and `model: sonnet` for `medium`.
-  - Sub-agents write only their evidence file. They never run `score`, `decide` or `waive`.
+- **If the repo has no `.story-gate/`:** copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` (setup-repo runs as Paul, once).
+- **Judge key on Paul's machine:** it lives in `F:\ENV\.env`. Run `gate.py` through `device_bash` with `STORY_GATE_ENV_FILE=$HOME/mnt/ENV/.env`. A cloud shell has no key, so local verdicts there can't PASS. CI still judges, using the repo secret.
+- **Sub-agents:** use the Agent tool, with `model: haiku` for `small` and `model: sonnet` for `medium`. Sub-agents write only their evidence file.
 - **Drift with real options:** run **frontier-gate**, then give Paul plain-English options with pros/cons and a recommendation.
-- **Report** in one block:
+- **Report:**
   - The verdict line.
   - A table of check → why → fix, only if the verdict isn't PASS.
   - One next step.
 - **Related skills:**
-  - **session-handshake:** session handoff, which is not the same as the story handoff.
+  - **session-handshake:** session handoff.
   - **check-jev:** when the judge errors.
-  - **adversarial-review / pr-review-loop:** after DONE.
+  - **pr-review-loop:** after the PR is open.

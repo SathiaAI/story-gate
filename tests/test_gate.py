@@ -16,7 +16,7 @@ def run(repo, *args, stdin=None, env=None):
 class Base(unittest.TestCase):
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
-        shutil.copytree(SRC, self.repo / ".story-gate", ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl"))
+        shutil.copytree(SRC, self.repo / ".story-gate", ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl", "judge-calibration.json"))
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
         (self.repo / "app.py").write_text("x = 1\n")
@@ -117,7 +117,7 @@ class TestDone(Base):
         self.assertEqual(run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "import sys; sys.exit(3)").returncode, 1)
         (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print('ok')")
-        h = "# Handoff\n" + "".join("## %s\nreal content\n" % s for s in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
+        h = "# Handoff\n" + "".join("## %s\nreal content\n" % s for s in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Release and rollback", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         self.assertNotEqual(run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "x").returncode, 0)  # errors need root cause + rule
         run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "pytest import path wrong", "--root-cause", "no conftest", "--rule", "add conftest.py at repo root", "--tags", "pytest")
@@ -180,6 +180,11 @@ class TestHooks(Base):
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         (self.repo / "app.py").write_text("x = 3\n")
         self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}").returncode, 2)
+        # enforce mode keeps blocking even on the client's retry; warn mode lets the retry through
+        self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin='{"stop_hook_active": true}').returncode, 2)
+        self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin='{"stop_hook_active": true}').returncode, 2)
+        self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin='{"stop_hook_active": true}').returncode, 0)  # loop cap
+        self.cfg(mode="warn", enforce_points=[])
         self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin='{"stop_hook_active": true}').returncode, 0)
         self.assertEqual(run(self.repo, "hook", "--client", "cursor", "--event", "stop", stdin='{"loop_count": 1}').returncode, 0)
 
@@ -273,9 +278,9 @@ class TestRegressions(Base):
     def test_green_run_survives_git_add_and_commit(self):
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
-        (self.repo / "new_mod.py").write_text("y = 1\n\ndef test_ac1_x():\n    pass\n")
+        (self.repo / "new_mod.py").write_text("y = 1\n"); (self.repo / "test_new_mod.py").write_text("def test_ac1_x():\n    pass\n")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
-        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
+        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Release and rollback", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "no new learnings")
         self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
@@ -297,7 +302,7 @@ class TestRegressions(Base):
         (self.repo / ".story-gate/config.json").write_text("")
         (self.repo / "app.py").write_text("x = 4\n")
         r = run(self.repo, "ci")
-        self.assertEqual(r.returncode, 0); self.assertIn("could not run", r.stdout)
+        self.assertEqual(r.returncode, 1); self.assertIn("unreadable", r.stdout)  # fail closed: mode unknown
 
 
 class TestCheckpointAndTrace(Base):
@@ -360,7 +365,7 @@ class TestRound1Fixes(Base):
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
-        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
+        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Release and rollback", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "none")
         self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
@@ -371,7 +376,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.2.0")
+        self.assertEqual(g.VERSION, "0.3.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -413,6 +418,318 @@ class TestRound2Fixes(Base):
         (self.repo / "app.py").write_text("x = 11\n")
         r = run(self.repo, "hook", "--client", "cursor", "--event", "stop", stdin='{"loop_count": 0, "workspace_roots": ["."]}')
         self.assertEqual(r.returncode, 0); self.assertIn("followup_message", r.stdout)
+
+
+def load_gate(repo):
+    import importlib.util
+    os.environ["STORY_GATE_ROOT"] = str(repo)
+    sys.path.insert(0, str(repo / ".story-gate"))
+    for m in ("sg_judges", "sg_github"):
+        sys.modules.pop(m, None)
+    spec = importlib.util.spec_from_file_location("gate_mod_%d" % id(repo), repo / ".story-gate/gate.py")
+    g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+    return g
+
+
+class MockJudge:
+    """Tiny local server that speaks the Jev decisions format and the OpenAI chat format."""
+    def __init__(self, model="typesafe/jev-1.13", p=0.95, broken=False):
+        import http.server, threading
+        me = self
+        self.model, self.p, self.broken, self.last = model, p, broken, None
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode())
+                me.last = body
+                if self.path.endswith("/chat/completions"):
+                    props = body["response_format"]["json_schema"]["schema"]["properties"]
+                    ans = {k: ({"noul": me.p} if "noul" in v["properties"] else {"choice": v["properties"]["choice"]["enum"][0], "confidence": 0.9}) for k, v in props.items()}
+                    out = {"model": me.model, "choices": [{"message": {"content": json.dumps(ans)}}]}
+                else:
+                    ans = {}
+                    for k, q in body["questions"].items():
+                        ans[k] = {"noul": me.p} if q["type"] == "noul" else {"choice": "none", "confidence": 0.9}
+                    if me.broken:
+                        ans.pop(next(iter(ans)))
+                    out = {"model": me.model, "answers": ans}
+                raw = json.dumps(out).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+
+
+class TestJudges(Base):
+    def score_with(self, judge_cfg, p=0.95, model="typesafe/jev-1.13", broken=False):
+        m = MockJudge(model=model, p=p, broken=broken)
+        try:
+            self.cfg(judge=dict(judge_cfg, base_url=m.url + ("/decisions" if judge_cfg["provider"] != "openai-compatible" else "")))
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            for f in ("ready.self.json", "done.self.json"):
+                (self.repo / ".story-gate/stories/SAT-1" / f).unlink()
+            r = run(self.repo, "score", "SAT-1", "ready", env={"JUDGE_API_KEY": "k"})
+            return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r
+        finally:
+            m.close()
+
+    def test_jev_via_proxy_can_pass(self):
+        v, r = self.score_with({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY"})
+        self.assertEqual((v["judge"], v["overall"]), ("jev", "PASS"), r.stdout)
+
+    def test_non_jev_model_behind_proxy_is_emulated_and_capped(self):
+        v, r = self.score_with({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY"}, model="some-other-model")
+        self.assertEqual((v["judge"], v["overall"]), ("emulated", "CONCERNS"), r.stdout)
+
+    def test_openai_compatible_is_capped(self):
+        v, r = self.score_with({"provider": "openai-compatible", "api_key_env": "JUDGE_API_KEY", "model": "local-7b"})
+        self.assertEqual((v["judge"], v["overall"]), ("emulated", "CONCERNS"), r.stdout)
+
+    def test_incomplete_answers_fail_closed(self):
+        v, r = self.score_with({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY"}, broken=True)
+        self.assertNotEqual(v["judge"], "jev")
+        self.assertIn("omitted", v.get("jev_error") or "")
+
+    def test_validate_rejects_bad_probabilities(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        qs = {"a": {"type": "noul", "instructions": "x"}}
+        self.assertIsNone(J.validate({"a": {"noul": 1.7}}, qs)[0])
+        self.assertIsNone(J.validate({"a": {"noul": float("nan")}}, qs)[0])
+        self.assertIsNotNone(J.validate({"a": {"noul": 0.3}}, qs)[0])
+        self.assertIsNone(J.validate({"a": {"noul": True}}, qs)[0])                      # bool is not a probability
+        cq = {"c": {"type": "choice", "criteria": ["none", "minor"], "instructions": "x"}}
+        self.assertIsNone(J.validate({"c": {"choice": ["none"], "confidence": 0.9}}, cq)[0])  # unhashable choice
+        self.assertIsNotNone(J.validate({"c": {"choice": "none", "confidence": 0.9}}, cq)[0])
+
+    def test_jev_model_id_is_matched_strictly(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        for ok in ("typesafe/jev-1.13", "jev", "TypeSafe/Jev-1.13-20260901"):
+            self.assertTrue(J.JEV_MODEL.match(ok), ok)
+        for bad in ("jevil-7b", "my-jev", "typesafe/jev-1.13-evil", "", "gpt-jev"):
+            self.assertFalse(J.JEV_MODEL.match(bad), bad)
+
+    def test_missing_model_in_response_is_not_jev(self):
+        v, r = self.score_with({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY"}, model="")
+        self.assertEqual((v["judge"], v["overall"]), ("emulated", "CONCERNS"), r.stdout)
+
+    def test_emulated_request_has_no_temperature_by_default(self):
+        m = MockJudge(model="local-7b")
+        try:
+            self.cfg(judge={"provider": "openai-compatible", "api_key_env": "JUDGE_API_KEY", "model": "local-7b", "base_url": m.url})
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            run(self.repo, "score", "SAT-1", "ready", env={"JUDGE_API_KEY": "k"})
+            self.assertNotIn("temperature", m.last)
+            self.assertNotIn("minimum", json.dumps(m.last["response_format"]))
+        finally:
+            m.close()
+
+
+class TestV03Integrity(Base):
+    def test_decision_bound_to_evidence(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(drift="spec_should_change")
+        run(self.repo, "score", "SAT-1", "ready")
+        run(self.repo, "decide", "SAT-1", "--drift", "spec", "--by", "Paul", "--note", "ok")
+        run(self.repo, "score", "SAT-1", "ready")
+        self.assertEqual(json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())["overall"], "PASS")
+        p = self.repo / ".story-gate/stories/SAT-1/story.md"; p.write_text(p.read_text() + "\nchanged scope")
+        run(self.repo, "score", "SAT-1", "ready")
+        self.assertEqual(json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())["overall"], "ESCALATED")
+
+    def test_escalation_event_even_when_failing(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(drift="architect_must_decide")
+        (self.repo / ".story-gate/stories/SAT-1/tests.json").write_text("{}")  # also FAIL structurally
+        run(self.repo, "score", "SAT-1", "ready")
+        self.assertIn("drift_escalated", (self.repo / ".story-gate/outbox.jsonl").read_text())
+
+    def test_concerns_do_not_pass_unless_accepted(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(self_score=0.5)
+        self.assertEqual(run(self.repo, "score", "SAT-1", "ready").returncode, 1)
+        self.cfg(accept_concerns=True)
+        self.assertEqual(run(self.repo, "score", "SAT-1", "ready").returncode, 0)
+
+    def test_spec_change_makes_ready_stale(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, mode="enforce", spec_files=["docs/PRD.md"])
+        (self.repo / "docs").mkdir(); (self.repo / "docs/PRD.md").write_text("v1")
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        hook = lambda: run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(TestHooks.PAYLOADS["claude"]))
+        self.assertEqual(hook().returncode, 0)
+        (self.repo / "docs/PRD.md").write_text("v2 - different requirement")
+        self.assertEqual(hook().returncode, 2)
+        self.assertIn("OUT OF DATE", run(self.repo, "status").stdout)
+
+    def test_unreadable_config_blocks_hooks(self):
+        (self.repo / ".story-gate/config.json").write_text("{broken")
+        r = run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(TestHooks.PAYLOADS["claude"]))
+        self.assertEqual(r.returncode, 2); self.assertIn("unreadable", r.stderr)
+
+    def test_shell_guard(self):
+        self.cfg(mode="enforce")
+        sh = lambda c: run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps({"tool_name": "Bash", "tool_input": {"command": c}})).returncode
+        self.assertEqual(sh("echo '{}' > .story-gate/config.json"), 2)
+        self.assertEqual(sh("python3 -c \"open('.story-gate/gate.py','w').write('')\""), 2)
+        self.assertEqual(sh("sed -i 's/1/2/' app.py"), 2)          # code write before READY
+        self.assertEqual(sh("pytest -q"), 0)                        # running tests is fine
+        self.assertEqual(sh("python .story-gate/gate.py start SAT-1"), 0)
+        self.assertEqual(sh("python .story-gate/gate.py start SAT-1; echo x > .story-gate/config.json"), 2)
+
+    def test_protected_via_symlink_and_case(self):
+        self.cfg(mode="enforce", judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        os.symlink(self.repo / ".story-gate", self.repo / "alias")
+        p = {"tool_name": "Write", "tool_input": {"file_path": "alias/gate.py"}}
+        self.assertEqual(run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p)).returncode, 2)
+
+    def test_active_story_scoped_to_branch(self):
+        run(self.repo, "start", "SAT-1")
+        subprocess.run(["git", "checkout", "-qb", "chore-cleanup"], cwd=self.repo, capture_output=True)
+        self.assertIn("no active story", run(self.repo, "status").stdout)
+
+    def test_source_rejects_shell_metacharacters(self):
+        self.cfg(sources=[{"type": "command", "command": "echo {id}"}])
+        r = run(self.repo, "source", "X; touch pwned #")
+        self.assertNotEqual(r.returncode, 0); self.assertFalse((self.repo / "pwned").exists())
+
+    def test_deleted_test_does_not_count(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "t"], cwd=self.repo)
+        subprocess.run(["git", "checkout", "-qb", "feature/SAT-1-b"], cwd=self.repo)
+        (self.repo / "test_app.py").unlink()
+        (self.repo / "app.py").write_text("x = 3  # test_ac1_x mentioned in production code\n")
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        run(self.repo, "score", "SAT-1", "done")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/done.json").read_text())
+        self.assertEqual(v["checks"]["traceability"]["status"], "FAIL")
+
+    def test_untracked_files_are_evidence(self):
+        g = load_gate(self.repo)
+        (self.repo / "brand_new.py").write_text("def feature():\n    return 42\n")
+        _, files, diff = g.diff_against("main")
+        self.assertIn("brand_new.py", files); self.assertIn("return 42", diff)
+        os.environ.pop("STORY_GATE_ROOT")
+
+    def test_ci_uses_ci_test_results(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "app.py").write_text("x = 5\n")
+        td = self.repo / "_ci"; td.mkdir()
+        (td / "results.json").write_text(json.dumps({"exit_code": 1, "command": "pytest"}))
+        r = run(self.repo, "ci", "--tests", str(td))
+        self.assertIn("tests failed or did not run in CI", r.stdout)
+
+    def test_ci_missing_test_results_never_uses_agent_results(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / ".story-gate/stories/SAT-1/test_results.json").write_text(json.dumps({"exit_code": 0, "command": "pytest"}))
+        (self.repo / "app.py").write_text("x = 5\n")
+        td = self.repo / "_ci"; td.mkdir()
+        r = run(self.repo, "ci", "--tests", str(td))
+        self.assertIn("CI test results are missing", r.stdout)
+        tr = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertIsNone(tr["exit_code"])
+
+    def test_ci_workflow_never_copies_pr_code_into_the_judge_job(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        self.assertNotIn('cp ".story-gate/', g.CI_YML)
+        self.assertIn("exit 0", g.TRUSTED_COPY)
+        self.assertIn("rm -f .story-gate/config.json .story-gate/judge-calibration.json", g.TRUSTED_COPY)
+        self.assertIn("SG_BASE_REF: ${{ github.event.pull_request.base.ref }}", g.CI_YML)
+        self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", g.AUDIT_YML)
+        self.assertIn(".claude/settings.json", g.GATE_FILES)
+
+
+class TestGitHubLogic(unittest.TestCase):
+    def setUp(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); self.G = importlib.import_module("sg_github")
+
+    def test_codeowners(self):
+        self.assertEqual(self.G.codeowners("# x\n*.js @web\n* @Paul @SathiaAI/core\n"), (["Paul"], ["SathiaAI/core"]))
+
+    def test_junit_and_refs(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "j.xml").write_text('<testsuite><testcase classname="tests.test_auth" name="test_ok"/><testcase classname="tests.test_auth" name="test_bad"><failure/></testcase><testcase name="test_skip"><skipped/></testcase></testsuite>')
+        res = self.G.junit(d / "j.xml")
+        self.assertEqual(self.G.ref_outcome("test_ok", res), "passed")
+        self.assertEqual(self.G.ref_outcome("test_bad", res), "failed")
+        self.assertEqual(self.G.ref_outcome("test_skip", res), "skipped")
+        self.assertEqual(self.G.ref_outcome("test_nope", res), "missing")
+        (d / "evil.xml").write_text('<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><testsuite/>')
+        with self.assertRaises(ValueError):
+            self.G.junit(d / "evil.xml")
+
+    def acc(self, reviews, author="agent-bot[bot]", head_author="agent-bot[bot]", owners="* @Paul\n"):
+        G = self.G
+        ctx = {"repo": "o/r", "number": 1, "head_sha": "abc1234", "author": author}
+        G.call = lambda m, p, t=None, b=None, accept=None: (200, {"author": {"login": head_author}, "committer": {"login": "web-flow"}}, {})
+        G.paged = lambda p, t: reviews
+        return G.acceptance(ctx, "t", owners)
+
+    def rv(self, login, state="APPROVED", sha="abc1234", typ="User"):
+        return {"user": {"login": login, "type": typ}, "state": state, "commit_id": sha}
+
+    def test_acceptance_rules(self):
+        self.assertTrue(self.acc([self.rv("Paul")])["accepted"])
+        self.assertFalse(self.acc([self.rv("Paul", sha="old0000")])["accepted"])          # stale approval
+        self.assertFalse(self.acc([self.rv("someone")])["accepted"])                      # not a code owner
+        self.assertFalse(self.acc([self.rv("Paul", typ="Bot")])["accepted"])              # bots never accept
+        self.assertFalse(self.acc([self.rv("Paul")], author="Paul")["accepted"])          # own PR
+        self.assertFalse(self.acc([self.rv("Paul")], head_author="Paul")["accepted"])     # approver pushed the last commit
+        self.assertFalse(self.acc([self.rv("Paul"), self.rv("coderabbitai[bot]", "CHANGES_REQUESTED", typ="Bot")])["accepted"])
+        self.assertFalse(self.acc([self.rv("Paul")], owners="")["accepted"])               # no code owners at all
+        G = self.G
+        ctx = {"repo": "o/r", "number": 1, "head_sha": "abc1234", "author": "agent-bot[bot]"}
+        G.paged = lambda p, t: [self.rv("Paul")]
+        G.call = lambda m, p, t=None, b=None, accept=None: (200, {"author": {"login": "agent-bot[bot]"}, "committer": {"login": "Paul"}}, {})
+        self.assertFalse(G.acceptance(ctx, "t", "* @Paul\n")["accepted"])                # approver committed the last commit
+        G.call = lambda m, p, t=None, b=None, accept=None: (404, {"message": "Not Found"}, {})
+        self.assertFalse(G.acceptance(ctx, "t", "* @Paul\n")["accepted"])                # can't verify the head commit
+        G.call = lambda m, p, t=None, b=None, accept=None: (200, {"author": None, "committer": {"login": "agent-bot[bot]"}}, {})
+        self.assertFalse(G.acceptance(ctx, "t", "* @Paul\n")["accepted"])                # unlinked author email
+
+    def test_unresolved_threads_follow_pages(self):
+        G = self.G
+        pages = [{"pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": [{"isResolved": True, "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}}]},
+                 {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{"isResolved": False, "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}}]}]
+        G.graphql = lambda q, v, t: {"repository": {"pullRequest": {"reviewThreads": pages[0 if v["a"] is None else 1]}}}
+        self.assertEqual(G.unresolved_threads({"repo": "o/r", "number": 1}, "t", ["coderabbitai[bot]"]), 1)
+
+    def test_private_key_file_mode(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permissions")
+        p = Path(tempfile.mkdtemp()) / "k.pem"
+        self.G.write_private(p, "secret")
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+
+    def test_ruleset_shape(self):
+        r = self.G.ruleset_json()
+        pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
+        self.assertTrue(pr["require_code_owner_review"] and pr["dismiss_stale_reviews_on_push"] and pr["require_last_push_approval"])
+        self.assertEqual(r["bypass_actors"], [])
+
+    def test_manifest_has_no_dangerous_permissions(self):
+        m = self.G.manifest("x", "http://127.0.0.1:1/callback")
+        self.assertNotIn("workflows", m["default_permissions"]); self.assertNotIn("administration", m["default_permissions"])
+        self.assertFalse(m["public"]); self.assertFalse(m["hook_attributes"]["active"])
+
+
+class TestInstallV03(Base):
+    def test_managed_workflows(self):
+        run(self.repo, "install")
+        for f in (".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml"):
+            self.assertTrue((self.repo / f).read_text().startswith("# managed by story-gate"))
+        own = self.repo / ".github/workflows/story-gate.yml"; own.write_text("name: mine\n")
+        out = run(self.repo, "install").stdout
+        self.assertIn("not managed", out); self.assertEqual(own.read_text(), "name: mine\n")
 
 
 if __name__ == "__main__":

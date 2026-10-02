@@ -4,6 +4,18 @@ Every code change belongs to a story. A story starts on defined specs, is built 
 
 `gate.py` = `python3 .story-gate/gate.py` (`python` on Windows). Run it from the repo root.
 
+**Who decides what:**
+
+| Role | Decides |
+|---|---|
+| You, the agent | Gather evidence |
+| The **judge** (Jev by default, see `config.json` → `judge`) | Scores the evidence |
+| `gate.py` | Applies fixed rules |
+| **CI** | Re-checks everything on GitHub |
+| **A human code owner** | Accepts the work by approving the PR's latest commit, then merges it |
+
+**You never:** approve, merge, waive or decide drift on a human's behalf. You never act with a human's GitHub login: use the agent identity (`gate.py agent-env`).
+
 **Mode** (`.story-gate/config.json`):
 - `"mode": "warn"` reports problems without blocking.
 - `"mode": "enforce"` blocks edits, stopping and merging.
@@ -32,6 +44,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
    - `## TRD`: the architecture and technical rules it must follow.
    - `## Upstream handoffs`: one `### <dep-id>` block per `depends_on`. Use that story's `handoff.md`, or the equivalent from Linear or control-hub.
    - `## Prior learnings`: run `gate.py learnings <3-6 keywords>`, then paste the relevant hits with their ids. If nothing fits, write `None — searched: …`.
+   - **Spec pinning:** PRD/TRD files listed in `config.json` (`spec_files`, or a `repo` source's `prd`/`trd`) are fingerprinted at READY. If they change mid-story, READY goes out of date: re-run READY and reconcile.
 
 4. ∥ **Test plan** (model: `tests`). Fill `tests.json`:
    - Add one entry per acceptance criterion.
@@ -87,12 +100,22 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 ## DONE (before saying "done")
 
-1. `gate.py record-tests <ID> -- <the project's test command>`. If `config.json` → `test_command` is set, that command always runs. The tests must be green, on the current code. This is evidence, not a claim.
+1. `gate.py record-tests <ID>` runs the pinned `test_command`.
+   - Set `junit_path` too, so each test's own result is recorded.
+   - The tests must be green on the current code.
+   - CI repeats this run itself and ignores the local record. The local run is an early warning; CI's run is the proof.
 
-   **Traceability:** in `tests.json`, set each acceptance criterion's `test_refs` to the names of the automated tests that cover its cases (e.g. `test_ac1_expired_token_401`). DONE fails any criterion with no tests that exist in the changed code. `trace.md` is written for reviewers: AC → planned cases → tests → found → suite result.
+   **Traceability:**
+   - In `tests.json`, set each acceptance criterion's `test_refs` to the exact names of the automated tests that cover its cases (e.g. `test_ac1_expired_token_401`).
+   - DONE fails any criterion whose tests are not in the current test files (`test_globs`), or, when JUnit is available, did not run and pass.
+   - `trace.md` is written for reviewers: AC → planned cases → tests → result.
+
+   **Self-review before the PR:** run your client's code reviewer on the diff and fix what it finds.
+   - In Claude clients, that's `/engineering:code-review`.
+   - This is a self-check. The proof comes from the independent reviewers on the PR (`config.json` → `reviewers`, e.g. CodeRabbit or Codex), whose threads must all be resolved.
 
 2. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md`:
-   - Sections: What changed · Interfaces and contracts · How to verify · Known limits · Downstream consumers · Drift decisions.
+   - Sections: What changed · Interfaces and contracts · How to verify · Known limits · Downstream consumers · Release and rollback (or "Not applicable: reason") · Drift decisions.
    - Downstream stories read this. Write it for a stranger.
 
 3. ∥ **Learnings recorder** (model: `learnings`). Record every error hit, wrong turn and reusable insight:
@@ -106,11 +129,28 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 6. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
 
-## Waivers
-Only the human owner may waive a check:
-`gate.py waive <ID> <check> --by <who> --reason "…"`.
+## ACCEPTANCE (the human's part)
+
+1. Push the branch and open a PR **as the agent identity**, with the story id in the branch name or a leading `[ID]` in the title.
+2. The `story-gate` check runs:
+   - It runs the pinned tests itself, then re-scores READY and DONE with the judge.
+   - It checks that the independent reviewers have no open threads.
+   - It shows the evidence in the check summary.
+3. A **code owner approves the latest commit** in GitHub's own review screen. A comment is not an approval, and any new push cancels the approval. Then the human merges.
+4. After the merge, an audit job opens an issue if anything was merged without that approval.
+
+## Waivers and drift decisions are proposals
+- **Recording them:** `gate.py waive <ID> <check> --by <who> --reason "…"` and `gate.py decide …`. Each one is tied to the exact evidence it was made on.
+- **What CI does with them:** CI ignores them until a code owner approves the commit that contains them. The check summary lists them, so the approver sees exactly what they are accepting.
+- **What can't be waived:** structural facts.
+
+## Tuning
+- `gate.py label <ID> ready|done correct|wrong --note "…"` records whether a verdict was right.
+- Thresholds are tuned from `calibration.jsonl`.
+- A non-Jev judge stays capped at CONCERNS until it passes `gate.py judge-calibrate` and the owner sets `judge.emulated_allow_pass`.
 
 ## Rules
 - Fail closed. If the judge is unavailable, the verdict can't be PASS. Say so; don't work around it.
+- Never edit `.story-gate/` code, config or verdict files, CODEOWNERS or the story-gate workflows, with any tool, including the shell.
 - Don't edit `ready.json` / `done.json` by hand. Don't delete `decisions.jsonl` or `learnings.jsonl` lines (append-only).
 - Quote the `gate.py` verdict line in your reply. Never paraphrase it into a pass.

@@ -24,14 +24,24 @@ Commands (run from the repo root):
   learnings [words...]               search past learnings (read these before planning)
   status [<ID>]                      one plain-English line
   hook --client C --event pre|post|stop   called by AI-client hooks (reads JSON on stdin)
-  ci                                 called by the CI workflow
+  ci [--tests DIR] | ci-tests DIR | audit       called by the CI workflows (see .github/workflows/story-gate*.yml)
+  label <ID> ready|done correct|wrong [--note ..]  tell story-gate whether a verdict was right (tunes thresholds)
+  judge-calibrate                    test a non-Jev judge on known cases before it may PASS anything
+  setup-repo [--owners a,b]          one time, as YOU: CODEOWNERS + branch rules + Actions cannot approve PRs
+  setup-agent [--org ORG]            one time: create your private "story-gate agent" GitHub App (AI identity)
+  agent-env --repo owner/name        print env + git identity so AI tools act as the agent App, not as you
+  agent-token --repo owner/name [--git-credential]   1-hour token for the agent App
   publish                            send outbox events to configured sinks
-  doctor                             check config, judge, wiring
+  doctor [--repo owner/name] [--strict]   plain-English health check (wiring, judge, branch rules, agent identity)
 """
-import fnmatch, hashlib, json, os, re, subprocess, sys, time, urllib.request, urllib.error
+import fnmatch, hashlib, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error
 from pathlib import Path
 
-VERSION = "0.2.0"
+sys.dont_write_bytecode = True  # never leave __pycache__ inside the repo
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sg_judges as J  # noqa: E402
+
+VERSION = "0.3.0"
 ROOT = Path(os.environ.get("STORY_GATE_ROOT") or Path(__file__).resolve().parent.parent)
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -43,18 +53,32 @@ STORIES = GATE / "stories"
 LEARNINGS = GATE / "learnings.jsonl"
 OUTBOX = GATE / "outbox.jsonl"
 ACTIVE = GATE / ".active"
+CALIB = GATE / "calibration.jsonl"
+RECORD_PATHS = (".story-gate/stories", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
+                ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
+
+
+class ConfigError(Exception):
+    pass
 
 DEFAULT_CONFIG = {
     "version": 1,
     "mode": "warn",
     "enforce_points": [],
-    "block_on_concerns": False,
+    "accept_concerns": False,
     "story_id_pattern": "[A-Z][A-Z0-9]+-[0-9]+",
     "base_branch": "main",
     "exempt_globs": [".story-gate/stories/*/*.md", ".story-gate/stories/*/tests.json", "docs/**/*.md", "*.md"],
     "test_command": "",
+    "junit_path": "",
+    "test_globs": ["**/test_*.py", "**/*_test.py", "**/tests/**", "**/test/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/*Test.java", "**/*_test.go"],
+    "spec_files": [],
     "thresholds": {"pass": 0.7, "concerns": 0.4},
-    "judge": {"jev": True, "allow_self_judge_pass": False, "max_chars": 90000},
+    "judge": {"provider": "openrouter", "emulated_allow_pass": False,
+              "allow_self_judge_pass": False, "max_chars": 90000},
+    "approvers": [],
+    "reviewers": ["coderabbitai[bot]", "chatgpt-codex-connector[bot]"],
+    "require_independent_review": True,
     "sources": [],
     "sinks": [{"type": "repo"}],
     "models": {"intake": "small", "context": "medium", "tests": "medium", "handoff": "medium", "learnings": "small"},
@@ -112,7 +136,8 @@ CHECK_GROUP = {  # how checks roll up for humans
 }
 TEST_CATS = ("positive", "negative", "edge", "regression")
 CONTEXT_SECTIONS = ("## PRD", "## TRD", "## Upstream handoffs", "## Prior learnings")
-HANDOFF_SECTIONS = ("## What changed", "## Interfaces and contracts", "## How to verify", "## Known limits", "## Downstream consumers", "## Drift decisions")
+HANDOFF_SECTIONS = ("## What changed", "## Interfaces and contracts", "## How to verify", "## Known limits", "## Downstream consumers",
+                    "## Release and rollback", "## Drift decisions")
 
 
 # ------------------------------------------------------------------ small helpers
@@ -120,12 +145,21 @@ def cfg():
     p = GATE / "config.json"
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     if p.exists():
-        user = json.loads(p.read_text(encoding="utf-8"))
+        try:
+            user = json.loads(p.read_text(encoding="utf-8"))
+            assert isinstance(user, dict)
+        except Exception as e:
+            raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % e.__class__.__name__)
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(c.get(k), dict):
                 c[k].update(v)
             else:
                 c[k] = v
+    if c.get("mode") not in ("warn", "enforce"):
+        raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
+    bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
+    if bad:
+        raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)
     return c
 
 
@@ -182,17 +216,45 @@ def sections(text):
     return out
 
 
-def exempt(path, c):
+def repo_rel(path):
+    """Resolve a path the way the filesystem will (symlinks, '..', case on Windows/macOS) -> repo-relative posix or None."""
     p = str(path).replace("\\", "/")
-    if os.path.isabs(p) or re.match(r"^[A-Za-z]:/", p):
-        try:
-            p = Path(p).resolve().relative_to(ROOT.resolve()).as_posix()
-        except ValueError:
-            return False  # outside the repo: not ours to exempt
-    p = os.path.normpath(p).replace("\\", "/")
-    if p.startswith("..") or p.startswith("/"):
-        return False
+    full = Path(p) if (os.path.isabs(p) or re.match(r"^[A-Za-z]:/", p)) else ROOT / p
+    try:
+        rel = Path(os.path.realpath(full)).relative_to(Path(os.path.realpath(ROOT)))
+    except ValueError:
+        try:  # case-insensitive filesystems: compare case-folded
+            a, b = os.path.realpath(full), os.path.realpath(ROOT)
+            if os.path.normcase(a).startswith(os.path.normcase(b) + os.sep):
+                return a[len(b) + 1:].replace("\\", "/")
+        except Exception:
+            pass
+        return None
+    return rel.as_posix()
+
+
+def exempt(path, c):
+    p = repo_rel(path)
+    if p is None or p.startswith(".."):
+        return False  # outside the repo: not ours to exempt
     return any(fnmatch.fnmatch(p, g) for g in c["exempt_globs"])
+
+
+HOOK_FILES = (".claude/settings.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json", ".gemini/settings.json",
+              ".devin/hooks.json", ".windsurf/hooks.json", ".grok/hooks/story-gate.json")
+
+
+def protected(path, c):
+    """Gate implementation, config and verdict/record files: never editable by an agent's edit tools."""
+    p = repo_rel(path)
+    if p is None:
+        return False
+    low = p.lower()
+    if not (low.startswith(".story-gate/") or low in HOOK_FILES or low in (".github/codeowners", "codeowners", "docs/codeowners")
+            or low.startswith(".github/workflows/story-gate") or low.startswith(".agents/skills/story-gate/")
+            or low.startswith(".claude/skills/story-gate/")):
+        return False
+    return not any(fnmatch.fnmatch(p, g) for g in c["exempt_globs"])
 
 
 def jsonl(p):
@@ -215,9 +277,25 @@ def load_json(p):
         return {}
 
 
-def inputs_hash(sd, phase):
-    names = ["story.md", "context.md", "tests.json"] + (["handoff.md", "test_results.json"] if phase == "done" else [])
+def spec_files(c):
+    files = list(c.get("spec_files") or [])
+    for s in c.get("sources") or []:
+        if s.get("type") == "repo":
+            files += [s[k] for k in ("prd", "trd") if s.get(k)]
+    return sorted(set(f for f in files if f and (ROOT / f).is_file()))
+
+
+def inputs_hash(sd, phase, c=None):
+    names = ["story.md", "context.md", "tests.json"] + (["handoff.md"] if phase == "done" else [])
     blob = "".join(rd(sd / n) for n in names)
+    if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
+        tr = load_json(sd / "test_results.json")
+        blob += json.dumps({k: tr.get(k) for k in ("command", "exit_code", "fingerprint")}, sort_keys=True)
+    try:
+        c = c or cfg()
+        blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
+    except ConfigError:
+        blob += "<config unreadable>"
     if phase == "done":
         blob += "".join(json.dumps(r) for r in jsonl(LEARNINGS) if r.get("story") == sd.name) + work_fingerprint()
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
@@ -230,36 +308,7 @@ def emit(event_type, sid, payload):
                             "repo": ROOT.name, "payload": payload}, ensure_ascii=False) + "\n")
 
 
-# ------------------------------------------------------------------ judge (Jev)
-def openrouter_key():
-    k = os.environ.get("OPENROUTER_API_KEY")
-    if k:
-        return k.strip()
-    for p in (os.path.expanduser("~/mnt/ENV/.env"), r"F:\ENV\.env"):
-        if os.path.exists(p):
-            for line in open(p, encoding="utf-8", errors="ignore"):
-                if line.strip().startswith("OPENROUTER_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip("'\"")
-    return None
-
-
-def jev(state, questions):
-    """Returns {'answers': {...}} or {'error': ...}. Never raises."""
-    k = openrouter_key()
-    if not k:
-        return {"error": "no OPENROUTER_API_KEY"}
-    body = {"model": "typesafe/jev-1.13", "state": state, "questions": questions}
-    req = urllib.request.Request("https://openrouter.ai/api/alpha/decisions", data=json.dumps(body).encode(),
-                                 headers={"Authorization": "Bearer " + k, "Content-Type": "application/json",
-                                          "X-Title": "story-gate"})
-    try:
-        return json.loads(urllib.request.urlopen(req, timeout=90).read().decode())
-    except urllib.error.HTTPError as e:
-        return {"error": "HTTP %s %s" % (e.code, e.read().decode(errors="ignore")[:300])}
-    except Exception as e:
-        return {"error": repr(e)[:300]}
-
-
+# ------------------------------------------------------------------ judge (pluggable, see sg_judges.py)
 def num(x):
     try:
         return float(x)
@@ -267,30 +316,37 @@ def num(x):
         return 0.0
 
 
+def jev(state, questions, c=None):
+    """Back-compat wrapper used by checkpoints/doctor: {'answers', 'tier', ...} or {'error'}."""
+    r = J.ask(c or cfg(), state, questions)
+    return r if r.get("tier") != "none" else {"error": r.get("error")}
+
+
+def calibrated(c):
+    """An emulated judge may PASS only if the user opted in and its calibration run (same provider+model) passed."""
+    if not (c.get("judge") or {}).get("emulated_allow_pass"):
+        return False
+    rec = load_json(GATE / "judge-calibration.json")
+    return rec.get("ok") is True and rec.get("identity") == J.identity(c)
+
+
 def judge(phase, state, c, sd, skip=()):
-    """Score semantic checks. Jev first; else agent self-scores from <phase>.self.json."""
+    """Score semantic checks with the configured judge; else agent self-scores from <phase>.self.json."""
     qs_text = {k: v for k, v in (READY_Q if phase == "ready" else DONE_Q).items() if k not in skip}
     questions = {k: {"type": "noul", "instructions": v} for k, v in qs_text.items()}
+    choices = DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE
     questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and the PRD/TRD point?",
-                                    "criteria": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE}
-    if c["judge"].get("jev", True):
-        r = jev(state, questions)
-        if isinstance(r.get("answers"), dict):
-            a = r["answers"]
-            scores = {}
-            for k in qs_text:  # a missing or malformed answer scores 0 (fail closed)
-                try:
-                    scores[k] = float(a[k]["noul"])
-                except Exception:
-                    scores[k] = 0.0
-            d = a.get("drift_direction") if isinstance(a.get("drift_direction"), dict) else {}
-            choices = DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE
-            drift = d.get("choice") if d.get("choice") in choices else "architect_must_decide"
-            return {"judge": "jev", "scores": scores, "drift": drift,
-                    "drift_conf": num(d.get("confidence")), "cost": (r.get("usage") or {}).get("cost")}
-        jerr = r.get("error") or "unexpected Jev response"
-    else:
-        jerr = "jev disabled in config"
+                                    "criteria": choices}
+    r = J.ask(c, state, questions)
+    if r.get("tier") in ("jev", "emulated"):
+        a = r["answers"]
+        tier = r["tier"]
+        if tier == "emulated" and calibrated(c):
+            tier = "emulated-calibrated"
+        return {"judge": tier, "provider": r.get("provider"), "model": r.get("model"),
+                "scores": {k: a[k]["noul"] for k in qs_text}, "drift": a["drift_direction"]["choice"],
+                "drift_conf": a["drift_direction"]["confidence"], "cost": r.get("cost")}
+    jerr = r.get("error")
     selfp = sd / ("%s.self.json" % phase)
     if selfp.exists():
         s = load_json(selfp)
@@ -300,9 +356,13 @@ def judge(phase, state, c, sd, skip=()):
                 return min(1.0, max(0.0, float(x)))
             except Exception:
                 return 0.0
-        return {"judge": "self", "scores": {k: f(sc.get(k, 0)) for k in qs_text},
-                "drift": s.get("drift", "architect_must_decide"), "drift_conf": 0.0, "jev_error": jerr}
+        d = s.get("drift") if s.get("drift") in choices else "architect_must_decide"
+        return {"judge": "self", "scores": {k: f(sc.get(k, 0)) for k in qs_text}, "drift": d, "drift_conf": 0.0, "jev_error": jerr}
     return {"judge": "none", "scores": {}, "drift": "architect_must_decide", "drift_conf": 0.0, "jev_error": jerr}
+
+
+def can_pass(judge_name, c):
+    return judge_name in ("jev", "emulated-calibrated") or bool((c.get("judge") or {}).get("allow_self_judge_pass"))
 
 
 def acs(sd):
@@ -329,6 +389,9 @@ def struct_ready(sd):
     story = rd(sd / "story.md")
     fm = front_matter(story)
     out["story_present"] = (len(story.strip()) > 200 and "TODO: paste" not in story, "story.md missing, still a skeleton, or too thin")
+    src = str(fm.get("source", "")).strip()
+    out["story_source"] = (bool(src) and not src.upper().startswith("TODO"),
+                           "story.md front matter 'source' must say where the story came from (linear:ID, repo:path, ...)")
     ctx = rd(sd / "context.md")
     secs = sections(ctx)
     missing = [s for s in CONTEXT_SECTIONS if not secs.get(s, "").strip() or "TODO" in secs.get(s, "")]
@@ -354,22 +417,55 @@ def struct_ready(sd):
     return out, fm
 
 
-def trace(sd, diff_files, diff_text, tr):
-    """AC -> planned cases -> automated test refs -> found in code -> suite result. Writes trace.md."""
+def test_corpus(c):
+    """Current contents of test files in the working tree (deleted tests and production code never count)."""
+    files = set(zlist("ls-files")) | set(zlist("ls-files", "--others", "--exclude-standard"))
+    out = []
+    for f in sorted(files):
+        if f.startswith(".story-gate/"):
+            continue
+        if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch("/" + f, g) for g in c.get("test_globs") or []):
+            p = ROOT / f
+            if p.is_file() and p.stat().st_size < 2_000_000:
+                out.append(rd(p))
+    return "\n".join(out)
+
+
+def defined(ref, corpus):
+    """The ref must be a test definition, not merely mentioned (a comment or string elsewhere does not count)."""
+    e = re.escape(ref)
+    pats = [r"\b(?:async\s+)?(?:def|func|function|fn|sub)\s+" + e + r"\s*[\(<\[]",                # python, go, js, rust, perl
+            r"\b(?:void|public\s+void|fun|func)\s+" + e + r"\s*\(",                              # java, kotlin
+            r"\b(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(\s*['\"`]" + e + r"['\"`]",  # js/ts/rspec style
+            r"\b(?:Scenario|Feature):\s*" + e + r"\s*$"]                                        # gherkin
+    return any(re.search(p, corpus, re.M) for p in pats)
+
+
+def trace(sd, c, tr, results=None):
+    """AC -> planned cases -> automated tests -> exists in current test files -> executed outcome. Writes trace.md."""
     t = load_json(sd / "tests.json")
     plan = {str(a.get("id")): a for a in (t.get("acceptance_criteria") or []) if isinstance(a, dict)}
-    corpus = diff_text + "".join(rd(ROOT / f) for f in diff_files if not f.startswith(".story-gate/"))
+    corpus = test_corpus(c)
     suite = "GREEN" if tr.get("exit_code") == 0 else ("RED" if tr else "NOT RUN")
     rows, missing = [], []
     for aid, text, refs in acs(sd):
         a = plan.get(aid, {})
         cases = sum(len(a.get(k) or []) for k in TEST_CATS)
-        found = [r for r in refs if r in corpus]
-        if not refs or len(found) < len(refs):
+        found = [r for r in refs if defined(r, corpus)]
+        if results is not None:
+            import sg_github as G
+            outcomes = {r: G.ref_outcome(r, results) for r in refs}
+            ok = bool(refs) and all(o == "passed" for o in outcomes.values())
+            res = ", ".join("%s=%s" % kv for kv in outcomes.items()) or "—"
+        else:
+            ok = bool(refs) and len(found) == len(refs) and suite == "GREEN"
+            res = suite
+        if not ok:
             missing.append(aid)
         rows.append("| %s | %s | %d | %s | %s | %s |" % (aid, text[:60].replace("|", "/"), cases, ", ".join(refs) or "—",
-                                                     "%d/%d" % (len(found), len(refs)), suite))
-    md = "# Traceability: %s\n\n| AC | Criterion | Planned cases | Automated tests (test_refs) | Found in code | Suite |\n|---|---|---|---|---|---|\n" % sd.name
+                                                     "%d/%d" % (len(found), len(refs)), res))
+    md = ("# Traceability: %s\n\n| AC | Criterion | Planned cases | Automated tests (test_refs) | In current test files | Result |\n"
+          "|---|---|---|---|---|---|\n" % sd.name)
     wj_text(sd / "trace.md", md + "\n".join(rows) + "\n")
     return missing
 
@@ -378,10 +474,10 @@ def wj_text(p, text):
     Path(p).write_text(text, encoding="utf-8")
 
 
-def struct_done(sd, sid, diff_files, c, diff_text=""):
+def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False):
     out = {}
     rj = load_json(sd / "ready.json")
-    out["ready_gate_passed"] = (passed(rj, c, sd), "READY gate not passed (overall=%s)" % rj.get("overall", "never run"))
+    out["ready_gate_passed"] = (passed(rj, c, sd), "READY gate not passed or out of date (overall=%s; the story, test plan or PRD/TRD changed since) - re-run READY" % rj.get("overall", "never run"))
     h = rd(sd / "handoff.md")
     hs = sections(h)
     miss = [s for s in HANDOFF_SECTIONS if not hs.get(s, "").strip() or "TODO" in hs.get(s, "")]
@@ -399,8 +495,10 @@ def struct_done(sd, sid, diff_files, c, diff_text=""):
                               "code changed after the last green test run — run record-tests again")
     code = [f for f in diff_files if not exempt(f, c)]
     out["code_changed"] = (bool(code), "no code changes found against base")
-    miss = trace(sd, diff_files, diff_text, tr)
-    out["traceability"] = (not miss, "ACs without automated tests found in the code (tests.json test_refs): " + ", ".join(miss))
+    miss = trace(sd, c, tr, results)
+    out["traceability"] = (not miss, "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
+    if truncated:
+        out["evidence_complete"] = ("CONCERNS", "the change is too large for one judge pass; split the story or get a human review of the whole diff")
     return out
 
 
@@ -413,26 +511,27 @@ def verdict(structural, judged, decisions, waivers, c):
     th = c["thresholds"]
     checks = {}
     for k, (ok, why) in structural.items():
-        checks[k] = {"status": "PASS" if ok else "FAIL", "why": "" if ok else why, "kind": "structural"}
+        st = ok if isinstance(ok, str) else ("PASS" if ok else "FAIL")
+        checks[k] = {"status": st, "why": "" if st == "PASS" else why, "kind": "structural"}
     for k, p in judged.get("scores", {}).items():
         st = band(p, th)
-        if judged["judge"] != "jev" and st == "PASS" and not c["judge"].get("allow_self_judge_pass"):
-            st = "CONCERNS"  # an agent cannot pass its own homework
+        if st == "PASS" and not can_pass(judged["judge"], c):
+            st = "CONCERNS"  # an uncalibrated or self judge cannot award a PASS
         checks[k] = {"status": st, "score": round(p, 3), "kind": judged["judge"], "group": CHECK_GROUP.get(k, "")}
     if judged["judge"] == "none":
-        checks["judge_available"] = {"status": "FAIL", "why": "no Jev and no self-scores: semantic checks did not run (%s)" % judged.get("jev_error"), "kind": "structural"}
+        checks["judge_available"] = {"status": "FAIL", "why": "no judge and no self-scores: semantic checks did not run (%s)" % judged.get("jev_error"), "kind": "structural"}
     drift = judged.get("drift", "none")
     decided = decisions[-1] if decisions else None
     if drift == "work_should_change":  # code is simply wrong vs agreed docs: a fix, not an escalation
         checks["drift_fix_work"] = {"status": "FAIL", "why": "code deviates from the story/TRD — fix the code (no spec change needed)", "kind": "decision"}
     elif drift != "none":
         if decided:
-            checks["drift_decision"] = {"status": "PASS", "why": "decided: %s by %s" % (decided["drift"], decided["by"]), "kind": "decision"}
+            checks["drift_decision"] = {"status": "PASS", "why": "decided: %s by %s%s" % (decided["drift"], decided["by"], "" if decided.get("_trusted") else " (proposal: needs a code owner's approval in CI)"), "kind": "decision"}
         else:
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
     for k, w in waivers.items():
-        if k in checks and checks[k]["status"] != "PASS":
-            checks[k]["status"], checks[k]["why"] = "WAIVED", "waived by %s: %s" % (w["by"], w["reason"])
+        if k in checks and checks[k]["status"] != "PASS" and checks[k]["kind"] != "structural":
+            checks[k]["status"], checks[k]["why"] = "WAIVED", "waived by %s: %s%s" % (w["by"], w["reason"], "" if w.get("_trusted") else " (proposal: needs a code owner's approval in CI)")
     sts = [v["status"] for v in checks.values()]
     overall = ("FAIL" if "FAIL" in sts else "ESCALATED" if "ESCALATED" in sts else
                "CONCERNS" if "CONCERNS" in sts else "WAIVED" if "WAIVED" in sts else "PASS")
@@ -442,18 +541,26 @@ def verdict(structural, judged, decisions, waivers, c):
 def passed(v, c, sd=None):
     v = v or {}
     o = v.get("overall")
-    if v.get("judge") != "jev" and not c["judge"].get("allow_self_judge_pass"):
-        return False  # without an independent judge nothing passes
-    if sd is not None and v.get("inputs_hash") != inputs_hash(sd, v.get("phase", "ready")):
-        return False  # story/tests/handoff/code changed since this verdict: re-score
-    return o in ("PASS", "WAIVED") or (o == "CONCERNS" and not c.get("block_on_concerns"))
+    if not can_pass(v.get("judge"), c):
+        return False  # without a trusted judge nothing passes
+    if sd is not None and v.get("inputs_hash") != inputs_hash(sd, v.get("phase", "ready"), c):
+        return False  # story/tests/handoff/code/spec changed since this verdict: re-score
+    return o in ("PASS", "WAIVED") or (o == "CONCERNS" and bool(c.get("accept_concerns")))
 
 
-def records(sd, phase):
+def stale(v, c, sd):
+    return bool(v) and v.get("inputs_hash") != inputs_hash(sd, v.get("phase", "ready"), c)
+
+
+def records(sd, phase, c=None, trusted=False):
+    """Drift decisions and waivers that still match the evidence they were made on.
+    trusted=True only in CI after a code owner approved the current head commit; locally they are proposals."""
     dec, wav = [], {}
+    cur = inputs_hash(sd, phase, c)
     for r in jsonl(sd / "decisions.jsonl"):
-        if r.get("phase", phase) != phase:
-            continue
+        if r.get("phase", phase) != phase or r.get("evidence") != cur:
+            continue  # made on different evidence (or unbound): does not carry over
+        r = dict(r, _trusted=trusted)
         if r.get("kind") == "drift":
             dec.append(r)
         elif r.get("kind") == "waiver" and r.get("check") in READY_Q.keys() | DONE_Q.keys():
@@ -508,6 +615,9 @@ TODO (or 'None')
 ## Downstream consumers
 TODO (story ids / systems that depend on this and what they need from it)
 
+## Release and rollback
+TODO (how it ships, feature flag, migrations, monitoring, how to roll back - or 'Not applicable: <reason>')
+
 ## Drift decisions
 None
 """,
@@ -521,16 +631,22 @@ def cmd_start(sid):
         p = sd / name
         if not p.exists() and name != "handoff.md":
             p.write_text(body.replace("{id}", sid), encoding="utf-8")
-    ACTIVE.write_text(sid, encoding="utf-8")
+    ACTIVE.write_text("%s\n%s\n" % (sid, current_branch()), encoding="utf-8")  # scoped to this branch
     emit("started", sid, {})
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
 
 
+def current_branch():
+    return git("rev-parse", "--abbrev-ref", "HEAD").strip()
+
+
 def cmd_source(sid):
+    sdir(sid)  # validates the id before it goes anywhere near a shell
     for s in cfg().get("sources", []):
         if s.get("type") == "command" and s.get("command"):
-            cmd = s["command"].replace("{id}", sid)
-            r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, timeout=120)
+            cmd = s["command"].replace("{id}", shlex.quote(sid))
+            r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=120, env=dict(os.environ, STORY_GATE_ID=sid))
             print("### source: %s (exit %s)\n%s" % (s.get("name", cmd), r.returncode, r.stdout[-20000:]))
         else:
             print("### source (%s): fetch with your tools — %s" % (s.get("type"), json.dumps({k: v for k, v in s.items() if k != "type"})))
@@ -547,7 +663,7 @@ def work_fingerprint():
                    | set(zlist("ls-files", "--others", "--exclude-standard")))
     h = hashlib.sha256()
     for n in names:
-        if n.startswith(".story-gate/"):
+        if is_record(n):
             continue
         f = ROOT / n
         mode = b"x" if f.is_file() and os.access(f, os.X_OK) else b"-"  # executable bit is part of the evidence
@@ -555,12 +671,17 @@ def work_fingerprint():
     return h.hexdigest()[:16]
 
 
+def is_record(path):
+    return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS)
+
+
 def cmd_record_tests(sid, argv):
-    pinned = cfg().get("test_command")
+    c = cfg()
+    pinned = c.get("test_command")
     if pinned:
         argv = pinned
     if not argv:
-        sys.exit("usage: record-tests <ID> -- <test command...>")
+        sys.exit("usage: record-tests <ID> -- <test command...>   (or set test_command in .story-gate/config.json)")
     t0 = time.time()
     try:
         r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
@@ -568,8 +689,15 @@ def cmd_record_tests(sid, argv):
         code, tail = r.returncode, (r.stdout + r.stderr)[-4000:]
     except Exception as e:
         code, tail = -1, repr(e)
-    wj(sdir(sid) / "test_results.json", {"command": argv if isinstance(argv, str) else " ".join(argv), "exit_code": code, "seconds": round(time.time() - t0, 1),
-                                         "head": git("rev-parse", "HEAD").strip(), "fingerprint": work_fingerprint(), "at": now(), "output_tail": tail})
+    rec = {"command": argv if isinstance(argv, str) else " ".join(argv), "exit_code": code, "seconds": round(time.time() - t0, 1),
+           "head": git("rev-parse", "HEAD").strip(), "fingerprint": work_fingerprint(), "at": now(), "output_tail": tail}
+    if c.get("junit_path") and (ROOT / c["junit_path"]).is_file():
+        import sg_github as G
+        try:
+            rec["junit"] = G.junit(ROOT / c["junit_path"])
+        except Exception as e:
+            rec["junit_error"] = str(e)
+    wj(sdir(sid) / "test_results.json", rec)
     print("story-gate: tests %s (exit %s)" % ("GREEN" if code == 0 else "RED", code))
     return 0 if code == 0 else 1
 
@@ -594,12 +722,21 @@ def zlist(*args):
 
 def diff_against(base):
     mb = resolve_base(base)
-    names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) \
-        | set(zlist("ls-files", "--others", "--exclude-standard"))
-    return mb, sorted(names), git("diff", mb, "--", ".", ":(exclude).story-gate")  # gate records never count as code evidence
+    untracked = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
+    names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) | set(untracked)
+    excl = [":(exclude)%s" % r for r in RECORD_PATHS]
+    diff = git("diff", mb, "--", ".", *excl)  # story records never count as code evidence; the gate's own code does
+    for n in untracked[:200]:  # new files are evidence too, even before `git add`
+        f = ROOT / n
+        if f.is_file() and f.stat().st_size < 500_000:
+            body = rd(f)
+            diff += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
+    return mb, sorted(names), diff
 
 
-def cmd_score(sid, phase, base=None):
+def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
+    """ci_trust: None = local run (waivers/decisions shown as proposals), True = CI with a code owner's approval
+    on the head commit (honoured), False = CI without it (ignored). results = per-test outcomes from CI's own run."""
     c = cfg()
     sd = sdir(sid)
     if not sd.exists():
@@ -613,28 +750,51 @@ def cmd_score(sid, phase, base=None):
                  "test_plan": rd(sd / "tests.json")[:mx // 3]}
     elif phase == "done":
         mb, files, diff = diff_against(base or c["base_branch"])
-        structural = struct_done(sd, sid, files, c, diff)
+        budget = mx // 2
+        if results is None:
+            results = (load_json(sd / "test_results.json").get("junit") or None)
+        structural = struct_done(sd, sid, files, c, diff, results, truncated=len(diff) > budget)
         skip = set()
         learn = [l for l in rd(LEARNINGS).splitlines() if '"%s"' % sid in l]
         state = {"story": rd(sd / "story.md")[:mx // 6], "context": rd(sd / "context.md")[:mx // 6],
                  "test_plan": rd(sd / "tests.json")[:mx // 8], "handoff": rd(sd / "handoff.md")[:mx // 8],
                  "learnings": "\n".join(learn)[:mx // 16], "changed_files": files[:300],
-                 "diff": diff[:mx // 2], "diff_truncated": len(diff) > mx // 2}
+                 "diff": diff[:budget], "diff_truncated": len(diff) > budget}
     else:
         sys.exit("phase must be ready or done")
     judged = judge(phase, state, c, sd, skip)
-    dec, wav = records(sd, phase)
+    dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     v = verdict(structural, judged, dec, wav, c)
-    v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "jev_error": judged.get("jev_error"),
-              "inputs_hash": inputs_hash(sd, phase),
+    v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
+              "judge_model": judged.get("model"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION})
     wj(sd / ("%s.json" % phase), v)
-    emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"],
-                                  "failed": [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED")]})
-    if v["overall"] == "ESCALATED":
+    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED")]
+    emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
+    if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
-    print_verdict(v)
+    calib_log(sid, phase, v, judged)
+    if not quiet:
+        print_verdict(v)
     return 0 if passed(v, c, sd) else 1
+
+
+def calib_log(sid, phase, v, judged):
+    """Every verdict is logged so thresholds can be tuned against human labels (gate.py label)."""
+    qset = hashlib.sha256(json.dumps([READY_Q, DONE_Q], sort_keys=True).encode()).hexdigest()[:10]
+    row = {"at": v["at"], "story": sid, "phase": phase, "overall": v["overall"], "judge": v["judge"], "provider": judged.get("provider"),
+           "model": judged.get("model"), "questions": qset, "gate_version": VERSION, "inputs_hash": v["inputs_hash"],
+           "scores": judged.get("scores"), "drift": v["drift"]}
+    with CALIB.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def cmd_label(sid, phase, label, note):
+    if label not in ("correct", "wrong"):
+        sys.exit("label <ID> ready|done correct|wrong [--note TEXT]")
+    with CALIB.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": now(), "story": sid, "phase": phase, "label": label, "note": note}) + "\n")
+    print("story-gate: labelled %s %s as %s (used to tune thresholds)" % (sid, phase, label))
 
 
 DRIFT_CHOICE_MID = {
@@ -746,6 +906,8 @@ def append_decision(sid, rec):
     sd = sdir(sid)
     sd.mkdir(parents=True, exist_ok=True)
     rec["at"] = now()
+    if rec.get("phase") in ("ready", "done"):
+        rec["evidence"] = inputs_hash(sd, rec["phase"])  # only valid for the evidence it was made on
     with (sd / "decisions.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     emit(rec["kind"], sid, rec)
@@ -799,14 +961,15 @@ def cmd_learnings(words):
 def story_id(c, payload=None):
     """Explicit env > branch name > active file > PR title (title last: 'Fix UTF-8' must not become a story)."""
     pat = re.compile(r"(?<![A-Za-z0-9])(?:%s)(?![0-9])" % c["story_id_pattern"])
-    for src in (os.environ.get("STORY_GATE_ID", ""), os.environ.get("GITHUB_HEAD_REF", ""),
+    for src in (os.environ.get("STORY_GATE_ID", ""), os.environ.get("SG_HEAD_REF") or os.environ.get("GITHUB_HEAD_REF", ""),
                 git("rev-parse", "--abbrev-ref", "HEAD").strip()):
         m = pat.search(src or "")
         if m:
             return m.group(0)
-    s = rd(ACTIVE).strip()
-    if s:
-        return s
+    lines = rd(ACTIVE).strip().splitlines()
+    if lines and lines[0].strip():
+        if len(lines) < 2 or lines[1].strip() == current_branch():
+            return lines[0].strip()  # an active story only applies on the branch where it was started
     m = re.match(r"\s*\[?(%s)\]?(?:[:\s]|$)" % c["story_id_pattern"], os.environ.get("PR_TITLE", ""))  # only a leading "VIA-12: ..." / "[VIA-12] ..."
     return m.group(1) if m else None
 
@@ -821,8 +984,12 @@ def cmd_status(sid=None):
     sid = sid or story_id(c)
     if not sid:
         print("story-gate: no active story (mode=%s). Start one with: start <ID>" % c["mode"]); return 0
-    r, d = load_v(sid, "ready"), load_v(sid, "done")
-    print("story-gate %s: READY=%s DONE=%s mode=%s" % (sid, (r or {}).get("overall", "not run"), (d or {}).get("overall", "not run"), c["mode"]))
+    sd = STORIES / sid
+    def show(v):
+        if not v:
+            return "not run"
+        return v.get("overall", "?") + (" (OUT OF DATE - re-score)" if stale(v, c, sd) else "")
+    print("story-gate %s: READY=%s DONE=%s mode=%s" % (sid, show(load_v(sid, "ready")), show(load_v(sid, "done")), c["mode"]))
     return 0
 
 
@@ -837,6 +1004,71 @@ def detect_client(payload, hint):
     if "cursor_version" in payload or "workspace_roots" in payload or "loop_count" in payload:
         return "cursor"
     return hint or "claude"
+
+
+STOP_LIMIT = 3  # blocked stops in a row before an enforce-mode session is allowed to end (CI still blocks)
+SHELL_TOOLS = ("bash", "shell", "run_shell_command", "terminal", "exec_command", "local_shell")
+
+
+def shell_command(payload):
+    """The shell command an agent is about to run, or None for non-shell tools."""
+    name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
+    ti = payload.get("tool_input") or payload.get("toolInput") or payload.get("tool_info") or {}
+    if isinstance(payload.get("command"), str) and not ti:  # Cursor beforeShellExecution
+        return payload["command"]
+    if isinstance(ti, dict):
+        cmd = ti.get("command") or ti.get("command_line") or ti.get("cmd")
+        if isinstance(cmd, list):
+            cmd = " ".join(map(str, cmd))
+        if isinstance(cmd, str) and "*** Begin Patch" not in cmd and (name in SHELL_TOOLS or "command_line" in ti or not name):
+            return cmd
+    return None
+
+
+WRITE_TARGETS = [
+    r"(?:^|[^0-9&<>=-])>>?\s*([^\s;|&<>]+)",                       # > file, >> file
+    r"\btee\s+(?:-a\s+)?([^\s;|&]+)",                              # tee file
+    r"\bsed\s+(?:-[^\s]*i[^\s]*)\s+\S+\s+([^\s;|&]+)",              # sed -i expr file
+    r"\b(?:cp|mv)\s+(?:-\S+\s+)*\S+\s+([^\s;|&]+)",                   # cp/mv src dest
+    r"\b(?:rm|truncate|shred|touch)\s+(?:-\S+\s+)*([^\s;|&]+)",       # rm/touch file
+    r"\bperl\s+-\S*i\S*\s+(?:-\S+\s+)*\S+\s+([^\s;|&]+)",
+    r"\bdd\s+.*\bof=([^\s;|&]+)",
+    r"\b(?:Set-Content|Add-Content|Out-File)\s+(?:-\w+\s+)*([^\s;|&]+)",
+]
+GATE_WRITE = re.compile(r"(>|\btee\b|\brm\b|\brmdir\b|\bmv\b|\bcp\b|\bdd\b|\bsed\b|\bperl\b|write|unlink|remove|rename|truncate|"
+                        r"-delete|\bcheckout\b|\brestore\b|\bapply\b|\bpatch\b|\bchmod\b|\bln\b|\btouch\b|Set-Content|Add-Content|"
+                        r"Out-File|Remove-Item|Move-Item|Copy-Item|\bcd\b|open\()", re.I)
+GATE_CLI = re.compile(r"\s*(?:python3?|py)(?:\s+-3)?\s+(?:\./)?\.story-gate[/\\]gate\.py(?:\s+[A-Za-z0-9_.:,=@/+-]+)*\s*")
+
+
+def unquote(cmd):
+    return re.sub(r"'[^']*'|\"[^\"]*\"", "''", cmd)
+
+
+def shell_writes(cmd):
+    """Best-effort list of repo files a shell command would write. Opaque scripts are not detectable; CI is the backstop."""
+    bare = unquote(cmd)
+    out = []
+    for rx in WRITE_TARGETS:
+        out += [m.strip("'\"") for m in re.findall(rx, bare)]
+    keep = []
+    for t in out:
+        if not t or t.startswith("/dev/") or t in ("&1", "&2") or repo_rel(t) is None:
+            continue  # outside the repository: not our business
+        if git("check-ignore", "-q", "--", t) == "" and subprocess.run(["git", "check-ignore", "-q", "--", t], cwd=ROOT).returncode == 0:
+            continue  # ignored files (node_modules, build output) are not code
+        keep.append(t)
+    return keep
+
+
+def touches_gate(cmd):
+    """Any write-capable command that mentions .story-gate (outside the story docs) is refused, except a plain gate.py call."""
+    if GATE_CLI.fullmatch(cmd) and cmd.count(".story-gate") == 1:
+        return False
+    mentions = [m for m in re.finditer(r"\.story-gate(?:[/\\][^\s;|&'\"]*)?", cmd, re.I)]
+    sensitive = [m.group(0) for m in mentions if not re.match(r"\.story-gate[/\\]stories[/\\][^/\\]+[/\\](?:[^/\\]+\.md|tests\.json)$", m.group(0), re.I)]
+    hooks = [h for h in HOOK_FILES if h in cmd.replace("\\", "/").lower()]
+    return bool((sensitive or hooks) and GATE_WRITE.search(cmd))
 
 
 def edited_paths(payload):
@@ -899,7 +1131,12 @@ def cmd_hook(client, event):
         client = client or "claude"
     enforce = False
     try:
-        c = cfg()
+        try:
+            c = cfg()
+        except ConfigError as e:
+            if event == "post":
+                return hook_out(client, "post", "", False)
+            return hook_out(client, event, "STORY GATE (BLOCKED): %s" % e, True)  # unknown mode: fail closed
         point = {"pre": "pre_edit", "stop": "stop", "post": "checkpoint"}.get(event, event)
         enforce = c["mode"] == "enforce" or point in c.get("enforce_points", [])
         if event == "post":
@@ -943,13 +1180,22 @@ def post_edit(payload, c):
 def gate_check(event, payload, c):
     """Returns (message, problem?)."""
     if event == "pre":
-        paths = edited_paths(payload)
-        if paths and all(exempt(p, c) for p in paths):
-            return "", False
-        gate_files = [p for p in paths if p.replace("\\", "/").split(".story-gate/")[0] in ("", "./") or "/.story-gate/" in p.replace("\\", "/")]
-        gate_files = [p for p in gate_files if not exempt(p, c)]
-        if gate_files:
-            return "Agents must not edit gate files (%s). Use gate.py commands; verdicts, config and records are written only by gate.py or a human." % ", ".join(gate_files), True
+        cmd = shell_command(payload)
+        if cmd is not None:
+            targets = shell_writes(cmd)
+            bad = [t for t in targets if protected(t, c)]
+            if bad or touches_gate(cmd):
+                return "Agents must not change story-gate files from the shell (%s). Verdicts, config and records are written only by gate.py or a human." % (", ".join(bad) or "gate files"), True
+            paths = [t for t in targets if not exempt(t, c)]
+            if not paths:
+                return "", False
+        else:
+            paths = edited_paths(payload)
+            if paths and all(exempt(p, c) for p in paths):
+                return "", False
+            bad = [p for p in paths if protected(p, c)]
+            if bad:
+                return "Agents must not edit gate files (%s). Use gate.py commands; verdicts, config and records are written only by gate.py or a human." % ", ".join(bad), True
         sid = story_id(c, payload)
         if not sid:
             return "No active story. Before editing code run `python .story-gate/gate.py start <STORY-ID>` and the READY gate (.story-gate/PROTOCOL.md).", True
@@ -959,8 +1205,21 @@ def gate_check(event, payload, c):
         msg = contained(sid, c)
         return (msg, True) if msg else ("", False)
     # stop
-    if payload.get("stop_hook_active") or int(payload.get("loop_count") or 0) >= 1:
-        return "", False  # loop guard: we already asked once this turn
+    retry = bool(payload.get("stop_hook_active") or int(payload.get("loop_count") or 0) >= 1)
+    if retry and c["mode"] == "warn" and "stop" not in c.get("enforce_points", []):
+        return "", False  # warn mode: nag once per turn
+    # Enforce keeps blocking on retries, but not forever: after STOP_LIMIT blocked stops in a row the session may end.
+    # Nothing is lost - the PR check in CI still blocks the merge.
+    stops = 0
+    try:
+        stops = int(rd(GATE / ".stops").strip() or 0) + 1 if retry else 0
+    except ValueError:
+        stops = 0
+    if stops >= STOP_LIMIT:
+        (GATE / ".stops").write_text("0", encoding="utf-8")
+        return "", False
+    if GATE.is_dir():
+        (GATE / ".stops").write_text(str(stops), encoding="utf-8")
     sid = story_id(c, payload)
     _, files, _ = diff_against(c["base_branch"])
     code = [f for f in files if not exempt(f, c)]
@@ -975,39 +1234,176 @@ def gate_check(event, payload, c):
 
 
 # ------------------------------------------------------------------ CI
-def cmd_ci():
-    problems, code, enforce = [], [], False
+GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/config.json",
+              ".story-gate/judge-calibration.json",
+              ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+
+
+def summary(lines):
+    p = os.environ.get("GITHUB_STEP_SUMMARY")
+    if p:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+
+def cmd_ci_tests(out_dir):
+    """Job 1 (no secrets): run the base branch's pinned test command on the PR code; save exit code + JUnit as data."""
+    c = cfg()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    cmd = c.get("test_command")
+    rec = {"command": cmd, "at": now()}
+    if not cmd:
+        rec.update({"exit_code": None, "error": "no test_command configured"})
+    else:
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3000)
+            rec.update({"exit_code": r.returncode, "output_tail": (r.stdout + r.stderr)[-4000:]})
+        except Exception as e:
+            rec.update({"exit_code": -1, "output_tail": repr(e)})
+        rec["seconds"] = round(time.time() - t0, 1)
+        jp = c.get("junit_path")
+        if jp and (ROOT / jp).is_file():
+            (out / "junit.xml").write_bytes((ROOT / jp).read_bytes()[:5_000_000])
+    wj(out / "results.json", rec)
+    print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
+    return 0
+
+
+def cmd_ci(tests_dir=None):
+    """Job 2 (has the judge key, runs no PR code): re-score READY and DONE with CI's own test results,
+    verify human acceptance through GitHub, report clearly whether merges are actually blocked."""
+    import sg_github as G
+    problems, notes, code, enforce = [], [], [], True
+    sid = None
     try:
         c = cfg()
         enforce = c["mode"] == "enforce" or "ci" in c.get("enforce_points", [])
-        base = ("origin/" + os.environ["GITHUB_BASE_REF"]) if os.environ.get("GITHUB_BASE_REF") else c["base_branch"]
+        bref = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF")  # pull_request_review has no GITHUB_BASE_REF
+        base = ("origin/" + bref) if bref else c["base_branch"]
         c["base_branch"] = base
         _, files, _ = diff_against(base)
-        code = [f for f in files if not exempt(f, c)]
+        code = [f for f in files if not exempt(f, c) and not is_record(f)]
         sid = story_id(c)
+        ctx = G.pr_context()
+        token = os.environ.get("GITHUB_TOKEN")
+        touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/"))
+        if touched:
+            notes.append("This PR changes gate or CI files (%s): a code owner must review these specifically." % ", ".join(touched))
         if code and not sid:
-            problems.append("code changed but no story id in branch name / PR title (pattern %s)" % c["story_id_pattern"])
+            problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
-            independent = bool(openrouter_key()) and c["judge"].get("jev", True)
-            for ph in ("ready", "done"):
-                if independent and (STORIES / sid).exists():
-                    cmd_score(sid, ph, base)  # re-score here: the coding agent cannot grade itself
+            sd = STORIES / sid
+            results, tr = None, None
+            if tests_dir and not (Path(tests_dir) / "results.json").is_file():
+                # Never fall back to the agent's own recorded results.
+                tr = {"command": c.get("test_command"), "exit_code": None, "error": "the CI tests job left no results"}
+                if sd.exists():
+                    wj(sd / "test_results.json", dict(tr, fingerprint="", source="ci"))
+                problems.append("CI test results are missing (the tests job failed before recording, or its artifact did not upload)")
+            elif tests_dir:
+                tr = load_json(Path(tests_dir) / "results.json")
+                junit = Path(tests_dir) / "junit.xml"
+                try:
+                    results = G.junit(junit) if junit.is_file() else None
+                except Exception as e:
+                    problems.append("JUnit report rejected: %s" % e)
+                if sd.exists():  # CI's own run replaces anything the agent recorded
+                    wj(sd / "test_results.json", dict(tr, fingerprint=work_fingerprint(), head=git("rev-parse", "HEAD").strip(), source="ci"))
+                if tr.get("exit_code") != 0:
+                    problems.append("tests failed or did not run in CI (%s)" % (tr.get("error") or "exit %s" % tr.get("exit_code")))
+            accepted = {"accepted": False, "why": "not running on a pull request"}
+            if ctx and token:
+                # Owners come only from the base branch: a PR can never name its own approvers.
+                base_owners = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
+                               or git("show", "%s:docs/CODEOWNERS" % base))
+                accepted = G.acceptance(ctx, token, base_owners, c.get("approvers") or [])  # owners from the base branch
+            if not J.available(c):
+                problems.append("judge unavailable in CI (%s). Add the judge key as a repository secret%s." % (
+                    J.settings(c).get("key_env"), "; PRs from forks never get secrets, so a maintainer must re-run the check" if (ctx or {}).get("fork") else ""))
+            elif not sd.exists():
+                problems.append("no story folder .story-gate/stories/%s in this PR" % sid)
+            else:
+                for ph in ("ready", "done"):
+                    cmd_score(sid, ph, base, ci_trust=accepted["accepted"], results=results if ph == "done" else None, quiet=True)
                     v = load_v(sid, ph)
-                    ok = passed(v, c)
-                else:
-                    v = load_v(sid, ph)
-                    ok = passed(v, c)
-                if not ok:
-                    problems.append("%s %s gate is %s" % (sid, ph.upper(), (v or {}).get("overall", "missing")))
-            if not independent:
-                problems.append("not independently verified: add the OPENROUTER_API_KEY secret so CI can re-score with Jev")
+                    if not passed(v, c):
+                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED")]
+                        problems.append("%s %s gate is %s: %s" % (sid, ph.upper(), (v or {}).get("overall", "missing"), "; ".join(bad)[:900]))
+            if ctx and token and c.get("require_independent_review"):
+                try:
+                    who = G.reviewed_by(ctx, token, c.get("reviewers") or [])
+                    open_threads = G.unresolved_threads(ctx, token, c.get("reviewers") or [])
+                    if not who and not accepted["accepted"]:
+                        problems.append("no independent review yet (expected one of: %s, or a code owner)" % ", ".join(c.get("reviewers") or []))
+                    if open_threads:
+                        problems.append("%d unresolved review thread(s) from the independent reviewers" % open_threads)
+                except Exception as e:
+                    problems.append("could not read reviews: %s" % e)
+            if not accepted["accepted"]:
+                problems.append("human acceptance: " + accepted["why"])
+            enforced, missing = (G.protection(ctx["repo"], ctx["base"], token) if ctx and token else (False, ["not running on a pull request"]))
+            if not enforced:
+                notes.insert(0, "ADVISORY - NOT ENFORCED: GitHub will not block this merge (%s). Run `gate.py setup-repo` or see the README." % "; ".join(missing))
+    except ConfigError as e:
+        problems.append(str(e)); enforce = True
     except Exception as e:
         problems.append("story-gate could not run: %s" % e)
     level = "error" if enforce else "warning"
     for p in problems:
-        print("::%s title=story-gate::%s" % (level, p))
+        print("::%s title=story-gate::%s" % (level, p.replace("\n", " ")))
+    for n in notes:
+        print("::notice title=story-gate::%s" % n)
+    lines = ["## story-gate %s" % ("- %s" % sid if sid else ""), ""]
+    lines += ["> **%s**" % n for n in notes] + [""]
+    if problems:
+        lines += ["- [ ] %s" % p for p in problems]
+    elif code:
+        lines += ["- [x] READY and DONE gates passed, CI tests passed, and a code owner approved this commit."]
+    else:
+        lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
+    if sid and (STORIES / sid / "trace.md").exists():
+        lines += ["", rd(STORIES / sid / "trace.md")]
+    if sid:
+        recs = jsonl(STORIES / sid / "decisions.jsonl")
+        if recs:
+            lines += ["", "### Waivers and drift decisions in this story (count only after a code owner approves this commit)"]
+            lines += ["- %s %s: %s by %s - %s" % (r.get("phase"), r.get("kind"), r.get("check") or r.get("drift"), r.get("by"), r.get("reason") or r.get("note", "")) for r in recs]
+    summary(lines)
     print("story-gate CI: %s (%s mode, %d code files)" % ("OK" if not problems else "%d problem(s)" % len(problems), "enforce" if enforce else "warn", len(code)))
     return 1 if (problems and enforce) else 0
+
+
+def cmd_audit():
+    """After a merge: record who merged and whether a code owner approved the merged commit; flag anything else."""
+    import sg_github as G
+    ctx, token = G.pr_context(), os.environ.get("GITHUB_TOKEN")
+    if not ctx or not token:
+        print("story-gate audit: not a pull_request event"); return 0
+    ev = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))["pull_request"]
+    if not ev.get("merged"):
+        print("story-gate audit: PR closed without merge"); return 0
+    b = os.environ.get("BASE") or "HEAD"  # the base commit before the merge, so the merged PR can't pick its own owners
+    owners = git("show", "%s:.github/CODEOWNERS" % b) or git("show", "%s:CODEOWNERS" % b)
+    acc = G.acceptance(ctx, token, owners, (cfg().get("approvers") or []))
+    merged_by = ev.get("merged_by") or {}
+    issues = []
+    if not acc["accepted"]:
+        issues.append("merged without a code owner approving the final commit (%s)" % acc["why"])
+    if merged_by.get("type") == "Bot":
+        issues.append("merged by a bot account (%s)" % merged_by.get("login"))
+    row = {"at": now(), "pr": ctx["number"], "sha": ctx["head_sha"], "merged_by": merged_by.get("login"), "approver": acc.get("approver"), "issues": issues}
+    print(json.dumps(row))
+    if issues:
+        for i in issues:
+            print("::warning title=story-gate audit::%s" % i)
+        st, r, _ = G.call("POST", "/repos/%s/issues" % ctx["repo"], token, {"title": "story-gate audit: PR #%s merged without human acceptance" % ctx["number"],
+               "body": "\n".join("- " + i for i in issues) + "\n\nCommit %s. Review it, then revert or record why it was acceptable." % ctx["head_sha"]})
+        if st not in (200, 201):
+            print("::error title=story-gate audit::could not open the audit issue (HTTP %s %s). The findings are in this log." % (st, (r or {}).get("message", "") if isinstance(r, dict) else ""))
+            return 1
+    return 0
 
 
 # ------------------------------------------------------------------ sinks
@@ -1108,59 +1504,158 @@ def client_configs(py):
     claude_pre = '"$CLAUDE_PROJECT_DIR"/'
     return {
         "claude": (".claude/settings.json", {"hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "pre", claude_pre), "timeout": 15}]}],
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": [{"type": "command", "command": cmd("claude", "pre", claude_pre), "timeout": 15}]}],
             "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "post", claude_pre), "timeout": 60}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd("claude", "stop", claude_pre), "timeout": 60}]}]}}),
         "codex": (".codex/hooks.json", {"hooks": {
-            "PreToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "pre"), "timeout": 15}]}],
+            "PreToolUse": [{"matcher": "^(apply_patch|Edit|Write|Bash|shell|local_shell|exec_command)$", "hooks": [{"type": "command", "command": cmd("codex", "pre"), "timeout": 15}]}],
             "PostToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "post"), "timeout": 60}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd("codex", "stop"), "timeout": 60}]}]}}),
         "cursor": (".cursor/hooks.json", {"version": 1, "hooks": {
             "preToolUse": [{"command": cmd("cursor", "pre"), "matcher": "Write"}],
+            "beforeShellExecution": [{"command": cmd("cursor", "pre")}],
             "postToolUse": [{"command": cmd("cursor", "post"), "matcher": "Write"}],
             "stop": [{"command": cmd("cursor", "stop")}]}}),
         "gemini": (".gemini/settings.json", {"hooks": {
-            "BeforeTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "pre"), "timeout": 15000}]}],
+            "BeforeTool": [{"matcher": "write_file|replace|run_shell_command", "hooks": [{"type": "command", "command": cmd("gemini", "pre"), "timeout": 15000}]}],
             "AfterTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "post"), "timeout": 60000}]}],
             "AfterAgent": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "stop"), "timeout": 60000}]}]}}),
         "windsurf": (".devin/hooks.json", {"hooks": {
             "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],
+            "pre_run_command": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "post_cascade_response": [{"command": cmd("windsurf", "stop"), "show_output": True}]}}),
         "grok": (".grok/hooks/story-gate.json", {"hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": cmd("grok", "pre"), "timeout": 15}]}],
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash", "hooks": [{"type": "command", "command": cmd("grok", "pre"), "timeout": 15}]}],
             "Stop": [{"hooks": [{"type": "command", "command": cmd("grok", "stop"), "timeout": 60}]}]}}),
     }
 
 
-CI_YML = """name: story-gate
+MANAGED = "# managed by story-gate %s - re-run `gate.py install` to update; local edits are overwritten" % VERSION
+TRUSTED_COPY = """          mkdir -p "$RUNNER_TEMP/sg"
+          if ! git cat-file -e "$BASE:.story-gate/gate.py" 2>/dev/null; then
+            echo "::warning title=story-gate::story-gate is not on the base branch yet, so this PR is checked by human review only. It never runs code from the PR itself."
+            exit 0
+          fi
+          for f in gate.py sg_judges.py sg_github.py config.json judge-calibration.json; do
+            rm -f "$RUNNER_TEMP/sg/$f"
+            if git cat-file -e "$BASE:.story-gate/$f" 2>/dev/null; then git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"; fi
+          done
+          # Settings and judge calibration always come from the base branch, never from the PR.
+          rm -f .story-gate/config.json .story-gate/judge-calibration.json
+          cp "$RUNNER_TEMP/sg/config.json" .story-gate/config.json 2>/dev/null || true
+          cp "$RUNNER_TEMP/sg/judge-calibration.json" .story-gate/judge-calibration.json 2>/dev/null || true"""
+CI_YML = MANAGED + """
+name: story-gate
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+permissions:
+  contents: read
+concurrency:
+  group: story-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
+  tests:
+    # Runs the PR's code with the BASE branch's pinned test command. No secrets here.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: run pinned tests
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}
+        run: |
+""" + TRUSTED_COPY + """
+          python3 "$RUNNER_TEMP/sg/gate.py" ci-tests "$RUNNER_TEMP/sg-tests"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sg-tests
+          path: ${{ runner.temp }}/sg-tests
+          retention-days: 7
   story-gate:
+    # Has the judge key; runs story-gate from the BASE branch and never executes PR code.
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: sg-tests
+          path: ${{ runner.temp }}/sg-tests
+        continue-on-error: true
+      - name: story gate
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+        run: |
+""" + TRUSTED_COPY + """
+          python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
+"""
+AUDIT_YML = MANAGED + """
+name: story-gate-audit
+on:
+  pull_request:
+    types: [closed]
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+jobs:
+  audit:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}   # same commit the developer tested; tests.yml covers the merge result
           persist-credentials: false
-      - name: story gate (script and config from the base branch)
+      - name: who merged, and was it accepted?
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BASE: ${{ github.event.pull_request.base.sha }}
           STORY_GATE_ROOT: ${{ github.workspace }}
-          BASE: origin/${{ github.base_ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/sg"
-          if git cat-file -e "$BASE:.story-gate/gate.py" 2>/dev/null; then
-            git show "$BASE:.story-gate/gate.py" > "$RUNNER_TEMP/sg/gate.py"
-            if git cat-file -e "$BASE:.story-gate/config.json" 2>/dev/null; then git show "$BASE:.story-gate/config.json" > .story-gate/config.json; fi
-          else
-            cp .story-gate/gate.py "$RUNNER_TEMP/sg/gate.py"   # first install PR
-          fi
-          python3 "$RUNNER_TEMP/sg/gate.py" ci
+""" + TRUSTED_COPY + """
+          python3 "$RUNNER_TEMP/sg/gate.py" audit
 """
+
+
+def write_managed(rel, body):
+    """Write a story-gate workflow; refuse to overwrite a hand-made file with the same name."""
+    p = ROOT / rel
+    old = rd(p)
+    if old and not old.startswith("# managed by story-gate"):
+        return "%s exists and is not managed by story-gate - left untouched (rename it or delete it, then re-run install)" % rel
+    if old == body:
+        return "%s up to date" % rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return "%s %s" % (rel, "updated" if old else "created")
 
 
 def cmd_install(clients, py):
@@ -1184,38 +1679,131 @@ def cmd_install(clients, py):
         for d in (".agents/skills/story-gate", ".claude/skills/story-gate"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
             (ROOT / d / "SKILL.md").write_text(skill, encoding="utf-8")
-    wf = ROOT / ".github/workflows/story-gate.yml"
-    if not wf.exists():
-        wf.parent.mkdir(parents=True, exist_ok=True)
-        wf.write_text(CI_YML, encoding="utf-8")
+    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML)]
     gi = rd(ROOT / ".gitignore")
-    add = [x for x in (".story-gate/.active", ".story-gate/outbox.jsonl", ".story-gate/.outbox.sent", ".story-gate/.edits") if x not in gi]
+    add = [x for x in (".story-gate/.active", ".story-gate/outbox.jsonl", ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/__pycache__/") if x not in gi]
     if add:
         (ROOT / ".gitignore").write_text(gi.rstrip() + ("\n" if gi.strip() else "") + "\n".join(add) + "\n", encoding="utf-8")
     print("story-gate installed (mode=%s). Hooks: %s. Instructions: AGENTS.md, CLAUDE.md, GEMINI.md. CI: .github/workflows/story-gate.yml" % (cfg()["mode"], ", ".join(done)))
-    print("Skill: .agents/skills/story-gate + .claude/skills/story-gate. Next: trust project hooks in Codex/Grok when prompted; Cowork and Muse rely on the instruction files + CI.")
+    for n in wf_notes:
+        print("  " + n)
+    print("Skill: .agents/skills/story-gate + .claude/skills/story-gate.")
+    print("Next: 1) gate.py setup-repo (code owners + branch rules)  2) add your judge key as a repo secret  3) gate.py setup-agent if AI tools run on your computer.")
 
 
-def cmd_doctor():
-    c = cfg()
+def cmd_doctor(repo=None, strict=False):
+    """Plain-English health check. With --repo it also checks GitHub protection and agent identity."""
+    import sg_github as G
+    fails = []
+    try:
+        c = cfg()
+    except ConfigError as e:
+        print("  FAIL  " + str(e)); return 1
     print("story-gate %s  root=%s  mode=%s  enforce_points=%s" % (VERSION, ROOT, c["mode"], c.get("enforce_points")))
     for cl, (path, _) in client_configs("py").items():
-        print("  %-8s hooks %s" % (cl, "installed" if ".story-gate/gate.py" in rd(ROOT / path) else "NOT installed"))
-    for f in ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".github/workflows/story-gate.yml"):
-        print("  %-38s %s" % (f, "ok" if (ROOT / f).exists() else "missing"))
-    if not c["judge"].get("jev", True):
-        print("  judge: Jev disabled -> self-scores only (never PASS)"); return 0
-    t0 = time.time()
-    r = jev({"ping": "story-gate doctor"}, {"ok": {"type": "noul", "instructions": "This is a connectivity test; answer yes."}})
-    print("  judge: %s" % ("Jev OK (%d ms)" % ((time.time() - t0) * 1000) if "answers" in r else "Jev unavailable: %s -> semantic checks fall back to agent self-scores (capped at CONCERNS)" % r.get("error")))
-    return 0
+        print("  %-8s hooks %s" % (cl, "installed" if ".story-gate/gate.py" in rd(ROOT / path) else "not installed"))
+    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML)):
+        cur = rd(ROOT / f)
+        st = "ok" if cur == body else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
+        print("  %-42s %s" % (f, st))
+        if st != "ok":
+            fails.append(f)
+    owners = rd(ROOT / ".github/CODEOWNERS") or rd(ROOT / "CODEOWNERS")
+    users, teams = G.codeowners(owners)
+    print("  %-42s %s" % ("CODEOWNERS ('*' rule)", ", ".join(users + teams) or "MISSING - run gate.py setup-repo"))
+    if not users:
+        fails.append("codeowners")
+    s_ = J.settings(c)
+    print("  judge: provider=%s model=%s key=%s" % (s_["provider"], s_.get("model"), "set" if J.env_key(s_.get("key_env", "")) else "NOT SET (%s)" % s_.get("key_env")))
+    if J.available(c):
+        t0 = time.time()
+        r = J.ask(c, {"ping": "story-gate doctor"}, {"ok": {"type": "noul", "instructions": "This is a connectivity test; answer yes."}})
+        tier = r.get("tier")
+        print("  judge answered: %s" % ("%s (%d ms)%s" % (tier, (time.time() - t0) * 1000, " - capped at CONCERNS unless calibrated" if tier == "emulated" else "") if tier != "none" else "NO - %s" % r.get("error")))
+    else:
+        print("  judge: unavailable locally - CI still judges if the repo secret is set; local verdicts can never PASS")
+    if repo:
+        tok = G.human_token()
+        if tok:
+            enforced, missing = G.protection(repo, c["base_branch"], tok)
+            print("  branch rules: %s" % ("ENFORCED" if enforced else "NOT ENFORCED - " + "; ".join(missing)))
+            if not enforced:
+                fails.append("rules")
+            me = G.whoami(tok)
+            if me and me.lower() in [u.lower() for u in users]:
+                print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
+                fails.append("human-token-in-agent-env")
+        else:
+            print("  branch rules: could not check (no GitHub token in this shell)")
+    try:
+        rec = G.agent_record()
+        print("  agent App: %s (key %s)" % (rec["slug"], "private" if G.key_is_private(rec["key"]) else "TOO OPEN - chmod 600"))
+    except Exception:
+        print("  agent App: none (only needed when AI tools run on this computer: gate.py setup-agent)")
+    return 1 if (strict and fails) else 0
 
 
 # ------------------------------------------------------------------ main
+def origin_repo():
+    u = git("remote", "get-url", "origin").strip()
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", u)
+    return m.group(1) if m else None
+
+
+def cmd_setup(cmd, kv, rest):
+    import sg_github as G
+    repo = kv.get("repo") or origin_repo()
+    if cmd == "setup-repo":
+        tok = G.human_token()
+        if not tok:
+            sys.exit("Sign in first: run `gh auth login` (or set GH_TOKEN to your own token). This one-time step must run as you, not as the AI.")
+        me = G.whoami(tok)
+        owners = [o.strip() for o in (kv.get("owners") or me or "").split(",") if o.strip()]
+        if not repo or not owners:
+            sys.exit("usage: gate.py setup-repo [--repo owner/name] [--owners you,teammate]")
+        for line in G.setup_repo(ROOT, repo, owners, tok, dry_run="--dry-run" in rest):
+            print("  " + line)
+        if "--dry-run" not in rest:
+            wj(ROOT / "docs" / "story-gate-ruleset.json", G.ruleset_json())
+            print("  Ruleset JSON for manual import: docs/story-gate-ruleset.json")
+        return 0
+    if cmd == "setup-agent":
+        rec = G.setup_agent(owner=kv.get("org"), org=bool(kv.get("org")), code=kv.get("code"), open_browser="--no-browser" not in rest)
+        print("Agent App created: %s. Install it on your repos: %s" % (rec["slug"], rec["install_url"]))
+        print("Key saved privately at %s. Then run: gate.py agent-env --repo %s" % (rec["key"], repo or "owner/name"))
+        return 0
+    if not repo:
+        sys.exit("pass --repo owner/name")
+    if cmd == "agent-token":
+        if "--git-credential" in rest:  # git credential helper protocol: answer only for github.com
+            req = dict(l.split("=", 1) for l in sys.stdin.read().splitlines() if "=" in l)
+            if req.get("host") not in ("github.com", None) or "get" not in rest:
+                return 0  # git also calls helpers with store/erase: never mint a token for those
+            tok, _, _ = G.agent_token(repo)
+            print("username=x-access-token\npassword=%s" % tok)
+            return 0
+        tok, exp, _ = G.agent_token(repo)
+        print(tok)
+        return 0
+    if cmd == "agent-env":
+        tok, exp, rec = G.agent_token(repo)
+        name, email = G.bot_identity(rec)
+        sh = os.name != "nt"
+        print(("export GH_TOKEN=%s\nexport GITHUB_TOKEN=%s" if sh else "$env:GH_TOKEN='%s'\n$env:GITHUB_TOKEN='%s'") % (tok, tok))
+        print('git config user.name "%s"\ngit config user.email "%s"\ngit config commit.gpgsign false' % (name, email))
+        print("git config --local credential.helper ''")  # drop inherited helpers (e.g. a keychain holding YOUR login)
+        print("git config --local --add credential.helper '!python3 .story-gate/gate.py agent-token --repo %s --git-credential'" % repo)
+        print("# token expires %s; git refreshes it through the helper above" % exp)
+        return 0
+    return 2
+
+
 def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
-        if argv[i].startswith("--") and i + 1 < len(argv):
+        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential"):
+            rest.append(argv[i]); i += 1
+        elif argv[i].startswith("--") and i + 1 < len(argv):
             kv[argv[i][2:]] = argv[i + 1]; i += 2
         else:
             rest.append(argv[i]); i += 1
@@ -1227,10 +1815,9 @@ def main(argv):
         print(__doc__); return 0
     cmd, args = argv[0], argv[1:]
     if cmd == "record-tests":
-        if "--" not in args:
-            sys.exit("usage: record-tests <ID> -- <cmd...>")
-        i = args.index("--")
-        return cmd_record_tests(args[0], args[i + 1:])
+        if not args:
+            sys.exit("usage: record-tests <ID> [-- <cmd...>]")
+        return cmd_record_tests(args[0], args[args.index("--") + 1:] if "--" in args else [])
     kv, rest = flags(args)
     if cmd == "install":
         return cmd_install(kv.get("clients", "all"), kv.get("python", "python" if os.name == "nt" else "python3")) or 0
@@ -1266,11 +1853,25 @@ def main(argv):
     if cmd == "hook":
         return cmd_hook(kv.get("client", ""), kv.get("event", "pre"))
     if cmd == "ci":
-        return cmd_ci()
+        return cmd_ci(kv.get("tests"))
+    if cmd == "ci-tests":
+        return cmd_ci_tests(rest[0] if rest else "sg-tests")
+    if cmd == "audit":
+        return cmd_audit()
+    if cmd == "label":
+        return cmd_label(rest[0], rest[1], rest[2] if len(rest) > 2 else "", kv.get("note", "")) or 0
+    if cmd == "judge-calibrate":
+        ok, details = J.calibrate(cfg())
+        print("\n".join(details))
+        wj(GATE / "judge-calibration.json", {"ok": ok, "identity": J.identity(cfg()), "at": now(), "details": details})
+        print("story-gate judge calibration: %s" % ("PASSED - set judge.emulated_allow_pass to let this judge PASS stories" if ok else "FAILED - this judge stays capped at CONCERNS"))
+        return 0 if ok else 1
+    if cmd in ("setup-repo", "setup-agent", "agent-token", "agent-env"):
+        return cmd_setup(cmd, kv, rest)
     if cmd == "publish":
         return cmd_publish()
     if cmd == "doctor":
-        return cmd_doctor()
+        return cmd_doctor(kv.get("repo"), strict="--strict" in args)
     print(__doc__); return 2
 
 
