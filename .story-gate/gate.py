@@ -1876,8 +1876,10 @@ def cmd_setup(cmd, kv, rest):
         push = git("remote", "get-url", "--push", "origin").strip()
         if push and not push.startswith("https://"):  # SSH would push with YOUR key; credential helpers only cover HTTPS
             print("git remote set-url --push origin https://github.com/%s.git" % repo)
-        print("git config --local credential.helper ''")  # drop inherited helpers (e.g. a keychain holding YOUR login)
-        helper = '!"%s" "%s" agent-token --repo %s --git-credential' % (sys.executable.replace("\\", "/"), str(GATE / "gate.py").replace("\\", "/"), repo)
+        print("git config --local --replace-all credential.helper ''")  # drop inherited helpers (e.g. a keychain holding YOUR login)
+        home = os.environ.get("STORY_GATE_HOME")  # remembered so later git sessions find the same agent key
+        helper = '!%s"%s" "%s" agent-token --repo %s --git-credential' % (
+            ('STORY_GATE_HOME="%s" ' % home.replace("\\", "/")) if home else "", sys.executable.replace("\\", "/"), str(GATE / "gate.py").replace("\\", "/"), repo)
         print("git config --local --add credential.helper '%s'" % helper)  # this Python, absolute path: works on Windows too
         print("# token expires %s; git refreshes it through the helper above" % exp)
         return 0
