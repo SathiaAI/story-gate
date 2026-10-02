@@ -643,7 +643,9 @@ class TestV03Integrity(Base):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         self.assertNotIn('cp ".story-gate/', g.CI_YML)
         self.assertIn("exit 0", g.TRUSTED_COPY)
-        self.assertIn("rm -f .story-gate/config.json .story-gate/judge-calibration.json", g.TRUSTED_COPY)
+        self.assertIn('export STORY_GATE_TRUSTED_DIR="$RUNNER_TEMP/sg"', g.TRUSTED_COPY)
+        self.assertIn("if [ -L .story-gate ]", g.TRUSTED_COPY)
+        self.assertNotIn("rm -f .story-gate/", g.TRUSTED_COPY)   # the PR's own settings files stay visible as changes
         self.assertIn("SG_BASE_REF: ${{ github.event.pull_request.base.ref }}", g.CI_YML)
         self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", g.AUDIT_YML)
         self.assertIn(".claude/settings.json", g.GATE_FILES)
@@ -830,6 +832,34 @@ class TestRound4Fixes(Base):
         G.write_private(p, "one"); G.write_private(p, "two")   # rewriting replaces the file
         ok, detail = G.key_access(p)
         self.assertTrue(ok, detail); self.assertEqual(p.read_text(), "two")
+
+
+class TestRound6Fixes(Base):
+    def test_ci_reads_policy_from_trusted_dir_and_fails_closed(self):
+        td = Path(tempfile.mkdtemp())
+        (td / "config.json").write_text(json.dumps({"mode": "enforce"}))
+        self.cfg(mode="warn")  # the PR's own copy says warn
+        r = run(self.repo, "status", env={"STORY_GATE_TRUSTED_DIR": str(td)})
+        self.assertIn("mode=enforce", r.stdout + r.stderr)
+        (td / "config.json").unlink()
+        r = run(self.repo, "ci", env={"STORY_GATE_TRUSTED_DIR": str(td)})
+        self.assertNotEqual(r.returncode, 0); self.assertIn("missing", r.stdout)
+
+    def test_depends_on_must_be_story_ids(self):
+        fake = Path(tempfile.mkdtemp()); (fake / "handoff.md").write_text("x")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        st = self.repo / ".story-gate/stories/SAT-1/story.md"
+        st.write_text(st.read_text().replace("depends_on: []", "depends_on: [%s]" % fake))
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        out, _ = g.struct_ready(self.repo / ".story-gate/stories/SAT-1")
+        self.assertFalse(out["upstream_handoffs"][0])
+
+    def test_junit_pass_needs_test_in_repo(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        missing = g.trace(self.repo / ".story-gate/stories/SAT-1", g.cfg(), {"exit_code": 0}, {"test_ac1_x": "passed"})
+        self.assertIn("AC-1", missing)   # JUnit says passed, but no such test exists in the repository's test files
 
 
 class TestInstallV03(Base):

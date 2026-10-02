@@ -141,9 +141,17 @@ HANDOFF_SECTIONS = ("## What changed", "## Interfaces and contracts", "## How to
 
 
 # ------------------------------------------------------------------ small helpers
+def trusted(name):
+    """Settings files. In CI they come from STORY_GATE_TRUSTED_DIR (the base branch's copies), never from the PR."""
+    t = os.environ.get("STORY_GATE_TRUSTED_DIR")
+    return Path(t) / name if t else GATE / name
+
+
 def cfg():
-    p = GATE / "config.json"
+    p = trusted("config.json")
     c = json.loads(json.dumps(DEFAULT_CONFIG))
+    if os.environ.get("STORY_GATE_TRUSTED_DIR") and not p.is_file():
+        raise ConfigError("the base branch's .story-gate/config.json is missing, so CI can't know the policy - the gate fails closed")
     if p.exists():
         try:
             user = json.loads(p.read_text(encoding="utf-8"))
@@ -341,7 +349,7 @@ def calibrated(c):
     """An emulated judge may PASS only if the user opted in and its calibration run (same provider+model) passed."""
     if not (c.get("judge") or {}).get("emulated_allow_pass"):
         return False
-    rec = load_json(GATE / "judge-calibration.json")
+    rec = load_json(trusted("judge-calibration.json"))
     return rec.get("ok") is True and rec.get("identity") == J.identity(c)
 
 
@@ -428,8 +436,10 @@ def struct_ready(sd):
     deps = fm.get("depends_on") or []
     deps = [deps] if isinstance(deps, str) and deps and deps.lower() != "none" else (deps if isinstance(deps, list) else [])
     up = secs.get("## Upstream handoffs", "")
-    nohand = [d for d in deps if not (STORIES / d / "handoff.md").exists()
-              and not re.search(r"^###\s+" + re.escape(d) + r"\b(?!-)", up, re.M)]
+    pat = re.compile(r"(?:%s)" % cfg()["story_id_pattern"])
+    bad_ids = [d for d in deps if not (isinstance(d, str) and pat.fullmatch(d))]  # story ids only: no paths, no traversal
+    nohand = bad_ids + [d for d in deps if d not in bad_ids and not (STORIES / d / "handoff.md").exists()
+                        and not re.search(r"^###\s+" + re.escape(d) + r"\b(?!-)", up, re.M)]
     out["upstream_handoffs"] = (not nohand, "no handoff found for upstream: " + ", ".join(nohand))
     return out, fm
 
@@ -472,7 +482,7 @@ def trace(sd, c, tr, results=None):
         if results is not None:
             import sg_github as G
             outcomes = {r: G.ref_outcome(r, results) for r in refs}
-            ok = bool(refs) and all(o == "passed" for o in outcomes.values())
+            ok = bool(refs) and len(found) == len(refs) and all(o == "passed" for o in outcomes.values())  # in our test files AND passed
             res = ", ".join("%s=%s" % kv for kv in outcomes.items()) or "—"
         else:
             ok = bool(refs) and len(found) == len(refs) and suite == "GREEN"
@@ -690,7 +700,8 @@ def work_fingerprint():
         if f.is_file():
             body = hashlib.sha256(f.read_bytes()).digest()
         elif f.is_dir():  # a submodule: its checked-out commit is the evidence
-            body = b"GITLINK:" + git("-C", str(f), "rev-parse", "HEAD").strip().encode()
+            sub = git("-C", str(f), "rev-parse", "HEAD") + git("-C", str(f), "status", "--porcelain") + git("-C", str(f), "diff", "HEAD")
+            body = b"GITLINK:" + hashlib.sha256(sub.encode("utf-8", "replace")).digest()  # commit plus any uncommitted edits
         else:
             body = b"DELETED"
         h.update(n.encode("utf-8", "replace") + b"\0" + mode + body)
@@ -1588,7 +1599,8 @@ def client_configs(py):
 
 
 MANAGED = "# managed by story-gate %s - re-run `gate.py install` to update; local edits are overwritten" % VERSION
-TRUSTED_COPY = """          mkdir -p "$RUNNER_TEMP/sg"
+TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=story-gate::.story-gate is a symlink in this PR; refusing to run"; exit 1; fi
+          mkdir -p "$RUNNER_TEMP/sg"
           if ! git cat-file -e "$BASE:.story-gate/gate.py" 2>/dev/null; then
             echo "::warning title=story-gate::story-gate is not on the base branch yet, so this PR is checked by human review only. It never runs code from the PR itself."
             exit 0
@@ -1597,10 +1609,8 @@ TRUSTED_COPY = """          mkdir -p "$RUNNER_TEMP/sg"
             rm -f "$RUNNER_TEMP/sg/$f"
             if git cat-file -e "$BASE:.story-gate/$f" 2>/dev/null; then git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"; fi
           done
-          # Settings and judge calibration always come from the base branch, never from the PR.
-          rm -f .story-gate/config.json .story-gate/judge-calibration.json
-          cp "$RUNNER_TEMP/sg/config.json" .story-gate/config.json 2>/dev/null || true
-          cp "$RUNNER_TEMP/sg/judge-calibration.json" .story-gate/judge-calibration.json 2>/dev/null || true"""
+          # Settings and judge calibration are read from the base branch's copies; the PR's own files stay as evidence.
+          export STORY_GATE_TRUSTED_DIR="$RUNNER_TEMP/sg\""""
 CI_YML = MANAGED + """
 name: story-gate
 on:
@@ -1848,6 +1858,9 @@ def cmd_setup(cmd, kv, rest):
         sh = os.name != "nt"
         print(("export GH_TOKEN=%s\nexport GITHUB_TOKEN=%s" if sh else "$env:GH_TOKEN='%s'\n$env:GITHUB_TOKEN='%s'") % (tok, tok))
         print('git config user.name "%s"\ngit config user.email "%s"\ngit config commit.gpgsign false' % (name, email))
+        push = git("remote", "get-url", "--push", "origin").strip()
+        if push and not push.startswith("https://"):  # SSH would push with YOUR key; credential helpers only cover HTTPS
+            print("git remote set-url --push origin https://github.com/%s.git" % repo)
         print("git config --local credential.helper ''")  # drop inherited helpers (e.g. a keychain holding YOUR login)
         helper = '!"%s" "%s" agent-token --repo %s --git-credential' % (sys.executable.replace("\\", "/"), str(GATE / "gate.py").replace("\\", "/"), repo)
         print("git config --local --add credential.helper '%s'" % helper)  # this Python, absolute path: works on Windows too
