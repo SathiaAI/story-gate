@@ -1,0 +1,81 @@
+{
+ "version": 1,
+ "mode": "warn",
+ "enforce_points": [],
+ "block_on_concerns": false,
+ "story_id_pattern": "[A-Z][A-Z0-9]+-[0-9]+",
+ "base_branch": "main",
+ "exempt_globs": [
+  ".story-gate/stories/*/*.md",
+  ".story-gate/stories/*/tests.json",
+  "docs/**/*.md",
+  "*.md"
+ ],
+ "test_command": "",
+ "thresholds": {
+  "pass": 0.7,
+  "concerns": 0.4
+ },
+ "judge": {
+  "jev": true,
+  "allow_self_judge_pass": false,
+  "max_chars": 90000
+ },
+ "sources": [
+  {
+   "type": "linear",
+   "note": "Story = Linear issue <ID>; PRD/TRD may be Linear project documents"
+  },
+  {
+   "type": "repo",
+   "prd": "docs/PRD.md",
+   "trd": "docs/TRD.md",
+   "stories": "docs/stories/{id}.md"
+  },
+  {
+   "type": "control-hub",
+   "project_slug": "",
+   "note": "documents table (kind prd/trd/story) for this project"
+  },
+  {
+   "type": "command",
+   "name": "custom channel",
+   "command": "",
+   "note": "any shell command that prints the story/spec for {id}"
+  }
+ ],
+ "sinks": [
+  {
+   "type": "repo"
+  },
+  {
+   "type": "control-hub",
+   "url_env": "CONTROL_HUB_URL",
+   "key_env": "CONTROL_HUB_KEY",
+   "project_slug": ""
+  },
+  {
+   "type": "webhook",
+   "url_env": "STORY_GATE_WEBHOOK"
+  },
+  {
+   "type": "command",
+   "name": "custom channel",
+   "command": ""
+  }
+ ],
+ "models": {
+  "intake": "small",
+  "context": "medium",
+  "tests": "medium",
+  "handoff": "medium",
+  "learnings": "small"
+ },
+ "model_tiers": {
+  "small": "cheapest fast model your client offers",
+  "medium": "mid-tier coding model (never frontier)"
+ },
+ "checkpoint": {
+  "every_edits": 10
+ }
+}
