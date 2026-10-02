@@ -828,7 +828,8 @@ class TestRound4Fixes(Base):
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
         p = Path(tempfile.mkdtemp()) / "k.pem"
         G.write_private(p, "one"); G.write_private(p, "two")   # rewriting replaces the file
-        self.assertTrue(G.key_is_private(p)); self.assertEqual(p.read_text(), "two")
+        ok, detail = G.key_access(p)
+        self.assertTrue(ok, detail); self.assertEqual(p.read_text(), "two")
 
 
 class TestInstallV03(Base):

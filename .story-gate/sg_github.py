@@ -318,26 +318,33 @@ def write_private(path, text):
     lock_down(path)
 
 
+def key_access(path):
+    """-> (private: bool, detail: str). On Windows every allow entry must be the current account's SID."""
+    if os.name != "nt":
+        mode = os.stat(path).st_mode & 0o777
+        return (mode & 0o077) == 0, "mode %o" % mode
+    try:
+        sid = _user_sid()
+    except RuntimeError as e:
+        return False, str(e)
+    tmp = Path(tempfile.mkdtemp()) / "acl"
+    try:
+        r = subprocess.run(["icacls", str(path), "/save", str(tmp), "/q"], capture_output=True, text=True)
+        raw = tmp.read_bytes() if tmp.exists() else b""
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+    if r.returncode != 0 or not raw:
+        return False, "icacls /save failed: %s" % (r.stdout + r.stderr).strip()[:200]
+    text = raw.decode("utf-16", errors="ignore") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:8] else raw.decode("utf-8", "ignore")
+    dacl = next((l.strip()[2:].split("S:", 1)[0] for l in text.splitlines() if l.strip().startswith("D:")), "")
+    aces = re.findall(r"\(([^)]*)\)", dacl)
+    trustees = [a.split(";")[-1] for a in aces if a.split(";")[0] in ("A", "OA")]
+    me = {sid} | ({"LA"} if sid.endswith("-500") else set()) | ({"LG"} if sid.endswith("-501") else set())  # SDDL aliases for built-in accounts
+    return bool(trustees) and all(t in me for t in trustees), "you are %s; access list: %s" % (sid, dacl or text.strip()[:300])
+
+
 def key_is_private(path):
-    if os.name == "nt":  # every access entry must be the current account's SID
-        try:
-            sid = _user_sid()
-        except RuntimeError:
-            return False
-        tmp = Path(tempfile.mkdtemp()) / "acl"
-        try:
-            r = subprocess.run(["icacls", str(path), "/save", str(tmp), "/q"], capture_output=True, text=True)
-            raw = tmp.read_bytes() if tmp.exists() else b""
-        finally:
-            shutil.rmtree(tmp.parent, ignore_errors=True)
-        if r.returncode != 0 or not raw:
-            return False
-        text = raw.decode("utf-16", errors="ignore") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:8] else raw.decode("utf-8", "ignore")
-        dacl = next((l.strip()[2:].split("S:", 1)[0] for l in text.splitlines() if l.strip().startswith("D:")), "")
-        aces = re.findall(r"\(([^)]*)\)", dacl)
-        trustees = [a.split(";")[-1] for a in aces if a.split(";")[0] in ("A", "OA")]
-        return bool(trustees) and all(t == sid for t in trustees)
-    return (os.stat(path).st_mode & 0o077) == 0
+    return key_access(path)[0]
 
 
 def manifest(name, redirect):
@@ -434,8 +441,9 @@ def b64u(b):
 
 
 def app_jwt(rec):
-    if not key_is_private(rec["key"]):
-        raise RuntimeError("the agent key %s is readable by other users; fix its permissions (chmod 600)" % rec["key"])
+    ok, detail = key_access(rec["key"])
+    if not ok:
+        raise RuntimeError("the agent key %s is readable by other users (%s). Re-run `gate.py setup-agent`, or on Mac/Linux run chmod 600 on it" % (rec["key"], detail))
     now_ = int(time.time())
     msg = b64u(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()) + "." + b64u(json.dumps({"iat": now_ - 60, "exp": now_ + 540, "iss": str(rec["id"])}).encode())
     r = subprocess.run([openssl(), "dgst", "-sha256", "-sign", rec["key"]], input=msg.encode(), capture_output=True)
