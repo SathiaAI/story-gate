@@ -8,7 +8,7 @@ Design rules (decided by the frontier panel, Oct 2026):
   `workflows` or `administration` permission, so it cannot edit CI or branch rules.
 - Nothing here runs code from the pull request.
 """
-import base64, http.server, json, os, re, secrets, shutil, subprocess, time, urllib.error, urllib.parse, urllib.request, webbrowser
+import base64, csv, http.server, json, os, re, secrets, shutil, subprocess, tempfile, time, urllib.error, urllib.parse, urllib.request, webbrowser
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -286,18 +286,30 @@ def config_dir():
     return d
 
 
-def lock_down(path):
+def _user_sid():
+    """The current Windows account's SID (the full identity, never just the user name)."""
+    r = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True)
+    row = next(csv.reader([r.stdout.strip()]), [])
+    if r.returncode != 0 or len(row) < 2 or not row[-1].startswith("S-1-"):
+        raise RuntimeError("could not read your Windows account SID (whoami: %s)" % (r.stdout + r.stderr).strip()[:200])
+    return row[-1]
+
+
+def lock_down(path, directory=False):
+    """Owner-only access. Directories are locked before any secret is created in them, so new files start private."""
     if os.name == "nt":
-        user = os.environ.get("USERNAME", "")
-        r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", "%s:F" % user], capture_output=True, text=True)
+        grant = "*%s:%sF" % (_user_sid(), "(OI)(CI)" if directory else "")
+        r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", grant], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError("could not restrict %s to your account (icacls: %s)" % (path, (r.stdout + r.stderr).strip()[:200]))
     else:
-        os.chmod(path, 0o600)
+        os.chmod(path, 0o700 if directory else 0o600)
 
 
 def write_private(path, text):
     """Create the file readable by the owner only from the first byte (no window where others can read it)."""
+    path = Path(path)
+    lock_down(path.parent, directory=True)  # new files inherit owner-only access from here
     if os.path.lexists(path):
         os.remove(path)  # a fresh file: an old one could carry extra permissions (explicit ACEs on Windows)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -307,13 +319,24 @@ def write_private(path, text):
 
 
 def key_is_private(path):
-    if os.name == "nt":  # every access entry must belong to the current user
-        user = os.environ.get("USERNAME", "").lower()
-        r = subprocess.run(["icacls", str(path)], capture_output=True, text=True)
-        if r.returncode != 0 or not user:
+    if os.name == "nt":  # every access entry must be the current account's SID
+        try:
+            sid = _user_sid()
+        except RuntimeError:
             return False
-        entries = [l.replace(str(path), "", 1).split(":(")[0].strip().lower() for l in r.stdout.splitlines() if ":(" in l]
-        return bool(entries) and all(e == user or e.endswith("\\" + user) for e in entries)
+        tmp = Path(tempfile.mkdtemp()) / "acl"
+        try:
+            r = subprocess.run(["icacls", str(path), "/save", str(tmp), "/q"], capture_output=True, text=True)
+            raw = tmp.read_bytes() if tmp.exists() else b""
+        finally:
+            shutil.rmtree(tmp.parent, ignore_errors=True)
+        if r.returncode != 0 or not raw:
+            return False
+        text = raw.decode("utf-16", errors="ignore") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:8] else raw.decode("utf-8", "ignore")
+        dacl = next((l.strip()[2:].split("S:", 1)[0] for l in text.splitlines() if l.strip().startswith("D:")), "")
+        aces = re.findall(r"\(([^)]*)\)", dacl)
+        trustees = [a.split(";")[-1] for a in aces if a.split(";")[0] in ("A", "OA")]
+        return bool(trustees) and all(t == sid for t in trustees)
     return (os.stat(path).st_mode & 0o077) == 0
 
 

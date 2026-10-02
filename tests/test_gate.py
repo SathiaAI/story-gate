@@ -649,10 +649,17 @@ class TestV03Integrity(Base):
         self.assertIn(".claude/settings.json", g.GATE_FILES)
 
 
+def keep_github_fakes_local(test, G):
+    """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
+    saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
+    test.addCleanup(lambda: [setattr(G, n, f) for n, f in saved.items()])
+
+
 class TestGitHubLogic(unittest.TestCase):
     def setUp(self):
         import importlib
         sys.path.insert(0, str(SRC)); self.G = importlib.import_module("sg_github")
+        keep_github_fakes_local(self, self.G)
 
     def test_codeowners(self):
         self.assertEqual(self.G.codeowners("# x\n*.js @web\n* @Paul @SathiaAI/core\n"), (["Paul"], ["SathiaAI/core"]))
@@ -805,7 +812,7 @@ class TestRound4Fixes(Base):
 
     def test_review_must_be_on_head(self):
         import importlib
-        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         G.paged = lambda p, t: [{"user": {"login": "coderabbitai[bot]"}, "commit_id": "old0000"}]
         self.assertEqual(G.reviewed_by({"repo": "o/r", "number": 1, "head_sha": "new1111"}, "t", ["coderabbitai[bot]"]), [])
 
