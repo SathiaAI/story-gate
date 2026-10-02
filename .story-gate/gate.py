@@ -332,6 +332,9 @@ def struct_ready(sd):
     ctx = rd(sd / "context.md")
     secs = sections(ctx)
     missing = [s for s in CONTEXT_SECTIONS if not secs.get(s, "").strip() or "TODO" in secs.get(s, "")]
+    pl = secs.get("## Prior learnings", "").strip().lower()
+    if pl.startswith("none") and "searched" not in pl:
+        missing.append("## Prior learnings (say 'None — searched: <keywords>')")
     out["context_present"] = (not missing, "context.md sections empty/TODO: " + ", ".join(missing))
     try:
         t = json.loads(rd(sd / "tests.json", "{}"))
@@ -547,7 +550,8 @@ def work_fingerprint():
         if n.startswith(".story-gate/"):
             continue
         f = ROOT / n
-        h.update(n.encode("utf-8", "replace") + b"\0" + (hashlib.sha256(f.read_bytes()).digest() if f.is_file() else b"DELETED"))
+        mode = b"x" if f.is_file() and os.access(f, os.X_OK) else b"-"  # executable bit is part of the evidence
+        h.update(n.encode("utf-8", "replace") + b"\0" + mode + (hashlib.sha256(f.read_bytes()).digest() if f.is_file() else b"DELETED"))
     return h.hexdigest()[:16]
 
 
@@ -604,7 +608,7 @@ def cmd_score(sid, phase, base=None):
     if phase == "ready":
         structural, fm = struct_ready(sd)
         pl = sections(rd(sd / "context.md")).get("## Prior learnings", "").strip().lower()
-        skip = {"learnings_applied"} if pl.startswith("none") else set()  # nothing to apply; searching is checked structurally
+        skip = {"learnings_applied"} if pl.startswith("none") and "searched" in pl else set()  # skip only with search evidence
         state = {"story": rd(sd / "story.md")[:mx // 3], "context": rd(sd / "context.md")[:mx // 3],
                  "test_plan": rd(sd / "tests.json")[:mx // 3]}
     elif phase == "done":
@@ -873,7 +877,8 @@ def hook_out(client, event, msg, block):
     elif client == "gemini":
         print(json.dumps({"systemMessage": msg}))
     elif client == "cursor":
-        print(json.dumps({"permission": "allow", "user_message": msg, "agent_message": msg} if event == "pre" else {}))
+        print(json.dumps({"permission": "allow", "user_message": msg, "agent_message": msg} if event == "pre"
+                         else {"followup_message": msg}))  # stop: one follow-up; loop_count guard prevents repeats
     elif client == "grok":
         print(json.dumps({"decision": "allow", "reason": msg}))
     else:  # windsurf: show_output prints stdout to the user
@@ -1012,9 +1017,9 @@ def cmd_publish():
     sent_p = GATE / ".outbox.sent"
     sent = load_json(sent_p)  # per-sink cursor: a failing sink never causes duplicates in a working one
     rc, delivered = 0, 0
-    for s in c.get("sinks", []):
+    for i, s in enumerate(c.get("sinks", [])):
         t = s.get("type")
-        key = "%s:%s" % (t, s.get("name") or s.get("url_env") or s.get("command") or "")
+        key = "%d:%s" % (i, json.dumps(s, sort_keys=True))  # full identity: duplicate-looking sinks never share a cursor
         todo = lines[int(sent.get(key, 0)):]
         if t == "repo" or not todo:
             continue

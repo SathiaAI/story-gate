@@ -375,5 +375,45 @@ class TestRound1Fixes(Base):
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
+class TestRound2Fixes(Base):
+    def test_prior_learnings_none_needs_search_evidence(self):
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        p = self.repo / ".story-gate/stories/SAT-1/context.md"
+        p.write_text(p.read_text().replace("None — searched: x y", "None"))
+        run(self.repo, "score", "SAT-1", "ready")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())
+        self.assertEqual(v["checks"]["context_present"]["status"], "FAIL")
+
+    def test_exec_bit_change_invalidates_test_run(self):
+        if os.name == "nt":
+            self.skipTest("POSIX exec bit")
+        run(self.repo, "start", "SAT-1")
+        (self.repo / "tool.sh").write_text("echo hi\n"); os.chmod(self.repo / "tool.sh", 0o755)
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        fp1 = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())["fingerprint"]
+        os.chmod(self.repo / "tool.sh", 0o644)
+        import importlib.util
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            spec = importlib.util.spec_from_file_location("g2", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+            self.assertNotEqual(fp1, g.work_fingerprint())
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_duplicate_sinks_get_own_cursor(self):
+        run(self.repo, "start", "SAT-1")
+        o1, o2 = self.repo / "s1.txt", self.repo / "s2.txt"
+        cmd = lambda o: "%s -c \"import sys; open(r'%s','a').write(sys.stdin.read())\"" % (PY, o)
+        self.cfg(sinks=[{"type": "command", "command": cmd(o1)}, {"type": "command", "command": cmd(o2)}])
+        run(self.repo, "publish")
+        self.assertIn("story_gate.started", o1.read_text()); self.assertIn("story_gate.started", o2.read_text())
+
+    def test_cursor_stop_warning_visible(self):
+        run(self.repo, "start", "SAT-1")
+        (self.repo / "app.py").write_text("x = 11\n")
+        r = run(self.repo, "hook", "--client", "cursor", "--event", "stop", stdin='{"loop_count": 0, "workspace_roots": ["."]}')
+        self.assertEqual(r.returncode, 0); self.assertIn("followup_message", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
