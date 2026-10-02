@@ -30,13 +30,14 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-g
 - **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
 
 ## The moments
-1. **READY:** run `start`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
+1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
 2. **CHECKPOINT:** runs automatically in clients with after-edit hooks. Otherwise run `gate.py checkpoint <ID>` after each AC. If it says OFF_COURSE, stop and correct the work, or escalate.
 3. **DONE:**
    - Run `record-tests`.
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
-   - Write `handoff.md`, run `learn`, then run `score <ID> done`.
+   - Write `handoff.md` (all seven sections), then run `learn` (`--type error|pattern` also needs `--root-cause` and `--rule`), then run `score <ID> done`.
+   - Any later change to code, tests, `tests.json` or the specs makes the verdict out of date: re-run `record-tests` and re-score.
 4. **ACCEPTANCE:** open the PR as the agent. CI re-checks everything, and a code owner approves the latest commit and merges. You never approve or merge.
 5. **DRIFT:** never resolved silently.
    - Escalate it.
