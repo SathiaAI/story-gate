@@ -117,7 +117,7 @@ class TestDone(Base):
         self.assertEqual(run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "import sys; sys.exit(3)").returncode, 1)
         (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print('ok')")
-        h = "# Handoff\n" + "".join("## %s\nreal content\n" % s for s in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers"))
+        h = "# Handoff\n" + "".join("## %s\nreal content\n" % s for s in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         self.assertNotEqual(run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "x").returncode, 0)  # errors need root cause + rule
         run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "pytest import path wrong", "--root-cause", "no conftest", "--rule", "add conftest.py at repo root", "--tags", "pytest")
@@ -275,7 +275,7 @@ class TestRegressions(Base):
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         (self.repo / "new_mod.py").write_text("y = 1\n\ndef test_ac1_x():\n    pass\n")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
-        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers"))
+        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "no new learnings")
         self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
@@ -336,6 +336,43 @@ class TestCheckpointAndTrace(Base):
         for d in (".agents/skills/story-gate/SKILL.md", ".claude/skills/story-gate/SKILL.md"):
             self.assertIn("name: story-gate", (self.repo / d).read_text())
         self.assertIn("PostToolUse", (self.repo / ".codex/hooks.json").read_text())
+
+
+class TestRound1Fixes(Base):
+    def test_story_files_never_satisfy_traceability(self):
+        """CodeRabbit 4166059695: committed tests.json must not make its own test_refs 'found'."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "w"], cwd=self.repo)
+        run(self.repo, "score", "SAT-1", "done")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/done.json").read_text())
+        self.assertEqual(v["checks"]["traceability"]["status"], "FAIL")
+
+    def test_learnings_tolerates_bad_lines(self):
+        (self.repo / ".story-gate/learnings.jsonl").write_text("<<<<<<< HEAD\n{\"summary\": \"no id\"}\n")
+        r = run(self.repo, "learnings", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_red_run_invalidates_done(self):
+        """Codex 4166101862: a later red run on unchanged code must invalidate a DONE PASS."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Drift decisions"))
+        (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
+        run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "none")
+        self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "import sys; sys.exit(1)")
+        self.assertIn("DONE gate", run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}").stdout)
+
+    def test_handoff_requires_drift_section_and_version(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+        self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
+        self.assertEqual(g.VERSION, "0.2.0")
+        self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
 if __name__ == "__main__":

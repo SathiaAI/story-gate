@@ -31,7 +31,7 @@ Commands (run from the repo root):
 import fnmatch, hashlib, json, os, re, subprocess, sys, time, urllib.request, urllib.error
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ROOT = Path(os.environ.get("STORY_GATE_ROOT") or Path(__file__).resolve().parent.parent)
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -112,7 +112,7 @@ CHECK_GROUP = {  # how checks roll up for humans
 }
 TEST_CATS = ("positive", "negative", "edge", "regression")
 CONTEXT_SECTIONS = ("## PRD", "## TRD", "## Upstream handoffs", "## Prior learnings")
-HANDOFF_SECTIONS = ("## What changed", "## Interfaces and contracts", "## How to verify", "## Known limits", "## Downstream consumers")
+HANDOFF_SECTIONS = ("## What changed", "## Interfaces and contracts", "## How to verify", "## Known limits", "## Downstream consumers", "## Drift decisions")
 
 
 # ------------------------------------------------------------------ small helpers
@@ -216,7 +216,7 @@ def load_json(p):
 
 
 def inputs_hash(sd, phase):
-    names = ["story.md", "context.md", "tests.json"] + (["handoff.md"] if phase == "done" else [])
+    names = ["story.md", "context.md", "tests.json"] + (["handoff.md", "test_results.json"] if phase == "done" else [])
     blob = "".join(rd(sd / n) for n in names)
     if phase == "done":
         blob += "".join(json.dumps(r) for r in jsonl(LEARNINGS) if r.get("story") == sd.name) + work_fingerprint()
@@ -592,7 +592,7 @@ def diff_against(base):
     mb = resolve_base(base)
     names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) \
         | set(zlist("ls-files", "--others", "--exclude-standard"))
-    return mb, sorted(names), git("diff", mb)
+    return mb, sorted(names), git("diff", mb, "--", ".", ":(exclude).story-gate")  # gate records never count as code evidence
 
 
 def cmd_score(sid, phase, base=None):
@@ -766,7 +766,7 @@ def cmd_learn(sid, kv):
 
 
 def cmd_learnings(words):
-    rows = [json.loads(l) for l in rd(LEARNINGS).splitlines() if l.strip()]
+    rows = jsonl(LEARNINGS)  # tolerant: a bad line (e.g. merge-conflict marker) is skipped, never fatal
     ws = [w.lower() for w in words]
     hits = []
     for r in rows:
@@ -780,13 +780,14 @@ def cmd_learnings(words):
     rules = {}
     for r in rows:
         if r.get("rule"):
-            rules.setdefault(r["rule"].strip().lower(), []).append(r["story"])
+            rules.setdefault(str(r["rule"]).strip().lower(), []).append(r.get("story", "?"))
     for _, r in hits[:20]:
-        print("- [%s] %s (%s) %s%s" % (r["id"], r["summary"], r["type"], ("RULE: " + r["rule"]) if r.get("rule") else "",
-                                      "  tags=" + ",".join(r["tags"]) if r.get("tags") else ""))
-    rep = [(k, v) for k, v in rules.items() if len(v) >= 3]
-    for k, v in rep:
-        print("! repeated %dx — promote to AGENTS.md/CLAUDE.md: %s" % (len(v), k))
+        tags = r.get("tags") if isinstance(r.get("tags"), list) else []
+        print("- [%s] %s (%s) %s%s" % (r.get("id", "?"), r.get("summary", ""), r.get("type", "?"),
+                                      ("RULE: " + str(r["rule"])) if r.get("rule") else "", "  tags=" + ",".join(map(str, tags)) if tags else ""))
+    for k, v in rules.items():
+        if len(v) >= 3:
+            print("! repeated %dx — promote to AGENTS.md/CLAUDE.md: %s" % (len(v), k))
     if not hits:
         print("None found for: %s" % " ".join(words))
 
@@ -1135,7 +1136,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}   # same commit the developer tested; tests.yml covers the merge result
+          persist-credentials: false
       - name: story gate (script and config from the base branch)
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
