@@ -768,6 +768,62 @@ class TestRound3Fixes(Base):
         self.assertNotEqual(r.returncode, 0); self.assertIn("staged differently", r.stdout + r.stderr)
 
 
+class TestRound4Fixes(Base):
+    def test_quoted_write_targets_are_still_seen(self):
+        self.cfg(mode="enforce")
+        sh = lambda c: run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps({"tool_name": "Bash", "tool_input": {"command": c}})).returncode
+        self.assertEqual(sh('echo x > ".github/workflows/story-gate.yml"'), 2)
+        self.assertEqual(sh("echo x > '.story-gate/config.json'"), 2)
+        self.assertEqual(sh('echo x > "app.py"'), 2)                        # code write before READY
+        self.assertEqual(sh('git commit -m "move the notes > later"'), 0)   # quoted free text is not a target
+
+    def test_symlinked_evidence_is_not_read(self):
+        secret = Path(tempfile.mkdtemp()) / "environ"; secret.write_text("OPENROUTER_API_KEY=sk-secret")
+        run(self.repo, "start", "SAT-1")
+        st = self.repo / ".story-gate/stories/SAT-1/story.md"; st.unlink(); os.symlink(secret, st)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        self.assertEqual(g.rd(st), "")
+
+    def test_self_judge_override_never_widens_emulated(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        c = {"judge": {"allow_self_judge_pass": True}}
+        self.assertTrue(g.can_pass("self", c)); self.assertFalse(g.can_pass("emulated", c)); self.assertTrue(g.can_pass("jev", {}))
+
+    def test_policy_change_makes_ready_stale(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, mode="enforce")
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        hook = lambda: run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(TestHooks.PAYLOADS["claude"]))
+        self.assertEqual(hook().returncode, 0)
+        self.cfg(thresholds={"pass": 0.95, "concerns": 0.4})
+        self.assertEqual(hook().returncode, 2)
+
+    def test_junit_shared_name_takes_worst_outcome(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        d = Path(tempfile.mkdtemp()); (d / "j.xml").write_text('<testsuite><testcase classname="a" name="test_same"><skipped/></testcase><testcase classname="b" name="test_same"/></testsuite>')
+        self.assertEqual(G.ref_outcome("test_same", G.junit(d / "j.xml")), "skipped")
+
+    def test_review_must_be_on_head(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        G.paged = lambda p, t: [{"user": {"login": "coderabbitai[bot]"}, "commit_id": "old0000"}]
+        self.assertEqual(G.reviewed_by({"repo": "o/r", "number": 1, "head_sha": "new1111"}, "t", ["coderabbitai[bot]"]), [])
+
+    def test_setup_repo_matches_owner_exactly(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        (self.repo / ".github").mkdir(exist_ok=True); (self.repo / ".github/CODEOWNERS").write_text("* @alice2\n")
+        out = G.setup_repo(self.repo, "o/r", ["alice"], "t", dry_run=True)
+        self.assertIn("added", out[0])
+
+    def test_private_key_is_private_on_every_os(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        p = Path(tempfile.mkdtemp()) / "k.pem"
+        G.write_private(p, "one"); G.write_private(p, "two")   # rewriting replaces the file
+        self.assertTrue(G.key_is_private(p)); self.assertEqual(p.read_text(), "two")
+
+
 class TestInstallV03(Base):
     def test_managed_workflows(self):
         run(self.repo, "install")

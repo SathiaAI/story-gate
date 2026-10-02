@@ -164,8 +164,16 @@ def cfg():
 
 
 def rd(p, default=""):
+    """Read a text file. Inside the repository, symlinks and paths that resolve outside it are never followed,
+    so committed evidence can't point at /proc/self/environ or other secrets on a CI runner."""
     p = Path(p)
-    return p.read_text(encoding="utf-8", errors="ignore") if p.exists() else default
+    try:
+        inside = os.path.abspath(p).startswith(os.path.abspath(ROOT) + os.sep)
+        if inside and (p.is_symlink() or not os.path.realpath(p).startswith(os.path.realpath(ROOT) + os.sep)):
+            return default
+        return p.read_text(encoding="utf-8", errors="ignore") if p.is_file() else default
+    except OSError:
+        return default
 
 
 def wj(p, obj):
@@ -298,6 +306,9 @@ def inputs_hash(sd, phase, c=None):
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
+        j = c.get("judge") or {}
+        blob += json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+                            "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
     except ConfigError:
         blob += "<config unreadable>"
     if phase == "done":
@@ -366,7 +377,9 @@ def judge(phase, state, c, sd, skip=()):
 
 
 def can_pass(judge_name, c):
-    return judge_name in ("jev", "emulated-calibrated") or bool((c.get("judge") or {}).get("allow_self_judge_pass"))
+    if judge_name in ("jev", "emulated-calibrated"):
+        return True
+    return judge_name == "self" and bool((c.get("judge") or {}).get("allow_self_judge_pass"))  # never widens emulated
 
 
 def acs(sd):
@@ -1080,6 +1093,10 @@ GATE_CLI = re.compile(r"\s*(?:python3?|py)(?:\s+-3)?\s+(?:\./)?\.story-gate[/\\]
 
 
 def unquote(cmd):
+    """Quoted single paths ('app.py', ".github/x.yml") keep their text so quoting can't hide a write target;
+    other quoted text (messages, sed expressions) is blanked so it isn't mistaken for commands."""
+    cmd = re.sub(r"(['\"])([\w./\\~-]*[./\\][\w./\\~-]*)\1", r"\2", cmd)
+    cmd = re.sub(r"(>>?\s*)(['\"])([^'\"]*)\2", lambda m: m.group(1) + m.group(3).replace(" ", "?"), cmd)  # > "my file.py"
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", cmd)
 
 
@@ -1832,7 +1849,8 @@ def cmd_setup(cmd, kv, rest):
         print(("export GH_TOKEN=%s\nexport GITHUB_TOKEN=%s" if sh else "$env:GH_TOKEN='%s'\n$env:GITHUB_TOKEN='%s'") % (tok, tok))
         print('git config user.name "%s"\ngit config user.email "%s"\ngit config commit.gpgsign false' % (name, email))
         print("git config --local credential.helper ''")  # drop inherited helpers (e.g. a keychain holding YOUR login)
-        print("git config --local --add credential.helper '!python3 .story-gate/gate.py agent-token --repo %s --git-credential'" % repo)
+        helper = '!"%s" "%s" agent-token --repo %s --git-credential' % (sys.executable.replace("\\", "/"), str(GATE / "gate.py").replace("\\", "/"), repo)
+        print("git config --local --add credential.helper '%s'" % helper)  # this Python, absolute path: works on Windows too
         print("# token expires %s; git refreshes it through the helper above" % exp)
         return 0
     return 2

@@ -145,7 +145,8 @@ def unresolved_threads(ctx, token, reviewers):
 def reviewed_by(ctx, token, reviewers):
     want = {r.lower().replace("[bot]", "") for r in reviewers}
     reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
-    return sorted({(r.get("user") or {}).get("login", "") for r in reviews if ((r.get("user") or {}).get("login", "").lower().replace("[bot]", "")) in want})
+    return sorted({(r.get("user") or {}).get("login", "") for r in reviews  # only reviews of the current head commit count
+                   if r.get("commit_id") == ctx["head_sha"] and ((r.get("user") or {}).get("login", "").lower().replace("[bot]", "")) in want})
 
 
 def protection(repo, branch, token):
@@ -174,6 +175,9 @@ def protection(repo, branch, token):
 
 
 # ------------------------------------------------------------------ JUnit
+RANK = {"passed": 0, "skipped": 1, "failed": 2}
+
+
 def junit(path, max_bytes=5_000_000):
     """-> {test_name: outcome} with outcome in passed|failed|skipped. Rejects oversized files and DTDs."""
     p = Path(path)
@@ -193,8 +197,8 @@ def junit(path, max_bytes=5_000_000):
         else:
             o = "passed"
         for key in {name, (cls + "." + name) if cls else name, (cls + "::" + name) if cls else name}:
-            if key:
-                out[key] = "failed" if out.get(key) == "failed" else o
+            if key:  # one name shared by several tests: the worst outcome wins, so a skipped twin never hides behind a pass
+                out[key] = max(out.get(key, o), o, key=RANK.get)
     return out
 
 
@@ -248,7 +252,8 @@ def setup_repo(root, repo, owners, token, dry_run=False):
     co = Path(root) / ".github" / "CODEOWNERS"
     line = "* " + " ".join("@" + o.lstrip("@") for o in owners)
     text = co.read_text(encoding="utf-8") if co.exists() else ""
-    if line not in text:
+    have = {u.lower() for u in codeowners(text)[0]}  # the effective (last) '*' rule, by exact name
+    if not all(o.lstrip("@").lower() in have for o in owners):
         co.parent.mkdir(parents=True, exist_ok=True)
         if not dry_run:
             co.write_text((text.rstrip() + "\n" if text.strip() else "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n") + line + "\n", encoding="utf-8")
@@ -284,22 +289,31 @@ def config_dir():
 def lock_down(path):
     if os.name == "nt":
         user = os.environ.get("USERNAME", "")
-        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", "%s:F" % user], capture_output=True)
+        r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", "%s:F" % user], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("could not restrict %s to your account (icacls: %s)" % (path, (r.stdout + r.stderr).strip()[:200]))
     else:
         os.chmod(path, 0o600)
 
 
 def write_private(path, text):
     """Create the file readable by the owner only from the first byte (no window where others can read it)."""
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if os.path.lexists(path):
+        os.remove(path)  # a fresh file: an old one could carry extra permissions (explicit ACEs on Windows)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     lock_down(path)
 
 
 def key_is_private(path):
-    if os.name == "nt":
-        return True  # ACL set by lock_down; icacls output parsing is not portable enough to verify here
+    if os.name == "nt":  # every access entry must belong to the current user
+        user = os.environ.get("USERNAME", "").lower()
+        r = subprocess.run(["icacls", str(path)], capture_output=True, text=True)
+        if r.returncode != 0 or not user:
+            return False
+        entries = [l.replace(str(path), "", 1).split(":(")[0].strip().lower() for l in r.stdout.splitlines() if ":(" in l]
+        return bool(entries) and all(e == user or e.endswith("\\" + user) for e in entries)
     return (os.stat(path).st_mode & 0o077) == 0
 
 

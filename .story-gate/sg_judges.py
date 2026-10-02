@@ -172,7 +172,7 @@ def _emulated(s, key, state, questions):
 
 def identity(c):
     s = settings(c)
-    return hashlib.sha256(("%s|%s|%s" % (s["provider"], s["url"], s["model"])).encode()).hexdigest()[:12]
+    return hashlib.sha256(("%s|%s|%s" % (s["provider"], s.get("url", ""), s.get("model", ""))).encode()).hexdigest()[:12]
 
 
 # Clear-cut fixtures: an emulated judge must get every one right before it may issue PASS.

@@ -209,7 +209,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
 | `judge.temperature` | not sent | Sent to an `openai-compatible` judge only if you set it. Some reasoning models reject it |
-| `reviewers`, `require_independent_review` | CodeRabbit, Codex · on | Whose reviews count as independent, and whether one is required |
+| `reviewers`, `require_independent_review` | CodeRabbit, Codex · on | Whose reviews count as independent, and whether one is required on the latest commit |
 | `approvers` | `[]` | Extra human approvers on top of CODEOWNERS |
 | `sources`, `sinks` | Linear, repo, control-hub, custom | Where specs come from, and where verdicts, checkpoints, drift alerts and learnings are sent |
 
