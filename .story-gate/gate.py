@@ -2006,7 +2006,10 @@ def policy_weakened(e):
     if not isinstance(seen, dict) or not isinstance(seen.get("config"), dict) or any(k not in seen["config"] for k in need):
         return ["this computer's record of the accepted rules is unreadable"], sha  # never silently re-accept
     now_cfg = full_config(T.policy_text(e["toplevel"], e["policy_ref"], "config.json"))
-    return T.weaker(seen["config"], now_cfg), sha
+    try:
+        return T.weaker(seen["config"], now_cfg), sha
+    except Exception:  # right keys, wrong shapes (e.g. "thresholds": []): same answer as unreadable
+        return ["this computer's record of the accepted rules is unreadable"], sha
 
 
 def session_context(c):

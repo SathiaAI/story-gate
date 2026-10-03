@@ -1227,7 +1227,9 @@ class TestTrustedRuntime(RuntimeFixture):
     def test_unreadable_policy_baseline_is_never_silently_accepted(self):
         ep = self.home / "enrolled.json"; data = json.loads(ep.read_text())
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
-        for bad in ("garbage", {}, {"mode": "warn"}):  # not a config, empty, incomplete
+        full = {k: [] for k in ("mode", "enforce_points", "accept_concerns", "thresholds", "judge", "require_independent_review",
+                                "exempt_globs", "project_hooks_allowed", "test_command", "approvers")}
+        for bad in ("garbage", {}, {"mode": "warn"}, full):  # not a config, empty, incomplete, wrong shapes
             for v in data.values():
                 v["policy_seen"] = {"sha": "x", "config": bad}
             ep.write_text(json.dumps(data))
