@@ -2001,7 +2001,9 @@ def policy_weakened(e):
     seen = e.get("policy_seen")
     if seen is None:  # enrolled before this check existed: doctor records the current rules as the starting point
         return [], sha
-    if not isinstance(seen, dict) or not isinstance(seen.get("config"), dict):
+    need = ("mode", "enforce_points", "accept_concerns", "thresholds", "judge", "require_independent_review", "exempt_globs",
+            "project_hooks_allowed", "test_command", "approvers")
+    if not isinstance(seen, dict) or not isinstance(seen.get("config"), dict) or any(k not in seen["config"] for k in need):
         return ["this computer's record of the accepted rules is unreadable"], sha  # never silently re-accept
     now_cfg = full_config(T.policy_text(e["toplevel"], e["policy_ref"], "config.json"))
     return T.weaker(seen["config"], now_cfg), sha

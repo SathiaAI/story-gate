@@ -1226,13 +1226,14 @@ class TestTrustedRuntime(RuntimeFixture):
 
     def test_unreadable_policy_baseline_is_never_silently_accepted(self):
         ep = self.home / "enrolled.json"; data = json.loads(ep.read_text())
-        for v in data.values():
-            v["policy_seen"] = {"sha": "x", "config": "garbage"}
-        ep.write_text(json.dumps(data))
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
-        for _ in range(2):
-            out = subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
-            self.assertIn("unreadable", out)
+        for bad in ("garbage", {}, {"mode": "warn"}):  # not a config, empty, incomplete
+            for v in data.values():
+                v["policy_seen"] = {"sha": "x", "config": bad}
+            ep.write_text(json.dumps(data))
+            for _ in range(2):
+                out = subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
+                self.assertIn("unreadable", out, bad)
 
     def test_doctor_warns_when_the_default_branch_loosens_the_rules(self):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
