@@ -199,16 +199,19 @@ class TestHooks(Base):
 class TestInstallCI(Base):
     def test_install_idempotent_and_merges(self):
         (self.repo / ".claude").mkdir()
-        (self.repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}]}}))
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]},
+            {"matcher": "Edit", "hooks": [{"type": "command", "command": "python3 .story-gate/gate.py hook --client claude --event pre"}]}]}}))
         (self.repo / "AGENTS.md").write_text("# Mine\nkeep me\n")
         for _ in range(2):
             self.assertEqual(run(self.repo, "install").returncode, 0)
         s = json.loads((self.repo / ".claude/settings.json").read_text())
         self.assertEqual(s["permissions"]["allow"], ["Bash(ls)"])
-        self.assertEqual(len(s["hooks"]["PreToolUse"]), 2)
+        self.assertEqual(s["hooks"]["PreToolUse"], [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}])  # old branch-code hook removed
         a = (self.repo / "AGENTS.md").read_text()
         self.assertIn("keep me", a); self.assertEqual(a.count("story-gate:start"), 1)
-        for f in (".codex/hooks.json", ".cursor/hooks.json", ".gemini/settings.json", ".devin/hooks.json", ".grok/hooks/story-gate.json", "CLAUDE.md", "GEMINI.md", ".github/workflows/story-gate.yml"):
+        self.assertFalse((self.repo / ".codex/hooks.json").exists())  # hooks live in user settings now
+        for f in ("CLAUDE.md", "GEMINI.md", ".github/workflows/story-gate.yml"):
             self.assertTrue((self.repo / f).exists(), f)
         self.assertIn(".story-gate/.active", (self.repo / ".gitignore").read_text())
 
@@ -343,7 +346,6 @@ class TestCheckpointAndTrace(Base):
         run(self.repo, "install")
         for d in (".agents/skills/story-gate/SKILL.md", ".claude/skills/story-gate/SKILL.md"):
             self.assertIn("name: story-gate", (self.repo / d).read_text())
-        self.assertIn("PostToolUse", (self.repo / ".codex/hooks.json").read_text())
 
 
 class TestRound1Fixes(Base):
@@ -379,7 +381,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.3.0")
+        self.assertEqual(g.VERSION, "0.4.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -722,6 +724,14 @@ class TestGitHubLogic(unittest.TestCase):
         self.G.write_private(p, "secret")
         self.assertEqual(p.stat().st_mode & 0o777, 0o600)
 
+    def test_change_label_must_still_be_present(self):
+        G = self.G
+        ev = lambda kind, who: {"event": kind, "label": {"name": "story-gate-change"}, "actor": {"login": who}}
+        G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]"), ev("unlabeled", "Paul"), ev("labeled", "Paul")]
+        self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "Paul")
+        G.paged = lambda p, t: [ev("labeled", "Paul"), ev("unlabeled", "agent-bot[bot]")]
+        self.assertIsNone(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"))
+
     def test_ruleset_shape(self):
         r = self.G.ruleset_json()
         pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
@@ -925,6 +935,255 @@ class TestJudgeIndependence(Base):
             self.assertEqual(G.agent_record()["key"], str(home / "x.pem"))
         finally:
             os.environ.pop("STORY_GATE_HOME")
+
+
+class TestTrustedRuntime(Base):
+    """The hooks run a pinned copy in the user's folder, with policy from the default branch (panel decision sg-hookpin)."""
+
+    def setUp(self):
+        super().setUp()
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        self.user = Path(tempfile.mkdtemp()); self.home = self.user / "sg-home"
+        self.env = {"STORY_GATE_USER_HOME": str(self.user), "STORY_GATE_HOME": str(self.home)}
+        self.remote = Path(tempfile.mkdtemp()) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        g("checkout", "-q", "main")
+        self.cfg(mode="enforce"); g("commit", "-qam", "policy: enforce")
+        g("remote", "add", "origin", str(self.remote)); g("push", "-q", "origin", "main"); g("remote", "set-head", "origin", "main")
+        g("checkout", "-qb", "feature/SAT-1-thing2")
+        r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.install_out = r.stdout
+        cmd = json.loads((self.user / ".claude/settings.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        import re
+        self.py, self.gate = re.match(r'"(.*?)" -I "(.*?)" hook', cmd).groups()
+
+    def tearDown(self):
+        super().tearDown()
+        shutil.rmtree(self.user, ignore_errors=True); shutil.rmtree(self.remote.parent, ignore_errors=True)
+
+    def hook(self, event="pre", payload=None, cwd=None):
+        e = dict(os.environ, HOME=str(self.user), **self.env)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE"):
+            e.pop(k, None)
+        p = payload if payload is not None else {"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "app.py")}}
+        return subprocess.run([self.py, "-I", self.gate, "hook", "--client", "claude", "--event", event], cwd=cwd or self.repo,
+                              input=json.dumps(p), capture_output=True, text=True, env=e, timeout=60)
+
+    def test_install_writes_user_hooks_runtime_and_enrolls(self):
+        for f in (".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json", ".gemini/settings.json"):
+            self.assertIn("/runtime/", (self.user / f).read_text().replace("\\\\", "/"))
+        self.assertTrue(Path(self.gate).is_file()); self.assertIn("UNSIGNED", self.install_out.upper())
+        self.assertIn("origin/main", json.dumps(json.loads((self.home / "enrolled.json").read_text())))
+        self.assertEqual(self.hook().returncode, 2)  # enforce from the default branch: no active story
+
+    def test_branch_cannot_loosen_policy(self):
+        self.cfg(mode="warn", enforce_points=[])  # the branch tries to switch to warn
+        self.assertEqual(self.hook().returncode, 2)
+
+    def test_branch_can_tighten_policy(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
+        g("checkout", "-q", "feature/SAT-1-thing2"); g("merge", "-q", "main")
+        self.assertEqual(self.hook().returncode, 0)  # policy is warn
+        self.cfg(mode="enforce")                     # the branch may tighten
+        self.assertEqual(self.hook().returncode, 2)
+
+    def test_swapped_gate_code_never_runs(self):
+        marker = self.user / "pwned"
+        evil = "open(%r, 'w').write('x')\n" % str(marker)
+        (self.repo / ".story-gate/gate.py").write_text(evil)
+        (self.repo / "sg_judges.py").write_text(evil); (self.repo / "sg_trust.py").write_text(evil)
+        (self.repo / ".story-gate/sg_judges.py").write_text(evil)
+        self.hook(); self.hook("stop")
+        self.assertFalse(marker.exists())
+
+    def test_deleting_story_gate_in_branch_does_not_disable(self):
+        shutil.rmtree(self.repo / ".story-gate")
+        self.assertEqual(self.hook().returncode, 2)
+
+    def test_tampered_runtime_is_refused(self):
+        with open(self.gate, "a") as f:
+            f.write("\n# tampered\n")
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("integrity", r.stderr)
+
+    def test_project_hook_running_branch_code_is_flagged(self):
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 .story-gate/gate.py hook"}]}]}}))
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("project hook files", r.stderr)
+
+    def test_unenrolled_repo_is_untouched(self):
+        other = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.assertEqual(self.hook(cwd=other).returncode, 0)
+        self.assertEqual(self.hook(cwd=Path(tempfile.mkdtemp())).returncode, 0)  # not a git repository at all
+
+    def test_worktree_shares_enrollment(self):
+        wt = Path(tempfile.mkdtemp()) / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "feature/SAT-2-x", str(wt)], cwd=self.repo, check=True, capture_output=True)
+        self.assertEqual(self.hook(cwd=wt, payload={"tool_name": "Write", "tool_input": {"file_path": str(wt / "app.py")}}).returncode, 2)
+
+    def test_agent_cannot_touch_user_files_or_run_admin_commands(self):
+        sh = lambda c: self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}}).returncode
+        self.assertEqual(sh("echo x > %s" % (self.user / ".claude/settings.json")), 2)
+        self.assertEqual(sh("python3 .story-gate/gate.py install --user --unsigned"), 2)
+        self.assertEqual(sh("python3 .story-gate/gate.py upgrade --from /tmp/evil"), 2)
+        self.assertEqual(sh("rm -rf %s" % self.home), 2)
+        w = {"tool_name": "Write", "tool_input": {"file_path": self.gate}}
+        self.assertEqual(self.hook(payload=w).returncode, 2)
+
+    def test_dry_run_uninstall_and_backups(self):
+        own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}, "theme": "dark"}
+        p = self.user / ".claude/settings.json"
+        data = json.loads(p.read_text()); data["theme"] = "dark"; data["hooks"]["Stop"].append(own["hooks"]["Stop"][0]); p.write_text(json.dumps(data))
+        before = p.read_text()
+        r = run(self.repo, "uninstall", "--user", "--dry-run", env=self.env)
+        self.assertEqual(p.read_text(), before); self.assertIn("---", r.stdout)
+        run(self.repo, "uninstall", "--user", env=self.env)
+        after = json.loads(p.read_text())
+        self.assertEqual(after["theme"], "dark"); self.assertEqual(after["hooks"]["Stop"], own["hooks"]["Stop"])
+        self.assertTrue(list((self.user / ".claude").glob("settings.json.story-gate-backup-*")))
+        self.assertFalse((self.home / "runtime").exists())
+
+    def test_invalid_user_json_is_never_clobbered(self):
+        p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
+        r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        self.assertEqual(p.read_text(), "{ // comments are not JSON\n}"); self.assertIn("NOT changed", r.stdout)
+
+    def test_detached_head_and_paths_with_spaces(self):
+        spaced = Path(tempfile.mkdtemp()) / "my repo"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(spaced)], check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "--detach"], cwd=spaced, check=True)
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        subprocess.run([self.py, "-I", self.gate, "enroll"], cwd=spaced, env=e, check=True, capture_output=True)
+        self.assertEqual(self.hook(cwd=spaced, payload={"tool_name": "Write", "tool_input": {"file_path": str(spaced / "app.py")}}).returncode, 2)
+
+    def test_repo_without_remote_uses_local_default_branch(self):
+        solo = Path(tempfile.mkdtemp())
+        shutil.copytree(self.repo / ".story-gate", solo / ".story-gate", ignore=shutil.ignore_patterns("stories"))
+        g = lambda *a: subprocess.run(["git", *a], cwd=solo, capture_output=True, check=True)
+        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("add", "."); g("commit", "-qm", "i")
+        g("checkout", "-qb", "feature/SAT-9-x")
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        out = subprocess.run([self.py, "-I", self.gate, "enroll"], cwd=solo, env=e, capture_output=True, text=True).stdout
+        self.assertIn("main", out)
+        self.assertEqual(self.hook(cwd=solo, payload={"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}).returncode, 2)
+
+    def test_submodule_inside_enrolled_repo(self):
+        sub_src = Path(tempfile.mkdtemp()) / "lib"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(sub_src)], check=True)
+        (sub_src / "lib.py").write_text("y = 1\n")
+        subprocess.run(["git", "-C", str(sub_src), "-c", "user.email=t@t", "-c", "user.name=t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(sub_src), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"], check=True)
+        subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub_src), "lib"], cwd=self.repo, check=True, capture_output=True)
+        # editing the submodule's file from the enrolled parent is gated like any code
+        self.assertEqual(self.hook(payload={"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "lib/lib.py")}}).returncode, 2)
+        # inside the submodule itself (its own, unenrolled repository) the hook stays out of the way
+        self.assertEqual(self.hook(cwd=self.repo / "lib", payload={"tool_name": "Write", "tool_input": {"file_path": "lib.py"}}).returncode, 0)
+
+    def test_failed_upgrade_keeps_current_runtime(self):
+        bad = Path(tempfile.mkdtemp())
+        shutil.copytree(SRC, bad / "rel", ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl"))
+        (bad / "rel/release.json").write_text(json.dumps({"version": "9.9.9", "files": {"gate.py": "0" * 64}}))
+        (bad / "rel/release.json.sig").write_text("-----BEGIN SSH SIGNATURE-----\nbogus\n-----END SSH SIGNATURE-----\n")
+        before = (self.home / "runtime/active.json").read_text()
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        r = subprocess.run([self.py, "-I", self.gate, "upgrade", "--from", str(bad / "rel")], cwd=self.repo, env=e, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("NOT upgraded", r.stdout)
+        self.assertEqual((self.home / "runtime/active.json").read_text(), before)
+
+    def test_upgrade_refuses_to_run_from_repo_copy(self):
+        r = run(self.repo, "upgrade", env=self.env)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("installed runtime", r.stdout)
+
+    def test_concurrent_hooks_from_two_clients(self):
+        import concurrent.futures as cf
+        (self.repo / "app.py").write_text("x = 2\n")  # code changed with no story: pre and stop both block
+        with cf.ThreadPoolExecutor(4) as ex:
+            codes = list(ex.map(lambda ev: self.hook(ev).returncode, ["pre", "pre", "stop", "stop"]))
+        self.assertTrue(all(c == 2 for c in codes), codes)
+
+    def test_hook_selftest_runs_registered_hooks(self):
+        e = dict(self.env); r = run(self.repo, "hook-selftest", env=e)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for cl in ("claude", "codex", "cursor", "gemini", "windsurf"):
+            self.assertIn(cl, r.stdout)
+        self.assertIn("blocks", r.stdout)
+
+    def test_unapproved_project_hooks_are_blocked_until_policy_allows(self):
+        (self.repo / ".cursor").mkdir(exist_ok=True)
+        (self.repo / ".cursor/hooks.json").write_text(json.dumps({"version": 1, "hooks": {"stop": [{"command": "./scripts/lint.sh"}]}}))
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("lint.sh", r.stderr)
+        self.cfg(project_hooks_allowed=["./scripts/lint.sh"])  # the branch can't approve its own hooks
+        self.assertIn("lint.sh", self.hook().stderr)
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("stash", "-u"); g("checkout", "-q", "main"); self.cfg(project_hooks_allowed=["./scripts/lint.sh"]); g("commit", "-qam", "allow lint hook")
+        g("push", "-q", "origin", "main"); g("checkout", "-q", "feature/SAT-1-thing2"); g("merge", "-q", "main"); g("stash", "pop")
+        self.assertNotIn("lint.sh", self.hook().stderr)
+
+    def test_unsigned_install_requires_the_flag(self):
+        r = run(self.repo, "install", "--user", env=self.env)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("NOT installed", r.stdout)
+
+
+@unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+class TestReleaseSignatures(unittest.TestCase):
+    def test_embedded_key_matches_published_fingerprint(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
+        self.assertEqual(T.key_fingerprint(), T.RELEASE_FINGERPRINT)
+
+    def setUp(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); self.T = importlib.import_module("sg_trust")
+        self.d = Path(tempfile.mkdtemp())
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(self.d / "key")], check=True)
+        self.signers = "story-gate-release " + " ".join((self.d / "key.pub").read_text().split()[:2])
+        self.rel = self.d / "rel"; shutil.copytree(SRC, self.rel, ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl", "release.json*"))
+        self.T.sign_release(self.rel, self.d / "key", "9.9.9")
+
+    def test_valid_release_verifies(self):
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
+
+    def test_changed_file_fails(self):
+        with open(self.rel / "gate.py", "a") as f:
+            f.write("# evil\n")
+        with self.assertRaises(self.T.TrustError):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_added_file_fails(self):
+        (self.rel / "evil.py").write_text("x")
+        with self.assertRaises(self.T.TrustError):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_wrong_key_fails(self):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.d / "other")], check=True)
+        other = "story-gate-release " + " ".join((self.d / "other.pub").read_text().split()[:2])
+        with self.assertRaises(self.T.TrustError):
+            self.T.verify_release(self.rel, other)
+
+    def test_release_archive_cannot_escape_its_folder(self):
+        import io, tarfile, urllib.request
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            info = tarfile.TarInfo("../../evil.txt"); payload = b"x"; info.size = len(payload)
+            t.addfile(info, io.BytesIO(payload))
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = lambda *a, **k: io.BytesIO(buf.getvalue())
+        try:
+            with self.assertRaises(self.T.TrustError):
+                self.T.fetch_release("https://example.invalid/r.tgz", self.d / "dl")
+            with self.assertRaises(self.T.TrustError):
+                self.T.fetch_release("http://example.invalid/r.tgz", self.d / "dl")
+        finally:
+            urllib.request.urlopen = orig
+
+    def test_fingerprint_matches_ssh_keygen(self):
+        out = subprocess.run(["ssh-keygen", "-lf", str(self.d / "key.pub")], capture_output=True, text=True).stdout
+        self.assertIn(self.T.key_fingerprint(self.signers), out)
 
 
 class TestInstallV03(Base):
