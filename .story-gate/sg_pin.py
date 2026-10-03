@@ -582,7 +582,7 @@ def run_approved(token):
             if line.startswith(b"#!"):
                 interp = line[2:].strip().split()[0] if line[2:].strip() else b""
                 name = interp.decode("utf-8", "replace")
-                absolute = name.startswith("/") or bool(re.match(r"^[A-Za-z]:[/\\]", name))  # POSIX or Windows drive path
+                absolute = name.startswith("/") or (os.name == "nt" and bool(re.match(r"^[A-Za-z]:[/\\]", name)))  # C:/ only on Windows
                 if not absolute or _inside(name, top):
                     return refuse("hook '%s' not run: its script's interpreter (%s) %s, which would run a program from the "
                                   "repository" % (cmd, name, "is a relative path" if not absolute else "is inside the repository"))
