@@ -1347,7 +1347,8 @@ def touches_gate(cmd):
     if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and m and plain.count(".story-gate") == 1):
         return False
     low = cmd.replace("\\", "/").lower()
-    guarded = [str(T.runtime_root()).replace("\\", "/").lower(), "enrolled.json", "agent.json", "story_gate_home", ".git/hooks"]
+    guarded = [str(T.runtime_root()).replace("\\", "/").lower(), "enrolled.json", "agent.json", "story_gate_home", ".git/hooks",
+               "approved-cache", "local-hook-trust.json", "install-manifest.json"]
     if any(x in low for x in guarded) and GATE_WRITE.search(cmd):
         return True
     mentions = [m for m in re.finditer(r"\.story-gate(?:[/\\][^\s;|&'\"]*)?", cmd, re.I)]

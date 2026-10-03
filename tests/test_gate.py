@@ -1592,6 +1592,22 @@ class TestPinnedHooks(RuntimeFixture):
         r = self.fire(wrapped)
         self.assertEqual(r.returncode, 2); self.assertIn("tools/evil.sh", r.stderr)
 
+    def test_ignored_file_in_a_pinned_folder_is_refused(self):
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}],
+                        {"tools/run.sh": "echo run\n", ".gitignore": "tools/*.local\n"})
+        (wrapped,) = self.disk_commands()
+        (self.repo / "tools/x.local").write_text("echo hidden\n")
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("tools/x.local", r.stderr)
+
+    def test_planted_cache_file_is_detected(self):
+        wrapped = self.pinned_setup()
+        self.assertEqual(self.fire(wrapped).returncode, 0)
+        (cached,) = list((self.home / "approved-cache").glob("*/scripts/check.sh"))
+        cached.chmod(0o644); cached.write_text("echo PLANTED\n")
+        r = self.fire(wrapped)
+        self.assertNotIn("PLANTED", r.stdout); self.assertIn("MAIN-COPY", r.stdout)  # rebuilt from the commit
+
     def test_stdin_and_exit_code_pass_through(self):
         self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
                         {"scripts/check.sh": "read line; echo got:$line; exit 3\n"})
@@ -1639,7 +1655,20 @@ class TestPinnedHooks(RuntimeFixture):
             self.assertFalse(a("bash x.sh && rm -rf /", str(self.repo), None)["simple"])
             self.assertEqual(a('bash "$CLAUDE_PROJECT_DIR/scripts/a.sh"', str(self.repo), None)["refs"], ["scripts/a.sh"])
             self.assertEqual(a("bash ../outside.sh", str(self.repo), None)["outside"], ["../outside.sh"])
-            self.assertEqual(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/l.py")), "bash a b")
+            self.assertEqual(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/l.py"), launcher="/l.py"), "bash a b")
+            self.assertIsNone(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/other.py"), launcher="/l.py"))
+            self.assertIsNone(sg_pin.unwrap_cmd("bash evil.sh # " + sg_pin.wrap("bash a b", "/py", "/l.py"), launcher="/l.py"))
+            top = str(self.repo)
+            for cmd in ("CI=1 npm test", "env npm test", "time make", "bash -c 'scripts/check.sh a'", "python -W ignore -m pytest",
+                        "python3 -c 'import evil'", "pytest", "eslint .", "node tools/new.js", "python3 scripts/new.py", "bash",
+                        "echo $HOME", "notify-send %USERNAME%"):
+                self.assertNotEqual(sg_pin.classify(cmd, top, None, None)[0], "plain", cmd)
+            for cmd in ("BASH_ENV=lib/x.sh bash scripts/check.sh", "bash scripts/check.sh -flib/x.sh",
+                        "bash scripts/check.sh --opt=a,lib/x.sh"):
+                self.assertNotEqual(sg_pin.classify(cmd, top, None, {"pins": ["scripts", "lib"]})[0], "pinned", cmd)
+            self.assertEqual(sg_pin.classify("echo done", top, None, None)[0], "plain")
+            self.assertEqual(sg_pin.classify("bash scripts/check.sh", top, None, {"pins": ["scripts"]})[0], "pinned")
+            self.assertEqual(sg_pin.entries({"project_hooks_allowed": [{"command": "x", "pins": [".", ":(glob)*", "../a", "ok/dir/"]}]})["x"]["pins"], ["ok/dir"])
         finally:
             sys.path.remove(str(SRC))
 

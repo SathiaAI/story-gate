@@ -26,10 +26,20 @@ import sg_trust as T
 RUNNERS = {"npm", "npx", "yarn", "pnpm", "bun", "bunx", "make", "just", "task", "gradle", "gradlew", "mvn", "mvnw", "rake",
            "bundle", "poetry", "uv", "uvx", "pipenv", "tox", "nox", "cargo", "go", "deno", "dotnet", "composer", "pre-commit",
            "lefthook", "husky", "turbo", "nx"}  # run code chosen by repository files (package.json, Makefile, ...)
+CONFIG_LOADERS = {"pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
+                  "babel", "gulp", "grunt", "rspec", "phpunit", "playwright", "cypress", "stylelint", "commitlint", "lint-staged",
+                  "tsx", "ts-node", "nodemon", "rails", "django-admin"}  # load code from repository config (conftest.py, *.config.js)
+WRAPPERS = {"env", "time", "nice", "exec", "command", "sudo", "doas", "xargs", "nohup", "stdbuf", "timeout", "caffeinate",
+            "start", "call"}  # run another program named later in the line
+INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "py", "pythonw", "node", "deno", "bun", "ruby",
+                "perl", "php", "pwsh", "powershell", "cmd", "lua", "rscript", "java", "osascript", "tclsh", "wscript", "cscript"}
+CODE_FLAGS = {"-c", "-e", "-m", "-r", "-p", "-x", "--eval", "--require", "--import", "--loader", "--command", "-command",
+              "-encodedcommand", "/c", "/k", "-file"}  # code or modules given on the command line instead of a pinned file
+SCRIPT_EXT = re.compile(r"\.(sh|bash|zsh|ksh|py|pyw|js|mjs|cjs|ts|mts|cts|rb|pl|php|ps1|psm1|bat|cmd|lua|r|jar|exe|com)$", re.I)
 PROJECT_VARS = ("CLAUDE_PROJECT_DIR", "CURSOR_PROJECT_DIR", "GEMINI_PROJECT_DIR", "CODEX_PROJECT_DIR", "PROJECT_DIR")
 _VAR_PREFIX = re.compile(r"^(?:\$\{?(?:%s)\}?|%%(?:%s)%%)[/\\]" % ("|".join(PROJECT_VARS), "|".join(PROJECT_VARS)))
-SHELL_META = re.compile(r"[|&;<>()`*?\[\]{}~!#\n\\]|\$")  # anything beyond plain words and quotes
-WRAP_RE = re.compile(r'run-approved\s+([A-Za-z0-9_-]+)\s*$')
+SHELL_META = re.compile(r"[|&;<>()`*?\[\]{}~!#\n\\%^]|\$")  # anything beyond plain words and quotes
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 DEFAULT_MAX_AGE_DAYS = 7
 
 
@@ -46,10 +56,10 @@ def entries(cfg):
                 p = p.strip().replace("\\", "/") if isinstance(p, str) else ""
                 p = p[2:] if p.startswith("./") else p
                 p = p.rstrip("/")
-                if p and ".." not in p.split("/") and not p.startswith("/") and not re.match(r"^[A-Za-z]:", p):
+                if (p and p != "." and ".." not in p.split("/") and "." not in p.split("/") and not p.startswith("/")
+                        and not re.match(r"^[A-Za-z]:", p) and not re.search(r"[:*?\[\]\\]", p)):  # plain paths only, no pathspec magic
                     pins.append(p)
-            out[e["command"]] = {"pins": pins,
-                                 "accepted": e.get("runs_repo_code") == "accepted"}
+            out[e["command"]] = {"pins": pins, "accepted": e.get("runs_repo_code") == "accepted"}
     return out
 
 
@@ -85,47 +95,76 @@ def _rel(token):
     return t.replace("\\", "/"), explicit
 
 
+def _head(tok):
+    return re.sub(r"\.(exe|cmd|bat|ps1|com)$", "", os.path.basename(tok.replace("\\", "/")).lower())
+
+
 def analyse(cmd, top, sha):
-    """-> dict(parse_ok, simple, runner, refs, outside). refs = repository paths the command names (as files/folders that
-    exist in the default branch's commit); outside = tokens that point outside the repository (../)."""
-    info = {"parse_ok": True, "simple": not SHELL_META.search(_VAR_PREFIX.sub("", cmd)) if "\\" not in cmd else False,
-            "runner": False, "refs": [], "outside": []}
+    """Default-deny reading of a hook command. -> dict(parse_ok, simple, runner, refs, outside, reasons).
+    refs = repository paths the command uses (existing on the default branch, or written like a path/script);
+    outside = paths that leave the repository; runner = the command runs code chosen some other way (package.json,
+    Makefile, -c/-e/-m, wrappers, config files that are code). Only whole-token paths can be pinned."""
+    info = {"parse_ok": True, "simple": "\\" not in cmd, "runner": False, "refs": [], "outside": [], "reasons": []}
     try:
-        tokens = shlex.split(cmd, posix=True) if "\\" not in cmd else shlex.split(cmd.replace("\\", "/"), posix=True)
+        tokens = shlex.split(cmd.replace("\\", "/"), posix=True)
     except ValueError:
         info.update(parse_ok=False, simple=False)
         return info
     if not tokens:
         info["parse_ok"] = False
         return info
-    head = os.path.basename(tokens[0]).lower()
-    head = re.sub(r"\.(exe|cmd|bat|ps1)$", "", head)
-    if head in RUNNERS or (head.startswith("python") and "-m" in tokens[1:3]) or (head in ("node", "deno", "bun") and "-e" in tokens):
+    if SHELL_META.search(" ".join(_VAR_PREFIX.sub("", t) for t in tokens)) or any(v in cmd for v in PROJECT_VARS) and not all(
+            _VAR_PREFIX.match(t) for t in tokens if any(v in t for v in PROJECT_VARS)):
+        info["simple"] = False
+        info["reasons"].append("uses shell features")
+    if any(ENV_ASSIGN.match(t) for t in tokens):
+        info["simple"] = False
+        info["reasons"].append("sets environment variables")
+    head = _head(tokens[0])
+    if head in WRAPPERS or head in RUNNERS or head in CONFIG_LOADERS:
         info["runner"] = True
-    if any(v in cmd for v in PROJECT_VARS) and not any(_VAR_PREFIX.match(t) for t in tokens):
-        info["simple"] = False  # project variable used in a way we can't map to a path
-    cands = []
-    for t in tokens:
-        if t.startswith("-"):
-            t = t.split("=", 1)[1] if "=" in t else ""
-        if not t:
-            continue
-        rel, explicit = _rel(t)
-        if rel.startswith("../") or rel == "..":
-            info["outside"].append(t)
-            continue
-        if rel and not rel.startswith("/") and not re.match(r"^[A-Za-z]:/", rel):
-            cands.append((rel.rstrip("/"), explicit))
-    if cands and sha:
-        out = _git(top, "cat-file", "--batch-check", data=("\n".join("%s:%s" % (sha, c) for c, _ in cands) + "\n").encode()) or b""
-        lines = out.decode("utf-8", "replace").splitlines()
-        for (c, explicit), line in zip(cands, lines):
-            if not line.endswith("missing"):
-                info["refs"].append(c)
-            elif explicit:
-                info["refs"].append(c)  # written as a repo path (./x, $CLAUDE_PROJECT_DIR/x) but not on the default branch
-    elif cands:
-        info["refs"] = [c for c, explicit in cands if explicit]
+        info["reasons"].append("%s runs code chosen by repository files" % head)
+    interp = head in INTERPRETERS or bool(re.match(r"^python\d", head))
+    if interp:
+        if any(t.lower() in CODE_FLAGS or re.match(r"^-[a-z]*[cem]$", t.lower()) for t in tokens[1:]):
+            info["runner"] = True
+            info["reasons"].append("code given on the command line")
+        script = next((t for t in tokens[1:] if not t.startswith("-")), None)
+        if script is None:
+            info["runner"] = True
+            info["reasons"].append("interpreter without a script file")
+    cands, whole = [], set()
+    for i, tok in enumerate(tokens):
+        parts = [tok] + [x for x in re.split(r"[=,:]", tok) if x and x != tok]
+        if tok.startswith("-") and len(tok) > 2 and not tok.startswith("--"):
+            parts.append(tok[2:])
+        for j, part in enumerate(parts):
+            rel, explicit = _rel(part)
+            if not rel or re.match(r"^[A-Za-z]$", rel):
+                continue
+            if rel == ".." or rel.startswith("../") or "/../" in rel:
+                info["outside"].append(part)
+                continue
+            if rel.startswith("/") or re.match(r"^[A-Za-z]:/", rel) or rel.startswith("-"):
+                continue  # this computer's own absolute paths, and plain options
+            pathlike = explicit or "/" in rel or bool(SCRIPT_EXT.search(rel)) or (interp and i > 0 and part == next(
+                (t for t in tokens[1:] if not t.startswith("-")), None))
+            cands.append((rel.rstrip("/"), pathlike, j == 0))
+    if cands:
+        found = []
+        if sha:
+            out = _git(top, "cat-file", "--batch-check", data=("\n".join("%s:%s" % (sha, c) for c, _, _ in cands) + "\n").encode()) or b""
+            found = [not l.endswith("missing") for l in out.decode("utf-8", "replace").splitlines()]
+        found += [False] * (len(cands) - len(found))
+        for (c, pathlike, is_whole), exists in zip(cands, found):
+            if exists or pathlike:
+                if c not in info["refs"]:
+                    info["refs"].append(c)
+                if is_whole:
+                    whole.add(c)
+        if any(r not in whole for r in info["refs"]):
+            info["simple"] = False  # a repo path inside a longer token (VAR=x, --opt=x, -fx): can't be redirected safely
+            info["reasons"].append("repository path inside an option")
     return info
 
 
@@ -134,10 +173,11 @@ def covered(ref, pins):
 
 
 def classify(cmd, top, sha, entry):
-    """-> (tier, info). tier: plain | pinned | accepted | blocked."""
+    """-> (tier, info). tier: plain | pinned | accepted | blocked. Anything not clearly plain or pinned is blocked
+    unless a code owner explicitly accepted it."""
     info = analyse(cmd, top, sha)
-    runs_repo = info["runner"] or bool(info["refs"]) or bool(info["outside"]) or not info["parse_ok"]
-    if not runs_repo:
+    plain = info["parse_ok"] and info["simple"] and not info["runner"] and not info["refs"] and not info["outside"]
+    if plain:
         return "plain", info
     if entry and entry.get("accepted"):
         return "accepted", info
@@ -161,12 +201,21 @@ def wrap(cmd, py, launcher):
     return '"%s" -I "%s" run-approved %s' % (str(py).replace("\\", "/"), str(launcher).replace("\\", "/"), encode(cmd))
 
 
-def unwrap_cmd(c):
-    m = WRAP_RE.search(c or "") if isinstance(c, str) and "run-approved" in c else None
-    if not m:
+_WRAP_FULL = re.compile(r'"([^"]+)" -I "([^"]+)" run-approved ([A-Za-z0-9_-]+)')
+
+
+def _same_path(a, b):
+    n = lambda p: os.path.normcase(os.path.abspath(str(p).replace("\\", "/"))).replace("\\", "/")
+    return n(a) == n(b)
+
+
+def unwrap_cmd(c, launcher=None):
+    """The original command if `c` is exactly our runner call through this computer's story-gate launcher; else None."""
+    m = _WRAP_FULL.fullmatch(c) if isinstance(c, str) else None
+    if not m or not _same_path(m.group(2), launcher or T.launcher_path()):
         return None
     try:
-        return decode(m.group(1))
+        return decode(m.group(3))
     except (ValueError, UnicodeDecodeError):
         return None
 
@@ -247,27 +296,86 @@ def unwrap_bytes(data_bytes):
 
 
 # ------------------------------------------------------------------ the runner (AI tool side)
+def _skip(rel):
+    parts = rel.split("/")
+    return "__pycache__" in parts or rel.endswith((".pyc", ".pyo"))
+
+
+def _tree(top, sha, pins):
+    """{path: (mode, oid)} for the pinned paths in the default branch's commit."""
+    raw = _git(top, "ls-tree", "-r", "-z", "--full-tree", sha, "--", *pins)
+    if raw is None:
+        raise T.TrustError("can't read the default branch's files")
+    out = {}
+    for row in filter(None, raw.split(b"\0")):
+        meta, name = row.split(b"\t", 1)
+        mode, kind, oid = meta.decode().split()
+        out[name.decode("utf-8", "surrogateescape")] = (mode, kind, oid)
+    return out
+
+
+def _walk(root, rel):
+    """Every file and symlink under top/rel (not following links), ignored files included."""
+    base = os.path.join(root, *rel.split("/"))
+    if os.path.islink(base) or os.path.isfile(base):
+        return [rel]
+    found = []
+    for d, dirs, files in os.walk(base):
+        for name in dirs + files:
+            full = os.path.join(d, name)
+            r = os.path.relpath(full, root).replace("\\", "/")
+            if name in dirs and not os.path.islink(full):
+                continue
+            found.append(r)
+        dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(d, x))]
+    return found
+
+
 def differing(top, sha, pins):
-    """Pinned paths whose working-tree content isn't exactly the default branch's (edited, deleted, retyped, or new
-    untracked files inside a pinned folder)."""
-    out = set((_git(top, "diff", "--name-only", "--no-renames", sha, "--", *pins) or b"").decode("utf-8", "replace").split())
-    out |= set((_git(top, "ls-files", "-o", "--exclude-standard", "--", *pins) or b"").decode("utf-8", "replace").split())
-    if _git(top, "diff", "--quiet", sha, "--", *pins) is None and not out:
-        out.add("(unreadable)")
+    """Pinned paths whose working-tree content isn't exactly the default branch's: edited, deleted, retyped as a
+    symlink, or extra files (ignored ones included) inside a pinned folder. Compares content hashes, so git's stat cache,
+    assume-unchanged and skip-worktree can't hide a change."""
+    tree = _tree(top, sha, pins)
+    out = set(p for p in pins if not any(n == p or n.startswith(p + "/") for n in tree))
+    for p in pins:  # a symlinked folder on the way to a pin can point anywhere
+        parts = p.split("/")
+        for i in range(1, len(parts) + 1):
+            if os.path.islink(os.path.join(top, *parts[:i])):
+                out.add("/".join(parts[:i]))
+    regular = []
+    for n, (mode, kind, oid) in tree.items():
+        f = os.path.join(top, *n.split("/"))
+        if os.path.islink(f) or not os.path.isfile(f):
+            out.add(n)
+        else:
+            regular.append(n)
+    if regular:
+        r = subprocess.run(["git", "hash-object", "--stdin-paths"], cwd=str(top), input="\n".join(regular) + "\n",
+                           capture_output=True, text=True, encoding="utf-8")
+        oids = r.stdout.split() if r.returncode == 0 else []
+        if len(oids) != len(regular):
+            out.add("(unreadable)")
+        else:
+            out |= {n for n, o in zip(regular, oids) if o != tree[n][2]}
+    for p in pins:
+        out |= {f for f in _walk(top, p) if f not in tree and not _skip(f)}
     return sorted(out)
 
 
 def content_hash(top, pins):
-    """Hash of what is in the working tree right now under the pins (for a human's explicit trust of their own edits)."""
-    names = sorted(set((_git(top, "ls-files", "-z", "-c", "-o", "--exclude-standard", "--", *pins) or b"").decode("utf-8", "replace").split("\0")) - {""})
+    """Hash of exactly what is in the working tree under the pins (content, mode, links, ignored files)."""
     h = hashlib.sha256()
-    for n in names:
-        p = Path(top) / n
-        h.update(n.encode() + b"\0")
-        if p.is_symlink():
-            h.update(b"symlink:" + os.readlink(p).encode())
-        elif p.is_file():
-            h.update(hashlib.sha256(p.read_bytes()).digest())
+    for rel in sorted({f for p in pins for f in _walk(top, p)}):
+        if _skip(rel):
+            continue
+        full = os.path.join(top, *rel.split("/"))
+        st = os.lstat(full)
+        h.update(rel.encode("utf-8", "surrogateescape") + b"\0" + str(st.st_mode).encode())
+        if os.path.islink(full):
+            h.update(b"link:" + os.readlink(full).encode("utf-8", "surrogateescape"))
+        else:
+            with open(full, "rb") as f:
+                h.update(hashlib.sha256(f.read()).digest())
     return h.hexdigest()
 
 
@@ -277,7 +385,10 @@ def trust_path():
 
 def trusted_locally(top, cmd, pins):
     rec = T.read_json(trust_path()).get(T.repo_identity(top)[1] or "", {}).get(cmd)
-    return bool(rec and rec.get("content_sha256") == content_hash(top, pins))
+    try:
+        return bool(rec and rec.get("content_sha256") == content_hash(top, pins))
+    except OSError:
+        return False
 
 
 def trust_local(top, cmd, revoke=False):
@@ -291,8 +402,11 @@ def trust_local(top, cmd, revoke=False):
     if revoke:
         data.get(ident, {}).pop(cmd, None)
     else:
-        data.setdefault(ident, {})[cmd] = {"content_sha256": content_hash(top, ent["pins"]),
-                                           "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        try:
+            digest = content_hash(top, ent["pins"])
+        except OSError as ex:
+            raise T.TrustError("can't read the pinned files: %s" % ex)
+        data.setdefault(ident, {})[cmd] = {"content_sha256": digest, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                            "by": os.environ.get("USER") or os.environ.get("USERNAME") or "?"}
     T.write_json_atomic(trust_path(), data)
     return ent["pins"]
@@ -302,60 +416,104 @@ def cache_root():
     return T.G.config_dir() / "approved-cache"
 
 
+def _cache_ok(top, dest, tree):
+    files = sorted(n for n in tree)
+    have = {f for f in _walk(str(dest), ".") if not _skip(f) and f != ".complete"} if dest.is_dir() else set()
+    have = {f[2:] if f.startswith("./") else f for f in have}
+    if have != set(files):
+        return False
+    r = subprocess.run(["git", "hash-object", "--no-filters", "--stdin-paths"], cwd=str(top),
+                       input="\n".join(str(dest.joinpath(*n.split("/"))) for n in files) + "\n", capture_output=True, text=True)
+    oids = r.stdout.split() if r.returncode == 0 else []
+    return len(oids) == len(files) and all(o == tree[n][2] for n, o in zip(files, oids))
+
+
 def ensure_cache(top, sha, pins):
-    """A protected copy of the pinned files from the default branch's commit (content-addressed; never the branch)."""
+    """A protected copy of the pinned files from the default branch's commit. Re-verified against the commit's hashes
+    every time it is used, so nothing planted in the cache can run."""
+    tree = _tree(top, sha, pins)
+    if not tree:
+        raise T.TrustError("the pinned files aren't on the default branch (%s)" % ", ".join(pins))
+    for n, (mode, kind, oid) in tree.items():
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise T.TrustError("%s is a %s on the default branch; pinned hooks run regular files only" % (n, "symlink" if mode == "120000" else kind))
+        if ".." in n.split("/") or n.startswith("/"):
+            raise T.TrustError("unsafe path in the default branch: %s" % n)
     key = hashlib.sha256(("%s\0%s" % (sha, "\0".join(sorted(pins)))).encode()).hexdigest()[:24]
     dest = cache_root() / key
-    if (dest / ".complete").is_file():
+    if (dest / ".complete").is_file() and _cache_ok(top, dest, tree):
         return dest
-    tmp = cache_root() / (key + ".tmp-%d" % os.getpid())
-    shutil.rmtree(tmp, ignore_errors=True)
-    listing = (_git(top, "ls-tree", "-r", "-z", sha, "--", *pins) or b"").decode("utf-8", "replace").split("\0")
-    if not any(listing):
-        raise T.TrustError("the pinned files aren't on the default branch (%s)" % ", ".join(pins))
-    for row in filter(None, listing):
-        meta, name = row.split("\t", 1)
-        mode, kind, oid = meta.split()
-        if kind != "blob" or mode not in ("100644", "100755"):
-            raise T.TrustError("%s is a %s on the default branch; pinned hooks run regular files only" % (name, "symlink" if mode == "120000" else kind))
-        parts = name.split("/")
-        if ".." in parts or name.startswith("/"):
-            raise T.TrustError("unsafe path in the default branch: %s" % name)
-        f = tmp.joinpath(*parts)
+    tmp = cache_root() / (key + ".tmp-%d-%d" % (os.getpid(), int(time.time() * 1000)))
+    for n, (mode, kind, oid) in tree.items():
+        blob = _git(top, "cat-file", "blob", oid)
+        if blob is None:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise T.TrustError("can't read %s from the default branch" % n)
+        f = tmp.joinpath(*n.split("/"))
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_bytes(_git(top, "cat-file", "blob", oid) or b"")
-        if mode == "100755":
-            f.chmod(0o755)
+        f.write_bytes(blob)
+        f.chmod(0o555 if mode == "100755" else 0o444)  # read-only
     (tmp / ".complete").write_text(sha, encoding="utf-8")
+    if dest.exists():
+        _rm(dest)
     try:
         os.replace(tmp, dest)
     except OSError:  # another hook built it at the same moment
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rm(tmp)
+    if not _cache_ok(top, dest, tree):
+        raise T.TrustError("the protected copy of the pinned files failed its check")
     return dest
 
 
+def _rm(p):
+    def onerr(func, path, _):
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError:
+            pass
+    shutil.rmtree(p, onerror=onerr)
+
+
 def rewrite(cmd, cache, pins):
-    """The command with every pinned path pointing at the protected copy."""
-    tokens = shlex.split(cmd.replace("\\", "/"), posix=True)
+    """The command's words with every pinned path pointing at the protected copy (only whole-word paths are pinned)."""
     out = []
-    for t in tokens:
-        prefix, val = "", t
-        if t.startswith("-") and "=" in t:
-            prefix, val = t.split("=", 1)[0] + "=", t.split("=", 1)[1]
-        rel, _ = _rel(val)
+    for t in shlex.split(cmd.replace("\\", "/"), posix=True):
+        rel, _ = _rel(t)
         rel = rel.rstrip("/")
-        out.append(prefix + (str(cache.joinpath(*rel.split("/"))).replace("\\", "/") if rel and covered(rel, pins) else val))
+        out.append(str(cache.joinpath(*rel.split("/"))).replace("\\", "/") if rel and covered(rel, pins) else t)
     return out
 
 
-def shell_argv(tokens=None, cmdline=None):
-    """How the command runs: POSIX sh; on Windows Git Bash when present (what Claude Code uses), else cmd.exe."""
+def _git_bash():
+    git = shutil.which("git")
+    if git:
+        root = Path(git).resolve().parent.parent  # ...\Git\cmd\git.exe -> ...\Git
+        for cand in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def run_argv(tokens=None, cmdline=None):
+    """How the command runs: POSIX sh; on Windows Git Bash (what Claude Code uses, never WSL's bash), else cmd.exe.
+    Returns (args, use_string)."""
     if os.name == "nt":
-        bash = shutil.which("bash")
+        bash = _git_bash()
         if bash:
-            return [bash, "-c", shlex.join(tokens) if tokens is not None else cmdline]
-        return ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(tokens) if tokens is not None else cmdline]
-    return ["/bin/sh", "-c", shlex.join(tokens) if tokens is not None else cmdline]
+            return [bash, "-c", shlex.join(tokens) if tokens is not None else cmdline], False
+        line = subprocess.list2cmdline(tokens) if tokens is not None else cmdline
+        return 'cmd.exe /d /s /c "%s"' % line, True  # /s strips exactly the outer quotes we add
+    return ["/bin/sh", "-c", shlex.join(tokens) if tokens is not None else cmdline], False
+
+
+def _inside(path, root):
+    try:
+        a = os.path.normcase(os.path.realpath(path)).lower()
+        b = os.path.normcase(os.path.realpath(root)).lower()
+        return os.path.commonpath([a, b]) == b
+    except ValueError:
+        return False
 
 
 def policy_age_days(top):
@@ -374,6 +532,7 @@ def refuse(msg):
 
 def run_approved(token):
     """Entry point for `gate.py run-approved <id>`. Never runs anything it can't vouch for."""
+    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # Windows: never pick up a program from the repository folder
     try:
         cmd = decode(token)
     except (ValueError, UnicodeDecodeError):
@@ -395,24 +554,26 @@ def run_approved(token):
     limit = cfg.get("policy_max_age_days", DEFAULT_MAX_AGE_DAYS)
     if age is not None and isinstance(limit, (int, float)) and age > limit:
         sys.stderr.write("story-gate: warning: your copy of %s is %d days old; run git fetch so hooks use current approvals\n" % (ref, age))
-    diff = differing(top, sha, pins)
+    try:
+        diff = differing(top, sha, pins)
+    except (T.TrustError, OSError) as ex:
+        return refuse("hook '%s' not run: %s" % (cmd, ex))
     env = dict(os.environ)
-    real_top = os.path.normcase(os.path.realpath(top))
-    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep)
-                                  if p and not os.path.normcase(os.path.realpath(p)).startswith(real_top))  # no repo-supplied programs
+    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p and not _inside(p, top))  # no repo programs
     if diff:
         if not trusted_locally(top, cmd, pins):
-            return refuse("hook '%s' not run: %s differ from %s, so this could be a branch's code. If these are your own "
-                          "edits, a human can allow exactly this content with: gate.py hook-trust \"%s\"" % (cmd, ", ".join(diff[:5]), ref, cmd))
-        argv = shell_argv(cmdline=cmd)  # your own edits, explicitly trusted for this exact content
+            return refuse("hook '%s' not run: %s differ%s from %s, so this could be a branch's code. If these are your own "
+                          "edits, a human can allow exactly this content with: gate.py hook-trust \"%s\""
+                          % (cmd, ", ".join(diff[:5]), "s" if len(diff) == 1 else "", ref, cmd))
+        args, as_string = run_argv(cmdline=cmd)  # your own edits, explicitly trusted for this exact content
     else:
         try:
             cache = ensure_cache(top, sha, pins)
-        except T.TrustError as ex:
+        except (T.TrustError, OSError) as ex:
             return refuse("hook '%s' not run: %s" % (cmd, ex))
-        argv = shell_argv(tokens=rewrite(cmd, cache, pins))
+        args, as_string = run_argv(tokens=rewrite(cmd, cache, pins))
     try:
-        return subprocess.run(argv, cwd=start if os.path.isdir(start) else top, env=env).returncode  # stdin/out/err pass through
+        return subprocess.run(args, cwd=start if os.path.isdir(start) else top, env=env).returncode  # stdin/out/err pass through
     except OSError as ex:
         return refuse("hook '%s' could not start: %s" % (cmd, ex))
 
