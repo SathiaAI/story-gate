@@ -9,7 +9,7 @@ def run(repo, *args, stdin=None, env=None):
     e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo / "_home"))
     for k in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_ID", "PR_TITLE",
               "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY",
-              "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI"):
+              "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI", "GITHUB_ACTIONS"):
         e.pop(k, None)  # tests never reach a real judge or read the CI runner's own pull request
     e.update(env or {})
     return subprocess.run([PY, str(repo / ".story-gate/gate.py"), *args], cwd=repo, input=stdin,
@@ -1329,6 +1329,23 @@ class TestDashboard(Base):
         s = [x for x in d["stories"] if x["id"] == "SAT-7"][0]
         self.assertIs(s["ready_fresh"], False)
         self.assertEqual({m["key"]: m for m in d["metrics"]}["ready_stale"]["value"], 1)
+
+    def test_ready_fresh_with_non_utf8_story_text(self):
+        self.g("checkout", "-q", "-b", "feat/SAT-8")
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
+        run(self.repo, "start", "SAT-8"); self.fill_ready("SAT-8")
+        ctx = self.repo / ".story-gate/stories/SAT-8/context.md"
+        ctx.write_bytes(ctx.read_bytes().replace("—".encode("utf-8"), b"\x97") + b"line\r\n")  # an editor saving cp1252 with CRLF
+        self.assertIn("READY: PASS", run(self.repo, "score", "SAT-8", "ready").stdout)
+        self.g("add", "-A"); self.g("-c", "core.autocrlf=false", "commit", "-qm", "scored"); self.g("push", "-q", "origin", "feat/SAT-8")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-8"][0]
+        self.assertTrue(s["ready_fresh"])
+
+    def test_ready_hash_ignores_line_endings(self):
+        g = load_gate(self.repo); c = g.cfg()
+        self.assertEqual(g.ready_hash_from("a\r\nb\r\n", "c\r\n", "{}", [("PRD.md", "x\r\n")], c),
+                         g.ready_hash_from("a\nb\n", "c\n", "{}", [("PRD.md", "x\n")], c))
 
     def test_waivers_are_not_proof(self):
         s = self.st("SAT-1"); s["done"]["overall"] = "WAIVED"

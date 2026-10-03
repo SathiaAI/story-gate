@@ -285,7 +285,7 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
             files = {f: blobs.get("%s:.story-gate/stories/%s/%s" % (sha, sid, f)) for f in listing.get(sid, [])}
             s = parse_story(sid, files)
             if gate is not None and pc is not None and s.get("ready") and s["ready"].get("inputs_hash"):
-                txt = lambda b: (b or b"").decode("utf-8", "replace")
+                txt = lambda b: (b or b"").decode("utf-8", "ignore")  # exactly how gate.py's rd() reads the same files
                 pairs = [(f, txt(blobs.get("%s:%s" % (sha, f)))) for f in spec_names if blobs.get("%s:%s" % (sha, f)) is not None]
                 try:
                     s["ready_fresh"] = s["ready"].get("inputs_hash") == gate.ready_hash_from(

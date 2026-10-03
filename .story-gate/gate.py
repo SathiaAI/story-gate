@@ -427,7 +427,8 @@ def policy_fingerprint(c):
 
 def ready_hash_from(story, context, tests, spec_pairs, c):
     """READY evidence hash from texts (used by `score` and by the dashboard, which reads them as git blobs)."""
-    blob = story + context + tests + "".join(f + t for f, t in spec_pairs) + policy_fingerprint(c)
+    nl = lambda t: t.replace("\r\n", "\n")  # line endings aren't content: git blobs may keep CRLF that rd() reads as LF
+    blob = nl(story) + nl(context) + nl(tests) + "".join(f + nl(t) for f, t in spec_pairs) + policy_fingerprint(c)
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
