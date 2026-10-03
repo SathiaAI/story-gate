@@ -6,7 +6,8 @@ PY = sys.executable
 
 
 def run(repo, *args, stdin=None, env=None):
-    e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo / "_home"))
+    # fake home OUTSIDE the repo: macOS's system Python writes caches into $HOME/Library, which would dirty the repo
+    e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo.parent / (repo.name + "-home")))
     for k in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_ID", "PR_TITLE",
               "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY",
               "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI", "GITHUB_ACTIONS",
@@ -29,6 +30,7 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.repo.parent / (self.repo.name + "-home"), ignore_errors=True)
 
     def cfg(self, **kw):
         p = self.repo / ".story-gate/config.json"
