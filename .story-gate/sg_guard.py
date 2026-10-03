@@ -422,9 +422,9 @@ def build_bundle(dest, py, launcher, user_hooks_text="", keep=()):
     body = managed_body(py, launcher, user_hooks_text, keep)
     json.loads(body)  # Claude Code refuses to start on an unparseable managed file: never write one
     (dest / "claude").mkdir(parents=True, exist_ok=True)
-    (dest / "claude" / DROPIN).write_text(body, encoding="utf-8", newline="\n")
+    (dest / "claude" / DROPIN).write_bytes(body.encode("utf-8"))  # bytes: LF on every OS
     target = str(claude_dropin())
-    (dest / "install.sh").write_text("""#!/bin/sh
+    (dest / "install.sh").write_bytes(("""#!/bin/sh
 # story-gate lockdown for Claude Code (macOS / Linux / WSL). Run: sudo sh install.sh
 # Adds ONE file; never edits managed-settings.json. Refuses to replace a file story-gate didn't write.
 set -e
@@ -434,16 +434,16 @@ mkdir -p "$(dirname "$T")"
 cp "$(dirname "$0")/claude/%s" "$T"
 chmod 644 "$T"
 echo "story-gate lockdown is ON for Claude Code. Undo: sudo sh $(dirname "$0")/uninstall.sh"
-""" % (target, LOCKDOWN_MARK, DROPIN), encoding="utf-8", newline="\n")
-    (dest / "uninstall.sh").write_text("""#!/bin/sh
+""" % (target, LOCKDOWN_MARK, DROPIN)).encode("utf-8"))
+    (dest / "uninstall.sh").write_bytes(("""#!/bin/sh
 # Removes story-gate's lockdown file for Claude Code. Run: sudo sh uninstall.sh
 set -e
 T="%s"
 if [ -f "$T" ] && grep -q '"%s"' "$T"; then rm -f "$T"; fi
 rmdir "$(dirname "$T")" 2>/dev/null || true
 echo "story-gate lockdown is OFF for Claude Code."
-""" % (target, LOCKDOWN_MARK), encoding="utf-8", newline="\n")
-    (dest / "install.ps1").write_text("""# story-gate lockdown for Claude Code (Windows). Run in PowerShell as Administrator.
+""" % (target, LOCKDOWN_MARK)).encode("utf-8"))
+    (dest / "install.ps1").write_bytes(("""# story-gate lockdown for Claude Code (Windows). Run in PowerShell as Administrator.
 # Adds ONE file; never edits managed-settings.json. Refuses to replace a file story-gate didn't write.
 $ErrorActionPreference = "Stop"
 $T = "%s"
@@ -451,13 +451,13 @@ if ((Test-Path $T) -and -not (Select-String -Path $T -SimpleMatch '"%s"' -Quiet)
 New-Item -ItemType Directory -Force -Path (Split-Path $T) | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "claude\\%s") $T -Force
 Write-Host "story-gate lockdown is ON for Claude Code. Undo: run uninstall.ps1 as Administrator"
-""" % (target, LOCKDOWN_MARK, DROPIN), encoding="utf-8", newline="\n")
-    (dest / "uninstall.ps1").write_text("""# Removes story-gate's lockdown file for Claude Code. Run in PowerShell as Administrator.
+""" % (target, LOCKDOWN_MARK, DROPIN)).encode("utf-8"))
+    (dest / "uninstall.ps1").write_bytes(("""# Removes story-gate's lockdown file for Claude Code. Run in PowerShell as Administrator.
 $T = "%s"
 if ((Test-Path $T) -and (Select-String -Path $T -SimpleMatch '"%s"' -Quiet)) { Remove-Item $T -Force }
 Write-Host "story-gate lockdown is OFF for Claude Code."
-""" % (target, LOCKDOWN_MARK), encoding="utf-8", newline="\n")
-    (dest / "README-IT.md").write_text("""# story-gate lockdown: files for IT
+""" % (target, LOCKDOWN_MARK)).encode("utf-8"))
+    (dest / "README-IT.md").write_bytes(("""# story-gate lockdown: files for IT
 
 Turns on Claude Code's `allowManagedHooksOnly` switch with one drop-in file, so Claude Code runs only managed hooks and
 ignores hooks shipped inside repositories. Claude Code merges `managed-settings.json` with every `*.json` file in
@@ -479,11 +479,11 @@ the same folder for everyone, or generate one file per person with `gate.py lock
 The file also carries a copy of that person's own Claude hooks, because user-level hooks stop running under this switch.
 
 Check the files against SHA256SUMS. Undo: delete the one file (uninstall.sh / uninstall.ps1).
-""" % (DROPIN, DROPIN, DROPIN, DROPIN, str(launcher).replace("\\", "/")), encoding="utf-8", newline="\n")
+""" % (DROPIN, DROPIN, DROPIN, DROPIN, str(launcher).replace("\\", "/"))).encode("utf-8"))
     sums = []
     for f in sorted(p for p in dest.rglob("*") if p.is_file() and p.name != "SHA256SUMS"):
         sums.append("%s  %s" % (hashlib.sha256(f.read_bytes()).hexdigest(), f.relative_to(dest).as_posix()))
-    (dest / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8", newline="\n")
+    (dest / "SHA256SUMS").write_bytes(("\n".join(sums) + "\n").encode("utf-8"))
     return dest, body
 
 

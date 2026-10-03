@@ -9,7 +9,8 @@ def run(repo, *args, stdin=None, env=None):
     e = dict(os.environ, STORY_GATE_ROOT=str(repo), HOME=str(repo / "_home"))
     for k in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_ID", "PR_TITLE",
               "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_STEP_SUMMARY",
-              "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI"):
+              "STORY_GATE_TRUSTED_DIR", "STORY_GATE_HOME", "CLAUDECODE", "CURSOR_TRACE_ID", "CODEX_SANDBOX", "GEMINI_CLI", "GITHUB_ACTIONS",
+              "STORY_GATE_MANAGED_DIR"):
         e.pop(k, None)  # tests never reach a real judge or read the CI runner's own pull request
     e.update(env or {})
     return subprocess.run([PY, str(repo / ".story-gate/gate.py"), *args], cwd=repo, input=stdin,
@@ -1145,8 +1146,9 @@ class TestRepoHookGuard(RuntimeFixture):
     def admin(self, *args, cwd=None, extra=None):
         """Run the installed runtime as the human would (not as an agent hook)."""
         e = dict(os.environ, HOME=str(self.user), **self.env, **(extra or {}))
-        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE"):
-            e.pop(k, None)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE", "GITHUB_ACTIONS"):
+            if k not in (extra or {}):
+                e.pop(k, None)
         return subprocess.run([self.py, "-I", self.gate, *args], cwd=cwd or self.repo, capture_output=True, text=True, env=e, timeout=120,
                               stdin=subprocess.DEVNULL)
 
