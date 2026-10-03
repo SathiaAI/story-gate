@@ -646,7 +646,8 @@ def ci_status(G, repo, token, data):
         if len(chunk) < 100:
             break
         page += 1
-    heads = {"origin/" + (p.get("head") or {}).get("ref", ""): ((p.get("head") or {}).get("sha"), p.get("number")) for p in prs}
+    own = [p for p in prs if (((p.get("head") or {}).get("repo") or {}).get("full_name") or "").lower() == repo.lower()]  # a fork's branch can share a name
+    heads = {"origin/" + (p.get("head") or {}).get("ref", ""): ((p.get("head") or {}).get("sha"), p.get("number")) for p in own}
     for s in data["stories"]:
         if s["merged"] or s["ref"] not in heads:
             continue

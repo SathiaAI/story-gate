@@ -72,7 +72,8 @@ def _nothing_to_gate():
         except Exception:
             return False
     home = os.environ.get("STORY_GATE_HOME") or os.path.join(
-        os.environ.get("APPDATA", "") if os.name == "nt" else (os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")), "story-gate")
+        (os.environ.get("APPDATA") or os.path.expanduser("~")) if os.name == "nt" else (os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")),
+        "story-gate")  # same place as sg_github.config_dir()
     try:
         enrolled_keys = open(os.path.join(home, "enrolled.json"), encoding="utf-8").read()
     except OSError:

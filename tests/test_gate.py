@@ -2121,7 +2121,8 @@ class TestDashboard(Base):
             if "/pulls?" in path:
                 seen["n"] += 1
                 if seen["n"] == 1: return 429, {}, {"Retry-After": "1"}
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc"}}], {}
+                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}},
+                             {"number": 9, "head": {"ref": "feat/SAT-5", "sha": "fff", "repo": {"full_name": "fork/r"}}}], {}  # a fork's same-named branch
             if "/check-runs" in path: return 200, {"check_runs": [{"conclusion": "success"}]}, {}
             return 404, {}, {}
         G.call = call
