@@ -12,8 +12,18 @@ Semantic checks are scored by TypeSafe Jev (OpenRouter /api/alpha/decisions) whe
 otherwise agent self-scores are used but can never reach PASS (allow_self_judge_pass=false).
 
 Commands (run from the repo root):
-  install [--clients all|claude,codex,cursor,gemini,windsurf,grok] [--python python3]   wire hooks, instructions, CI
-  start <ID>                         make story folder + skeletons, set active story
+  install                            set up this repository: config, instructions, skills, CI workflows (commit the result)
+  install --user [--clients claude,codex,cursor,gemini,windsurf] [--dry-run] [--unsigned]
+                                     once per computer, as the human: install the trusted runtime + user-level hooks, enroll this repo
+  uninstall --user [--dry-run]       remove the user-level hooks and the runtime
+  enroll [--policy-ref REF] | unenroll   turn checking on/off for this repository on this computer
+  upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
+  release-sign --key KEY             maintainers: sign the files in .story-gate as a release
+  hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
+  feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
+  plan <ID> --title T [--feature F]  add a story to the backlog (not started; queued once READY passes)
+  start <ID> [--model M] [--client C]   claim the story: make folder + skeletons, set active story, record who codes
+  dashboard [--open] [--out DIR] [--offline]   build the progress dashboard from every branch (HTML + summary)
   source <ID>                        run 'command' sources from config, print their output
   record-tests <ID> -- <cmd...>      run the test command, store exit code + output tail (evidence)
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
@@ -34,15 +44,69 @@ Commands (run from the repo root):
   publish                            send outbox events to configured sinks
   doctor [--repo owner/name] [--strict]   plain-English health check (wiring, judge, branch rules, agent identity)
 """
-import fnmatch, hashlib, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error
-from pathlib import Path
+import os, sys
+
+
+def _nothing_to_gate():
+    """Cheap check (no subprocess, no heavy imports): True outside git repositories, and in repositories that neither
+    contain .story-gate nor are enrolled on this computer. Hooks fire everywhere, so this keeps them fast."""
+    d = os.getcwd()
+    while not os.path.exists(os.path.join(d, ".git")):
+        up = os.path.dirname(d)
+        if up == d:
+            return True
+        d = up
+    if os.path.isdir(os.path.join(d, ".story-gate")):
+        return False
+    g = os.path.join(d, ".git")
+    if os.path.isfile(g):  # worktree or submodule: "gitdir: <common>/worktrees/<name>"
+        try:
+            ptr = open(g, encoding="utf-8").read().split("gitdir:", 1)[1].strip()
+            g = os.path.join(d, ptr) if not os.path.isabs(ptr) else ptr
+            g = os.path.dirname(os.path.dirname(g)) if os.path.basename(os.path.dirname(g)) == "worktrees" else g
+        except Exception:
+            return False
+    home = os.environ.get("STORY_GATE_HOME") or os.path.join(
+        os.environ.get("APPDATA", "") if os.name == "nt" else (os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")), "story-gate")
+    try:
+        enrolled_keys = open(os.path.join(home, "enrolled.json"), encoding="utf-8").read()
+    except OSError:
+        return True
+    key = os.path.normcase(os.path.realpath(g))
+    return json_escape(key) not in enrolled_keys
+
+
+def json_escape(s):
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+if sys.argv[1:2] == ["hook"] and not os.environ.get("STORY_GATE_ROOT") and _nothing_to_gate():
+    print("{}")  # fast path: hooks fire in every folder, but outside a git repository there is nothing to gate
+    sys.exit(0)
+
+import fnmatch, hashlib, json, re, shlex, subprocess, time, urllib.request, urllib.error  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.dont_write_bytecode = True  # never leave __pycache__ inside the repo
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE))]  # never import modules from the working tree
 import sg_judges as J  # noqa: E402
+import sg_trust as T  # noqa: E402
 
-VERSION = "0.3.0"
-ROOT = Path(os.environ.get("STORY_GATE_ROOT") or Path(__file__).resolve().parent.parent)
+VERSION = "0.4.0"
+RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
+
+
+def _root():
+    if os.environ.get("STORY_GATE_ROOT"):
+        return Path(os.environ["STORY_GATE_ROOT"])
+    if RUNTIME:  # the trusted runtime works on whichever repository the client is in
+        top, _ = T.repo_identity(os.getcwd())
+        return Path(top) if top else Path.cwd()
+    return HERE.parent
+
+
+ROOT = _root()
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding="utf-8", errors="replace")
@@ -54,7 +118,7 @@ LEARNINGS = GATE / "learnings.jsonl"
 OUTBOX = GATE / "outbox.jsonl"
 ACTIVE = GATE / ".active"
 CALIB = GATE / "calibration.jsonl"
-RECORD_PATHS = (".story-gate/stories", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
+RECORD_PATHS = (".story-gate/stories", ".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
                 ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
 
 
@@ -84,6 +148,8 @@ DEFAULT_CONFIG = {
     "models": {"intake": "small", "context": "medium", "tests": "medium", "handoff": "medium", "learnings": "small"},
     "model_tiers": {"small": "cheapest fast model your client offers", "medium": "mid-tier coding model (never frontier)"},
     "checkpoint": {"every_edits": 10},
+    "project_hooks_allowed": [],
+    "dashboard_issue": None,
 }
 
 # ------------------------------------------------------------------ checks
@@ -147,17 +213,50 @@ def trusted(name):
     return Path(t) / name if t else GATE / name
 
 
+def enrolled():
+    """The trusted runtime's enrollment record for this repository (None outside the runtime or when not enrolled)."""
+    if not RUNTIME or os.environ.get("STORY_GATE_TRUSTED_DIR"):
+        return None
+    e = T.enrollment(ROOT)
+    return e if e and e.get("enrolled") else None
+
+
+def policy_json(name):
+    """A settings file from where policy comes from: CI's trusted copy, the enrolled default branch, or the working tree."""
+    e = enrolled()
+    if e:
+        return T.policy_text(e["toplevel"], e["policy_ref"], name)
+    p = trusted(name)
+    return p.read_text(encoding="utf-8") if p.is_file() else None
+
+
 def cfg():
     p = trusted("config.json")
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.environ.get("STORY_GATE_TRUSTED_DIR") and not p.is_file():
         raise ConfigError("the base branch's .story-gate/config.json is missing, so CI can't know the policy - the gate fails closed")
-    if p.exists():
+    e = enrolled()
+    text = policy_json("config.json")
+    if e and text is None:
+        raise ConfigError("this repository is enrolled but %s has no .story-gate/config.json - the gate fails closed" % e["policy_ref"])
+    if text is not None:
         try:
-            user = json.loads(p.read_text(encoding="utf-8"))
+            user = json.loads(text)
             assert isinstance(user, dict)
-        except Exception as e:
-            raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % e.__class__.__name__)
+        except Exception as ex:
+            raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % ex.__class__.__name__)
+        if e:  # the working tree may only tighten the default branch's policy
+            try:
+                local = json.loads((GATE / "config.json").read_text(encoding="utf-8")) if (GATE / "config.json").is_file() else {}
+            except Exception:
+                local = {}
+            base = json.loads(json.dumps(DEFAULT_CONFIG))
+            for k, v in user.items():
+                if isinstance(v, dict) and isinstance(base.get(k), dict):
+                    base[k].update(v)
+                else:
+                    base[k] = v
+            user = T.tighten(base, local)
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(c.get(k), dict):
                 c[k].update(v)
@@ -263,13 +362,28 @@ HOOK_FILES = (".claude/settings.json", ".codex/hooks.json", ".codex/config.toml"
 STORY_DOCS = (".story-gate/stories/*/*.md", ".story-gate/stories/*/tests.json")
 
 
+def user_protected(path):
+    """The trusted runtime, enrollment, agent key and user-level hook files: never writable by an agent."""
+    try:
+        rp = os.path.normcase(os.path.realpath(os.path.expanduser(str(path))))
+        for b in T.user_protected_paths():
+            b = os.path.normcase(os.path.realpath(str(b)))
+            if rp == b or rp.startswith(b.rstrip(os.sep) + os.sep):
+                return True
+    except Exception:
+        return True  # can't tell: treat as protected
+    return False
+
+
 def protected(path, c):
     """Gate implementation, config and verdict/record files: never editable by an agent's edit tools."""
+    if user_protected(path):
+        return True
     p = repo_rel(path)
     if p is None:
         return False
     low = p.lower()
-    if not (low.startswith(".story-gate/") or low in HOOK_FILES or low in (".github/codeowners", "codeowners", "docs/codeowners")
+    if not (low.startswith(".story-gate/") or low.startswith(".git/") or low in HOOK_FILES or low in (".github/codeowners", "codeowners", "docs/codeowners")
             or low.startswith(".github/workflows/story-gate") or low.startswith(".agents/skills/story-gate/")
             or low.startswith(".claude/skills/story-gate/")):
         return False
@@ -305,7 +419,28 @@ def spec_files(c):
     return sorted(set(f for f in files if f and (ROOT / f).is_file()))
 
 
+def policy_fingerprint(c):
+    j = c.get("judge") or {}
+    return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
+
+
+def ready_hash_from(story, context, tests, spec_pairs, c):
+    """READY evidence hash from texts (used by `score` and by the dashboard, which reads them as git blobs)."""
+    nl = lambda t: t.replace("\r\n", "\n")  # line endings aren't content: git blobs may keep CRLF that rd() reads as LF
+    blob = nl(story) + nl(context) + nl(tests) + "".join(f + nl(t) for f, t in spec_pairs) + policy_fingerprint(c)
+    return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
 def inputs_hash(sd, phase, c=None):
+    if phase == "ready":
+        try:
+            c = c or cfg()
+            return ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
+                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c)
+        except ConfigError:
+            return hashlib.sha256((rd(sd / "story.md") + rd(sd / "context.md") + rd(sd / "tests.json") + "<config unreadable>")
+                                  .encode("utf-8", "ignore")).hexdigest()[:16]
     names = ["story.md", "context.md", "tests.json"] + (["handoff.md"] if phase == "done" else [])
     blob = "".join(rd(sd / n) for n in names)
     if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
@@ -314,9 +449,7 @@ def inputs_hash(sd, phase, c=None):
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
-        j = c.get("judge") or {}
-        blob += json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
-                            "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
+        blob += policy_fingerprint(c)
     except ConfigError:
         blob += "<config unreadable>"
     if phase == "done":
@@ -349,7 +482,10 @@ def calibrated(c):
     """An emulated judge may PASS only if the user opted in and its calibration run (same provider+model) passed."""
     if not (c.get("judge") or {}).get("emulated_allow_pass"):
         return False
-    rec = load_json(trusted("judge-calibration.json"))
+    try:
+        rec = json.loads(policy_json("judge-calibration.json") or "{}")
+    except ValueError:
+        rec = {}
     return rec.get("ok") is True and rec.get("identity") == J.identity(c)
 
 
@@ -608,6 +744,7 @@ SKELETONS = {
     "story.md": """---
 id: {id}
 title: TODO
+feature: none
 source: TODO (linear:{id} | repo:path | control-hub:doc-id | other)
 depends_on: []
 consumers: []
@@ -667,8 +804,9 @@ def cmd_start(sid, client=None, model=None):
     sd.mkdir(parents=True, exist_ok=True)
     client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
     if client or model or not (sd / "coder.json").exists():
-        old = load_json(sd / "coder.json")  # who is coding: pilot metrics, and a judge must never be the coder's model
-        wj(sd / "coder.json", {"client": client or old.get("client", ""), "model": model or old.get("model", ""), "at": now()})
+        old = load_json(sd / "coder.json")  # who is coding (the claim): dashboard, and a judge must never be the coder's model
+        wj(sd / "coder.json", {"schema": 1, "client": client or old.get("client", ""), "model": model or old.get("model", ""),
+                               "branch": current_branch(), "claimed_at": old.get("claimed_at") or now(), "at": now()})
     for name, body in SKELETONS.items():
         p = sd / name
         if not p.exists() and name != "handoff.md":
@@ -677,6 +815,40 @@ def cmd_start(sid, client=None, model=None):
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, current_branch(), git("rev-parse", "HEAD").strip()), encoding="utf-8")
     emit("started", sid, load_json(sd / "coder.json"))
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
+
+
+FEATURE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
+
+
+def cmd_plan(sid, title, feature=None):
+    """Add a story to the backlog without starting it (no claim, no active story). Commit it so the dashboard sees it."""
+    sd = sdir(sid)
+    if feature and not FEATURE_ID.fullmatch(feature):
+        sys.exit("feature ids are letters, digits, . _ - (max 40)")
+    sd.mkdir(parents=True, exist_ok=True)
+    for name, body in SKELETONS.items():
+        p = sd / name
+        if not p.exists() and name != "handoff.md":
+            p.write_text(body.replace("{id}", sid), encoding="utf-8")
+    text = rd(sd / "story.md")
+    if title:
+        text = re.sub(r"(?m)^title:.*$", lambda m: "title: " + title.replace("\n", " ")[:120], text, count=1)
+    if feature:
+        text = re.sub(r"(?m)^feature:.*$", lambda m: "feature: " + feature, text, count=1)
+    (sd / "story.md").write_text(text, encoding="utf-8")
+    emit("planned", sid, {"title": title, "feature": feature})
+    print("story-gate: planned %s%s. Fill story.md, context.md and tests.json, then score %s ready. It's queued once READY passes."
+          % (sid, " in feature " + feature if feature else "", sid))
+
+
+def cmd_feature(fid, title, description=""):
+    if not FEATURE_ID.fullmatch(fid or ""):
+        sys.exit("feature <ID> --title TEXT   (ids: letters, digits, . _ -)")
+    p = GATE / "features.json"
+    data = load_json(p)
+    data[fid] = {"title": (title or data.get(fid, {}).get("title") or fid)[:120], "description": (description or data.get(fid, {}).get("description", ""))[:500]}
+    wj(p, data)
+    print("story-gate: feature %s saved in .story-gate/features.json" % fid)
 
 
 def current_branch():
@@ -1134,6 +1306,8 @@ def shell_writes(cmd):
         out += [m.strip("'\"") for m in re.findall(rx, bare)]
     keep = []
     for t in out:
+        if t and user_protected(t):
+            keep.append(t); continue  # the trusted runtime and user-level hook files are always ours to guard
         if not t or t.startswith("/dev/") or t in ("&1", "&2") or repo_rel(t) is None:
             continue  # outside the repository: not our business
         if git("check-ignore", "-q", "--", t) == "" and subprocess.run(["git", "check-ignore", "-q", "--", t], cwd=ROOT).returncode == 0:
@@ -1142,12 +1316,23 @@ def shell_writes(cmd):
     return keep
 
 
+ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
+                  "judge-calibrate"}
+
+
 def touches_gate(cmd):
     """Any write-capable command that mentions .story-gate (outside the story docs) is refused, except a plain gate.py call."""
     plain = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)  # quoted free text (--summary "...") is data, not shell
-    if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and GATE_CLI.fullmatch(plain)
-            and plain.count(".story-gate") == 1):
+    m = GATE_CLI.fullmatch(plain)
+    sub = (plain.split("gate.py", 1)[1].split() or [""])[0] if m else ""
+    if sub in ADMIN_COMMANDS:
+        return True  # installing, enrolling, upgrading or signing is for the human, never an agent
+    if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and m and plain.count(".story-gate") == 1):
         return False
+    low = cmd.replace("\\", "/").lower()
+    guarded = [str(T.runtime_root()).replace("\\", "/").lower(), "enrolled.json", "agent.json", "story_gate_home", ".git/hooks"]
+    if any(x in low for x in guarded) and GATE_WRITE.search(cmd):
+        return True
     mentions = [m for m in re.finditer(r"\.story-gate(?:[/\\][^\s;|&'\"]*)?", cmd, re.I)]
     sensitive = [m.group(0) for m in mentions if not re.match(r"\.story-gate[/\\]stories[/\\][^/\\]+[/\\](?:[^/\\]+\.md|tests\.json)$", m.group(0), re.I)]
     hooks = [h for h in HOOK_FILES if h in cmd.replace("\\", "/").lower()]
@@ -1213,6 +1398,10 @@ def cmd_hook(client, event):
     except Exception:
         client = client or "claude"
     enforce = False
+    if RUNTIME:
+        early = runtime_precheck(client, event)
+        if early is not None:
+            return early
     try:
         try:
             c = cfg()
@@ -1222,6 +1411,17 @@ def cmd_hook(client, event):
             return hook_out(client, event, "STORY GATE (BLOCKED): %s" % e, True)  # unknown mode: fail closed
         point = {"pre": "pre_edit", "stop": "stop", "post": "checkpoint"}.get(event, event)
         enforce = c["mode"] == "enforce" or point in c.get("enforce_points", [])
+        if RUNTIME and event != "post":
+            problem = runtime_policy_problem(c)
+            if problem:
+                return hook_out(client, event, "STORY GATE (%s): %s" % ("BLOCKED" if enforce else "warning only", problem), enforce)
+            allowed = set(c.get("project_hooks_allowed") or [])  # from the default branch's policy only
+            unknown = [(f, cmd) for f, cmd in T.other_project_hooks(ROOT, HOOK_FILES) if cmd not in allowed]
+            if unknown:
+                return hook_out(client, event, "STORY GATE (%s): this branch has AI-tool hooks the default branch hasn't approved, so "
+                                "story-gate can't vouch for them: %s. If they're wanted, a code owner lists the exact commands in "
+                                "project_hooks_allowed in .story-gate/config.json on the default branch."
+                                % ("BLOCKED" if enforce else "warning only", "; ".join("%s: %s" % (f, cmd[:80]) for f, cmd in unknown[:5])), enforce)
         if event == "post":
             return hook_out(client, "post", post_edit(payload, c), False)  # checkpoints inform; containment happens at the next pre-edit
         msg, bad = gate_check(event, payload, c)
@@ -1233,6 +1433,34 @@ def cmd_hook(client, event):
         return hook_out(client, event, "", False)
     prefix = "STORY GATE (%s): " % ("BLOCKED" if enforce else "warning only")
     return hook_out(client, event, prefix + msg, enforce)
+
+
+def runtime_precheck(client, event):
+    """Trusted runtime only. Returns a hook result to stop early, or None to carry on."""
+    if not T.repo_identity(os.getcwd())[1]:
+        return hook_out(client, event, "", False)  # not in a git repository: nothing to gate
+    problems = T.verify_self(HERE)
+    if problems:  # the installed runtime itself was changed: never run it
+        return hook_out(client, event, "STORY GATE (BLOCKED): the installed story-gate runtime failed its integrity check (%s). "
+                        "Re-install it: gate.py install --user" % "; ".join(problems[:3]), event != "post")
+    if not enrolled():
+        if event == "stop" and GATE.is_dir():
+            return hook_out(client, event, "STORY GATE (warning only): this repository has story-gate but this computer hasn't "
+                            "enrolled it, so nothing is checked here. A human runs: gate.py enroll", False)
+        return hook_out(client, event, "", False)
+    return None
+
+
+def runtime_policy_problem(c):
+    """Policy-level problems the trusted runtime reports for an enrolled repository."""
+    need = c.get("min_runtime_version")
+    if need and T.version_tuple(VERSION) < T.version_tuple(need):
+        return "this repository needs story-gate %s or newer; this computer runs %s. Upgrade: gate.py upgrade" % (need, VERSION)
+    found = T.project_hook_findings(ROOT, HOOK_FILES)
+    if found:
+        return ("project hook files run story-gate code from the branch (%s), which a branch could swap. Remove those entries "
+                "(gate.py install --user does it) - the hooks in your user settings already cover this repository" % ", ".join(found))
+    return None
 
 
 def post_edit(payload, c):
@@ -1317,9 +1545,11 @@ def gate_check(event, payload, c):
 
 
 # ------------------------------------------------------------------ CI
-GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/config.json",
+GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
+              ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
-              ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+              ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
+              ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 
 
 def summary(lines):
@@ -1354,6 +1584,9 @@ def cmd_ci_tests(out_dir):
     return 0
 
 
+CHANGE_LABEL = "story-gate-change"
+
+
 def cmd_ci(tests_dir=None):
     """Job 2 (has the judge key, runs no PR code): re-score READY and DONE with CI's own test results,
     verify human acceptance through GitHub, report clearly whether merges are actually blocked."""
@@ -1371,9 +1604,19 @@ def cmd_ci(tests_dir=None):
         sid = story_id(c)
         ctx = G.pr_context()
         token = os.environ.get("GITHUB_TOKEN")
-        touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/"))
+        touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
+                         or (f.startswith(".story-gate/") and (f.endswith(".py") or f.startswith(".story-gate/vendor/"))))
         if touched:
-            notes.append("This PR changes gate or CI files (%s): a code owner must review these specifically." % ", ".join(touched))
+            who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
+            owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base) or "")
+            allowed = {u.lower() for u in G.codeowners(owners_txt)[0]} | {a.lower().lstrip("@") for a in (c.get("approvers") or [])}
+            if who and who.lower() in allowed:
+                notes.append("This PR changes story-gate code, hook or workflow files (%s); %s confirmed with the '%s' label."
+                             % (", ".join(touched), who, CHANGE_LABEL))
+            else:
+                problems.append("This PR changes story-gate code, hook or workflow files (%s). A code owner must review them and add "
+                                "the label '%s' to confirm%s." % (", ".join(touched), CHANGE_LABEL,
+                                                                  " (it was added by %s, who is not a code owner)" % who if who else ""))
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
@@ -1565,54 +1808,6 @@ def put_block(path, py):
     p.write_text(text, encoding="utf-8")
 
 
-def merge_hooks(path, new):
-    """Add our hook entries to a JSON hooks file without touching anything else. Idempotent."""
-    p = ROOT / path
-    p.parent.mkdir(parents=True, exist_ok=True)
-    data = json.loads(rd(p, "{}") or "{}")
-    for k, v in new.items():
-        if k != "hooks":
-            data.setdefault(k, v)
-    hooks = data.setdefault("hooks", {})
-    for ev, entries in new["hooks"].items():
-        cur = hooks.setdefault(ev, [])
-        cur[:] = [e for e in cur if "story-gate" not in json.dumps(e) and ".story-gate/gate.py" not in json.dumps(e)]
-        cur.extend(entries)
-    p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def client_configs(py):
-    g = ".story-gate/gate.py"
-    cmd = lambda cl, ev, pre="": "%s %s%s hook --client %s --event %s" % (py, pre, g, cl, ev)
-    claude_pre = '"$CLAUDE_PROJECT_DIR"/'
-    return {
-        "claude": (".claude/settings.json", {"hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": [{"type": "command", "command": cmd("claude", "pre", claude_pre), "timeout": 15}]}],
-            "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "post", claude_pre), "timeout": 180}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd("claude", "stop", claude_pre), "timeout": 60}]}]}}),
-        "codex": (".codex/hooks.json", {"hooks": {
-            "PreToolUse": [{"matcher": "^(apply_patch|Edit|Write|Bash|shell|local_shell|exec_command)$", "hooks": [{"type": "command", "command": cmd("codex", "pre"), "timeout": 15}]}],
-            "PostToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "post"), "timeout": 180}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd("codex", "stop"), "timeout": 60}]}]}}),
-        "cursor": (".cursor/hooks.json", {"version": 1, "hooks": {
-            "preToolUse": [{"command": cmd("cursor", "pre"), "matcher": "Write"}],
-            "beforeShellExecution": [{"command": cmd("cursor", "pre")}],
-            "postToolUse": [{"command": cmd("cursor", "post"), "matcher": "Write"}],
-            "stop": [{"command": cmd("cursor", "stop")}]}}),
-        "gemini": (".gemini/settings.json", {"hooks": {
-            "BeforeTool": [{"matcher": "write_file|replace|run_shell_command", "hooks": [{"type": "command", "command": cmd("gemini", "pre"), "timeout": 15000}]}],
-            "AfterTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "post"), "timeout": 180000}]}],
-            "AfterAgent": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "stop"), "timeout": 60000}]}]}}),
-        "windsurf": (".devin/hooks.json", {"hooks": {
-            "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],
-            "pre_run_command": [{"command": cmd("windsurf", "pre"), "show_output": True}],
-            "post_cascade_response": [{"command": cmd("windsurf", "stop"), "show_output": True}]}}),
-        "grok": (".grok/hooks/story-gate.json", {"hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash", "hooks": [{"type": "command", "command": cmd("grok", "pre"), "timeout": 15}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd("grok", "stop"), "timeout": 60}]}]}}),
-    }
-
-
 MANAGED = "# managed by story-gate %s - re-run `gate.py install` to update; local edits are overwritten" % VERSION
 TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=story-gate::.story-gate is a symlink in this PR; refusing to run"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/sg"
@@ -1630,7 +1825,7 @@ CI_YML = MANAGED + """
 name: story-gate
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
   pull_request_review:
     types: [submitted, edited, dismissed]
 permissions:
@@ -1727,6 +1922,59 @@ jobs:
 """
 
 
+DASH_YML = MANAGED + """
+name: story-gate-dashboard
+# Runs only the default branch's copy of this file and of story-gate (schedule, workflow_run and default-branch
+# pushes always use the default branch). Records on other branches are read as data, never executed.
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_run:
+    workflows: [story-gate]
+    types: [completed]
+  push:
+    branches: [{base}]
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: story-gate-dashboard
+  cancel-in-progress: false
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: build
+        env:
+          SG_DEFAULT_BRANCH: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+        run: python3 .story-gate/gate.py dashboard --out "$RUNNER_TEMP/sg-dashboard"
+      - id: report
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-gate-dashboard
+          path: ${{{{ runner.temp }}}}/sg-dashboard/dashboard.html
+          retention-days: 30
+      - name: publish
+        env:
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+          GITHUB_TOKEN: ${{{{ github.token }}}}
+        run: python3 .story-gate/gate.py dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "${{{{ steps.report.outputs.artifact-url }}}}" --out "$RUNNER_TEMP/sg-dashboard"
+      - name: say so if the refresh failed (the last good snapshot stays)
+        if: failure()
+        env:
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+          GITHUB_TOKEN: ${{{{ github.token }}}}
+        run: python3 .story-gate/gate.py dashboard --report-failure
+"""
+
+
 def write_managed(rel, body):
     """Write a story-gate workflow; refuse to overwrite a hand-made file with the same name."""
     p = ROOT / rel
@@ -1740,20 +1988,14 @@ def write_managed(rel, body):
     return "%s %s" % (rel, "updated" if old else "created")
 
 
-def cmd_install(clients, py):
+def cmd_install(py):
+    """Repository setup (commit the result). Hooks are NOT written into the repository any more: each person runs
+    `gate.py install --user` once per computer, so a branch can never change what the hooks run."""
     GATE.mkdir(exist_ok=True)
     STORIES.mkdir(exist_ok=True)
     if not (GATE / "config.json").exists():
         wj(GATE / "config.json", DEFAULT_CONFIG)
-    allc = client_configs(py)
-    chosen = list(allc) if clients in ("all", "") else [x.strip() for x in clients.split(",")]
-    done = []
-    for cl in chosen:
-        if cl not in allc:
-            sys.exit("unknown client %s (known: %s)" % (cl, ", ".join(allc)))
-        path, conf = allc[cl]
-        merge_hooks(path, conf)
-        done.append(path)
+    removed = T.remove_project_hooks(ROOT, HOOK_FILES)
     for f in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
         put_block(f, py)
     skill = rd(GATE / "SKILL.md")
@@ -1761,16 +2003,177 @@ def cmd_install(clients, py):
         for d in (".agents/skills/story-gate", ".claude/skills/story-gate"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
             (ROOT / d / "SKILL.md").write_text(skill, encoding="utf-8")
-    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML)]
+    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                write_managed(".github/workflows/story-gate-dashboard.yml", dash_yml())]
     gi = rd(ROOT / ".gitignore")
     add = [x for x in (".story-gate/.active", ".story-gate/outbox.jsonl", ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/__pycache__/") if x not in gi]
     if add:
         (ROOT / ".gitignore").write_text(gi.rstrip() + ("\n" if gi.strip() else "") + "\n".join(add) + "\n", encoding="utf-8")
-    print("story-gate installed (mode=%s). Hooks: %s. Instructions: AGENTS.md, CLAUDE.md, GEMINI.md. CI: .github/workflows/story-gate.yml" % (cfg()["mode"], ", ".join(done)))
+    print("story-gate installed in this repository (mode=%s). Instructions: AGENTS.md, CLAUDE.md, GEMINI.md. CI: .github/workflows/story-gate.yml" % cfg()["mode"])
     for n in wf_notes:
         print("  " + n)
+    if removed:
+        print("  Removed story-gate hooks from project hook files (they ran branch code):")
+        print("\n".join(removed))
     print("Skill: .agents/skills/story-gate + .claude/skills/story-gate.")
-    print("Next: 1) gate.py setup-repo (code owners + branch rules)  2) add your judge key as a repo secret  3) gate.py setup-agent if AI tools run on your computer.")
+    print("Next: 1) commit and merge this  2) gate.py setup-repo (code owners + branch rules)  3) add your judge key as a repo secret\n"
+          "      4) on each computer that runs AI tools: gate.py install --user  (turns on the hooks, safely)")
+
+
+def dash_yml():
+    base = re.sub(r"^origin/", "", cfg().get("base_branch", "main"))
+    return DASH_YML.replace("{base}", json.dumps(base)).replace("{{", "{").replace("}}", "}")
+
+
+def cmd_user(cmd, kv, rest):
+    """install --user / uninstall --user / enroll / unenroll / upgrade / rollback / release-sign."""
+    dry = "--dry-run" in rest
+    if cmd == "install":
+        py = kv.get("python") or sys.executable
+        clients = [x.strip() for x in kv.get("clients", ",".join(T.USER_CLIENTS)).split(",") if x.strip()]
+        bad = [x for x in clients if x not in T.USER_CLIENTS]
+        if bad:
+            sys.exit("user-level hooks are supported for %s; %s run in reduced protection (CI still checks every PR)"
+                     % (", ".join(T.USER_CLIENTS), ", ".join(bad)))
+        unsigned = "--unsigned" in rest
+        print("story-gate %s - trusted runtime install%s" % (VERSION, " (dry run: nothing is written)" if dry else ""))
+        print("Release key fingerprint: %s  (it must match the one on the story-gate release page)" % T.key_fingerprint())
+        try:
+            if unsigned:
+                print("WARNING: --unsigned installs a DEVELOPMENT copy that no one signed. Only do this for code you trust.")
+            else:
+                T.verify_release(HERE)
+                print("Signature: valid")
+            if dry:
+                dest = T.runtime_root() / VERSION
+            else:
+                dest = T.install_runtime(HERE, VERSION, unsigned=unsigned)
+        except T.TrustError as e:
+            print("NOT installed: %s" % e); return 1
+        out = T.register_user_hooks(str(Path(py).resolve()).replace("\\", "/"), str(dest / "gate.py").replace("\\", "/"), clients, dry)
+        print("Runtime: %s" % dest)
+        print("User-level hooks (%s):" % ", ".join(clients))
+        print("\n".join(out) or "  nothing to change")
+        top, ident = T.repo_identity(os.getcwd())
+        if top and (Path(top) / ".story-gate").is_dir():
+            if not dry:
+                e = T.enroll(top, kv.get("policy-ref"))
+                print("Enrolled this repository. Policy comes from %s; branches can only make it stricter." % e["policy_ref"])
+            rm = T.remove_project_hooks(top, HOOK_FILES, dry)
+            if rm:
+                print("Project hook files that ran branch code (story-gate entries removed):")
+                print("\n".join(rm))
+        print("Notes:\n  - Codex asks you to trust new hooks once: run /hooks in Codex and trust the story-gate entries."
+              "\n  - Grok: reduced protection (its hook merging isn't documented); run gate.py status yourself. See docs/client-security.md."
+              "\n  - Cowork, Cursor Cloud and Codex cloud have no hooks: run gate.py status yourself; CI is the backstop."
+              "\n  - In each other repository with story-gate, run: gate.py enroll")
+        return 0
+    if cmd == "uninstall":
+        out = T.unregister_user_hooks(dry)
+        print("\n".join(out) or "no story-gate hooks in your user settings")
+        if not dry and T.runtime_root().exists():
+            shutil_rmtree(T.runtime_root())
+            print("Removed the runtime: %s (enrollment and agent key are kept)" % T.runtime_root())
+        return 0
+    if cmd == "enroll":
+        try:
+            e = T.enroll(os.getcwd(), kv.get("policy-ref"))
+        except T.TrustError as ex:
+            print("NOT enrolled: %s" % ex); return 1
+        print("Enrolled %s. Policy comes from %s." % (T.repo_identity(os.getcwd())[0], e["policy_ref"]))
+        return 0
+    if cmd == "unenroll":
+        print("Unenrolled." if T.unenroll(os.getcwd()) else "This repository was not enrolled.")
+        return 0
+    if cmd in ("upgrade", "rollback"):
+        if not RUNTIME:
+            print("Run this with the installed runtime (the one your hooks use), so the new version is checked with the key you "
+                  "already trust: python %s %s" % (Path(read_active_dir()) / "gate.py" if read_active_dir() else "<runtime>/gate.py", cmd))
+            return 1
+        if cmd == "rollback":
+            prev = T.read_json(T.active_path()).get("previous")
+            if not prev or not Path(prev).is_dir():
+                print("No previous runtime to roll back to."); return 1
+            if T.verify_self(prev) and any("changed" in x or "unexpected" in x for x in T.verify_self(prev)):
+                print("The previous runtime failed its integrity check; not rolling back."); return 1
+            m = T.read_json(Path(prev) / "manifest.json")
+            T.write_json_atomic(T.active_path(), {"version": m.get("version"), "dir": prev, "previous": str(HERE),
+                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json")})
+            print("\n".join(T.register_user_hooks(sys.executable.replace("\\", "/"), (Path(prev) / "gate.py").as_posix(),
+                                                    T.registered_clients(HERE / "gate.py") or T.USER_CLIENTS)))
+            print("Rolled back to %s." % m.get("version")); return 0
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as td:
+            if kv.get("url"):
+                try:
+                    src = T.fetch_release(kv["url"], td)
+                except (T.TrustError, OSError) as ex:
+                    print("NOT upgraded: %s" % ex); return 1
+            elif kv.get("from"):
+                src = Path(kv["from"])
+            else:
+                e = T.enrollment(os.getcwd()) or {}
+                ref = kv.get("ref") or e.get("policy_ref") or T.default_policy_ref(os.getcwd())
+                if not ref:
+                    print("Say where the new version is: --from <folder> or --ref <branch or tag>"); return 1
+                names = [n for n in git("ls-tree", "-r", "--name-only", ref, ".story-gate").splitlines()]
+                for n in names:
+                    rel_ = n.split("/", 1)[1]
+                    if rel_.startswith("stories/"):
+                        continue
+                    dst = Path(td) / rel_
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(subprocess.run(["git", "show", "%s:%s" % (ref, n)], cwd=ROOT, capture_output=True).stdout)
+                src = Path(td)
+            try:
+                man = T.verify_release(src)  # checked with the key in THIS (already trusted) runtime
+                dest = T.install_runtime(src, man.get("version") or "unknown")
+            except T.TrustError as ex:
+                print("NOT upgraded: %s" % ex); return 1
+        clients = T.registered_clients(HERE / "gate.py") or list(T.USER_CLIENTS)
+        print("\n".join(T.register_user_hooks(sys.executable.replace("\\", "/"), (dest / "gate.py").as_posix(), clients)))
+        print("Upgraded to %s. Roll back with: gate.py rollback" % man.get("version")); return 0
+    if cmd == "release-sign":
+        if not kv.get("key"):
+            sys.exit("release-sign --key <private signing key>   (maintainers only)")
+        try:
+            m = T.sign_release(HERE, kv["key"], VERSION)
+        except T.TrustError as ex:
+            print("NOT signed: %s" % ex); return 1
+        print("Signed %d files for story-gate %s: .story-gate/release.json + release.json.sig" % (len(m["files"]), VERSION)); return 0
+    return 2
+
+
+def cmd_hook_selftest():
+    """Run each registered user-level hook command exactly as the AI tool would, with a sample edit, and time it."""
+    act = T.read_json(T.active_path())
+    if not act:
+        print("No trusted runtime installed. Run: gate.py install --user"); return 1
+    gate = Path(act["dir"]) / "gate.py"
+    payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(ROOT / "story_gate_selftest.py")}, "cwd": str(ROOT)})
+    limits = {"claude": 15, "codex": 15, "cursor": 15, "gemini": 15, "windsurf": 15}
+    rc = 0
+    for cl in T.registered_clients(gate):
+        e = dict(os.environ); e.pop("STORY_GATE_ROOT", None)
+        t0 = time.time()
+        r = subprocess.run([sys.executable, "-I", str(gate), "hook", "--client", cl, "--event", "pre"], cwd=ROOT, input=payload,
+                           capture_output=True, text=True, env=e, timeout=60)
+        ms = (time.time() - t0) * 1000
+        verdict = "blocks" if r.returncode == 2 else ("allows" if r.returncode == 0 else "ERROR exit %d" % r.returncode)
+        ok = r.returncode in (0, 2) and ms < limits.get(cl, 15) * 1000 * 0.5
+        rc |= 0 if ok else 1
+        print("  %-8s %s an edit with no READY story here (%d ms)%s" % (cl, verdict, ms, "" if ok else "  <- PROBLEM"))
+    print("Expected: 'blocks' in enforce mode, 'allows' (with a warning) in warn mode. Then try a real edit in each tool once.")
+    return rc
+
+
+def read_active_dir():
+    return T.read_json(T.active_path()).get("dir")
+
+
+def shutil_rmtree(p):
+    import shutil
+    shutil.rmtree(p, ignore_errors=True)
 
 
 def cmd_doctor(repo=None, strict=False):
@@ -1782,9 +2185,30 @@ def cmd_doctor(repo=None, strict=False):
     except ConfigError as e:
         print("  FAIL  " + str(e)); return 1
     print("story-gate %s  root=%s  mode=%s  enforce_points=%s" % (VERSION, ROOT, c["mode"], c.get("enforce_points")))
-    for cl, (path, _) in client_configs("py").items():
-        print("  %-8s hooks %s" % (cl, "installed" if ".story-gate/gate.py" in rd(ROOT / path) else "not installed"))
-    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML)):
+    act = T.read_json(T.active_path())
+    if act:
+        rt = Path(act.get("dir", ""))
+        probs = T.verify_self(rt) if rt.is_dir() else ["missing"]
+        print("  trusted runtime: %s (%s, %s)" % (act.get("version"), "signed" if act.get("signed") else "UNSIGNED development copy",
+                                                 "intact" if not probs else "PROBLEM: " + "; ".join(probs[:2])))
+        regd = T.registered_clients(rt / "gate.py")
+        for cl in T.USER_CLIENTS:
+            print("  %-8s user hooks %s" % (cl, "on" if cl in regd else "off"))
+        for cl in T.DEGRADED_CLIENTS:
+            print("  %-8s reduced protection (no verified user-level hooks; CI still checks every PR)" % cl)
+        if probs:
+            fails.append("runtime")
+    else:
+        print("  trusted runtime: NOT installed on this computer - hooks are off. Run: gate.py install --user")
+        fails.append("runtime")
+    e = T.enrollment(ROOT) or {}
+    print("  this repository: %s" % ("enrolled, policy from %s" % e.get("policy_ref") if e.get("enrolled") else "NOT enrolled (gate.py enroll)"))
+    found = T.project_hook_findings(ROOT, HOOK_FILES)
+    if found:
+        print("  WARNING: project hook files run story-gate code from the branch: %s (gate.py install --user removes them)" % ", ".join(found))
+        fails.append("project-hooks")
+    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                    (".github/workflows/story-gate-dashboard.yml", dash_yml())):
         cur = rd(ROOT / f)
         st = "ok" if cur == body else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
         print("  %-42s %s" % (f, st))
@@ -1811,6 +2235,9 @@ def cmd_doctor(repo=None, strict=False):
             print("  branch rules: %s" % ("ENFORCED" if enforced else "NOT ENFORCED - " + "; ".join(missing)))
             if not enforced:
                 fails.append("rules")
+            st_, info, _ = G.call("GET", "/repos/%s" % repo, tok)
+            if st_ == 200 and isinstance(info, dict) and info.get("has_issues") is False:
+                print("  WARNING: Issues are turned off, so the dashboard can't be pinned as an issue. It still appears in each run's summary and report.")
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
@@ -1889,7 +2316,8 @@ def cmd_setup(cmd, kv, rest):
 def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
-        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential"):
+        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
+                       "--report-failure"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
             kv[argv[i][2:]] = argv[i + 1]; i += 2
@@ -1907,8 +2335,23 @@ def main(argv):
             sys.exit("usage: record-tests <ID> [-- <cmd...>]")
         return cmd_record_tests(args[0], args[args.index("--") + 1:] if "--" in args else [])
     kv, rest = flags(args)
+    if cmd == "install" and "--user" in rest:
+        return cmd_user("install", kv, rest)
     if cmd == "install":
-        return cmd_install(kv.get("clients", "all"), kv.get("python", "python" if os.name == "nt" else "python3")) or 0
+        return cmd_install(kv.get("python", "python" if os.name == "nt" else "python3")) or 0
+    if cmd == "uninstall" and "--user" in rest:
+        return cmd_user("uninstall", kv, rest)
+    if cmd == "hook-selftest":
+        return cmd_hook_selftest()
+    if cmd in ("enroll", "unenroll", "upgrade", "rollback", "release-sign"):
+        return cmd_user(cmd, kv, rest)
+    if cmd == "plan":
+        return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
+    if cmd == "feature":
+        return cmd_feature(rest[0] if rest else "", kv.get("title", ""), kv.get("description", "")) or 0
+    if cmd == "dashboard":
+        import sg_dashboard as D
+        return D.cli(sys.modules[__name__], kv, rest)
     if cmd == "start":
         return cmd_start(rest[0], kv.get("client"), kv.get("model")) or 0
     if cmd == "source":

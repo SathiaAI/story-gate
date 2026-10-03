@@ -49,6 +49,12 @@ def env_key(name):
     if v:
         return v.strip()
     f = os.environ.get("STORY_GATE_ENV_FILE")
+    if not f:  # default: a key file in your story-gate user folder, never in a repository
+        try:
+            import sg_github
+            f = str(sg_github.config_dir() / "judge.env")
+        except Exception:
+            f = ""
     if f and os.path.isfile(f):
         for line in open(f, encoding="utf-8", errors="ignore"):
             s = line.strip()

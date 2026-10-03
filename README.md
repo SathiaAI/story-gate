@@ -7,7 +7,7 @@
 3. Fixed rules decide.
 4. A human accepts.
 
-**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
+**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-hows-it-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
 
 ---
 
@@ -55,7 +55,7 @@ cp -r story-gate/.story-gate your-repo/      # or download this repo and copy th
 cd your-repo
 python3 .story-gate/gate.py install           # Windows: python .story-gate\gate.py install --python python
 ```
-Commit what it adds (the hooks, the skill and two workflows) and merge it.
+Commit what it adds (the settings, the skill, agent instructions and two workflows) and merge it. Hooks are **not** written into the repository: each person turns them on for their own computer in Step 4.
 
 **Step 2 · Name the humans** (2 minutes, run it as yourself)
 ```bash
@@ -74,20 +74,27 @@ Commit and merge the CODEOWNERS file. If your account can't create rules through
 2. In your repository, open **Settings › Secrets and variables › Actions › New repository secret**.
 3. Name it `OPENROUTER_API_KEY` and paste the key.
 
+For verdicts on your own computer, put the same line (`OPENROUTER_API_KEY=...`) in `judge.env` in your story-gate user folder (`~/.config/story-gate`, or `%APPDATA%\story-gate` on Windows). Keys are never read from a repository.
+
 Using a different judge? See [Fallbacks](#fallbacks).
 
-**Step 4 · Give the AI its own GitHub identity** (3 minutes; only if AI tools run on your computer)
+**Step 4 · Set up your computer for AI tools** (4 minutes; only if AI tools run on your computer)
 ```bash
+python3 .story-gate/gate.py install --user    # once per computer: safe hooks for Claude Code, Codex, Cursor, Gemini, Windsurf
 python3 .story-gate/gate.py setup-agent       # opens GitHub: click Create, then Install on your repos
 python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output into the AI tool's terminal
 ```
-Your AI then pushes and opens PRs as **story-gate-agent[bot]**, never as you.
+- `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
+- It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
+- In each other repository that uses story-gate, run `gate.py enroll`.
+- Your AI then pushes and opens PRs as **story-gate-agent[bot]**, never as you.
 
 Cloud agents need no setup here, because they already have their own GitHub identity: Codex cloud, Cursor Cloud and Copilot.
 
 **Step 5 · Prove it works** (1 minute)
 1. Ask your AI to open a small test PR. The `story-gate` check should stay red until **you** approve the latest commit.
 2. Run `python3 .story-gate/gate.py doctor --repo you/your-repo --strict`. It must finish without failures.
+3. Run `python3 .story-gate/gate.py hook-selftest`. In enforce mode every tool should say **blocks**.
 
 > **Free GitHub plan?** GitHub only enforces branch rules on **private** repositories on paid plans (Pro, Team, Enterprise). story-gate still runs everywhere, but on a free private repository every check says **ADVISORY – NOT ENFORCED**. An audit job opens an issue if anything is merged without your approval.
 
@@ -100,17 +107,29 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 | Client | How it learns the rules | Blocks edits before READY | Automatic checkpoints | Blocks "done" before DONE | Cheap sub-agents |
 |---|---|---|---|---|---|
 | **Claude Code** | `.claude/skills`, CLAUDE.md | Yes, including shell writes | Yes | Yes | Yes: `small`=haiku, `medium`=sonnet |
-| **Codex CLI** | `.agents/skills`, AGENTS.md | Yes (trust the project `.codex/` folder) | Yes | Yes | Yes, per-agent `model` |
+| **Codex CLI** | `.agents/skills`, AGENTS.md | Yes (trust the story-gate hooks once in `/hooks`) | Yes | Yes | Yes, per-agent `model` |
 | **Cursor** | `.agents/skills`, rules | Yes, including shell commands | Yes | Yes | Yes, per-agent `model` |
 | **Gemini CLI** | `.agents/skills`, GEMINI.md | Yes, including shell commands | Yes | Yes | Yes (Flash models) |
-| **Windsurf / Devin** | `.agents/skills` | Yes | Run `checkpoint` | Warn only | Pick the model in the UI |
-| **Grok Build** | `.claude/skills`, AGENTS.md | Yes (`/hooks-trust`) | Run `checkpoint` | Yes | Not confirmed |
+| **Windsurf / Devin** | `.agents/skills` | Yes (user-level hooks; timeout and trust behaviour unverified) | Run `checkpoint` | Yes | Pick the model in the UI |
+| **Grok Build** | `.claude/skills`, AGENTS.md | Reduced protection: run `status` (see [client security](docs/client-security.md)) | Run `checkpoint` | Through CI | Not confirmed |
 | **pi** | AGENTS.md | Through CI (a pi extension can add hooks; not shipped yet) | Run `checkpoint` | Through CI | Any model you configure |
 | **Hermes Agent** | A Hermes skill + AGENTS.md | Through CI | Run `checkpoint` | Through CI | Any model you configure |
 | **Muse Code** | `.agents/skills`, AGENTS.md | Not confirmed | Run `checkpoint` | Through CI | One model family: steps run inline |
 | **Claude Cowork** | The story-gate skill | No (hooks don't run there) | Run `checkpoint` | Through CI | Yes |
 | **Cursor Cloud, Codex cloud** | AGENTS.md | No (hooks don't run in the cloud) | Run `checkpoint` | Through CI | Built in |
 | **ChatGPT, grok.com, chat-only bots** | Not possible (they can't run commands) | No | No | Through CI, once the code reaches a PR | — |
+
+**How your computer stays safe.** The hooks follow the same rule as CI: a branch is evidence, never instructions.
+
+| What a branch might try | What happens |
+|---|---|
+| Replace `.story-gate/gate.py` with its own code | Ignored. Hooks run the signed copy in your user folder, and it checks its own fingerprint every time |
+| Switch the rules to `warn` | Ignored. Rules come from the default branch; a branch can only make them stricter |
+| Delete `.story-gate` | Still checked: this repository is enrolled on your computer |
+| Add a project hook that runs branch code | Blocked in enforce mode, flagged in warn mode |
+| Get the AI to edit your user hooks or the runtime | Blocked, and `install`, `enroll` and `upgrade` are human-only commands |
+
+What each tool promises about hooks is in [docs/client-security.md](docs/client-security.md). One honest limit: any repository can add **its own** hooks, and only the AI tool's workspace-trust setting can stop those. For branches you don't trust, don't open them in an AI tool with hooks; CI still checks every PR.
 
 **LM Studio and Ollama** host models; they aren't coding agents. Use them as the model behind pi or Hermes, or as a local, advisory judge (see Fallbacks).
 
@@ -209,6 +228,8 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
 | `judge.temperature` | not sent | Sent to an `openai-compatible` judge only if you set it. Some reasoning models reject it |
+| `project_hooks_allowed` | none | Exact commands of your own project-level AI-tool hooks that may run. Read only from the default branch; any other project hook is blocked in enforce mode |
+| `min_runtime_version` | not set | Computers running an older trusted runtime are told to upgrade (blocked in enforce mode) |
 | `reviewers`, `require_independent_review` | CodeRabbit, Codex · on | Whose reviews count as independent, and whether one is required on the latest commit |
 | `approvers` | `[]` | Extra human approvers on top of CODEOWNERS |
 | `sources`, `sinks` | Linear, repo, control-hub, custom | Where specs come from, and where verdicts, checkpoints, drift alerts and learnings are sent |
@@ -219,6 +240,24 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 3. Add `pre_edit`.
 4. Add `checkpoint` and `stop`.
 5. Switch to `"mode": "enforce"`.
+
+## F. The dashboard: how it's going
+
+Every repository with story-gate gets a **Story-gate dashboard** issue, pinned and kept current by `.github/workflows/story-gate-dashboard.yml`. It lives in your repository, so only people who can see the repository can see it. That keeps it private on private repos, on any plan.
+
+| It shows | From |
+|---|---|
+| Features and stories, and how many meet the Definition of Ready | `features.json`, `story.md`, READY verdicts |
+| What's queued to start | Stories that passed READY and nobody has claimed |
+| Which agent works on which story, its stage, % done (estimate), drift and last report | The claim written by `gate.py start` and the latest checkpoint, on each branch |
+| When stories finish, and how many acceptance criteria tests proved | DONE verdicts and `trace.md` |
+| Gate catches before merge, defects recorded, first-try READY rate, DONE attempts, days from claim to merge, false alarms, stale claims, ownership conflicts, judge cost | The verdict log, learnings and labels |
+
+- **The full report** is a branded HTML page (Tabler styles, Viaknox colours) attached to each dashboard run. Repository members can download it from the issue.
+- **On your own computer:** `gate.py dashboard --open` builds the same page from your local branches.
+- **Plan work before anyone starts it:** `gate.py feature PAY --title "Payments"`, then `gate.py plan PAY-12 --title "Refunds" --feature PAY`. A story is **queued** once its READY passes, and **claimed** when an agent runs `gate.py start PAY-12 --model <model>`.
+- **Honest numbers:** every number says how it's calculated, and estimates are labelled. Verdicts are recorded by the agents, and the `story-gate` check in CI re-checks them. Branch records are read as data, never run.
+- **GitHub Projects board:** optional and organisation-owned only (a GitHub App can't write to personal boards). Not built yet.
 
 ## Fallbacks
 
@@ -236,7 +275,6 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 
 ## Known limits
 
-- **Hook locations:** hooks other than Claude Code's assume they start in the repository's top folder.
 - **Pilot status for some clients:**
   - Grok Build's and Muse's hook formats are partly unverified.
   - Cursor and Grok also read Claude's hook file, so a warning can show twice.
@@ -245,7 +283,10 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 - **Teams in CODEOWNERS:** team entries (`@org/team`) aren't resolved yet. List people, or use `approvers`.
 - **Stop hook in enforce mode:** it blocks the agent from ending the session up to 3 times in a row, then lets it end so a stuck agent can't loop forever. The PR check still blocks the merge.
 - **First PR:** the PR that adds story-gate is checked by human review only, because CI never runs gate code taken from a PR.
-- **Untrusted branches:** hooks run `.story-gate/gate.py` from the checked-out branch, just as tests and package scripts do. Only run an AI agent with hooks on branches you trust. CI is unaffected: it always runs the base branch's copy.
+- **Repository hooks:** story-gate's own hooks run a signed copy from your user folder with rules from the default branch, but a repository can still ship its own hooks for your AI tool. Only the tool's workspace trust controls those. Open untrusted branches without hooks; CI still checks every PR.
+- **Grok:** user and project hook merging isn't documented, so story-gate doesn't register Grok hooks (status checks by hand, CI as the backstop). Windsurf/Devin timeout and trust behaviour is undocumented.
+- **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
+- **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests

@@ -32,6 +32,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
 
 ## READY (before any code)
 
+0. If the story isn't in the backlog yet, a human or orchestrator adds it: `gate.py plan <ID> --title "..." [--feature F]`. Starting it is your claim, and the dashboard shows it against your client and model.
 1. `gate.py start <ID> --model <your model id>` creates `.story-gate/stories/<ID>/`, makes `<ID>` the active story and records which client and model is coding (a judge from the same model family never counts).
 
 2. **Intake** (model: `intake`). Fetch the story from the source in `config.json` → `sources`:
@@ -152,5 +153,6 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 ## Rules
 - Fail closed. If the judge is unavailable, the verdict can't be PASS. Say so; don't work around it.
 - Never edit `.story-gate/` code, config or verdict files, CODEOWNERS or the story-gate workflows, with any tool, including the shell.
+- Never run the human-only commands (`install`, `install --user`, `enroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`), and never touch the story-gate runtime in the user folder or your tool's user-level hook settings.
 - Don't edit `ready.json` / `done.json` by hand. Don't delete `decisions.jsonl` or `learnings.jsonl` lines (append-only).
 - Quote the `gate.py` verdict line in your reply. Never paraphrase it into a pass.

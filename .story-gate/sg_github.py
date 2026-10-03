@@ -142,6 +142,20 @@ def unresolved_threads(ctx, token, reviewers):
     return n
 
 
+def label_added_by(ctx, token, label):
+    """Login of whoever most recently added `label` to the PR (and it is still on the PR), else None."""
+    events = paged("/repos/%s/issues/%s/events" % (ctx["repo"], ctx["number"]), token)
+    who, present = None, False
+    for e in events:
+        if (e.get("label") or {}).get("name") != label:
+            continue
+        if e.get("event") == "labeled":
+            who, present = ((e.get("actor") or {}).get("login")), True
+        elif e.get("event") == "unlabeled":
+            present = False
+    return who if present else None
+
+
 def reviewed_by(ctx, token, reviewers):
     want = {r.lower().replace("[bot]", "") for r in reviewers}
     reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
