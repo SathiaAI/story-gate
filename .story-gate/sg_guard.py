@@ -17,21 +17,36 @@ from pathlib import Path
 import sg_trust as T
 
 FILTER = "storygate-hooks"
-FILTERED = (".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json",
-            ".gemini/settings.json", ".devin/hooks.json", ".windsurf/hooks.json", ".grok/hooks/*.json")
-EXEC_KEYS = {"command", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"}  # strings an AI tool runs
+FILTERED = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json", ".codex/hooks.json", ".codex/config.toml",
+            ".cursor/hooks.json", ".cursor/mcp.json", ".gemini/settings.json", ".devin/hooks.json", ".windsurf/hooks.json",
+            ".grok/hooks/*.json")  # matched at any depth (a tool started in a sub-folder reads that folder's files)
+# Top-level settings a branch may not change from the default branch's version: they run programs, reach the network,
+# load servers or plugins, or loosen permissions.
+GUARDED_KEYS = {"env", "permissions", "mcpServers", "enableAllProjectMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers",
+                "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "statusLine", "fileSuggestion",
+                "subagentStatusLine", "enabledPlugins", "extraKnownMarketplaces", "disableAllHooks", "allowManagedHooksOnly",
+                "sandbox", "tools", "hooksConfig"}
+ACTOR_TYPES = {"command", "http", "prompt", "agent", "mcp_tool"}
+ACTOR_KEYS = ("command", "url", "prompt", "agent")
 ATTR_MARK = "# story-gate: AI-tool hook files are filtered so a branch can't add commands (gate.py enroll / unenroll)"
 CANARY = "story-gate-canary-should-never-run"
+_DROP = object()
 
 
 # ------------------------------------------------------------------ sanitizing hook files
+def is_exec_key(k):
+    """Keys whose value an AI tool runs: command, apiKeyHelper, Gemini's discoveryCommand/callCommand, ..."""
+    lk = k.lower() if isinstance(k, str) else ""
+    return lk.endswith("command") or lk.endswith("helper") or k in ("awsAuthRefresh", "awsCredentialExport")
+
+
 def exec_strings(data):
     """Every command-like string in a hook/settings JSON value."""
     out = set()
     def walk(x):
         if isinstance(x, dict):
             for k, v in x.items():
-                if k in EXEC_KEYS and isinstance(v, str):
+                if is_exec_key(k) and isinstance(v, str):
                     out.add(v)
                 walk(v)
         elif isinstance(x, list):
@@ -41,48 +56,107 @@ def exec_strings(data):
     return out
 
 
-def strip_unapproved(data, approved):
-    """Remove every command-like entry whose command isn't approved. Returns (new_data, removed_commands)."""
-    removed = []
-    def walk(x):
+def _canon(x):
+    return json.dumps(x, sort_keys=True)
+
+
+def _is_actor(d):
+    return any(k in d for k in ACTOR_KEYS) or d.get("type") in ACTOR_TYPES
+
+
+def actor_entries(data):
+    """Canonical form of every hook/server entry (anything with a command, url, prompt or agent)."""
+    out = set()
+    def walk(x, depth):
         if isinstance(x, dict):
+            if depth and _is_actor(x):
+                out.add(_canon(x))
+            for v in x.values():
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, depth + 1)
+    walk(data, 0)
+    return out
+
+
+def strip_unapproved(data, approved_cmds, approved_entries=frozenset()):
+    """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
+    An entry survives if it is identical to an approved one, or if its only active part is an approved command string."""
+    removed = []
+    def walk(x, depth):
+        if isinstance(x, dict):
+            if depth and _is_actor(x) and _canon(x) not in approved_entries:
+                active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
+                plain_cmd = (active == ["command"] and isinstance(x["command"], str) and x["command"] in approved_cmds
+                             and not set(x) & {"args", "env", "headers", "url", "cwd"})
+                if not plain_cmd:
+                    removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
+                    return _DROP
             out = {}
             for k, v in x.items():
-                if k in EXEC_KEYS and isinstance(v, str) and v not in approved:
-                    removed.append(v)
+                if is_exec_key(k) and not (isinstance(v, str) and v in approved_cmds):
+                    removed.append(str(v)[:200])
                     continue
-                nv = walk(v)
-                if isinstance(v, (dict, list)) and v and not nv:
-                    continue  # a hook entry that is now empty disappears
+                nv = walk(v, depth + 1)
+                if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
+                    continue  # an entry that is now empty disappears
                 out[k] = nv
-            if "command" in x and "command" not in out and set(out) <= {"type", "timeout", "matcher", "show_output", "failClosed"}:
-                return {}  # an entry whose only purpose was the removed command
             return out
         if isinstance(x, list):
-            return [w for w in (walk(v) for v in x) if w not in ({}, [])]
+            out = []
+            for v in x:
+                nv = walk(v, depth + 1)
+                if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
+                    continue
+                out.append(nv)
+            return out
         return x
-    return walk(data), removed
+    return walk(data, 0), removed
+
+
+def _load(b):
+    return json.loads(b.decode("utf-8")) if b and b.strip() else {}
 
 
 def sanitize(branch_bytes, approved_bytes, allowed=()):
-    """What git should write for a hook file: the branch's version minus any command the default branch didn't approve.
+    """What git should write for a hook file: the branch's version minus anything the default branch didn't approve.
     Unparseable or non-JSON content (e.g. .codex/config.toml) is replaced by the approved version."""
     if branch_bytes == approved_bytes:
         return branch_bytes, []
     try:
-        data = json.loads(branch_bytes.decode("utf-8")) if branch_bytes.strip() else {}
+        data = _load(branch_bytes)
     except (ValueError, UnicodeDecodeError):
         return (approved_bytes or b""), ["<file replaced by the approved version: not JSON>"]
-    approved = set(allowed)
-    if approved_bytes:
-        try:
-            approved |= exec_strings(json.loads(approved_bytes.decode("utf-8")))
-        except (ValueError, UnicodeDecodeError):
-            pass
-    new, removed = strip_unapproved(data, approved)
+    try:
+        appr = _load(approved_bytes) if approved_bytes else {}
+    except (ValueError, UnicodeDecodeError):
+        appr = {}
+    if not isinstance(data, dict):
+        return (approved_bytes or b"{}\n"), ["<file replaced by the approved version: not a JSON object>"]
+    appr = appr if isinstance(appr, dict) else {}
+    removed = []
+    for k in GUARDED_KEYS:  # settings that run or load things: exactly the default branch's value, or absent
+        if k in data and data.get(k) != appr.get(k):
+            removed.append("<setting %s>" % k)
+            if k in appr:
+                data[k] = appr[k]
+            else:
+                del data[k]
+    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_entries(appr))
+    removed += more
     if not removed:
         return branch_bytes, []
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed
+
+
+def is_filtered_form(stored, on_disk, allowed=()):
+    """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
+    possibly filtered under an older approval."""
+    try:
+        return _load(sanitize(stored, on_disk, allowed)[0]) == _load(on_disk)
+    except (ValueError, UnicodeDecodeError):
+        return False
 
 
 # ------------------------------------------------------------------ the git filter
@@ -92,16 +166,30 @@ def _git(top, *args, data=None):
 
 
 def approved_for(top, path):
+    """The default branch's version of `path` and its project_hooks_allowed, read from the commit the policy ref points
+    at right now (resolved unambiguously, so a local branch called origin/main can't stand in for it)."""
     e = T.enrollment(top) or {}
-    ref = e.get("policy_ref")
-    approved = _git(top, "show", "%s:%s" % (ref, path)) if ref else None
+    sha = T.policy_commit(top, e.get("policy_ref")) if e.get("policy_ref") else None
+    if not sha:
+        return None, []
+    approved = _git(top, "show", "%s:%s" % (sha, path))
     allowed = []
-    if ref:
-        try:
-            allowed = json.loads(T.policy_text(top, ref, "config.json") or "{}").get("project_hooks_allowed") or []
-        except ValueError:
-            pass
+    try:
+        allowed = json.loads(T.policy_text(top, e["policy_ref"], "config.json") or "{}").get("project_hooks_allowed") or []
+    except ValueError:
+        pass
     return approved, [a for a in allowed if isinstance(a, str)]
+
+
+def _conflicted(data):
+    """Merge-conflict markers in a file no tool can parse (so passing it through runs nothing)."""
+    if not re.search(rb"^<{7} ", data, re.M) or not re.search(rb"^>{7} ", data, re.M):
+        return False
+    try:
+        _load(data)
+        return False
+    except (ValueError, UnicodeDecodeError):
+        return True
 
 
 def filter_main(mode, path):
@@ -111,17 +199,23 @@ def filter_main(mode, path):
     try:
         approved, allowed = approved_for(top, path)
         if mode == "smudge":  # git is about to write `path` into the working tree
-            out, removed = sanitize(data, approved, allowed)
-            if removed:
-                log(top, "filtered %s: removed %d unapproved command(s)" % (path, len(removed)))
-                sys.stderr.write("story-gate: removed %d unapproved command(s) from %s (they came from this branch, not the default branch)\n"
-                                 % (len(removed), path))
+            if _conflicted(data):
+                out = data  # a merge conflict: the markers make it unparseable for every tool; resolving it is your call
+            else:
+                out, removed = sanitize(data, approved, allowed)
+                if removed:
+                    log(top, "filtered %s: removed %d unapproved entr%s" % (path, len(removed), "y" if len(removed) == 1 else "ies"))
+                    sys.stderr.write("story-gate: removed %d unapproved hook entr%s or setting(s) from %s (they came from this branch, "
+                                     "not the default branch)\n" % (len(removed), "y" if len(removed) == 1 else "ies", path))
         else:  # clean: git is reading the working tree; map our filtered copy back to the stored version so status stays clean
-            idx = _git(top, "cat-file", "blob", ":%s" % path) or _git(top, "show", "HEAD:%s" % path)
-            out = idx if idx is not None and sanitize(idx, approved, allowed)[0] == data else data
-            if out is data and idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
+            idx = _git(top, "cat-file", "blob", ":%s" % path)
+            idx = idx if idx is not None else _git(top, "show", "HEAD:%s" % path)
+            out = data
+            if idx is not None and (sanitize(idx, approved, allowed)[0] == data or is_filtered_form(idx, data, allowed)):
+                out = idx
+            elif idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
                 try:
-                    lost = exec_strings(json.loads(idx.decode("utf-8"))) - exec_strings(json.loads(data.decode("utf-8") or "{}"))
+                    lost = exec_strings(_load(idx)) - exec_strings(_load(data))
                 except (ValueError, UnicodeDecodeError):
                     lost = set()
                 if lost:
@@ -129,7 +223,7 @@ def filter_main(mode, path):
                                      "added. Get new hook commands approved on the default branch first.\n" % (path, len(lost)))
     except Exception as ex:  # fail closed: never pass the branch's hook file through unchecked
         sys.stderr.write("story-gate filter error on %s: %r\n" % (path, ex))
-        out = b"{}\n" if mode == "smudge" and path.endswith(".json") else (b"" if mode == "smudge" else data)
+        out = (b"{}\n" if path.endswith(".json") else b"") if mode == "smudge" else data
     sys.stdout.buffer.write(out)
     sys.stdout.flush()
     return 0
@@ -137,21 +231,40 @@ def filter_main(mode, path):
 
 def log(top, line):
     try:
-        p = Path(_git(top, "rev-parse", "--git-common-dir").decode().strip())
-        p = p if p.is_absolute() else Path(top) / p
-        with open(p / "story-gate-guard.log", "a", encoding="utf-8") as f:
+        with open(common_dir(top) / "story-gate-guard.log", "a", encoding="utf-8") as f:
             f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), line))
     except Exception:
         pass
 
 
-def info_attributes(top):
+def common_dir(top):
     raw = _git(str(top), "rev-parse", "--git-common-dir")
     if raw is None:
         raise T.TrustError("not inside a git repository")
-    common = Path(raw.decode().strip())
-    common = common if common.is_absolute() else Path(top) / common
-    return common / "info" / "attributes"
+    p = Path(raw.decode().strip())
+    return Path(os.path.realpath(p if p.is_absolute() else Path(top) / p))
+
+
+def repo_key(top):
+    return os.path.normcase(str(common_dir(top)))
+
+
+def info_attributes(top):
+    return common_dir(top) / "info" / "attributes"
+
+
+def attr_lines():
+    return [ATTR_MARK] + ["**/%s filter=%s" % (p, FILTER) for p in FILTERED]
+
+
+def _shq(s):
+    """Single-quote for the shell git runs filters with ($ and backticks stay literal)."""
+    return "'%s'" % str(s).replace("\\", "/").replace("'", "'\\''")
+
+
+def filter_settings(py, launcher):
+    cmd = lambda mode: "%s -I %s hook-filter %s %%f" % (_shq(py), _shq(launcher), mode)  # git fills in %f
+    return {"filter.%s.smudge" % FILTER: cmd("smudge"), "filter.%s.clean" % FILTER: cmd("clean"), "filter.%s.required" % FILTER: "true"}
 
 
 def filter_conflicts(top):
@@ -172,39 +285,45 @@ def enable_filter(top, py, launcher, dry_run=False):
     conflicts = filter_conflicts(top)
     if conflicts:
         return False, ["Checkout filter NOT turned on: " + "; ".join(conflicts) + ". Remove that setting or ask for help; story-gate won't override it."]
-    cmd = lambda mode: '"%s" -I "%s" hook-filter %s %%f' % (py.replace("\\", "/"), str(launcher).replace("\\", "/"), mode)  # git fills %f
-    settings = {"filter.%s.smudge" % FILTER: cmd("smudge"), "filter.%s.clean" % FILTER: cmd("clean"), "filter.%s.required" % FILTER: "true"}
+    settings = filter_settings(py, launcher)
     attrs = info_attributes(top)
-    lines = [ATTR_MARK] + ["%s filter=%s" % (p, FILTER) for p in FILTERED]
     old = attrs.read_bytes().decode("latin-1") if attrs.is_file() else ""  # latin-1: every byte round-trips exactly
-    new = old if ATTR_MARK in old else (old + ("" if not old or old.endswith("\n") else "\n") + "\n".join(lines) + "\n")
-    out.append("  %s: %s" % (attrs, "already set" if new == old else "adds %d lines (local to this computer, never committed)" % len(lines)))
+    new = old if ATTR_MARK in old else (old + ("" if not old or old.endswith("\n") else "\n") + "\n".join(attr_lines()) + "\n")
+    out.append("  %s: %s" % (attrs, "already set" if new == old else "adds %d lines (local to this computer, never committed)" % len(attr_lines())))
     out += ["  git config --local %s = %s" % (k, v) for k, v in settings.items()]
     if dry_run:
         return True, out
-    before = {k: (_git(top, "config", "--local", "--get", k) or b"").decode().strip() or None for k in settings}
-    T.record("repos", os.path.normcase(os.path.realpath(top)), config_before=before,
-             attributes_before=old if attrs.is_file() else None, attributes_path=str(attrs))
+    dirty = _dirty_hook_files(top)
+    key = repo_key(top)
+    if key not in T.read_json(T.manifest_path()).get("repos", {}):  # first time: remember exactly how things were
+        before = {k: (_git(top, "config", "--local", "--get", k) or b"").decode().strip() or None for k in settings}
+        T.record("repos", key, config_before=before, attributes_before=old if attrs.is_file() else None)
     attrs.parent.mkdir(parents=True, exist_ok=True)
     attrs.write_bytes(new.encode("latin-1"))
     for k, v in settings.items():
         _git(top, "config", "--local", k, v)
-    out += rematerialize(top)
+    T.record("repos", key, toplevel=os.path.realpath(top), attributes_path=str(attrs), attributes_after=new, config_after=settings)
+    if not filter_active(top):
+        return False, out + ["  Checkout filter NOT on: git didn't accept the settings (is .git/config read-only?)"]
+    out += rematerialize(top, [n for n in tracked_hook_files(top) if n not in dirty], dirty)
     return True, out
 
 
 def tracked_hook_files(top):
-    names = (_git(top, "ls-files", "-z", "--", *FILTERED) or b"").decode("utf-8", "replace").split("\0")
+    names = (_git(top, "ls-files", "-z", "--", *[":(glob)**/%s" % p for p in FILTERED]) or b"").decode("utf-8", "replace").split("\0")
     return [n for n in names if n]
 
 
-def rematerialize(top):
-    """Re-write tracked hook files through the filter (skips files you have edited and not committed)."""
-    out = []
-    for n in tracked_hook_files(top):
-        if _git(top, "diff", "--quiet", "--", n) is None:
-            out.append("  %s: you have uncommitted edits here, so it wasn't re-checked. Commit or discard them, then run gate.py enroll again" % n)
-            continue
+def _dirty_hook_files(top):
+    """Tracked hook files you've changed and not committed, as git sees them right now."""
+    return [n for n in tracked_hook_files(top) if _git(top, "diff", "--quiet", "--", n) is None]
+
+
+def rematerialize(top, files, skipped=()):
+    """Re-write these tracked hook files from git so the current filter settings apply."""
+    out = ["  %s: you have uncommitted edits here, so it wasn't re-checked. Commit or discard them, then run gate.py filter on" % n
+           for n in skipped]
+    for n in files:
         try:
             os.remove(os.path.join(top, n))
         except OSError:
@@ -213,87 +332,116 @@ def rematerialize(top):
     return out
 
 
+def _strip_our_lines(text):
+    return "".join(l for l in text.splitlines(True) if l.rstrip("\r\n") != ATTR_MARK and ("filter=%s" % FILTER) not in l)
+
+
 def disable_filter(top, dry_run=False):
-    """Undo enable_filter exactly: attributes file and git config back to how they were, hook files re-checked out."""
+    """Undo enable_filter: attributes and git config back exactly as they were (or, if you changed them since, only
+    story-gate's lines and keys removed), and hook files re-checked out without the filter."""
     top = str(top)
-    key = os.path.normcase(os.path.realpath(top))
-    e = T.read_json(T.manifest_path()).get("repos", {}).get(key)
-    out = []
-    attrs = Path(e["attributes_path"]) if e and e.get("attributes_path") else info_attributes(top)
+    key = repo_key(top)
+    m = T.read_json(T.manifest_path()).get("repos", {})
+    e = m.get(key) or m.get(os.path.normcase(os.path.realpath(top)))  # older manifests were keyed by the working folder
+    attrs = info_attributes(top)
     if dry_run:
         return ["  would restore %s and the git filter settings, then re-check out the hook files" % attrs]
-    if e is not None:
-        if e.get("attributes_before") is not None:
-            attrs.write_bytes(e["attributes_before"].encode("latin-1"))
-        elif attrs.is_file():
+    clean = [n for n in tracked_hook_files(top) if _git(top, "diff", "--quiet", "--", n) is not None]  # judged while filtered
+    cur = attrs.read_bytes().decode("latin-1") if attrs.is_file() else None
+    if e is not None and cur is not None and cur == e.get("attributes_after"):
+        if e.get("attributes_before") is None:
             attrs.unlink()
-        for k, v in (e.get("config_before") or {}).items():
-            if v is None:
-                _git(top, "config", "--local", "--unset-all", k)
-            else:
-                _git(top, "config", "--local", k, v)
-        T.forget("repos", key)
-    else:  # enabled before manifests existed: remove only our lines and keys
-        if attrs.is_file():
-            kept = [l for l in attrs.read_text(encoding="utf-8").splitlines() if l != ATTR_MARK and ("filter=%s" % FILTER) not in l]
-            attrs.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        else:
+            attrs.write_bytes(e["attributes_before"].encode("latin-1"))
+    elif cur is not None:  # changed since: keep your lines, remove ours
+        kept = _strip_our_lines(cur)
+        attrs.write_bytes(kept.encode("latin-1")) if kept else attrs.unlink()
+    for k, ours in ((e or {}).get("config_after") or filter_settings("", "")).items():
+        now = (_git(top, "config", "--local", "--get", k) or b"").decode().strip()
+        if e is not None and now != ours:
+            continue  # someone changed it since: leave it
+        before = (e or {}).get("config_before", {}).get(k)
+        if before is None:
+            _git(top, "config", "--local", "--unset-all", k)
+        else:
+            _git(top, "config", "--local", k, before)
+    if e is None:
         _git(top, "config", "--local", "--remove-section", "filter.%s" % FILTER)
-    out.append("  %s and git filter settings restored" % attrs)
-    out += rematerialize(top)
+    T.forget("repos", key)
+    T.forget("repos", os.path.normcase(os.path.realpath(top)))
+    out = ["  %s and git filter settings restored" % attrs]
+    out += rematerialize(top, clean, [n for n in tracked_hook_files(top) if n not in clean])
     return out
 
 
 def filter_active(top):
+    """The filter as git will actually apply it (effective config, includes and attributes), not just our files."""
     try:
-        attrs = info_attributes(top)
+        top = str(top)
+        info_attributes(top)
     except T.TrustError:
         return False
-    on = attrs.is_file() and ("filter=%s" % FILTER) in attrs.read_text(encoding="utf-8", errors="ignore")
-    smudge = (_git(str(top), "config", "--local", "--get", "filter.%s.smudge" % FILTER) or b"").decode()
-    return bool(on and "hook-filter smudge" in smudge)
+    get = lambda k: (_git(top, "config", "--get", k) or b"").decode().strip()
+    attr = (_git(top, "check-attr", "filter", "--", ".claude/settings.json") or b"").decode().strip().rsplit(": ", 1)[-1]
+    return (attr == FILTER and "hook-filter smudge" in get("filter.%s.smudge" % FILTER)
+            and "hook-filter clean" in get("filter.%s.clean" % FILTER) and get("filter.%s.required" % FILTER) == "true")
+
+
+def tampered(top):
+    """story-gate turned the filter on here, nobody turned it off with `gate.py filter off`, yet it's not active."""
+    try:
+        return repo_key(top) in T.read_json(T.manifest_path()).get("repos", {}) and not filter_active(top)
+    except T.TrustError:
+        return False
 
 
 # ------------------------------------------------------------------ proof
 def prove(top):
-    """Plant a canary hook in every filtered file on a throwaway commit, check it out in a throwaway worktree, and show
-    whether the canary reached disk. Nothing in your branches or working tree changes."""
+    """Plant a canary in every filtered file on a throwaway commit, check those files out in a throwaway worktree, and
+    show whether the canary reached disk. Nothing in your branches or working tree changes."""
     top = str(top)
     lines, ok = [], True
     if not filter_active(top):
-        return False, ["  checkout filter: OFF in this repository (gate.py enroll turns it on)"]
+        return False, ["  checkout filter: OFF in this repository (gate.py filter on, or gate.py enroll)"]
     canary = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "echo %s" % CANARY}]}],
-                        "stop": [{"command": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY}
+                        "stop": [{"command": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY,
+              "mcpServers": {"canary": {"command": "echo", "args": [CANARY]}}}
     blob = (json.dumps(canary, indent=2) + "\n").encode()
+    toml = ('notify = ["sh", "-c", "echo %s"]\n' % CANARY).encode()
     head = (_git(top, "rev-parse", "HEAD") or b"").decode().strip()
     if not head:
         return False, ["  can't prove: this repository has no commits yet"]
     work = Path(tempfile.mkdtemp(prefix="sg-prove-"))
-    tmpidx = str(work / "index")
     who = {"GIT_AUTHOR_NAME": "story-gate", "GIT_AUTHOR_EMAIL": "story-gate@localhost", "GIT_COMMITTER_NAME": "story-gate",
            "GIT_COMMITTER_EMAIL": "story-gate@localhost"}
-    env = dict(os.environ, GIT_INDEX_FILE=tmpidx, **who)
+    env = dict(os.environ, GIT_INDEX_FILE=str(work / "index"), **who)
     def g(*a, data=None):
         r = subprocess.run(["git", *a], cwd=top, input=data, capture_output=True, env=env)
         return r.stdout.decode().strip() if r.returncode == 0 else None
-    paths = [p.replace("*", "canary") for p in FILTERED if not p.endswith(".toml")]
+    paths = [p.replace("*", "canary") for p in FILTERED]
     wt = work / "wt"
     try:
         g("read-tree", head)
-        sha = g("hash-object", "-w", "--no-filters", "--stdin", data=blob)
+        sha, tsha = g("hash-object", "-w", "--no-filters", "--stdin", data=blob), g("hash-object", "-w", "--no-filters", "--stdin", data=toml)
         for p in paths:
-            g("update-index", "--add", "--cacheinfo", "100644,%s,%s" % (sha, p))
-        tree = g("write-tree")
-        commit = g("commit-tree", tree, "-p", head, "-m", "story-gate canary (throwaway)")
+            g("update-index", "--add", "--cacheinfo", "100644,%s,%s" % (tsha if p.endswith(".toml") else sha, p))
+        commit = g("commit-tree", g("write-tree") or "", "-p", head, "-m", "story-gate canary (throwaway)")
         if not commit:
             return False, ["  can't prove: git couldn't create the throwaway commit"]
         (work / "nohooks").mkdir()
-        r = subprocess.run(["git", "-c", "core.hooksPath=%s" % (work / "nohooks"), "worktree", "add", "--detach", str(wt), commit],
-                           cwd=top, capture_output=True, text=True)
+        nohooks = ["-c", "core.hooksPath=%s" % (work / "nohooks")]
+        r = subprocess.run(["git", *nohooks, "worktree", "add", "--no-checkout", "--detach", str(wt), commit], cwd=top, capture_output=True, text=True)
+        if r.returncode == 0:  # only the hook files are written, through the filter, so this is quick in big repositories
+            r = subprocess.run(["git", *nohooks, "checkout", commit, "--", *paths], cwd=str(wt), capture_output=True, text=True)
         if r.returncode != 0:
             return False, ["  can't prove: %s" % r.stderr.strip()[:200]]
         for p in paths:
             f = wt / p
-            landed = f.is_file() and CANARY in f.read_text(encoding="utf-8", errors="ignore")
+            if not f.is_file():
+                ok = False
+                lines.append("  %-30s not written - can't tell" % p)
+                continue
+            landed = CANARY in f.read_text(encoding="utf-8", errors="ignore")
             ok &= not landed
             lines.append("  %-30s %s" % (p, "CANARY REACHED DISK - NOT protected" if landed else "canary removed before it reached disk"))
     finally:
@@ -345,12 +493,30 @@ def managed_body(py, launcher, user_hooks_text="", keep=()):
     hooks = _user_claude_hooks(user_hooks_text)
     for ev, entries in ours.items():
         hooks.setdefault(ev, []).extend(entries)
-    for cmd in keep:
-        hooks.setdefault("PreToolUse", []).append({"matcher": "*", "hooks": [{"type": "command", "command": cmd}]})
+    for event, group in keep:  # project hooks you chose to keep, with their own event, matcher and timeout
+        hooks.setdefault(event, []).append(group)
     body = {LOCKDOWN_MARK: {"version": 1, "user_hooks_sha256": hashlib.sha256(json.dumps(_user_claude_hooks(user_hooks_text), sort_keys=True).encode()).hexdigest(),
-                            "kept_project_hooks": list(keep)},
+                            "kept_project_hooks": [h["command"] for _, g in keep for h in g.get("hooks", [])]},
             "allowManagedHooksOnly": True, "hooks": hooks}
     return json.dumps(body, indent=2) + "\n"
+
+
+def find_project_hook(approved_text, command):
+    """The (event, group) holding `command` in the default branch's .claude/settings.json, trimmed to that command.
+    Refuses commands that run files from the repository: under lockdown they would run in EVERY repository."""
+    if command.startswith(("./", "../", ".\\")) or "CLAUDE_PROJECT_DIR" in command:
+        raise T.TrustError("'%s' runs a file from the repository, so under lockdown any repository could supply it. "
+                           "Keep only commands that run something installed on this computer." % command)
+    try:
+        data = json.loads(approved_text or "{}")
+    except ValueError:
+        data = {}
+    for event, groups in ((data.get("hooks") or {}) if isinstance(data, dict) else {}).items():
+        for g in groups if isinstance(groups, list) else []:
+            mine = [h for h in (g.get("hooks") or []) if isinstance(h, dict) and h.get("command") == command]
+            if mine:
+                return event, dict(g, hooks=mine)
+    raise T.TrustError("'%s' isn't a hook in this repository's .claude/settings.json on the default branch" % command)
 
 
 def lockdown_status(user_hooks_text=None):
@@ -394,7 +560,9 @@ What changes on this computer
 
 What it affects
   Computer-wide in Claude Code: project hooks stop running in EVERY repository on this computer, not only the ones
-  story-gate covers. To keep a project hook you rely on: gate.py lockdown --on --keep-project-hook "<its command>".
+  story-gate covers. To keep a project hook you rely on, run this inside that repository:
+  gate.py lockdown --on --keep-project-hook "<its exact command>"  (repeat the flag for more; commands that run a
+  file from the repository are refused, because every repository could then supply that file).
   If you change your own Claude hooks later, run gate.py lockdown --on again (doctor tells you when).
   If your company manages Claude Code through MDM or the Windows registry, those settings win over files: give the
   bundle (gate.py lockdown --bundle <folder>) to IT instead.
@@ -443,16 +611,16 @@ if [ -f "$T" ] && grep -q '"%s"' "$T"; then rm -f "$T"; fi
 rmdir "$(dirname "$T")" 2>/dev/null || true
 echo "story-gate lockdown is OFF for Claude Code."
 """ % (target, LOCKDOWN_MARK)).encode("utf-8"))
-    (dest / "install.ps1").write_bytes(("""# story-gate lockdown for Claude Code (Windows). Run in PowerShell as Administrator.
+    (dest / "install.ps1").write_bytes(("""# story-gate lockdown for Claude Code (Windows). As Administrator: powershell -ExecutionPolicy Bypass -File install.ps1
 # Adds ONE file; never edits managed-settings.json. Refuses to replace a file story-gate didn't write.
 $ErrorActionPreference = "Stop"
 $T = "%s"
 if ((Test-Path $T) -and -not (Select-String -Path $T -SimpleMatch '"%s"' -Quiet)) { Write-Host "Not changed: $T exists and isn't story-gate's."; exit 1 }
 New-Item -ItemType Directory -Force -Path (Split-Path $T) | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "claude\\%s") $T -Force
-Write-Host "story-gate lockdown is ON for Claude Code. Undo: run uninstall.ps1 as Administrator"
+Write-Host "story-gate lockdown is ON for Claude Code. Undo, as Administrator: powershell -ExecutionPolicy Bypass -File uninstall.ps1"
 """ % (target, LOCKDOWN_MARK, DROPIN)).encode("utf-8"))
-    (dest / "uninstall.ps1").write_bytes(("""# Removes story-gate's lockdown file for Claude Code. Run in PowerShell as Administrator.
+    (dest / "uninstall.ps1").write_bytes(("""# Removes story-gate's lockdown file for Claude Code. As Administrator: powershell -ExecutionPolicy Bypass -File uninstall.ps1
 $T = "%s"
 if ((Test-Path $T) -and (Select-String -Path $T -SimpleMatch '"%s"' -Quiet)) { Remove-Item $T -Force }
 Write-Host "story-gate lockdown is OFF for Claude Code."
@@ -478,7 +646,8 @@ and fingerprint). The path in this file is for the person who generated it (%s).
 the same folder for everyone, or generate one file per person with `gate.py lockdown --bundle <folder>`.
 The file also carries a copy of that person's own Claude hooks, because user-level hooks stop running under this switch.
 
-Check the files against SHA256SUMS. Undo: delete the one file (uninstall.sh / uninstall.ps1).
+Check the files against SHA256SUMS. Run the scripts with `sudo sh install.sh` or, on Windows as Administrator,
+`powershell -ExecutionPolicy Bypass -File install.ps1`. Undo: delete the one file (uninstall.sh / uninstall.ps1).
 """ % (DROPIN, DROPIN, DROPIN, DROPIN, str(launcher).replace("\\", "/"))).encode("utf-8"))
     sums = []
     for f in sorted(p for p in dest.rglob("*") if p.is_file() and p.name != "SHA256SUMS"):

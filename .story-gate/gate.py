@@ -1322,9 +1322,16 @@ def shell_writes(cmd):
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
                   "judge-calibrate", "lockdown", "filter"}
-# Ways to switch off or route around the checkout filter (sg_guard). Nothing an agent needs; refused in any shell command.
-FILTER_BYPASS = re.compile(r"filter\.storygate|info[/\\]attributes|attributesfile|--no-filters|GIT_ATTR|GIT_CONFIG_(?:COUNT|KEY|VALUE|PARAMETERS)"
-                           r"|\bgit\b[^|;&]*\s-c\s*filter\.", re.I)
+# Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
+# Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
+# itself on every call (sg_guard.tampered), because text matching can't see every spelling.
+FILTER_BYPASS = re.compile(
+    r"filter\.storygate|filter\.[^\s.]*\.(?:smudge|clean|required|process)\b|\bgit\s+config\b[^|;&]*\b(?:smudge|clean|required|process)\b"
+    r"|info[/\\]attributes|attributesfile|--no-filters|GIT_ATTR|GIT_CONFIG|--config-env|\binclude\.path|\bincludeif\."
+    r"|\.git[/\\]config\b|config\.worktree|\bgit\b[^|;&]*\s-c\s*(?:filter|include|core\.attributes|core\.hookspath|remote)"
+    r"|update-ref|refs/remotes|\bremote\s+(?:add|set-url|rename|remove|rm|set-head|set-branches)\b|\bremote\.[^.\s]+\.(?:url|fetch|pushurl)",
+    re.I)
+ADMIN_CALL = re.compile(r"(?:gate|launch)\.py\s+(?:-\S+\s+)*(%s)\b" % "|".join(sorted(ADMIN_COMMANDS)))
 
 
 def touches_gate(cmd):
@@ -1332,8 +1339,9 @@ def touches_gate(cmd):
     plain = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)  # quoted free text (--summary "...") is data, not shell
     m = GATE_CLI.fullmatch(plain)
     sub = (plain.split("gate.py", 1)[1].split() or [""])[0] if m else ""
-    if FILTER_BYPASS.search(cmd):
-        return True  # turning off or bypassing the checkout filter is for the human (gate.py filter off), never an agent
+    bare = re.sub(r"[\'\"\\]", "", cmd)  # 'filter.story''gate' and "filter".x read as what the shell will run
+    if FILTER_BYPASS.search(bare) or ADMIN_CALL.search(bare):
+        return True  # switching protection off, changing the policy source or any admin command: human only, anywhere in the line
     if sub in ADMIN_COMMANDS:
         return True  # installing, enrolling, upgrading or signing is for the human, never an agent
     if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and m and plain.count(".story-gate") == 1):
@@ -1465,6 +1473,10 @@ def runtime_policy_problem(c):
     need = c.get("min_runtime_version")
     if need and T.version_tuple(VERSION) < T.version_tuple(need):
         return "this repository needs story-gate %s or newer; this computer runs %s. Upgrade: gate.py upgrade" % (need, VERSION)
+    import sg_guard as SG
+    if SG.tampered(str(ROOT)):
+        return ("the checkout filter that keeps a branch's AI-tool hooks off this computer was switched off outside story-gate. "
+                "A human turns it back on with: gate.py filter on  (or off on purpose, logged: gate.py filter off)")
     found = T.project_hook_findings(ROOT, HOOK_FILES)
     if found:
         return ("project hook files run story-gate code from the branch (%s), which a branch could swap. Remove those entries "
@@ -2059,7 +2071,7 @@ def cmd_user(cmd, kv, rest):
                 dest = T.install_runtime(HERE, VERSION, unsigned=unsigned)
         except T.TrustError as e:
             print("NOT installed: %s" % e); return 1
-        out = T.register_user_hooks(str(Path(py).resolve()).replace("\\", "/"), str(T.launcher_path()).replace("\\", "/"), clients, dry)
+        out = T.register_user_hooks(os.path.abspath(py).replace("\\", "/"), str(T.launcher_path()).replace("\\", "/"), clients, dry)
         print("Runtime: %s" % dest)
         print("User-level hooks (%s):" % ", ".join(clients))
         print("\n".join(out) or "  nothing to change")
@@ -2110,6 +2122,10 @@ def cmd_user(cmd, kv, rest):
                 pass
         return 0
     if cmd == "enroll":
+        if dry:
+            top = T.repo_identity(os.getcwd())[0]
+            print("Would enroll %s." % top)
+            return 0 if not top else (0 if turn_filter_on(top, kv.get("python") or sys.executable, True) or True else 1)
         try:
             e = T.enroll(os.getcwd(), kv.get("policy-ref"))
         except T.TrustError as ex:
@@ -2121,8 +2137,10 @@ def cmd_user(cmd, kv, rest):
     if cmd == "unenroll":
         import sg_guard as SG
         top = T.repo_identity(os.getcwd())[0]
-        if top and SG.filter_active(top):
+        if top and (SG.filter_active(top) or SG.tampered(top) or dry):
             print("Checkout filter off:\n" + "\n".join(SG.disable_filter(top, dry)))
+        if dry:
+            print("Would unenroll %s." % top); return 0
         print("Unenrolled." if T.unenroll(os.getcwd()) else "This repository was not enrolled.")
         return 0
     if cmd in ("upgrade", "rollback"):
@@ -2186,7 +2204,7 @@ def turn_filter_on(top, py, dry=False):
     if not T.launcher_ok():
         print("Checkout filter: needs the trusted runtime first (gate.py install --user)")
         return False
-    ok, lines = SG.enable_filter(top, str(Path(py).resolve()), T.launcher_path(), dry)
+    ok, lines = SG.enable_filter(top, os.path.abspath(py), T.launcher_path(), dry)
     print(("Checkout filter %s:" % ("would be turned on" if dry else "on")) if ok else "Checkout filter:")
     print("\n".join(lines))
     if ok and not dry:
@@ -2198,7 +2216,7 @@ def lockdown_off_command(st):
     import sg_guard as SG
     b = G_config_dir() / "lockdown"
     if os.name == "nt":
-        return 'PowerShell as Administrator: & "%s"   (or delete %s)' % (b / "uninstall.ps1", st["file"])
+        return 'PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"   (or delete %s)' % (b / "uninstall.ps1", st["file"])
     return 'sudo sh "%s"   (or: sudo rm "%s")' % (b / "uninstall.sh", st["file"])
 
 
@@ -2224,8 +2242,13 @@ def cmd_lockdown(kv, rest):
     import sg_guard as SG
     user_text = rd(T.user_hook_files()["claude"])
     st = SG.lockdown_status(user_text)
-    keep = [kv["keep-project-hook"]] if kv.get("keep-project-hook") else []
-    py = str(Path(kv.get("python") or sys.executable).resolve())
+    keep = []
+    for cmd_ in [k for k in (kv.get("keep-project-hook") or "").split("\n") if k]:
+        try:
+            keep.append(SG.find_project_hook(SG.approved_for(str(ROOT), ".claude/settings.json")[0], cmd_))
+        except T.TrustError as ex:
+            print("NOT changed: %s" % ex); return 1
+    py = os.path.abspath(kv.get("python") or sys.executable)
     if "--on" not in rest and "--off" not in rest and not kv.get("bundle"):
         print(SG.explain(st))
         print("Protection on this computer against hooks shipped inside branches:")
@@ -2274,7 +2297,8 @@ def cmd_lockdown(kv, rest):
         print("Lockdown is ON for Claude Code: %s\nRestart Claude Code, then check: gate.py doctor --prove" % target)
         return 0
     except OSError:
-        cmd = ('PowerShell as Administrator: & "%s"' % (bundle / "install.ps1")) if os.name == "nt" else 'sudo sh "%s"' % (bundle / "install.sh")
+        cmd = ('PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"' % (bundle / "install.ps1")) if os.name == "nt" \
+            else 'sudo sh "%s"' % (bundle / "install.sh")
         print("You said yes. Writing %s needs admin rights, so run this one command yourself:\n  %s\n"
               "Then restart Claude Code and check: gate.py doctor --prove" % (target, cmd))
         return 0
@@ -2496,7 +2520,9 @@ def flags(argv):
                        "--report-failure", "--prove", "--on", "--off", "--explain"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
-            kv[argv[i][2:]] = argv[i + 1]; i += 2
+            k = argv[i][2:]
+            kv[k] = (kv[k] + "\n" + argv[i + 1]) if k == "keep-project-hook" and k in kv else argv[i + 1]  # repeatable
+            i += 2
         else:
             rest.append(argv[i]); i += 1
     return kv, rest

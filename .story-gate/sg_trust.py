@@ -366,9 +366,20 @@ def unenroll(cwd):
     return False
 
 
+def policy_commit(top, ref):
+    """The commit the policy ref points at right now. "origin/main" means the remote-tracking branch only: a local
+    branch or tag with the same name (which git would otherwise prefer) can't stand in for it."""
+    if not ref:
+        return None
+    for full in ("refs/remotes/" + ref, "refs/heads/" + ref, "refs/tags/" + ref):
+        if subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True).returncode == 0:
+            return git_in(top, "rev-parse", "--verify", "-q", full + "^{commit}") or None
+    return None
+
+
 def policy_text(top, ref, name):
     """Contents of .story-gate/<name> on the policy ref, pinned to the commit it resolves to right now. None if absent."""
-    sha = git_in(top, "rev-parse", "--verify", "-q", ref + "^{commit}")
+    sha = policy_commit(top, ref)
     if not sha:
         return None
     r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True)
@@ -476,10 +487,12 @@ def removed_hook_json(text):
 
 
 def apply_file(path, new_text, dry_run, out, check_json=True):
-    """Write with a timestamped backup and an install-manifest entry; print a diff; never clobber a file we couldn't parse."""
+    """Write with a backup and an install-manifest entry; print a diff; never clobber a file we couldn't parse.
+    Writes through symlinks (dotfile managers keep their link)."""
     path = Path(path)
-    existed = path.exists()
-    old = path.read_text(encoding="utf-8") if existed else ""
+    real = Path(os.path.realpath(path))
+    existed = real.exists()
+    old = real.read_text(encoding="utf-8") if existed else ""
     if old == new_text:
         out.append("  %s: already up to date" % path)
         return False
@@ -489,44 +502,55 @@ def apply_file(path, new_text, dry_run, out, check_json=True):
                                                                       str(path), str(path) + " (new)", n=1))
     if dry_run:
         return True
-    path.parent.mkdir(parents=True, exist_ok=True)
+    real.parent.mkdir(parents=True, exist_ok=True)
+    prev = read_json(manifest_path()).get("files", {}).get(str(path)) or {}
+    edited = bool(prev.get("user_edited") or (prev and existed and sha256(real) != prev.get("sha_after")))  # you changed it since
     backup = None
     if existed:
-        backup = path.with_name(path.name + ".story-gate-backup-" + time.strftime("%Y%m%d%H%M%S"))
-        shutil.copy2(path, backup)
-    tmp = path.with_name(path.name + ".tmp-%d" % os.getpid())
+        stamp = time.strftime("%Y%m%d%H%M%S") + "-%06d" % (int(time.time() * 1e6) % 1000000)
+        backup, n = real.with_name("%s.story-gate-backup-%s" % (real.name, stamp)), 0
+        while backup.exists():  # never overwrite an earlier backup
+            n += 1
+            backup = real.with_name("%s.story-gate-backup-%s-%d" % (real.name, stamp, n))
+        shutil.copy2(real, backup)
+    tmp = real.with_name(real.name + ".tmp-%d" % os.getpid())
     tmp.write_text(new_text, encoding="utf-8")
-    os.replace(tmp, path)
-    record("files", str(path), existed_before=existed, backup_before=str(backup) if backup else None, sha_after=sha256(path))
+    os.replace(tmp, real)
+    record("files", str(path), existed_before=existed, backup_before=str(backup) if backup else None, sha_after=sha256(real),
+           user_edited=edited)
     return True
 
 
 def restore_file(path, out, dry_run=False):
     """Put a file back exactly as it was before story-gate first touched it, if nobody has changed it since.
-    If it was changed since, only story-gate's own entries are removed (the person's later edits are kept)."""
+    If it was changed since (or the backup is gone), only story-gate's own entries are removed and your edits stay."""
     path = Path(path)
     e = read_json(manifest_path()).get("files", {}).get(str(path))
     if not e:
         return False
-    if not path.exists():
+    real = Path(os.path.realpath(path))
+    backup = Path(e["backup_before"]) if e.get("backup_before") else None
+    done = True
+    if not real.exists():
         out.append("  %s: already gone" % path)
-    elif sha256(path) == e.get("sha_after"):
+    elif sha256(real) == e.get("sha_after") and not e.get("user_edited") and (not e.get("existed_before") or (backup and backup.is_file())):
         if dry_run:
             out.append("  %s: would be restored exactly as before" % path)
             return True
-        if e.get("existed_before") and e.get("backup_before") and Path(e["backup_before"]).is_file():
-            shutil.copy2(e["backup_before"], path)
-            out.append("  %s: restored byte for byte from %s" % (path, e["backup_before"]))
-        elif not e.get("existed_before"):
-            path.unlink()
+        if e.get("existed_before"):
+            shutil.copy2(backup, real)
+            out.append("  %s: restored byte for byte from %s" % (path, backup))
+        else:
+            real.unlink()
             out.append("  %s: removed (story-gate created it)" % path)
     else:
         try:
-            apply_file(path, removed_hook_json(path.read_text(encoding="utf-8")), dry_run, out)
-            out.append("  %s: changed since install, so only story-gate's entries were removed" % path)
+            apply_file(path, removed_hook_json(real.read_text(encoding="utf-8")), dry_run, out)
+            out.append("  %s: changed since install (or no backup), so only story-gate's entries were removed" % path)
         except (ValueError, TrustError) as ex:
+            done = False
             out.append("  %s: NOT changed (%s) - remove the story-gate lines by hand" % (path, ex))
-    if not dry_run:
+    if done and not dry_run:
         forget("files", str(path))
     return True
 

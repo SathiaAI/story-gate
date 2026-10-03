@@ -144,7 +144,11 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 
 Codex adds its own hard-on-change layer: it asks you to trust any changed project hook. Cursor, Gemini, Windsurf and Grok have no switch like lockdown, so the checkout filter is their protection. Details per tool: [docs/client-security.md](docs/client-security.md).
 
-**Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands.
+**What the filter checks:** every hook entry, MCP server and command-like setting (`apiKeyHelper`, `statusLine`, Gemini's `discoveryCommand`, ...) must match the default branch's version; `env`, `permissions`, `mcpServers` and plugin settings must be identical to it. Files covered, in any folder: `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `.devin/hooks.json`, `.windsurf/hooks.json`, `.grok/hooks/*.json`.
+
+**Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands. To commit the *removal* of a hook the default branch never approved, turn the filter off for that commit (`gate.py filter off`, then `filter on`).
+
+**Approve commands, not scripts:** an approved hook such as `bash scripts/check.sh` runs whatever `scripts/check.sh` contains on the branch you're on. Prefer hooks that run something installed on your computer.
 
 **Escape hatch:** `gate.py filter off` turns the filter off for one repository and writes it to `.git/story-gate-guard.log`; `gate.py filter on` (or `enroll`) turns it back on. Doctor flags it while it's off.
 
@@ -161,6 +165,8 @@ python3 .story-gate/gate.py lockdown --off           # removes story-gate's file
 - It affects **every** repository on the computer. To keep a project hook you rely on: `lockdown --on --keep-project-hook "<command>"`. If you change your own Claude hooks later, run `lockdown --on` again; doctor tells you when.
 - If your company manages Claude Code through MDM or the Windows registry, those win over files: give IT the bundle.
 - `uninstall --user` refuses while lockdown is on, so Claude Code is never left pointing at a removed runtime.
+
+**If git says the story-gate filter failed** (for example after you removed the Python it was set up with), run `gate.py filter on` with your current Python, or remove it by hand: `git config --local --remove-section filter.storygate-hooks`.
 
 **Uninstall puts everything back.** `uninstall --user` turns off the checkout filter in every covered repository (attributes file and git settings restored byte for byte), restores each user hook file from its backup (or removes only story-gate's entries if you've changed the file since), then removes the runtime. `unenroll` does the same for one repository.
 
@@ -317,6 +323,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 - **Stop hook in enforce mode:** it blocks the agent from ending the session up to 3 times in a row, then lets it end so a stuck agent can't loop forever. The PR check still blocks the merge.
 - **First PR:** the PR that adds story-gate is checked by human review only, because CI never runs gate code taken from a PR.
 - **Repository hooks:** the checkout filter covers hook files that arrive through git, in repositories story-gate covers. Repositories you haven't enrolled, and hook files written outside git, aren't filtered. Only Claude Code (lockdown) and Codex (trust re-prompt) have a hard switch today. Open untrusted repositories without hooks; CI still checks every PR.
+- **Hooks in other places:** Claude Code skill and subagent files can declare hooks too (Claude Code asks for workspace trust before running those), and plugins can ship hooks. Lockdown blocks plugin hooks in Claude Code; the checkout filter doesn't read those files.
 - **Other filters:** if a repository already sets a git filter on an AI-tool hook file (Git LFS, for example), story-gate doesn't override it and says so.
 - **Grok:** user and project hook merging isn't documented, so story-gate doesn't register Grok hooks (status checks by hand, CI as the backstop). Windsurf/Devin timeout and trust behaviour is undocumented.
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
