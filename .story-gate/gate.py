@@ -2645,6 +2645,8 @@ def main(argv):
     if cmd == "hook-trust":
         return cmd_hook_trust(rest)
     if cmd == "plan":
+        if not rest:
+            sys.exit("usage: gate.py plan <ID> --title T [--feature F]")
         return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
     if cmd == "feature":
         return cmd_feature(rest[0] if rest else "", kv.get("title", ""), kv.get("description", "")) or 0

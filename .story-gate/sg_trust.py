@@ -537,6 +537,10 @@ def restore_file(path, out, dry_run=False):
         out.append("  %s: now points to %s (it pointed to %s at install); not restored - remove the story-gate lines by hand"
                    % (path, real, e["real_before"]))
         return True
+    if not e.get("real_before") and path.is_symlink():  # older install: link target not recorded, so fail closed
+        out.append("  %s: is a link and this install didn't record its target; not restored - remove the story-gate lines by hand"
+                   % path)
+        return True
     backup = Path(e["backup_before"]) if e.get("backup_before") else None
     done = True
     if not real.exists():

@@ -1538,6 +1538,30 @@ class TestRepoHookGuard(RuntimeFixture):
         r = run(self.repo, "uninstall", "--user", env=self.env)
         self.assertIn("not restored", r.stdout); self.assertIn("hook --client cursor", b.read_text())
 
+    def test_restore_fails_closed_for_a_link_from_an_older_install(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        run(self.repo, "uninstall", "--user", env=self.env)
+        a = self.user / "dot/a.json"; a.parent.mkdir(); a.write_text("{}\n")
+        link = self.user / ".cursor/hooks.json"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(a)
+        run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        mf = self.home / "install-manifest.json"
+        data = json.loads(mf.read_text())
+        for e in data["files"].values():
+            e.pop("real_before", None)  # what an install from before link tracking recorded
+        mf.write_text(json.dumps(data))
+        r = run(self.repo, "uninstall", "--user", env=self.env)
+        self.assertIn("didn't record its target", r.stdout)
+        self.assertTrue(link.is_symlink()); self.assertIn("hook --client cursor", a.read_text())
+
+    def test_plan_without_an_id_prints_usage(self):
+        r = run(self.repo, "plan", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("usage: gate.py plan <ID>", r.stderr); self.assertNotIn("IndexError", r.stderr)
+
     def test_unenroll_turns_the_filter_off(self):
         r = self.admin("unenroll")
         self.assertIn("Checkout filter off", r.stdout)
