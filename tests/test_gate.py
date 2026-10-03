@@ -1555,6 +1555,23 @@ class TestDashboard(Base):
         self.assertIs(s["ready_fresh"], False)
         self.assertEqual({m["key"]: m for m in d["metrics"]}["ready_stale"]["value"], 1)
 
+    def test_ready_fresh_with_non_utf8_story_text(self):
+        self.g("checkout", "-q", "-b", "feat/SAT-8")
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
+        run(self.repo, "start", "SAT-8"); self.fill_ready("SAT-8")
+        ctx = self.repo / ".story-gate/stories/SAT-8/context.md"
+        ctx.write_bytes(ctx.read_bytes().replace("—".encode("utf-8"), b"\x97") + b"line\r\n")  # an editor saving cp1252 with CRLF
+        self.assertIn("READY: PASS", run(self.repo, "score", "SAT-8", "ready").stdout)
+        self.g("add", "-A"); self.g("-c", "core.autocrlf=false", "commit", "-qm", "scored"); self.g("push", "-q", "origin", "feat/SAT-8")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-8"][0]
+        self.assertTrue(s["ready_fresh"])
+
+    def test_ready_hash_ignores_line_endings(self):
+        g = load_gate(self.repo); c = g.cfg()
+        self.assertEqual(g.ready_hash_from("a\r\nb\r\n", "c\r\n", "{}", [("PRD.md", "x\r\n")], c),
+                         g.ready_hash_from("a\nb\n", "c\n", "{}", [("PRD.md", "x\n")], c))
+
     def test_waivers_are_not_proof(self):
         s = self.st("SAT-1"); s["done"]["overall"] = "WAIVED"
         M = {m["key"]: m for m in self.D.metrics(self.data["stories"], [], [], [], "2026-10-02T00:00:00Z")}
