@@ -84,5 +84,5 @@ gate.py hook-trust "bash scripts/check.sh" --revoke
 **Trusted root:** the default branch as git last fetched it (`refs/remotes/origin/<default>`), plus the signed story-gate runtime in your user folder.
 
 **Tested with:**
-- Real Claude Code on Windows, plus the full test suite on Linux and Windows in CI and on macOS by hand.
+- Real Claude Code on Windows, plus the full test suite in CI on Linux, Windows and macOS.
 - Gemini CLI: its hook file is filtered and wrapped, but Google no longer lets personal sign-ins use the command-line tool, so the runner wasn't triggered from Gemini itself.

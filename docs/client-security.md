@@ -43,6 +43,6 @@ Sources for lockdown: [Claude Code managed settings](https://code.claude.com/doc
 3. Optional: add a hook of your own in the project settings, then confirm story-gate's hook still runs. That shows the tool runs user and project hooks together.
 4. Run `gate.py doctor --prove`. It plants a canary hook in every AI-tool hook file on a throwaway commit and shows the canary never reaches disk.
 
-The CI matrix tests story-gate's side on Linux and Windows; the same suite was also run by hand on macOS. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
+The CI matrix tests story-gate's side on Linux, Windows and macOS. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
 
 Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [Codex hooks](https://developers.openai.com/codex/hooks) · [Cursor hooks](https://cursor.com/docs/agent/hooks) · [Gemini CLI hooks](https://geminicli.com/docs/hooks/) · [Windsurf/Devin hooks](https://docs.windsurf.com/windsurf/cascade/hooks) · [Grok hooks](https://docs.x.ai/build/features/hooks)
