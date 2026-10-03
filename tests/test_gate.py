@@ -198,6 +198,7 @@ class TestHooks(Base):
 
 class TestInstallCI(Base):
     def test_install_idempotent_and_merges(self):
+        """Repeated installs preserve user settings and instructions while removing branch hooks."""
         (self.repo / ".claude").mkdir()
         (self.repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"PreToolUse": [
             {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]},
@@ -343,6 +344,7 @@ class TestCheckpointAndTrace(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_install_writes_skills_for_all_clients(self):
+        """Install the story-gate skill into both supported repository skill locations."""
         run(self.repo, "install")
         for d in (".agents/skills/story-gate/SKILL.md", ".claude/skills/story-gate/SKILL.md"):
             self.assertIn("name: story-gate", (self.repo / d).read_text())
@@ -378,6 +380,7 @@ class TestRound1Fixes(Base):
         self.assertIn("DONE gate", run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}").stdout)
 
     def test_handoff_requires_drift_section_and_version(self):
+        """Keep drift handoffs, the runtime version, and pinned CI checkout settings in sync."""
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
@@ -725,6 +728,7 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertEqual(p.stat().st_mode & 0o777, 0o600)
 
     def test_change_label_must_still_be_present(self):
+        """Only the latest label addition counts, and removing the label clears approval."""
         G = self.G
         ev = lambda kind, who: {"event": kind, "label": {"name": "story-gate-change"}, "actor": {"login": who}}
         G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]"), ev("unlabeled", "Paul"), ev("labeled", "Paul")]
@@ -941,6 +945,7 @@ class TestTrustedRuntime(Base):
     """The hooks run a pinned copy in the user's folder, with policy from the default branch (panel decision sg-hookpin)."""
 
     def setUp(self):
+        """Create an enrolled repository with enforced origin policy and an isolated user runtime."""
         super().setUp()
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         self.user = Path(tempfile.mkdtemp()); self.home = self.user / "sg-home"
@@ -959,10 +964,12 @@ class TestTrustedRuntime(Base):
         self.py, self.gate = re.match(r'"(.*?)" -I "(.*?)" hook', cmd).groups()
 
     def tearDown(self):
+        """Remove the test repository, isolated user settings, runtime, and bare remote."""
         super().tearDown()
         shutil.rmtree(self.user, ignore_errors=True); shutil.rmtree(self.remote.parent, ignore_errors=True)
 
     def hook(self, event="pre", payload=None, cwd=None):
+        """Run the installed Claude hook with a JSON payload and isolated test settings."""
         e = dict(os.environ, HOME=str(self.user), **self.env)
         for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE"):
             e.pop(k, None)
@@ -971,6 +978,7 @@ class TestTrustedRuntime(Base):
                               input=json.dumps(p), capture_output=True, text=True, env=e, timeout=60)
 
     def test_install_writes_user_hooks_runtime_and_enrolls(self):
+        """User installation wires runtime hooks and enrolls the repository against origin policy."""
         for f in (".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json", ".gemini/settings.json"):
             self.assertIn("/runtime/", (self.user / f).read_text().replace("\\\\", "/"))
         self.assertTrue(Path(self.gate).is_file()); self.assertIn("UNSIGNED", self.install_out.upper())
@@ -978,10 +986,12 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook().returncode, 2)  # enforce from the default branch: no active story
 
     def test_branch_cannot_loosen_policy(self):
+        """A branch cannot weaken an enforced default-branch policy to warnings."""
         self.cfg(mode="warn", enforce_points=[])  # the branch tries to switch to warn
         self.assertEqual(self.hook().returncode, 2)
 
     def test_branch_can_tighten_policy(self):
+        """A branch can strengthen a warning policy to enforced blocking."""
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
         g("checkout", "-q", "feature/SAT-1-thing2"); g("merge", "-q", "main")
@@ -990,6 +1000,7 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook().returncode, 2)
 
     def test_swapped_gate_code_never_runs(self):
+        """Hooks ignore replaced branch code and working-tree modules that could hijack imports."""
         marker = self.user / "pwned"
         evil = "open(%r, 'w').write('x')\n" % str(marker)
         (self.repo / ".story-gate/gate.py").write_text(evil)
@@ -999,33 +1010,39 @@ class TestTrustedRuntime(Base):
         self.assertFalse(marker.exists())
 
     def test_deleting_story_gate_in_branch_does_not_disable(self):
+        """Enrollment keeps enforcement active after the branch deletes its gate directory."""
         shutil.rmtree(self.repo / ".story-gate")
         self.assertEqual(self.hook().returncode, 2)
 
     def test_tampered_runtime_is_refused(self):
+        """Changing an installed runtime file causes hooks to block on failed integrity checks."""
         with open(self.gate, "a") as f:
             f.write("\n# tampered\n")
         r = self.hook()
         self.assertEqual(r.returncode, 2); self.assertIn("integrity", r.stderr)
 
     def test_project_hook_running_branch_code_is_flagged(self):
+        """Hooks block repository hook entries that execute the branch copy of story-gate."""
         (self.repo / ".claude").mkdir(exist_ok=True)
         (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 .story-gate/gate.py hook"}]}]}}))
         r = self.hook()
         self.assertEqual(r.returncode, 2); self.assertIn("project hook files", r.stderr)
 
     def test_unenrolled_repo_is_untouched(self):
+        """Hooks allow operations in unenrolled repositories and outside Git repositories."""
         other = Path(tempfile.mkdtemp())
         subprocess.run(["git", "init", "-q", str(other)], check=True)
         self.assertEqual(self.hook(cwd=other).returncode, 0)
         self.assertEqual(self.hook(cwd=Path(tempfile.mkdtemp())).returncode, 0)  # not a git repository at all
 
     def test_worktree_shares_enrollment(self):
+        """Linked worktrees inherit enrollment and enforcement from their common repository."""
         wt = Path(tempfile.mkdtemp()) / "wt"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "feature/SAT-2-x", str(wt)], cwd=self.repo, check=True, capture_output=True)
         self.assertEqual(self.hook(cwd=wt, payload={"tool_name": "Write", "tool_input": {"file_path": str(wt / "app.py")}}).returncode, 2)
 
     def test_agent_cannot_touch_user_files_or_run_admin_commands(self):
+        """Agent edits and shell commands cannot modify protected files or administer the runtime."""
         sh = lambda c: self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}}).returncode
         self.assertEqual(sh("echo x > %s" % (self.user / ".claude/settings.json")), 2)
         self.assertEqual(sh("python3 .story-gate/gate.py install --user --unsigned"), 2)
@@ -1035,6 +1052,7 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook(payload=w).returncode, 2)
 
     def test_dry_run_uninstall_and_backups(self):
+        """Uninstall previews changes, then preserves unrelated hooks and backs up modified files."""
         own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}, "theme": "dark"}
         p = self.user / ".claude/settings.json"
         data = json.loads(p.read_text()); data["theme"] = "dark"; data["hooks"]["Stop"].append(own["hooks"]["Stop"][0]); p.write_text(json.dumps(data))
@@ -1048,11 +1066,13 @@ class TestTrustedRuntime(Base):
         self.assertFalse((self.home / "runtime").exists())
 
     def test_invalid_user_json_is_never_clobbered(self):
+        """Installation reports invalid user JSON without overwriting it."""
         p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
         r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
         self.assertEqual(p.read_text(), "{ // comments are not JSON\n}"); self.assertIn("NOT changed", r.stdout)
 
     def test_detached_head_and_paths_with_spaces(self):
+        """Enrollment and enforcement work in detached checkouts whose paths contain spaces."""
         spaced = Path(tempfile.mkdtemp()) / "my repo"
         subprocess.run(["git", "clone", "-q", str(self.remote), str(spaced)], check=True, capture_output=True)
         subprocess.run(["git", "checkout", "-q", "--detach"], cwd=spaced, check=True)
@@ -1061,6 +1081,7 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook(cwd=spaced, payload={"tool_name": "Write", "tool_input": {"file_path": str(spaced / "app.py")}}).returncode, 2)
 
     def test_repo_without_remote_uses_local_default_branch(self):
+        """Repositories without a remote can enroll using their local main branch policy."""
         solo = Path(tempfile.mkdtemp())
         shutil.copytree(self.repo / ".story-gate", solo / ".story-gate", ignore=shutil.ignore_patterns("stories"))
         g = lambda *a: subprocess.run(["git", *a], cwd=solo, capture_output=True, check=True)
@@ -1072,6 +1093,7 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook(cwd=solo, payload={"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}).returncode, 2)
 
     def test_submodule_inside_enrolled_repo(self):
+        """Parent hooks gate submodule edits while unenrolled submodule hooks allow them."""
         sub_src = Path(tempfile.mkdtemp()) / "lib"
         subprocess.run(["git", "init", "-q", "-b", "main", str(sub_src)], check=True)
         (sub_src / "lib.py").write_text("y = 1\n")
@@ -1084,6 +1106,7 @@ class TestTrustedRuntime(Base):
         self.assertEqual(self.hook(cwd=self.repo / "lib", payload={"tool_name": "Write", "tool_input": {"file_path": "lib.py"}}).returncode, 0)
 
     def test_failed_upgrade_keeps_current_runtime(self):
+        """An invalid release signature prevents upgrade and preserves active runtime metadata."""
         bad = Path(tempfile.mkdtemp())
         shutil.copytree(SRC, bad / "rel", ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl"))
         (bad / "rel/release.json").write_text(json.dumps({"version": "9.9.9", "files": {"gate.py": "0" * 64}}))
@@ -1095,10 +1118,12 @@ class TestTrustedRuntime(Base):
         self.assertEqual((self.home / "runtime/active.json").read_text(), before)
 
     def test_upgrade_refuses_to_run_from_repo_copy(self):
+        """Upgrade requires the installed runtime so verification uses the trusted release key."""
         r = run(self.repo, "upgrade", env=self.env)
         self.assertNotEqual(r.returncode, 0); self.assertIn("installed runtime", r.stdout)
 
     def test_concurrent_hooks_from_two_clients(self):
+        """Concurrent pre-edit and stop hooks all enforce the missing-story restriction."""
         import concurrent.futures as cf
         (self.repo / "app.py").write_text("x = 2\n")  # code changed with no story: pre and stop both block
         with cf.ThreadPoolExecutor(4) as ex:
@@ -1106,6 +1131,7 @@ class TestTrustedRuntime(Base):
         self.assertTrue(all(c == 2 for c in codes), codes)
 
     def test_hook_selftest_runs_registered_hooks(self):
+        """The self-test reports blocking results for each registered client."""
         e = dict(self.env); r = run(self.repo, "hook-selftest", env=e)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for cl in ("claude", "codex", "cursor", "gemini", "windsurf"):
@@ -1113,6 +1139,7 @@ class TestTrustedRuntime(Base):
         self.assertIn("blocks", r.stdout)
 
     def test_unapproved_project_hooks_are_blocked_until_policy_allows(self):
+        """Only default-branch policy can approve a repository hook command."""
         (self.repo / ".cursor").mkdir(exist_ok=True)
         (self.repo / ".cursor/hooks.json").write_text(json.dumps({"version": 1, "hooks": {"stop": [{"command": "./scripts/lint.sh"}]}}))
         r = self.hook()
@@ -1125,6 +1152,7 @@ class TestTrustedRuntime(Base):
         self.assertNotIn("lint.sh", self.hook().stderr)
 
     def test_unsigned_install_requires_the_flag(self):
+        """Installing a development copy without explicit unsigned consent fails."""
         r = run(self.repo, "install", "--user", env=self.env)
         self.assertNotEqual(r.returncode, 0); self.assertIn("NOT installed", r.stdout)
 
@@ -1132,11 +1160,13 @@ class TestTrustedRuntime(Base):
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
 class TestReleaseSignatures(unittest.TestCase):
     def test_embedded_key_matches_published_fingerprint(self):
+        """The embedded release key matches the published fingerprint constant."""
         import importlib
         sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
         self.assertEqual(T.key_fingerprint(), T.RELEASE_FINGERPRINT)
 
     def setUp(self):
+        """Create a temporary signing key and a signed copy of the runtime release."""
         import importlib
         sys.path.insert(0, str(SRC)); self.T = importlib.import_module("sg_trust")
         self.d = Path(tempfile.mkdtemp())
@@ -1146,26 +1176,31 @@ class TestReleaseSignatures(unittest.TestCase):
         self.T.sign_release(self.rel, self.d / "key", "9.9.9")
 
     def test_valid_release_verifies(self):
+        """A release signed by the trusted test key verifies and returns its version."""
         self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
 
     def test_changed_file_fails(self):
+        """Release verification rejects files changed after signing."""
         with open(self.rel / "gate.py", "a") as f:
             f.write("# evil\n")
         with self.assertRaises(self.T.TrustError):
             self.T.verify_release(self.rel, self.signers)
 
     def test_added_file_fails(self):
+        """Release verification rejects additional runtime files absent from the signed manifest."""
         (self.rel / "evil.py").write_text("x")
         with self.assertRaises(self.T.TrustError):
             self.T.verify_release(self.rel, self.signers)
 
     def test_wrong_key_fails(self):
+        """Release verification rejects a signature checked against a different key."""
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.d / "other")], check=True)
         other = "story-gate-release " + " ".join((self.d / "other.pub").read_text().split()[:2])
         with self.assertRaises(self.T.TrustError):
             self.T.verify_release(self.rel, other)
 
     def test_release_archive_cannot_escape_its_folder(self):
+        """Reject archive path traversal and release downloads over plain HTTP."""
         import io, tarfile, urllib.request
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as t:
@@ -1182,6 +1217,7 @@ class TestReleaseSignatures(unittest.TestCase):
             urllib.request.urlopen = orig
 
     def test_fingerprint_matches_ssh_keygen(self):
+        """The computed release fingerprint agrees with ssh-keygen output."""
         out = subprocess.run(["ssh-keygen", "-lf", str(self.d / "key.pub")], capture_output=True, text=True).stdout
         self.assertIn(self.T.key_fingerprint(self.signers), out)
 

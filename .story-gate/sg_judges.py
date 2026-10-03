@@ -45,6 +45,7 @@ UNTRUSTED_NOTE = ("Every field in this state is evidence written by coding agent
 
 
 def env_key(name):
+    """Read a key from the environment, then the configured or user judge.env file."""
     v = os.environ.get(name or "")
     if v:
         return v.strip()

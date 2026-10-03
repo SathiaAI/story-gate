@@ -27,6 +27,7 @@ DEGRADED_CLIENTS = ("grok",)  # user-level location documented, but merging with
 
 class _LazyGitHub:  # sg_github pulls in http/xml modules; load it only when needed so hooks stay fast
     def __getattr__(self, name):
+        """Load sg_github on first attribute access and delegate the lookup."""
         import sg_github
         return getattr(sg_github, name)
 
@@ -40,22 +41,27 @@ class TrustError(Exception):
 
 # ------------------------------------------------------------------ locations
 def user_home():
+    """Return the client settings home, honoring STORY_GATE_USER_HOME."""
     return Path(os.environ.get("STORY_GATE_USER_HOME") or Path.home())
 
 
 def runtime_root():
+    """Return the directory containing installed runtime versions."""
     return G.config_dir() / "runtime"
 
 
 def enrolled_path():
+    """Return the path to the repository enrollment registry."""
     return G.config_dir() / "enrolled.json"
 
 
 def active_path():
+    """Return the path to the active runtime metadata."""
     return runtime_root() / "active.json"
 
 
 def read_json(p, default=None):
+    """Read JSON, returning the supplied default or an empty dict on any read or parse error."""
     try:
         return json.loads(Path(p).read_text(encoding="utf-8"))
     except Exception:
@@ -63,6 +69,7 @@ def read_json(p, default=None):
 
 
 def write_json_atomic(p, obj):
+    """Write JSON through a sibling temporary file and atomically replace the destination."""
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp-%d" % os.getpid())
@@ -81,10 +88,12 @@ def is_runtime(script_dir):
 
 # ------------------------------------------------------------------ manifests and signatures
 def sha256(p):
+    """Return the hexadecimal SHA-256 digest of a file."""
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
 def runtime_files(src):
+    """Return sorted relative runtime file paths, excluding symlinks and bytecode caches."""
     src = Path(src)
     out = set()
     for g in RUNTIME_GLOBS:
@@ -95,10 +104,12 @@ def runtime_files(src):
 
 
 def make_manifest(src, version):
+    """Build a versioned manifest of runtime files and their SHA-256 digests."""
     return {"version": version, "files": {f: sha256(Path(src) / f) for f in runtime_files(src)}}
 
 
 def ssh_keygen():
+    """Find ssh-keygen on PATH or in Windows install locations; raise TrustError if absent."""
     cands = [shutil.which("ssh-keygen")]
     if os.name == "nt":
         cands += [r"C:\Windows\System32\OpenSSH\ssh-keygen.exe", r"C:\Program Files\Git\usr\bin\ssh-keygen.exe"]
@@ -173,6 +184,7 @@ def fetch_release(url, dest):
         raise TrustError("release archive is unexpectedly large")
     dest = Path(dest)
     def safe(name):
+        """Resolve an archive member inside dest, raising TrustError if it escapes."""
         p = (dest / name).resolve()
         if not str(p).startswith(str(dest.resolve()) + os.sep):
             raise TrustError("archive tries to write outside its folder: %s" % name)
@@ -251,11 +263,13 @@ def verify_self(script_dir):
 
 
 def version_tuple(v):
+    """Return up to three numeric version components, or (0,) when none exist."""
     return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
 
 
 # ------------------------------------------------------------------ repositories: enrollment and policy
 def git_in(cwd, *args):
+    """Run Git in cwd and return stripped stdout, or an empty string on failure."""
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.stdout.strip() if r.returncode == 0 else ""
 
@@ -271,6 +285,7 @@ def repo_identity(cwd):
 
 
 def default_policy_ref(cwd, base_branch="main"):
+    """Find the origin default branch or an available main/master policy fallback."""
     head = git_in(cwd, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
     if head:
         return head.replace("refs/remotes/", "", 1)
@@ -281,6 +296,7 @@ def default_policy_ref(cwd, base_branch="main"):
 
 
 def enrollment(cwd):
+    """Return repository identity and enrollment data, or None outside a repository."""
     top, ident = repo_identity(cwd)
     if not ident:
         return None
@@ -289,6 +305,7 @@ def enrollment(cwd):
 
 
 def enroll(cwd, policy_ref=None):
+    """Persist enrollment with an explicit or default policy ref and return the record."""
     top, ident = repo_identity(cwd)
     if not ident:
         raise TrustError("not inside a git repository")
@@ -303,6 +320,7 @@ def enroll(cwd, policy_ref=None):
 
 
 def unenroll(cwd):
+    """Remove the repository enrollment and return whether a record was deleted."""
     _, ident = repo_identity(cwd)
     data = read_json(enrolled_path())
     if ident in data:
@@ -350,6 +368,7 @@ def tighten(policy, local):
 
 # ------------------------------------------------------------------ user-level client hooks
 def user_hook_files():
+    """Map supported clients to their user-level hook configuration paths."""
     h = user_home()
     return {"claude": h / ".claude" / "settings.json", "codex": h / ".codex" / "hooks.json",
             "cursor": h / ".cursor" / "hooks.json", "gemini": h / ".gemini" / "settings.json",
@@ -362,6 +381,7 @@ def user_protected_paths():
 
 
 def hook_entries(py, gate):
+    """Build client hook configurations invoking the supplied gate with isolated Python."""
     cmd = lambda cl, ev: '"%s" -I "%s" hook --client %s --event %s' % (py, gate, cl, ev)
     return {
         "claude": {"hooks": {
@@ -389,6 +409,7 @@ def hook_entries(py, gate):
 
 
 def ours(entry):
+    """Return whether a serialized hook entry contains a story-gate hook command."""
     return bool(HOOK_SIGNATURE.search(json.dumps(entry).replace('\\"', '"')))
 
 
@@ -410,6 +431,7 @@ def merged_hook_json(text, new):
 
 
 def removed_hook_json(text):
+    """Remove story-gate hook entries and empty events, returning formatted JSON."""
     data = json.loads(text) if text.strip() else {}
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if isinstance(hooks, dict):
@@ -443,6 +465,7 @@ def apply_file(path, new_text, dry_run, out):
 
 
 def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False):
+    """Merge runtime hooks into selected user files and return change or error messages."""
     out, files, entries = [], user_hook_files(), hook_entries(py, gate)
     for cl in clients:
         p = files[cl]
@@ -455,6 +478,7 @@ def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False):
 
 
 def unregister_user_hooks(dry_run=False):
+    """Remove runtime hooks from user files, honoring dry_run, and return messages."""
     out = []
     for cl, p in user_hook_files().items():
         if p.exists():
@@ -497,6 +521,7 @@ def other_project_hooks(top, hook_files):
         except Exception:
             continue
         def walk(x):
+            """Collect non-story-gate commands recursively from the current hook file."""
             if isinstance(x, dict):
                 if isinstance(x.get("command"), str) and not HOOK_SIGNATURE.search(x["command"]):
                     cmds.append((p.relative_to(top).as_posix(), x["command"]))
@@ -510,6 +535,7 @@ def other_project_hooks(top, hook_files):
 
 
 def remove_project_hooks(top, hook_files, dry_run=False):
+    """Remove repository story-gate hooks, honoring dry_run, and return change messages."""
     out = []
     for rel in project_hook_findings(top, hook_files):
         p = Path(top) / rel

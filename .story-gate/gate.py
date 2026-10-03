@@ -74,6 +74,7 @@ def _nothing_to_gate():
 
 
 def json_escape(s):
+    """Escape backslashes and double quotes for the enrollment key lookup."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
@@ -95,6 +96,7 @@ RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed wit
 
 
 def _root():
+    """Resolve the repository root from the override, runtime context, or script location."""
     if os.environ.get("STORY_GATE_ROOT"):
         return Path(os.environ["STORY_GATE_ROOT"])
     if RUNTIME:  # the trusted runtime works on whichever repository the client is in
@@ -227,6 +229,7 @@ def policy_json(name):
 
 
 def cfg():
+    """Load policy over defaults, allowing enrolled working trees only to tighten it."""
     p = trusted("config.json")
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.environ.get("STORY_GATE_TRUSTED_DIR") and not p.is_file():
@@ -1328,6 +1331,7 @@ def hook_out(client, event, msg, block):
 
 
 def cmd_hook(client, event):
+    """Read a client hook payload, enforce the applicable policy, and emit its result."""
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         payload = json.loads(raw) if raw.strip() else {}
@@ -2049,10 +2053,12 @@ def cmd_hook_selftest():
 
 
 def read_active_dir():
+    """Return the active runtime directory, or None when none is recorded."""
     return T.read_json(T.active_path()).get("dir")
 
 
 def shutil_rmtree(p):
+    """Remove a directory tree while ignoring filesystem errors."""
     import shutil
     shutil.rmtree(p, ignore_errors=True)
 
@@ -2191,6 +2197,7 @@ def cmd_setup(cmd, kv, rest):
 
 
 def flags(argv):
+    """Split arguments into valued options and remaining positional or boolean flags."""
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned"):
@@ -2203,6 +2210,7 @@ def flags(argv):
 
 
 def main(argv):
+    """Dispatch CLI arguments to a gate command and return its exit status."""
     if not argv:
         print(__doc__); return 0
     cmd, args = argv[0], argv[1:]
