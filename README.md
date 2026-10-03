@@ -80,10 +80,11 @@ Using a different judge? See [Fallbacks](#fallbacks).
 
 **Step 4 · Set up your computer for AI tools** (4 minutes; only if AI tools run on your computer)
 ```bash
-python3 .story-gate/gate.py install --user    # once per computer: safe hooks for Claude Code, Codex, Cursor, Gemini, Windsurf
+python3 .story-gate/gate.py install --user --unsigned   # once per computer; drop --unsigned once a signed release exists
 python3 .story-gate/gate.py setup-agent       # opens GitHub: click Create, then Install on your repos
 python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output into the AI tool's terminal
 ```
+- **Until the first signed release:** plain `install --user` stops with "NOT installed: no signed release". Use `--unsigned` (doctor reports the copy as unsigned); once a signed release is out, run `install --user` again without it.
 - `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
 - It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
 - It also turns on the **checkout filter** in this repository (and in each repository you `enroll`, nowhere else): when git writes an AI tool's hook file, you get the version your default branch approved, minus any command it didn't. Settings live in the repository's own `.git` folder, never in a commit.

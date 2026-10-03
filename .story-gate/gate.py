@@ -2196,15 +2196,19 @@ def cmd_user(cmd, kv, rest):
                   "already trust: python %s %s" % (Path(read_active_dir()) / "gate.py" if read_active_dir() else "<runtime>/gate.py", cmd))
             return 1
         if cmd == "rollback":
-            prev = T.read_json(T.active_path()).get("previous")
+            act = T.read_json(T.active_path())
+            prev = act.get("previous")
             if not prev or not Path(prev).is_dir():
                 print("No previous runtime to roll back to."); return 1
-            if T.verify_self(prev) and any("changed" in x or "unexpected" in x for x in T.verify_self(prev)):
-                print("The previous runtime failed its integrity check; not rolling back."); return 1
+            bad = T.runtime_problems(prev, act.get("previous_manifest_sha256"))  # checked against ITS OWN recorded manifest hash
+            if bad:
+                print("The previous runtime failed its integrity check; not rolling back (%s). Install that version again instead."
+                      % bad[0]); return 1
             m = T.read_json(Path(prev) / "manifest.json")
             T.launcher_path().write_text(T.LAUNCHER, encoding="utf-8")
             T.write_json_atomic(T.active_path(), {"version": m.get("version"), "dir": prev, "previous": str(HERE),
-                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json"),
+                                                  "previous_manifest_sha256": act.get("manifest_sha256"), "signed": m.get("signed"),
+                                                  "manifest_sha256": T.sha256(Path(prev) / "manifest.json"),
                                                   "launcher_sha256": T.sha256(T.launcher_path())})
             print("Rolled back to %s." % m.get("version")); return 0
         import tempfile as _tf

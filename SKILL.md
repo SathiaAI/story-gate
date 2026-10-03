@@ -52,7 +52,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-g
 - In Cowork, Cursor Cloud and Codex cloud, hooks don't run: run `gate.py status` before editing and run the checkpoints yourself. CI is the backstop.
 
 ## Claude / Cowork specifics
-- **If the repo has no `.story-gate/`:** copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` (setup-repo runs as Paul, once).
+- **If the repo has no `.story-gate/`:** stop and ask the human to set it up: copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` themselves. Agents never run those commands.
 - **Judge key on Paul's machine:** it lives in `F:\ENV\.env`. Run `gate.py` through `device_bash` with `STORY_GATE_ENV_FILE=$HOME/mnt/ENV/.env`. A cloud shell has no key, so local verdicts there can't PASS. CI still judges, using the repo secret.
 - **Sub-agents:** use the Agent tool, with `model: haiku` for `small` and `model: sonnet` for `medium`. Sub-agents write only their evidence file.
 - **Drift with real options:** run **frontier-gate**, then give Paul plain-English options with pros/cons and a recommendation.

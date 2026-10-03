@@ -1,6 +1,6 @@
 # How each AI tool runs story-gate's hooks
 
-`gate.py install --user` puts story-gate's hooks in each tool's **user** settings and points them at the signed copy in your user folder. This table says what each tool's own documentation promises, so we only claim protection where the tool does. Checked October 2026. "Unverified" means the tool's docs don't say.
+`gate.py install --user` puts story-gate's hooks in each tool's **user** settings and points them at the signed copy in your user folder. Until the first signed release is published, pilots install with `gate.py install --user --unsigned` (doctor then says the copy is unsigned). This table says what each tool's own documentation promises, so we only claim protection where the tool does. Checked October 2026. "Unverified" means the tool's docs don't say.
 
 | | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build |
 |---|---|---|---|---|---|---|
@@ -12,7 +12,9 @@
 | **story-gate support** | Full | Full (trust the hooks once in `/hooks`) | Full | Full | Registered; behaviour partly unverified | Reduced protection: not registered |
 
 **What this means**
-- **Claude Code, Codex, Cursor, Gemini:** story-gate's hooks run from your user settings alongside any project hooks, and a "block" from story-gate stops the edit.
+- **Claude Code, Codex, Cursor:** story-gate's hooks run from your user settings alongside any project hooks, and a "block" from story-gate stops the edit.
+- **Gemini:** a "block" from story-gate stops the edit, but Gemini's docs don't say whether user and project hooks both run, so that part is unverified (step 3 below checks it).
+- **Trust step vs story-gate:** the tool's trust step decides whether *it* runs a project's hooks. Separately, in an enrolled repository in enforce mode, story-gate blocks pre-edit and other non-post hook events while a project hook command isn't in the default branch's `project_hooks_allowed` list.
 - **Fail-open tools:** a crash or timeout lets the edit through. story-gate keeps its pre-edit hook fast (it reads local files only) and fails closed inside the hook itself. CI still checks every PR either way.
 - **Windsurf/Devin:** hooks are registered and blocking is documented, but trust and timeout behaviour aren't. Treat it as partly protected.
 - **Grok:** it also reads Claude Code's and Cursor's hook files, so it may pick up story-gate's Claude hooks. Merging isn't documented, so story-gate doesn't register Grok hooks or claim protection there. Run `gate.py status` and rely on CI.
@@ -34,11 +36,11 @@ Sources for lockdown: [Claude Code managed settings](https://code.claude.com/doc
 
 ## Check it on your computer
 
-1. Run `gate.py hook-selftest` in an enrolled repository. It runs each installed hook exactly as the tool would and times it. In enforce mode every tool should say **blocks**.
+1. Run `gate.py hook-selftest` in an enrolled repository. It sends a sample pre-edit request to story-gate's hook handler once per registered tool and times it. It checks story-gate's side only: it doesn't start the AI tool or test how the tool merges user and project hooks (steps 2 and 3 do). In enforce mode every tool should say **blocks**.
 2. Open each AI tool once, with no READY story, and ask it to edit a code file. The edit should be blocked (enforce) or warned about (warn).
 3. Optional: add a hook of your own in the project settings, then confirm story-gate's hook still runs. That shows the tool runs user and project hooks together.
 4. Run `gate.py doctor --prove`. It plants a canary hook in every AI-tool hook file on a throwaway commit and shows the canary never reaches disk.
 
-The CI matrix tests story-gate's side on Windows, macOS and Linux. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
+The CI matrix tests story-gate's side on Linux and Windows; the same suite was also run by hand on macOS. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
 
 Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [Codex hooks](https://developers.openai.com/codex/hooks) · [Cursor hooks](https://cursor.com/docs/agent/hooks) · [Gemini CLI hooks](https://geminicli.com/docs/hooks/) · [Windsurf/Devin hooks](https://docs.windsurf.com/windsurf/cascade/hooks) · [Grok hooks](https://docs.x.ai/build/features/hooks)

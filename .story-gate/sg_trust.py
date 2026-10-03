@@ -242,9 +242,10 @@ def install_runtime(src, version, unsigned=False, signers=RELEASE_SIGNERS):
     if dest.exists():
         shutil.rmtree(dest)
     os.replace(stage, dest)
-    prev = read_json(active_path()).get("dir")
+    old = read_json(active_path())
     launcher_path().write_text(LAUNCHER, encoding="utf-8")
-    write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": prev, "signed": bool(signed),
+    write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": old.get("dir"),
+                                      "previous_manifest_sha256": old.get("manifest_sha256"), "signed": bool(signed),
                                       "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path())})
     return dest
 
@@ -281,15 +282,12 @@ def forget(kind, key):
         write_json_atomic(manifest_path(), m)
 
 
-def verify_self(script_dir):
-    """The running runtime must match its install-time manifest and be the active one. Returns a list of problems."""
-    sd = Path(script_dir).resolve()
+def runtime_problems(sd, manifest_sha256):
+    """Integrity of one runtime folder: its manifest must have the recorded hash and every file must match the manifest."""
+    sd = Path(sd).resolve()
     problems = []
-    act = read_json(active_path())
-    if not act or Path(act.get("dir", "")).resolve() != sd:
-        problems.append("this runtime is not the active story-gate runtime (%s)" % sd)
     mp = sd / "manifest.json"
-    if act.get("manifest_sha256") and mp.is_file() and sha256(mp) != act["manifest_sha256"]:
+    if not manifest_sha256 or not mp.is_file() or sha256(mp) != manifest_sha256:
         problems.append("runtime manifest was changed after install")
     man = read_json(mp)
     for f, h in (man.get("files") or {}).items():
@@ -299,6 +297,20 @@ def verify_self(script_dir):
     extra = [f for f in runtime_files(sd) if f not in (man.get("files") or {})]
     if extra:
         problems.append("unexpected files in the runtime: %s" % ", ".join(extra[:5]))
+    return problems
+
+
+def verify_self(script_dir):
+    """The running runtime must match its install-time manifest and be the active one. Returns a list of problems."""
+    sd = Path(script_dir).resolve()
+    problems = []
+    act = read_json(active_path())
+    if not act or Path(act.get("dir", "")).resolve() != sd:
+        problems.append("this runtime is not the active story-gate runtime (%s)" % sd)
+    if act.get("manifest_sha256"):
+        problems += runtime_problems(sd, act["manifest_sha256"])
+    else:
+        problems += [x for x in runtime_problems(sd, None) if "manifest was changed" not in x]
     if act and not launcher_ok():
         problems.append("the launcher (%s) was changed after install" % launcher_path())
     return problems
@@ -320,7 +332,7 @@ def repo_identity(cwd):
     if not top:
         return None, None
     common = git_in(cwd, "rev-parse", "--git-common-dir")
-    common = os.path.realpath(os.path.join(top, common)) if common and not os.path.isabs(common) else os.path.realpath(common or top)
+    common = os.path.realpath(os.path.join(cwd, common)) if common and not os.path.isabs(common) else os.path.realpath(common or top)  # git prints it relative to cwd
     return os.path.realpath(top), os.path.normcase(common)
 
 
@@ -606,17 +618,48 @@ def _branch_hook_files(top, hook_files):
     return [rel for rel in hook_files if rel not in LOCAL_ONLY or rel in tracked]
 
 
+def _hook_commands(p):
+    """Command strings under the `hooks` section of a hook file (JSON, or TOML where Python has tomllib).
+    None when the file can't be parsed, so the caller can fail closed."""
+    text = p.read_text(encoding="utf-8", errors="ignore")
+    try:
+        if p.suffix == ".toml":
+            import tomllib
+            data = tomllib.loads(text)
+        else:
+            data = json.loads(text) if text.strip() else {}
+    except Exception:  # unparseable, or no tomllib (Python < 3.11)
+        return None
+    out = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k == "command" and isinstance(v, (str, list)):
+                    out.append(v if isinstance(v, str) else " ".join(map(str, v)))
+                else:
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(data.get("hooks") if isinstance(data, dict) else None)
+    return out
+
+
+def _runs_repo_gate(p):
+    cmds = _hook_commands(p)
+    if cmds is None:  # can't read it with certainty: treat as running repository code
+        return ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/")
+    return any(".story-gate/gate.py" in c.replace("\\", "/") for c in cmds)
+
+
 def project_hook_findings(top, hook_files):
-    """Project-level hook files that still run story-gate code from the repository (a branch could swap it)."""
-    found = []
-    for rel in _branch_hook_files(top, hook_files):
-        p = Path(top) / rel
-        if p.is_file() and ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/"):
-            found.append(rel)
+    """Project-level hook files whose hook commands still run story-gate code from the repository (a branch could swap it).
+    Only commands under `hooks` count, so a permission rule such as Bash(python3 .story-gate/gate.py:*) is not a finding."""
+    found = [rel for rel in _branch_hook_files(top, hook_files) if (Path(top) / rel).is_file() and _runs_repo_gate(Path(top) / rel)]
     hd = Path(top) / ".grok" / "hooks"
     if hd.is_dir():
-        found += [str(f.relative_to(top)).replace("\\", "/") for f in hd.glob("*.json")
-                  if ".story-gate/gate.py" in f.read_text(encoding="utf-8", errors="ignore").replace("\\", "/")]
+        found += [str(f.relative_to(top)).replace("\\", "/") for f in hd.glob("*.json") if _runs_repo_gate(f)]
     return sorted(set(found))
 
 

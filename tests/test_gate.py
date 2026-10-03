@@ -735,6 +735,12 @@ class TestGitHubLogic(unittest.TestCase):
         G.paged = lambda p, t: [ev("labeled", "Paul"), ev("unlabeled", "agent-bot[bot]")]
         self.assertIsNone(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"))
 
+    def test_label_actor_uses_event_time_not_response_order(self):
+        G = self.G
+        ev = lambda kind, who, at, i: {"event": kind, "label": {"name": "story-gate-change"}, "actor": {"login": who}, "created_at": at, "id": i}
+        G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]", "2026-10-02T10:00:00Z", 3), ev("labeled", "Paul", "2026-10-01T10:00:00Z", 1)]
+        self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "agent-bot[bot]")
+
     def test_ruleset_shape(self):
         r = self.G.ruleset_json()
         pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
@@ -1044,6 +1050,18 @@ class TestTrustedRuntime(RuntimeFixture):
         (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 .story-gate/gate.py hook"}]}]}}))
         r = self.hook()
         self.assertEqual(r.returncode, 2); self.assertIn("project hook files", r.stderr)
+
+    def test_permission_rule_naming_gate_is_not_a_project_hook(self):
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(python3 .story-gate/gate.py:*)"]}}))
+        self.assertNotIn("project hook files", self.hook().stderr)
+
+    def test_repository_identity_is_the_same_from_a_subfolder(self):
+        sub = self.repo / "src" / "deep"; sub.mkdir(parents=True)
+        code = "import sys; sys.path.insert(0, sys.argv[1]); import sg_trust as T; print(T.repo_identity(sys.argv[2])[1])"
+        ident = lambda d: subprocess.run([sys.executable, "-c", code, str(SRC), str(d)], capture_output=True, text=True, env=dict(os.environ, **self.env)).stdout
+        self.assertEqual(ident(sub), ident(self.repo))  # git prints the common dir relative to cwd, not to the top
+        self.assertEqual(self.hook(cwd=sub).returncode, 2)
 
     def test_unenrolled_repo_is_untouched(self):
         other = Path(tempfile.mkdtemp())
@@ -1402,10 +1420,32 @@ class TestRepoHookGuard(RuntimeFixture):
     def test_rollback_keeps_hooks_working(self):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
         act = json.loads((self.home / "runtime/active.json").read_text())
-        act["previous"] = act["dir"]; (self.home / "runtime/active.json").write_text(json.dumps(act))
+        act["previous"] = act["dir"]; act["previous_manifest_sha256"] = act["manifest_sha256"]
+        (self.home / "runtime/active.json").write_text(json.dumps(act))
         r = subprocess.run([self.py, "-I", self.gate, "rollback"], cwd=self.repo, env=e, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("integrity", self.hook().stderr)
+
+    def test_rollback_checks_the_previous_runtime_against_its_own_manifest(self):
+        import hashlib
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        act_p = self.home / "runtime/active.json"
+        act = json.loads(act_p.read_text())
+        old = self.home / "runtime/0.0.0-older"
+        shutil.copytree(act["dir"], old)
+        man = json.loads((old / "manifest.json").read_text()); man["installed_at"] = "2020-01-01T00:00:00Z"  # a different install
+        (old / "manifest.json").write_text(json.dumps(man, indent=2) + "\n")
+        act["previous"] = str(old); act["previous_manifest_sha256"] = hashlib.sha256((old / "manifest.json").read_bytes()).hexdigest()
+        act_p.write_text(json.dumps(act))
+        rb = lambda: subprocess.run([self.py, "-I", self.gate, "rollback"], cwd=self.repo, env=e, capture_output=True, text=True)
+        (old / "gate.py").write_text((old / "gate.py").read_text() + "\n# tampered\n")
+        r = rb()
+        self.assertEqual(r.returncode, 1); self.assertIn("integrity", r.stdout)
+        self.assertEqual(json.loads(act_p.read_text())["dir"], act["dir"])
+        (old / "gate.py").write_text((Path(act["dir"]) / "gate.py").read_text())
+        r = rb()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # before the fix this always refused: two installs never share a manifest hash
+        self.assertEqual(Path(json.loads(act_p.read_text())["dir"]).resolve(), old.resolve())
 
     def test_filter_off_is_logged_and_on_restores(self):
         r = self.admin("filter", "off")
