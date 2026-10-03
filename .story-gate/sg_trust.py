@@ -246,12 +246,56 @@ def install_runtime(src, version, unsigned=False, signers=RELEASE_SIGNERS):
     launcher_path().write_text(LAUNCHER, encoding="utf-8")
     write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": old.get("dir"),
                                       "previous_manifest_sha256": old.get("manifest_sha256"), "signed": bool(signed),
-                                      "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path())})
+                                      "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path()),
+                                      "shim_python": old.get("shim_python")})
     return dest
 
 
 def launcher_path():
     return runtime_root() / "launch.py"
+
+
+def shim_dir():
+    return runtime_root() / "bin"
+
+
+def shim_files(py):
+    """The `story-gate` command: a two-line wrapper that runs the verified runtime through the launcher, never a repository's copy."""
+    py, launcher = str(py), str(launcher_path())
+    return {"story-gate": '#!/bin/sh\n# story-gate: runs the verified story-gate installed on this computer\nexec "%s" -I "%s" "$@"\n'
+            % (py.replace("\\", "/"), launcher.replace("\\", "/")),
+            "story-gate.cmd": '@echo off\r\nrem story-gate: runs the verified story-gate installed on this computer\r\n"%s" -I "%s" %%*\r\n'
+            % (py.replace("/", "\\") if os.name == "nt" else py, launcher.replace("/", "\\") if os.name == "nt" else launcher)}
+
+
+def write_shims(py):
+    d = shim_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    for name, body in shim_files(py).items():
+        f = d / name
+        f.write_bytes(body.encode("utf-8"))
+        if name == "story-gate" and os.name != "nt":
+            f.chmod(0o755)
+    act = read_json(active_path())
+    if act:
+        write_json_atomic(active_path(), dict(act, shim_python=str(py)))  # so doctor can check the wrappers byte for byte
+    return d
+
+
+def shim_problems(py=None):
+    """Doctor's check: the wrappers say exactly what install wrote, and `story-gate` on PATH (if any) is ours."""
+    py = py or read_json(active_path()).get("shim_python")
+    if not py:
+        return ["the story-gate command isn't installed yet (gate.py install --user adds it)"]
+    probs = []
+    for name, body in shim_files(py).items():
+        f = shim_dir() / name
+        if not f.is_file() or f.read_bytes() != body.encode("utf-8"):
+            probs.append("%s was changed or is missing (gate.py install --user rewrites it)" % f)
+    found = shutil.which("story-gate")
+    if found and Path(found).resolve().parent != shim_dir().resolve():
+        probs.append("`story-gate` on PATH is %s, not story-gate's own command in %s" % (found, shim_dir()))
+    return probs
 
 
 def launcher_ok():
@@ -354,16 +398,40 @@ def enrollment(cwd):
     return dict(rec, toplevel=top, identity=ident) if rec else {"toplevel": top, "identity": ident, "enrolled": False}
 
 
-def enroll(cwd, policy_ref=None):
+LOCAL_POLICY_RISK = ("a local branch can be moved by anything running on this computer, including an AI agent, so it is a "
+                     "weaker source of policy than a remote's branch")
+
+
+def is_remote_ref(top, ref):
+    """True when ref names a configured remote's branch (e.g. origin/main), which only a fetch from that remote moves."""
+    return bool(ref) and "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split()
+
+
+def policy_source_problem(e):
+    """Why an enrollment's policy source can't be trusted (None when it can). Fails closed for local refs, including
+    enrollments made before this check, unless the human allowed a local policy explicitly."""
+    if not e or is_remote_ref(e["toplevel"], e.get("policy_ref")) or e.get("allow_local_policy"):
+        return None
+    return ("policy comes from %s, which is not a remote's branch: %s. Re-enroll with a remote branch "
+            "(gate.py enroll --policy-ref origin/main), or, for a repository with no remote, "
+            "gate.py enroll --allow-local-policy" % (e.get("policy_ref"), LOCAL_POLICY_RISK))
+
+
+def enroll(cwd, policy_ref=None, allow_local=False):
     top, ident = repo_identity(cwd)
     if not ident:
         raise TrustError("not inside a git repository")
     ref = policy_ref or default_policy_ref(top)
     if not ref:
         raise TrustError("can't find the default branch (no origin/HEAD, main or master). Pass --policy-ref <branch>")
+    if not is_remote_ref(top, ref) and not allow_local:
+        raise TrustError("policy would come from %s, which is not a remote's branch: %s. Use --policy-ref <remote>/<branch>, "
+                         "or, only if this repository has no remote, --allow-local-policy" % (ref, LOCAL_POLICY_RISK))
     data = read_json(enrolled_path())
     data[ident] = {"enrolled": True, "policy_ref": ref, "origin": git_in(top, "remote", "get-url", "origin"),
                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if not is_remote_ref(top, ref):
+        data[ident]["allow_local_policy"] = True  # the human chose this; doctor keeps warning about it
     write_json_atomic(enrolled_path(), data)
     return data[ident]
 
@@ -378,11 +446,23 @@ def unenroll(cwd):
     return False
 
 
+_POLICY_SHA = {}  # (top, ref) -> (sha, when): one hook call reads every policy file from the same commit
+
+
 def policy_commit(top, ref):
     """The commit the policy ref points at right now. "origin/main" means the remote-tracking branch only: a local
     branch or tag with the same name (which git would otherwise prefer) can't stand in for it."""
     if not ref:
         return None
+    hit = _POLICY_SHA.get((str(top), ref))
+    if hit and time.time() - hit[1] < 5:  # a hook runs well under a second; long-running commands re-resolve
+        return hit[0]
+    sha = _resolve_policy_commit(top, ref)
+    _POLICY_SHA[(str(top), ref)] = (sha, time.time())
+    return sha
+
+
+def _resolve_policy_commit(top, ref):
     if "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split():
         candidates = ("refs/remotes/" + ref,)  # a remote's branch: if the tracking ref is gone, fail closed
     else:

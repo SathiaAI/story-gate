@@ -84,11 +84,12 @@ python3 .story-gate/gate.py install --user --unsigned   # once per computer; dro
 python3 .story-gate/gate.py setup-agent       # opens GitHub: click Create, then Install on your repos
 python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output into the AI tool's terminal
 ```
+- `install --user` also adds a **`story-gate` command** (in the runtime's `bin` folder; add that folder to your PATH to type it). It runs the verified copy, so AI tools use `story-gate start`, `story-gate score` and so on instead of the repository's `gate.py`. If it isn't on PATH, story-gate's messages print the full command.
 - **Until the first signed release:** plain `install --user` stops with "NOT installed: no signed release". Use `--unsigned` (doctor reports the copy as unsigned); once a signed release is out, run `install --user` again without it.
 - `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
 - It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
 - It also turns on the **checkout filter** in this repository (and in each repository you `enroll`, nowhere else): when git writes an AI tool's hook file, you get the version your default branch approved, minus any command it didn't. Settings live in the repository's own `.git` folder, never in a commit.
-- In each other repository that uses story-gate, run `gate.py enroll`.
+- In each other repository that uses story-gate, run `gate.py enroll`. Rules must come from a remote's branch (`origin/main` by default). For a repository with no remote, `enroll --allow-local-policy` works but is weaker (anything on this computer can move a local branch), and doctor says so.
 - **Recommended, optional, OFF unless you say yes:** `gate.py lockdown` explains Claude Code's own hard switch for repository hooks before anything changes. See [Lockdown](#lockdown-optional-off-by-default).
 - Your AI then pushes and opens PRs as **story-gate-agent[bot]**, never as you.
 
@@ -127,13 +128,16 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 
 | What a branch might try | What happens |
 |---|---|
-| Replace `.story-gate/gate.py` with its own code | Ignored. Hooks run the signed copy in your user folder, and it checks its own fingerprint every time |
+| Replace `.story-gate/gate.py` with its own code | Ignored. Hooks run the signed copy in your user folder, and it checks its own fingerprint every time. Agents run the same copy through the `story-gate` command; the hooks refuse running the repository's story-gate code |
 | Switch the rules to `warn` | Ignored. Rules come from the default branch; a branch can only make them stricter |
 | Delete `.story-gate` | Still checked: this repository is enrolled on your computer |
 | Add a project hook that runs story-gate code from the branch | Blocked in enforce mode, flagged in warn mode |
 | Add its own hook to `.claude/settings.json`, `.cursor/hooks.json` or another AI-tool hook file | The checkout filter removes every command the default branch didn't approve before the file reaches disk. With lockdown on, Claude Code also refuses repository hooks outright |
 | Get the AI to switch the filter or lockdown off | Blocked: `filter`, `lockdown`, `install`, `enroll` and `upgrade` are human-only, and shell commands that touch the filter settings are refused |
 | Get the AI to edit your user hooks or the runtime | Blocked |
+| Move the branch the rules come from | Rules come from a remote's branch (e.g. `origin/main`), which only a fetch from that remote moves; the hooks refuse commands that change remotes or remote-tracking refs. A local-only branch is refused unless you enroll with `--allow-local-policy`, and doctor keeps warning about it |
+
+**Where the line is (trust boundary).** story-gate protects you from a branch: hooks, the checkout filter and the story-gate code itself never come from it. It does **not** make a branch's own code safe to run. When an AI agent runs the tests or the build, that is the branch's code, running as you, the same as if you ran it. Local verdict files are a convenience, not proof: CI judges every PR again with the default branch's copy of story-gate and its own test run, and a code owner approves the merge. Code that already runs as you (malware, or a script you chose to run) can change anything in your user folder, story-gate's included; that needs the operating system's protection, not story-gate's.
 
 **Three layers, honestly labelled.** `gate.py doctor` shows each tool's level on your computer, and the local dashboard shows the same table.
 
@@ -329,6 +333,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 - **Grok:** user and project hook merging isn't documented, so story-gate doesn't register Grok hooks (status checks by hand, CI as the backstop). Windsurf/Devin timeout and trust behaviour is undocumented.
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
+- **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests

@@ -2,7 +2,7 @@
 
 Every code change belongs to a story. A story starts on defined specs, is built and tested against them, and ends on them. It passes **READY** before code is written, **CHECKPOINTS** while it's being built, and **DONE** before the work is called finished. Agents collect the evidence; `gate.py` makes the call. Never declare a gate passed yourself. Quote the line `gate.py` prints.
 
-`gate.py` = `python3 .story-gate/gate.py` (`python` on Windows). Run it from the repo root.
+`gate.py` means **`story-gate`**, the verified copy installed on this computer; run it anywhere inside the repository. If `story-gate` isn't found, use the full command story-gate's messages print. Only where story-gate isn't installed (cloud agents, where hooks don't run) use `python3 .story-gate/gate.py` (`python` on Windows) from the repo root. With story-gate installed, the hooks refuse running the repository's copy, because a branch can replace it.
 
 **Who decides what:**
 

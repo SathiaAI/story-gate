@@ -16,7 +16,7 @@ Commands (run from the repo root):
   install --user [--clients claude,codex,cursor,gemini,windsurf] [--dry-run] [--unsigned]
                                      once per computer, as the human: install the trusted runtime + user-level hooks, enroll this repo
   uninstall --user [--dry-run]       remove the user-level hooks and the runtime
-  enroll [--policy-ref REF] | unenroll   turn checking (and the checkout filter for AI-tool hook files) on/off for this repository
+  enroll [--policy-ref REMOTE/BRANCH] [--allow-local-policy] | unenroll   turn checking (and the checkout filter for AI-tool hook files) on/off for this repository
   filter on|off|status               this repository only: the checkout filter that keeps a branch's hook changes off disk (off is logged)
   lockdown [--on [--keep-project-hook CMD] | --off | --bundle DIR]   optional, OFF by default: Claude Code's hard switch for
                                      repository hooks. Explains first; --on needs your explicit YES; --bundle writes files for IT
@@ -230,6 +230,9 @@ def policy_json(name):
     """A settings file from where policy comes from: CI's trusted copy, the enrolled default branch, or the working tree."""
     e = enrolled()
     if e:
+        bad = T.policy_source_problem(e)
+        if bad:
+            raise ConfigError("this repository is enrolled but its %s - the gate fails closed" % bad)
         return T.policy_text(e["toplevel"], e["policy_ref"], name)
     p = trusted(name)
     return p.read_text(encoding="utf-8") if p.is_file() else None
@@ -1341,7 +1344,40 @@ FILTER_BYPASS = re.compile(
     r"|\.git[/\\]config\b|config\.worktree|\bgit\b[^|;&]*\s-c\s*(?:filter|include|core\.attributes|core\.hookspath|remote)"
     r"|update-ref|refs/remotes|\bremote\s+(?:add|set-url|rename|remove|rm|set-head|set-branches)\b|\bremote\.[^.\s]+\.(?:url|fetch|pushurl)",
     re.I)
-ADMIN_CALL = re.compile(r"(?:gate|launch)\.py\s+(?:-\S+\s+)*(%s)\b" % "|".join(sorted(ADMIN_COMMANDS)))
+ADMIN_CALL = re.compile(r"(?:(?:gate|launch)\.py|\bstory-gate(?:\.cmd)?)\s+(?:-\S+\s+)*(%s)\b" % "|".join(sorted(ADMIN_COMMANDS)))
+# Running story-gate's own code from the repository. Hooks never do; with the trusted runtime installed, agents don't either:
+# a branch can replace that code. Reading it (cat, grep, git diff...) is fine.
+REPO_GATE_CODE = re.compile(r"\.story-gate/[\w.-]+\.py\b", re.I)
+READ_ONLY_CMD = re.compile(r"\s*(?:cat|head|tail|less|more|grep|egrep|rg|wc|ls|diff|file|stat|type|Get-Content|Select-String|"
+                           r"git\s+(?:diff|show|log|blame|status|grep|ls-files))\s", re.I)
+
+
+def runs_repo_gate_code(cmd):
+    if not REPO_GATE_CODE.search(cmd.replace("\\", "/")):
+        return False
+    return not (READ_ONLY_CMD.match(cmd) and not re.search(r"[;&|`$<>\n(]", cmd))
+
+
+def verified_gate_call(cmd):
+    """`story-gate <args>` or the exact full launcher command gate_cmd prints, with plain arguments and no other shell."""
+    c = cmd.strip()
+    if "`" in c or "$(" in c or "${" in c:
+        return False  # double quotes still run these
+    for prefix in ("story-gate ", "story-gate.cmd ", '"%s" -I "%s" ' % (sys.executable, T.launcher_path())):
+        if c.startswith(prefix):
+            rest = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", c[len(prefix):])
+            return not re.search(r"[;&|`$<>\n(){}]", rest)
+    return False
+
+
+def gate_cmd(args):
+    """What to tell an agent to run: the verified copy on this computer when it's installed, else the repository's copy."""
+    import shutil
+    if not RUNTIME:
+        return "python .story-gate/gate.py " + args
+    if shutil.which("story-gate") and Path(shutil.which("story-gate")).resolve().parent == T.shim_dir().resolve():
+        return "story-gate " + args
+    return '"%s" -I "%s" %s' % (sys.executable, T.launcher_path(), args)
 
 
 def is_admin_or_bypass(cmd):
@@ -1361,10 +1397,13 @@ def touches_gate(cmd):
         return True  # switching protection off, changing the policy source or any admin command: human only, anywhere in the line
     if sub in ADMIN_COMMANDS:
         return True  # installing, enrolling, upgrading or signing is for the human, never an agent
+    if RUNTIME and verified_gate_call(cmd):
+        return False  # the verified copy (`story-gate ...` or the full command the hooks print); admin calls were refused above
     if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and m and plain.count(".story-gate") == 1):
         return False
     low = cmd.replace("\\", "/").lower()
     guarded = [str(T.runtime_root()).replace("\\", "/").lower(), "enrolled.json", "agent.json", "story_gate_home", ".git/hooks",
+               "packed-refs", ".git/refs/",
                "approved-cache", "local-hook-trust.json", "install-manifest.json"]
     if any(x in low for x in guarded) and GATE_WRITE.search(cmd):
         return True
@@ -1470,7 +1509,7 @@ def cmd_hook(client, event):
             return hook_out(client, "post", post_edit(payload, c), False)  # checkpoints inform; containment happens at the next pre-edit
         msg, bad = gate_check(event, payload, c)
         shell = shell_command(payload) if event == "pre" else None
-        if bad and shell is not None and is_admin_or_bypass(shell):
+        if bad and shell is not None and (is_admin_or_bypass(shell) or (RUNTIME and runs_repo_gate_code(shell))):
             enforce = True  # protection itself is never warn-only: installing, trusting or switching off is for the human
         if bad and event == "pre" and msg.startswith("Story ") and "OFF COURSE" in msg:
             enforce = c["mode"] == "enforce" or "checkpoint" in c.get("enforce_points", [])
@@ -1547,6 +1586,10 @@ def gate_check(event, payload, c):
     """Returns (message, problem?)."""
     if event == "pre":
         cmd = shell_command(payload)
+        if cmd is not None and RUNTIME and runs_repo_gate_code(cmd):
+            m = re.search(r"\.story-gate[/\\]gate\.py\s*(.*)$", cmd)
+            return ("This runs story-gate's code from the repository, which a branch can replace. Run the verified copy on this "
+                    "computer instead: `%s`" % gate_cmd((m.group(1).strip() if m else "<command>") or "status")), True
         if cmd is not None:
             targets = shell_writes(cmd)
             bad = [t for t in targets if protected(t, c)]
@@ -1564,7 +1607,7 @@ def gate_check(event, payload, c):
                 return "Agents must not edit gate files (%s). Use gate.py commands; verdicts, config and records are written only by gate.py or a human." % ", ".join(bad), True
         sid = story_id(c, payload)
         if not sid:
-            return "No active story. Before editing code run `python .story-gate/gate.py start <STORY-ID>` and the READY gate (.story-gate/PROTOCOL.md).", True
+            return "No active story. Before editing code run `%s` and the READY gate (.story-gate/PROTOCOL.md)." % gate_cmd("start <STORY-ID>"), True
         v = load_v(sid, "ready")
         if not passed(v, c, STORIES / sid):
             return "Story %s READY gate is %s (or out of date). Finish the READY steps in .story-gate/PROTOCOL.md before editing code." % (sid, (v or {}).get("overall", "not run")), True
@@ -1854,10 +1897,13 @@ BLOCK_START, BLOCK_END = "<!-- story-gate:start -->", "<!-- story-gate:end -->"
 INSTRUCTION_BLOCK = BLOCK_START + """
 ## Story gate (required for any code change)
 Every code change belongs to a story and passes the story gate. Full steps: `.story-gate/PROTOCOL.md`.
-1. Before editing code: `{py} .story-gate/gate.py start <STORY-ID>`, fill the story folder, then `{py} .story-gate/gate.py score <STORY-ID> ready`.
-2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `gate.py decide`.
-3. Before saying you are done: run tests via `gate.py record-tests`, write `handoff.md`, record learnings with `gate.py learn`, then `gate.py score <STORY-ID> done`.
-4. Read past learnings first: `{py} .story-gate/gate.py learnings <keywords>`.
+Run story-gate as `story-gate <command>`: that is the verified copy installed on this computer. If `story-gate` isn't
+found, use the full command a story-gate message prints. Only where story-gate isn't installed (cloud agents, where hooks
+don't run) use `{py} .story-gate/gate.py <command>`.
+1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
+2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
+3. Before saying you are done: run tests via `story-gate record-tests`, write `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`.
+4. Read past learnings first: `story-gate learnings <keywords>`.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
 """ + BLOCK_END
 
@@ -2117,13 +2163,23 @@ def cmd_user(cmd, kv, rest):
             print("NOT installed: %s" % e); return 1
         out = T.register_user_hooks(os.path.abspath(py).replace("\\", "/"), str(T.launcher_path()).replace("\\", "/"), clients, dry)
         print("Runtime: %s" % dest)
+        if not dry:
+            sd = T.write_shims(os.path.abspath(py))
+            on_path = os.path.normcase(str(sd)) in [os.path.normcase(x.rstrip("/\\")) for x in os.environ.get("PATH", "").split(os.pathsep)]
+            print("story-gate command: %s%s" % (sd, "" if on_path else "  (optional: add this folder to PATH so you and your AI tools "
+                                                                     "can type `story-gate`; the hooks print the full command otherwise)"))
         print("User-level hooks (%s):" % ", ".join(clients))
         print("\n".join(out) or "  nothing to change")
         top, ident = T.repo_identity(os.getcwd())
         if top and (Path(top) / ".story-gate").is_dir():
             if not dry:
-                e = T.enroll(top, kv.get("policy-ref"))
-                print("Enrolled this repository. Policy comes from %s; branches can only make it stricter." % e["policy_ref"])
+                try:
+                    e = T.enroll(top, kv.get("policy-ref"), "--allow-local-policy" in rest)
+                    print("Enrolled this repository. Policy comes from %s; branches can only make it stricter." % e["policy_ref"])
+                    if e.get("allow_local_policy"):
+                        print("WARNING: %s." % T.LOCAL_POLICY_RISK)
+                except T.TrustError as ex:
+                    print("NOT enrolled: %s" % ex)
             rm = T.remove_project_hooks(top, HOOK_FILES, dry)
             if rm:
                 print("Project hook files that ran branch code (story-gate entries removed):")
@@ -2174,11 +2230,13 @@ def cmd_user(cmd, kv, rest):
             print("Would enroll %s." % top)
             return 0 if not top else (0 if turn_filter_on(top, kv.get("python") or sys.executable, True) or True else 1)
         try:
-            e = T.enroll(os.getcwd(), kv.get("policy-ref"))
+            e = T.enroll(os.getcwd(), kv.get("policy-ref"), "--allow-local-policy" in rest)
         except T.TrustError as ex:
             print("NOT enrolled: %s" % ex); return 1
         top = T.repo_identity(os.getcwd())[0]
         print("Enrolled %s. Policy comes from %s." % (top, e["policy_ref"]))
+        if e.get("allow_local_policy"):
+            print("WARNING: %s." % T.LOCAL_POLICY_RISK)
         turn_filter_on(top, kv.get("python") or sys.executable, dry)
         return 0
     if cmd == "unenroll":
@@ -2209,7 +2267,7 @@ def cmd_user(cmd, kv, rest):
             T.write_json_atomic(T.active_path(), {"version": m.get("version"), "dir": prev, "previous": str(HERE),
                                                   "previous_manifest_sha256": act.get("manifest_sha256"), "signed": m.get("signed"),
                                                   "manifest_sha256": T.sha256(Path(prev) / "manifest.json"),
-                                                  "launcher_sha256": T.sha256(T.launcher_path())})
+                                                  "launcher_sha256": T.sha256(T.launcher_path()), "shim_python": act.get("shim_python")})
             print("Rolled back to %s." % m.get("version")); return 0
         import tempfile as _tf
         with _tf.TemporaryDirectory() as td:
@@ -2453,11 +2511,23 @@ def cmd_doctor(repo=None, strict=False, prove=False):
             print("  %-8s reduced protection (no verified user-level hooks; CI still checks every PR)" % cl)
         if probs:
             fails.append("runtime")
+        sprobs = T.shim_problems()
+        import shutil
+        print("  story-gate command: %s" % ("PROBLEM: " + "; ".join(sprobs) if sprobs else
+                                           "%s (%s)" % (T.shim_dir(), "on PATH" if shutil.which("story-gate") else
+                                                        "not on PATH - optional; hooks print the full command")))
+        if sprobs:
+            fails.append("story-gate command")
     else:
         print("  trusted runtime: NOT installed on this computer - hooks are off. Run: gate.py install --user")
         fails.append("runtime")
     e = T.enrollment(ROOT) or {}
     print("  this repository: %s" % ("enrolled, policy from %s" % e.get("policy_ref") if e.get("enrolled") else "NOT enrolled (gate.py enroll)"))
+    if e.get("enrolled") and e.get("allow_local_policy"):
+        print("  WARN  policy comes from a local branch (allowed with --allow-local-policy): %s. Add a remote and re-enroll "
+              "with --policy-ref <remote>/<branch> when you can." % T.LOCAL_POLICY_RISK)
+    elif e.get("enrolled") and T.policy_source_problem(e):
+        print("  FAIL  " + T.policy_source_problem(e)); fails.append("policy source")
     import sg_guard as SG
     filt = SG.filter_active(str(ROOT))
     print("  checkout filter: %s" % ("ON - a branch's hook changes can't reach disk here" if filt else
@@ -2606,7 +2676,7 @@ def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
-                       "--report-failure", "--prove", "--on", "--off", "--explain"):
+                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
             k = argv[i][2:]

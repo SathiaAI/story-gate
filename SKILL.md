@@ -11,7 +11,7 @@ description: "Per-story quality gate for any coding work, in any AI client: READ
 - ends on them, complete and delivered,
 - and is accepted by a human, not by you.
 
-Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-gate/gate.py` (`python` on Windows).
+Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate`**, the verified copy installed on this computer (if `story-gate` isn't found, use the full command story-gate's messages print). Only where story-gate isn't installed (cloud agents, where hooks don't run) use `python3 .story-gate/gate.py` (`python` on Windows). With story-gate installed, the hooks refuse running the repository's copy, because a branch can replace it.
 
 ## Your identity
 - Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.

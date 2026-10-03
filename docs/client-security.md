@@ -30,6 +30,8 @@
 
 **Symlinks:** git writes symlinks without running the filter. story-gate refuses (enforce) or warns about any AI-tool settings file or folder stored as a symlink, and `doctor --prove` fails while one exists.
 
+**Agents run the verified copy too:** `install --user` adds a `story-gate` command that runs the signed copy in your user folder. In an enrolled repository the hooks refuse an agent running the repository's story-gate code (`python .story-gate/gate.py ...`) and print the command to use instead. Tests and builds the agent runs are still the branch's code: see *Where the line is* in the README.
+
 **What's still exposed:** repositories you haven't enrolled; hook files written outside git (a script you run, a download); and, for tools without a hard switch, a hook file an agent writes directly (story-gate's pre-edit block stops agents writing hook files, in enforce mode). CI checks every PR either way.
 
 Sources for lockdown: [Claude Code managed settings](https://code.claude.com/docs/en/managed-settings) (drop-in `managed-settings.d/` files merge with `managed-settings.json`; hook lists combine) and [Claude Code hooks](https://code.claude.com/docs/en/hooks) (`allowManagedHooksOnly` blocks user, project and local hooks, and plugin hooks except those from plugins force-enabled in managed `enabledPlugins`).

