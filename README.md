@@ -7,7 +7,7 @@
 3. Fixed rules decide.
 4. A human accepts.
 
-**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
+**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-hows-it-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
 
 ---
 
@@ -240,6 +240,24 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 3. Add `pre_edit`.
 4. Add `checkpoint` and `stop`.
 5. Switch to `"mode": "enforce"`.
+
+## F. The dashboard: how it's going
+
+Every repository with story-gate gets a **Story-gate dashboard** issue, pinned and kept current by `.github/workflows/story-gate-dashboard.yml`. It lives in your repository, so only people who can see the repository can see it. That keeps it private on private repos, on any plan.
+
+| It shows | From |
+|---|---|
+| Features and stories, and how many meet the Definition of Ready | `features.json`, `story.md`, READY verdicts |
+| What's queued to start | Stories that passed READY and nobody has claimed |
+| Which agent works on which story, its stage, % done (estimate), drift and last report | The claim written by `gate.py start` and the latest checkpoint, on each branch |
+| When stories finish, and how many acceptance criteria tests proved | DONE verdicts and `trace.md` |
+| Gate catches before merge, defects recorded, first-try READY rate, DONE attempts, days from claim to merge, false alarms, stale claims, ownership conflicts, judge cost | The verdict log, learnings and labels |
+
+- **The full report** is a branded HTML page (Tabler styles, Viaknox colours) attached to each dashboard run. Repository members can download it from the issue.
+- **On your own computer:** `gate.py dashboard --open` builds the same page from your local branches.
+- **Plan work before anyone starts it:** `gate.py feature PAY --title "Payments"`, then `gate.py plan PAY-12 --title "Refunds" --feature PAY`. A story is **queued** once its READY passes, and **claimed** when an agent runs `gate.py start PAY-12 --model <model>`.
+- **Honest numbers:** every number says how it's calculated, and estimates are labelled. Verdicts are recorded by the agents, and the `story-gate` check in CI re-checks them. Branch records are read as data, never run.
+- **GitHub Projects board:** optional and organisation-owned only (a GitHub App can't write to personal boards). Not built yet.
 
 ## Fallbacks
 

@@ -1186,6 +1186,205 @@ class TestReleaseSignatures(unittest.TestCase):
         self.assertIn(self.T.key_fingerprint(self.signers), out)
 
 
+class TestDashboard(Base):
+    """Dashboard decision sg-dashboard: pinned issue + Tabler report, built from every branch's records as data."""
+
+    def put(self, sid, *, title="T", feature="none", ready=None, done=None, coder=None, cp=None, trace=None):
+        sd = self.repo / ".story-gate/stories" / sid; sd.mkdir(parents=True, exist_ok=True)
+        (sd / "story.md").write_text("---\nid: %s\ntitle: %s\nfeature: %s\nsource: linear:%s\n---\nbody\n" % (sid, title, feature, sid))
+        (sd / "tests.json").write_text(json.dumps({"acceptance_criteria": [{"id": "AC-1"}, {"id": "AC-2"}]}))
+        if ready: (sd / "ready.json").write_text(json.dumps({"overall": ready, "drift": "none", "checks": {}, "cost": 0.001}))
+        if done: (sd / "done.json").write_text(json.dumps({"overall": done, "drift": "none", "checks": {}, "cost": 0.002}))
+        if coder: (sd / "coder.json").write_text(json.dumps(coder))
+        if cp: (sd / "checkpoints.jsonl").write_text(json.dumps(cp) + "\n")
+        if trace: (sd / "trace.md").write_text("| AC | x | 3 | t | 1/1 | %s |\n| AC-1 | a | 3 | t | 1/1 | GREEN |\n| AC-2 | b | 3 | t | 1/1 | %s |\n" % (trace, trace))
+
+    def g(self, *a):
+        return subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+
+    def setUp(self):
+        super().setUp()
+        self.remote = Path(tempfile.mkdtemp()) / "r.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        self.g("checkout", "-q", "main")
+        (self.repo / ".story-gate/features.json").write_text(json.dumps({"PAY": {"title": "Payments"}}))
+        self.put("SAT-1", title="Merged story", feature="PAY", ready="PASS", done="PASS", coder={"client": "codex", "model": "gpt-5.1-codex", "branch": "f1", "claimed_at": "2026-09-01T00:00:00Z"}, trace="GREEN")
+        self.put("SAT-2", title="Queued story", feature="PAY", ready="PASS")
+        self.put("SAT-3", title="Draft <script>alert(1)</script> | **x** @everyone", ready="FAIL")
+        (self.repo / ".story-gate/calibration.jsonl").write_text("\n".join(json.dumps(r) for r in [
+            {"at": "1", "story": "SAT-1", "phase": "ready", "overall": "PASS"}, {"at": "2", "story": "SAT-1", "phase": "done", "overall": "FAIL"},
+            {"at": "3", "story": "SAT-1", "phase": "done", "overall": "PASS"}, {"at": "4", "story": "SAT-2", "phase": "ready", "overall": "FAIL"},
+            {"at": "5", "story": "SAT-1", "phase": "done", "label": "wrong"}]) + "\n")
+        (self.repo / ".story-gate/learnings.jsonl").write_text(json.dumps({"id": "L1", "story": "SAT-1", "type": "error"}) + "\n")
+        self.g("add", "-A"); self.g("commit", "-qm", "records")
+        self.g("remote", "add", "origin", str(self.remote)); self.g("push", "-q", "origin", "main")
+        for br, sid, kw in (("feat/SAT-4", "SAT-4", dict(title="Working", ready="PASS", coder={"client": "cursor", "model": "claude-sonnet", "branch": "feat/SAT-4"}, cp={"status": "AT_RISK", "percent": 60, "drift": "none"})),
+                            ("feat/SAT-5", "SAT-5", dict(title="Review me", ready="PASS", done="PASS", coder={"client": "grok", "model": "grok-4"}, trace="FAIL")),
+                            ("feat/SAT-6", "SAT-6", dict(title="Stuck", ready="ESCALATED", coder={"client": "claude-code", "model": "opus"})),
+                            ("feat/SAT-6b", "SAT-6", dict(title="Stuck", ready="PASS", coder={"client": "codex", "model": "gpt-5", "branch": "feat/SAT-6b"}))):
+            self.g("checkout", "-q", "-b", br, "main"); self.put(sid, **kw); self.g("add", "-A"); self.g("commit", "-qm", sid); self.g("push", "-q", "origin", br)
+        self.g("checkout", "-q", "main")
+        sys.path.insert(0, str(SRC))
+        import importlib; self.D = importlib.import_module("sg_dashboard")
+        self.data = self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", now="2026-10-02T00:00:00Z")
+
+    def st(self, sid):
+        return [s for s in self.data["stories"] if s["id"] == sid][0]
+
+    def test_statuses(self):
+        self.assertEqual(self.st("SAT-1")["status"], "done"); self.assertEqual(self.st("SAT-2")["status"], "queued")
+        self.assertEqual(self.st("SAT-3")["status"], "draft"); self.assertEqual(self.st("SAT-4")["status"], "in_progress")
+        self.assertEqual(self.st("SAT-5")["status"], "in_review")
+        self.assertEqual(self.st("SAT-4")["coder"]["client"], "cursor")
+        self.assertTrue(self.data["conflicts"]) # SAT-6 claimed on two branches by different agents
+
+    def test_metrics(self):
+        M = {m["key"]: m for m in self.data["metrics"]}
+        self.assertEqual(M["features"]["value"], 1); self.assertEqual(M["queued"]["value"], 1)
+        self.assertEqual(M["done"]["value"], 1); self.assertEqual(M["in_review"]["value"], 1)
+        self.assertEqual(M["gate_catches"]["value"], 1); self.assertEqual(M["defects"]["value"], 1)
+        self.assertEqual(M["false_alarms"]["value"], 1); self.assertEqual(M["first_try"]["value"], 50)
+        self.assertTrue(M["ac_progress"]["estimate"]); self.assertEqual(M["ac_progress"]["value"], 60)
+        self.assertEqual(M["ac_verified"]["value"], 75)  # SAT-1: 2/2 proven, SAT-5: 1/2
+        for m in self.data["metrics"]:
+            self.assertTrue(m["formula"])
+
+    def test_merged_done_is_not_reopened_by_a_stale_branch(self):
+        self.g("checkout", "-q", "-b", "feat/old-SAT-1", "main~1" if False else "main")
+        self.put("SAT-1", title="Merged story", ready="FAIL"); self.g("add", "-A"); self.g("commit", "-qm", "stale"); self.g("push", "-q", "origin", "feat/old-SAT-1")
+        d = self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+")
+        self.assertEqual([s for s in d["stories"] if s["id"] == "SAT-1"][0]["status"], "done")
+
+    def test_markdown_is_escaped_and_fits(self):
+        body = self.D.to_markdown(self.data, "https://example.com/a")
+        self.assertNotIn("<script>", body); self.assertNotIn("@everyone", body); self.assertIn("&lt;script&gt;", body)
+        self.assertIn("generated_at=2026-10-02T00:00:00Z", body); self.assertIn("How each number is calculated", body)
+        many = dict(self.data, stories=[dict(self.data["stories"][0], id="SAT-%d" % i, title="x" * 50) for i in range(3000)])
+        self.assertLessEqual(len(self.D.to_markdown(many)), self.D.ISSUE_LIMIT + 100)
+
+    def test_html_is_self_contained_escaped_and_branded(self):
+        page = self.D.to_html(self.data)
+        self.assertNotIn("<script>alert", page); self.assertIn("default-src 'none'", page)
+        self.assertNotIn("http", page.split("</style>")[-1].replace('xmlns="http://www.w3.org/2000/svg"', "")); self.assertNotRegex(page, r"<(script|link|img|iframe)[\s>]")
+        self.assertIn("Tabler", page); self.assertIn("#FF4B20", page); self.assertIn('aria-label="Viaknox"', page)
+
+    def test_record_folders_with_bad_names_and_huge_files_are_skipped(self):
+        self.g("checkout", "-q", "-b", "feat/evil", "main")
+        bad = self.repo / ".story-gate/stories/..evil"; bad.mkdir(parents=True); (bad / "story.md").write_text("x")
+        (self.repo / ".story-gate/stories/SAT-2/trace.md").write_text("x" * (self.D.MAX_BLOB + 10))
+        self.g("add", "-A"); self.g("commit", "-qm", "evil"); self.g("push", "-q", "origin", "feat/evil")
+        d = self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+")
+        self.assertNotIn("..evil", [s["id"] for s in d["stories"]]); self.assertTrue(any("over" in o for o in d["omissions"]))
+
+    def test_publish_creates_then_updates_and_never_goes_backwards(self):
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        state = {"issues": []}
+        def call(m, path, t=None, b=None, accept=None):
+            if m == "GET" and "/labels/" in path: return 404, {}, {}
+            if m == "POST" and path.endswith("/labels"): return 201, {}, {}
+            if m == "GET" and "/issues?" in path: return 200, state["issues"], {}
+            if m == "POST" and path.endswith("/issues"):
+                state["issues"].append({"number": 7, "state": "open", "body": b["body"], "node_id": "N"}); return 201, state["issues"][-1], {}
+            if m == "PATCH": state["issues"][0].update(b); return 200, {}, {}
+            return 500, {}, {}
+        G.call = call; G.graphql = lambda *a: {}
+        self.assertIn("Created", self.D.publish_issue(G, "o/r", "t", "<!-- story-gate-dashboard generated_at=2026-10-02T01 -->", "2026-10-02T01"))
+        state["issues"][0]["state"] = "closed"
+        self.assertIn("Updated", self.D.publish_issue(G, "o/r", "t", "<!-- story-gate-dashboard generated_at=2026-10-02T02 -->", "2026-10-02T02"))
+        self.assertEqual(state["issues"][0]["state"], "open")
+        self.assertIn("Skipped", self.D.publish_issue(G, "o/r", "t", "old", "2026-10-02T00"))
+
+    def test_ci_status_and_rate_limit_backoff(self):
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        seen = {"n": 0}
+        def call(m, path, t=None, b=None, accept=None):
+            if "/pulls?" in path:
+                seen["n"] += 1
+                if seen["n"] == 1: return 429, {}, {"Retry-After": "1"}
+                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc"}}], {}
+            if "/check-runs" in path: return 200, {"check_runs": [{"conclusion": "success"}]}, {}
+            return 404, {}, {}
+        G.call = call
+        orig = self.D.time.sleep; self.D.time.sleep = lambda s: None
+        try:
+            self.D.ci_status(G, "o/r", "t", self.data)
+        finally:
+            self.D.time.sleep = orig
+        self.assertEqual(self.st("SAT-5")["ci"], {"pr": 5, "result": "success"})
+        self.assertIn("#5 success", self.D.to_markdown(self.data))
+
+    def test_ready_verdicts_are_checked_against_the_story(self):
+        self.g("checkout", "-q", "-b", "feat/SAT-7")
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
+        run(self.repo, "start", "SAT-7"); self.fill_ready("SAT-7")
+        self.assertIn("READY: PASS", run(self.repo, "score", "SAT-7", "ready").stdout)
+        self.g("add", "-A"); self.g("commit", "-qm", "scored"); self.g("push", "-q", "origin", "feat/SAT-7")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        d = self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)
+        s = [x for x in d["stories"] if x["id"] == "SAT-7"][0]
+        self.assertTrue(s["ready_fresh"], "dashboard and gate.py must compute the same READY hash")
+        st = self.repo / ".story-gate/stories/SAT-7/story.md"; st.write_text(st.read_text() + "\nscope grew\n")
+        self.g("commit", "-qam", "story changed after READY"); self.g("push", "-q", "origin", "feat/SAT-7")
+        d = self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)
+        s = [x for x in d["stories"] if x["id"] == "SAT-7"][0]
+        self.assertIs(s["ready_fresh"], False)
+        self.assertEqual({m["key"]: m for m in d["metrics"]}["ready_stale"]["value"], 1)
+
+    def test_waivers_are_not_proof(self):
+        s = self.st("SAT-1"); s["done"]["overall"] = "WAIVED"
+        M = {m["key"]: m for m in self.D.metrics(self.data["stories"], [], [], [], "2026-10-02T00:00:00Z")}
+        self.assertEqual(M["waived"]["value"], 1); self.assertEqual(M["ac_verified"]["value"], 50)  # only SAT-5's 1/2 counts
+
+    def test_truncation_keeps_priorities_and_falls_back_from_the_chart(self):
+        body = self.D.to_markdown(self.data, limit=1800)
+        self.assertIn("## Features", body); self.assertLessEqual(len(body), 1800)
+        self.assertIn("Stories", body.split("## Features")[0])  # summary first
+
+    def test_failed_refresh_is_shown_and_last_snapshot_kept(self):
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        issue = {"number": 3, "body": "<!-- x -->\n# Story-gate dashboard\n\nUpdated A.\n| Stories | 6 |\n"}
+        def call(m, path, t=None, b=None, accept=None):
+            if m == "GET": return 200, [issue], {}
+            issue.update(b); return 200, {}, {}
+        G.call = call
+        self.D.report_failure(G, "o/r", "t", "2026-10-02T05:00:00Z", "https://github.com/o/r/actions/runs/1")
+        self.D.report_failure(G, "o/r", "t", "2026-10-02T06:00:00Z", "https://github.com/o/r/actions/runs/2")
+        self.assertEqual(issue["body"].count("refresh failed"), 1); self.assertIn("06:00", issue["body"])
+        self.assertIn("| Stories | 6 |", issue["body"])
+
+    def test_pin_only_when_a_slot_is_free(self):
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        calls = []
+        G.graphql = lambda q, v, t: (calls.append(q), {"repository": {"pinnedIssues": {"totalCount": 3}}})[1]
+        self.assertIn("slots", self.D.pin(G, "t", "o/r", "N")); self.assertFalse(any("pinIssue" in q for q in calls))
+        G.graphql = lambda q, v, t: (calls.append(q), {"repository": {"pinnedIssues": {"totalCount": 1}}})[1]
+        self.assertEqual(self.D.pin(G, "t", "o/r", "N"), "pinned")
+
+    def test_cli_builds_files_locally_offline(self):
+        out = Path(tempfile.mkdtemp())
+        r = run(self.repo, "dashboard", "--offline", "--out", str(out))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for f in ("dashboard.json", "dashboard.md", "dashboard.html"):
+            self.assertTrue((out / f).is_file())
+        self.assertIn("local snapshot", (out / "dashboard.json").read_text())
+
+    def test_plan_and_feature_commands(self):
+        self.g("checkout", "-q", "-b", "feat/plan")
+        self.assertEqual(run(self.repo, "feature", "SHIP", "--title", "Shipping").returncode, 0)
+        self.assertEqual(run(self.repo, "plan", "SAT-9", "--title", "Plan me", "--feature", "SHIP").returncode, 0)
+        text = (self.repo / ".story-gate/stories/SAT-9/story.md").read_text()
+        self.assertIn("title: Plan me", text); self.assertIn("feature: SHIP", text)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-9/coder.json").exists())  # planned, not claimed
+        self.assertIn("SHIP", (self.repo / ".story-gate/features.json").read_text())
+
+    def test_install_writes_dashboard_workflow(self):
+        run(self.repo, "install")
+        y = (self.repo / ".github/workflows/story-gate-dashboard.yml").read_text()
+        self.assertIn("issues: write", y); self.assertIn("persist-credentials: false", y)
+        self.assertNotIn("pull_request_target", y); self.assertIn('branches: ["main"]', y)
+        self.assertIn("default_branch || github.ref_name", y)
+
+
 class TestInstallV03(Base):
     def test_managed_workflows(self):
         run(self.repo, "install")

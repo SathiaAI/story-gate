@@ -20,7 +20,10 @@ Commands (run from the repo root):
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
-  start <ID>                         make story folder + skeletons, set active story
+  feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
+  plan <ID> --title T [--feature F]  add a story to the backlog (not started; queued once READY passes)
+  start <ID> [--model M] [--client C]   claim the story: make folder + skeletons, set active story, record who codes
+  dashboard [--open] [--out DIR] [--offline]   build the progress dashboard from every branch (HTML + summary)
   source <ID>                        run 'command' sources from config, print their output
   record-tests <ID> -- <cmd...>      run the test command, store exit code + output tail (evidence)
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
@@ -115,7 +118,7 @@ LEARNINGS = GATE / "learnings.jsonl"
 OUTBOX = GATE / "outbox.jsonl"
 ACTIVE = GATE / ".active"
 CALIB = GATE / "calibration.jsonl"
-RECORD_PATHS = (".story-gate/stories", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
+RECORD_PATHS = (".story-gate/stories", ".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
                 ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
 
 
@@ -146,6 +149,7 @@ DEFAULT_CONFIG = {
     "model_tiers": {"small": "cheapest fast model your client offers", "medium": "mid-tier coding model (never frontier)"},
     "checkpoint": {"every_edits": 10},
     "project_hooks_allowed": [],
+    "dashboard_issue": None,
 }
 
 # ------------------------------------------------------------------ checks
@@ -415,7 +419,27 @@ def spec_files(c):
     return sorted(set(f for f in files if f and (ROOT / f).is_file()))
 
 
+def policy_fingerprint(c):
+    j = c.get("judge") or {}
+    return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
+
+
+def ready_hash_from(story, context, tests, spec_pairs, c):
+    """READY evidence hash from texts (used by `score` and by the dashboard, which reads them as git blobs)."""
+    blob = story + context + tests + "".join(f + t for f, t in spec_pairs) + policy_fingerprint(c)
+    return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
 def inputs_hash(sd, phase, c=None):
+    if phase == "ready":
+        try:
+            c = c or cfg()
+            return ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
+                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c)
+        except ConfigError:
+            return hashlib.sha256((rd(sd / "story.md") + rd(sd / "context.md") + rd(sd / "tests.json") + "<config unreadable>")
+                                  .encode("utf-8", "ignore")).hexdigest()[:16]
     names = ["story.md", "context.md", "tests.json"] + (["handoff.md"] if phase == "done" else [])
     blob = "".join(rd(sd / n) for n in names)
     if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
@@ -424,9 +448,7 @@ def inputs_hash(sd, phase, c=None):
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
-        j = c.get("judge") or {}
-        blob += json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
-                            "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
+        blob += policy_fingerprint(c)
     except ConfigError:
         blob += "<config unreadable>"
     if phase == "done":
@@ -721,6 +743,7 @@ SKELETONS = {
     "story.md": """---
 id: {id}
 title: TODO
+feature: none
 source: TODO (linear:{id} | repo:path | control-hub:doc-id | other)
 depends_on: []
 consumers: []
@@ -780,8 +803,9 @@ def cmd_start(sid, client=None, model=None):
     sd.mkdir(parents=True, exist_ok=True)
     client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
     if client or model or not (sd / "coder.json").exists():
-        old = load_json(sd / "coder.json")  # who is coding: pilot metrics, and a judge must never be the coder's model
-        wj(sd / "coder.json", {"client": client or old.get("client", ""), "model": model or old.get("model", ""), "at": now()})
+        old = load_json(sd / "coder.json")  # who is coding (the claim): dashboard, and a judge must never be the coder's model
+        wj(sd / "coder.json", {"schema": 1, "client": client or old.get("client", ""), "model": model or old.get("model", ""),
+                               "branch": current_branch(), "claimed_at": old.get("claimed_at") or now(), "at": now()})
     for name, body in SKELETONS.items():
         p = sd / name
         if not p.exists() and name != "handoff.md":
@@ -790,6 +814,40 @@ def cmd_start(sid, client=None, model=None):
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, current_branch(), git("rev-parse", "HEAD").strip()), encoding="utf-8")
     emit("started", sid, load_json(sd / "coder.json"))
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
+
+
+FEATURE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
+
+
+def cmd_plan(sid, title, feature=None):
+    """Add a story to the backlog without starting it (no claim, no active story). Commit it so the dashboard sees it."""
+    sd = sdir(sid)
+    if feature and not FEATURE_ID.fullmatch(feature):
+        sys.exit("feature ids are letters, digits, . _ - (max 40)")
+    sd.mkdir(parents=True, exist_ok=True)
+    for name, body in SKELETONS.items():
+        p = sd / name
+        if not p.exists() and name != "handoff.md":
+            p.write_text(body.replace("{id}", sid), encoding="utf-8")
+    text = rd(sd / "story.md")
+    if title:
+        text = re.sub(r"(?m)^title:.*$", lambda m: "title: " + title.replace("\n", " ")[:120], text, count=1)
+    if feature:
+        text = re.sub(r"(?m)^feature:.*$", lambda m: "feature: " + feature, text, count=1)
+    (sd / "story.md").write_text(text, encoding="utf-8")
+    emit("planned", sid, {"title": title, "feature": feature})
+    print("story-gate: planned %s%s. Fill story.md, context.md and tests.json, then score %s ready. It's queued once READY passes."
+          % (sid, " in feature " + feature if feature else "", sid))
+
+
+def cmd_feature(fid, title, description=""):
+    if not FEATURE_ID.fullmatch(fid or ""):
+        sys.exit("feature <ID> --title TEXT   (ids: letters, digits, . _ -)")
+    p = GATE / "features.json"
+    data = load_json(p)
+    data[fid] = {"title": (title or data.get(fid, {}).get("title") or fid)[:120], "description": (description or data.get(fid, {}).get("description", ""))[:500]}
+    wj(p, data)
+    print("story-gate: feature %s saved in .story-gate/features.json" % fid)
 
 
 def current_branch():
@@ -1489,7 +1547,8 @@ def gate_check(event, payload, c):
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
               ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
-              ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+              ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
+              ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 
 
 def summary(lines):
@@ -1862,6 +1921,59 @@ jobs:
 """
 
 
+DASH_YML = MANAGED + """
+name: story-gate-dashboard
+# Runs only the default branch's copy of this file and of story-gate (schedule, workflow_run and default-branch
+# pushes always use the default branch). Records on other branches are read as data, never executed.
+on:
+  schedule:
+    - cron: "11,41 * * * *"
+  workflow_run:
+    workflows: [story-gate]
+    types: [completed]
+  push:
+    branches: [{base}]
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: story-gate-dashboard
+  cancel-in-progress: false
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: build
+        env:
+          SG_DEFAULT_BRANCH: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+        run: python3 .story-gate/gate.py dashboard --out "$RUNNER_TEMP/sg-dashboard"
+      - id: report
+        uses: actions/upload-artifact@v4
+        with:
+          name: story-gate-dashboard
+          path: ${{{{ runner.temp }}}}/sg-dashboard/dashboard.html
+          retention-days: 30
+      - name: publish
+        env:
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+          GITHUB_TOKEN: ${{{{ github.token }}}}
+        run: python3 .story-gate/gate.py dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "${{{{ steps.report.outputs.artifact-url }}}}" --out "$RUNNER_TEMP/sg-dashboard"
+      - name: say so if the refresh failed (the last good snapshot stays)
+        if: failure()
+        env:
+          STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+          GITHUB_TOKEN: ${{{{ github.token }}}}
+        run: python3 .story-gate/gate.py dashboard --report-failure
+"""
+
+
 def write_managed(rel, body):
     """Write a story-gate workflow; refuse to overwrite a hand-made file with the same name."""
     p = ROOT / rel
@@ -1890,7 +2002,8 @@ def cmd_install(py):
         for d in (".agents/skills/story-gate", ".claude/skills/story-gate"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
             (ROOT / d / "SKILL.md").write_text(skill, encoding="utf-8")
-    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML)]
+    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                write_managed(".github/workflows/story-gate-dashboard.yml", dash_yml())]
     gi = rd(ROOT / ".gitignore")
     add = [x for x in (".story-gate/.active", ".story-gate/outbox.jsonl", ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/__pycache__/") if x not in gi]
     if add:
@@ -1904,6 +2017,11 @@ def cmd_install(py):
     print("Skill: .agents/skills/story-gate + .claude/skills/story-gate.")
     print("Next: 1) commit and merge this  2) gate.py setup-repo (code owners + branch rules)  3) add your judge key as a repo secret\n"
           "      4) on each computer that runs AI tools: gate.py install --user  (turns on the hooks, safely)")
+
+
+def dash_yml():
+    base = re.sub(r"^origin/", "", cfg().get("base_branch", "main"))
+    return DASH_YML.replace("{base}", json.dumps(base)).replace("{{", "{").replace("}}", "}")
 
 
 def cmd_user(cmd, kv, rest):
@@ -2088,7 +2206,8 @@ def cmd_doctor(repo=None, strict=False):
     if found:
         print("  WARNING: project hook files run story-gate code from the branch: %s (gate.py install --user removes them)" % ", ".join(found))
         fails.append("project-hooks")
-    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML)):
+    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                    (".github/workflows/story-gate-dashboard.yml", dash_yml())):
         cur = rd(ROOT / f)
         st = "ok" if cur == body else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
         print("  %-42s %s" % (f, st))
@@ -2115,6 +2234,9 @@ def cmd_doctor(repo=None, strict=False):
             print("  branch rules: %s" % ("ENFORCED" if enforced else "NOT ENFORCED - " + "; ".join(missing)))
             if not enforced:
                 fails.append("rules")
+            st_, info, _ = G.call("GET", "/repos/%s" % repo, tok)
+            if st_ == 200 and isinstance(info, dict) and info.get("has_issues") is False:
+                print("  WARNING: Issues are turned off, so the dashboard can't be pinned as an issue. It still appears in each run's summary and report.")
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
@@ -2193,7 +2315,8 @@ def cmd_setup(cmd, kv, rest):
 def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
-        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned"):
+        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
+                       "--report-failure"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
             kv[argv[i][2:]] = argv[i + 1]; i += 2
@@ -2221,6 +2344,13 @@ def main(argv):
         return cmd_hook_selftest()
     if cmd in ("enroll", "unenroll", "upgrade", "rollback", "release-sign"):
         return cmd_user(cmd, kv, rest)
+    if cmd == "plan":
+        return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
+    if cmd == "feature":
+        return cmd_feature(rest[0] if rest else "", kv.get("title", ""), kv.get("description", "")) or 0
+    if cmd == "dashboard":
+        import sg_dashboard as D
+        return D.cli(sys.modules[__name__], kv, rest)
     if cmd == "start":
         return cmd_start(rest[0], kv.get("client"), kv.get("model")) or 0
     if cmd == "source":

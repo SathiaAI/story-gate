@@ -32,6 +32,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
 
 ## READY (before any code)
 
+0. If the story isn't in the backlog yet, a human or orchestrator adds it: `gate.py plan <ID> --title "..." [--feature F]`. Starting it is your claim, and the dashboard shows it against your client and model.
 1. `gate.py start <ID> --model <your model id>` creates `.story-gate/stories/<ID>/`, makes `<ID>` the active story and records which client and model is coding (a judge from the same model family never counts).
 
 2. **Intake** (model: `intake`). Fetch the story from the source in `config.json` → `sources`:
