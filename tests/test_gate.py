@@ -1229,6 +1229,7 @@ class TestTrustedRuntime(RuntimeFixture):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
         full = {k: [] for k in ("mode", "enforce_points", "accept_concerns", "thresholds", "judge", "require_independent_review",
                                 "exempt_globs", "project_hooks_allowed", "test_command", "approvers")}
+        full["thresholds"] = ["x"]  # right keys, wrong shape
         for bad in ("garbage", {}, {"mode": "warn"}, full):  # not a config, empty, incomplete, wrong shapes
             for v in data.values():
                 v["policy_seen"] = {"sha": "x", "config": bad}
