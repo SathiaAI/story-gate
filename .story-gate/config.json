@@ -1,0 +1,101 @@
+{
+ "version": 1,
+ "mode": "warn",
+ "enforce_points": [],
+ "accept_concerns": false,
+ "story_id_pattern": "[A-Z][A-Z0-9]+-[0-9]+",
+ "base_branch": "main",
+ "exempt_globs": [
+  ".story-gate/stories/*/*.md",
+  ".story-gate/stories/*/tests.json",
+  "docs/**/*.md",
+  "*.md"
+ ],
+ "test_command": "",
+ "junit_path": "",
+ "test_globs": [
+  "**/test_*.py",
+  "**/*_test.py",
+  "**/tests/**",
+  "**/test/**",
+  "**/__tests__/**",
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/*Test.java",
+  "**/*_test.go"
+ ],
+ "spec_files": [],
+ "thresholds": {
+  "pass": 0.7,
+  "concerns": 0.4
+ },
+ "judge": {
+  "provider": "openrouter",
+  "emulated_allow_pass": false,
+  "allow_self_judge_pass": false,
+  "max_chars": 90000
+ },
+ "approvers": [],
+ "reviewers": [
+  "coderabbitai[bot]",
+  "chatgpt-codex-connector[bot]"
+ ],
+ "require_independent_review": true,
+ "sources": [
+  {
+   "type": "linear",
+   "note": "Story = Linear issue <ID>; PRD/TRD may be Linear project documents"
+  },
+  {
+   "type": "repo",
+   "prd": "docs/PRD.md",
+   "trd": "docs/TRD.md",
+   "stories": "docs/stories/{id}.md"
+  },
+  {
+   "type": "control-hub",
+   "project_slug": "",
+   "note": "documents table (kind prd/trd/story) for this project"
+  },
+  {
+   "type": "command",
+   "name": "custom channel",
+   "command": "",
+   "note": "any shell command that prints the story/spec for {id}"
+  }
+ ],
+ "sinks": [
+  {
+   "type": "repo"
+  },
+  {
+   "type": "control-hub",
+   "url_env": "CONTROL_HUB_URL",
+   "key_env": "CONTROL_HUB_KEY",
+   "project_slug": ""
+  },
+  {
+   "type": "webhook",
+   "url_env": "STORY_GATE_WEBHOOK"
+  },
+  {
+   "type": "command",
+   "name": "custom channel",
+   "command": ""
+  }
+ ],
+ "models": {
+  "intake": "small",
+  "context": "medium",
+  "tests": "medium",
+  "handoff": "medium",
+  "learnings": "small"
+ },
+ "model_tiers": {
+  "small": "cheapest fast model your client offers",
+  "medium": "mid-tier coding model (never frontier)"
+ },
+ "checkpoint": {
+  "every_edits": 10
+ }
+}
