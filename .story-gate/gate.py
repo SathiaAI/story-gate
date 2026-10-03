@@ -86,6 +86,42 @@ def json_escape(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _in_git(d):
+    while not os.path.exists(os.path.join(d, ".git")):
+        if os.path.dirname(d) == d:
+            return False
+        d = os.path.dirname(d)
+    return True
+
+
+def _follow_edit(raw):
+    """A hook can fire from a folder outside any repository (a workspace holding several). Then gate the repository that
+    holds the file being edited. Inside a repository nothing changes: that repository is gated, as before."""
+    import json as _j
+    try:
+        p = _j.loads(raw) if raw.strip() else {}
+        base = p.get("cwd") if isinstance(p.get("cwd"), str) and os.path.isdir(p["cwd"]) else os.getcwd()
+        if _in_git(os.path.abspath(base)):
+            os.chdir(base)
+            return
+        ti = p.get("tool_input") or p.get("toolInput") or p.get("tool_info") or {}
+        for k in ("file_path", "path", "filePath", "target_file", "notebook_path"):
+            if isinstance(ti, dict) and isinstance(ti.get(k), str) and ti[k].strip():
+                d = os.path.abspath(os.path.join(base, ti[k]))
+                while not os.path.isdir(d) and os.path.dirname(d) != d:
+                    d = os.path.dirname(d)  # a new file: start from the nearest folder that exists
+                if _in_git(d):
+                    os.chdir(d)
+                return
+    except Exception:
+        pass  # unreadable payload: stay where the client started us
+
+
+HOOK_STDIN = None
+if sys.argv[1:2] == ["hook"]:
+    HOOK_STDIN = sys.stdin.read() if not sys.stdin.isatty() else ""
+    if not os.environ.get("STORY_GATE_ROOT"):
+        _follow_edit(HOOK_STDIN)
 if sys.argv[1:2] == ["hook"] and not os.environ.get("STORY_GATE_ROOT") and _nothing_to_gate():
     print("{}")  # fast path: hooks fire in every folder, but outside a git repository there is nothing to gate
     sys.exit(0)
@@ -1463,7 +1499,7 @@ def hook_out(client, event, msg, block):
 
 def cmd_hook(client, event):
     try:
-        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        raw = HOOK_STDIN if HOOK_STDIN is not None else (sys.stdin.read() if not sys.stdin.isatty() else "")
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         payload = {}
@@ -1525,6 +1561,9 @@ def cmd_hook(client, event):
 def runtime_precheck(client, event):
     """Trusted runtime only. Returns a hook result to stop early, or None to carry on."""
     if not T.repo_identity(os.getcwd())[1]:
+        if _in_git(os.getcwd()) and event != "post":  # a .git is here but git gave no answer (e.g. it hung): fail closed
+            return hook_out(client, event, "STORY GATE (BLOCKED): git didn't answer in time, so story-gate can't tell which "
+                            "repository this is. Try again; if it keeps happening, run: git status", True)
         return hook_out(client, event, "", False)  # not in a git repository: nothing to gate
     problems = T.verify_self(HERE)
     if problems:  # the installed runtime itself was changed: never run it

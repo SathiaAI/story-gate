@@ -55,7 +55,7 @@ cp -r story-gate/.story-gate your-repo/      # or download this repo and copy th
 cd your-repo
 python3 .story-gate/gate.py install           # Windows: python .story-gate\gate.py install --python python
 ```
-Commit what it adds (the settings, the skill, agent instructions and two workflows) and merge it. Hooks are **not** written into the repository: each person turns them on for their own computer in Step 4.
+Commit what it adds (the settings, the skill, agent instructions and three workflows: the PR check, the audit and the dashboard) and merge it. Hooks are **not** written into the repository: each person turns them on for their own computer in Step 4.
 
 **Step 2 · Name the humans** (2 minutes, run it as yourself)
 ```bash

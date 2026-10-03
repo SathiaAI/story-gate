@@ -25,13 +25,6 @@ LAUNCHER = '''"""story-gate launcher: hooks and git filters call this stable pat
 import json, os, subprocess, sys
 here = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STORY_GATE_HOME", os.path.dirname(here))
-if sys.argv[1:2] == ["hook"]:
-    d = os.getcwd()
-    while not os.path.exists(os.path.join(d, ".git")):
-        if os.path.dirname(d) == d:
-            print("{}")
-            sys.exit(0)  # outside any git repository: nothing to gate
-        d = os.path.dirname(d)
 try:
     with open(os.path.join(here, "active.json"), encoding="utf-8") as f:
         gate = os.path.join(json.load(f)["dir"], "gate.py")
@@ -365,8 +358,15 @@ def version_tuple(v):
 
 
 # ------------------------------------------------------------------ repositories: enrollment and policy
+GIT_TIMEOUT = 15  # seconds: a hung git (index lock, fsmonitor, slow network drive) must not outlast the client's hook timeout
+
+
 def git_in(cwd, *args):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ""  # callers treat "" as unknown, so policy reads fail closed
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -468,7 +468,12 @@ def _resolve_policy_commit(top, ref):
     else:
         candidates = ("refs/heads/" + ref, "refs/tags/" + ref)  # no remote (e.g. "main" in a local-only repo)
     for full in candidates:
-        if subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True).returncode == 0:
+        try:
+            found = subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True,
+                                   timeout=GIT_TIMEOUT).returncode == 0
+        except subprocess.TimeoutExpired:
+            return None
+        if found:
             return git_in(top, "rev-parse", "--verify", "-q", full + "^{commit}") or None
     return None
 
@@ -478,7 +483,10 @@ def policy_text(top, ref, name):
     sha = policy_commit(top, ref)
     if not sha:
         return None
-    r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True)
+    try:
+        r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None  # cfg() then fails closed
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
 
 

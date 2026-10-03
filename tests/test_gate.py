@@ -1066,8 +1066,17 @@ class TestTrustedRuntime(RuntimeFixture):
     def test_unenrolled_repo_is_untouched(self):
         other = Path(tempfile.mkdtemp())
         subprocess.run(["git", "init", "-q", str(other)], check=True)
-        self.assertEqual(self.hook(cwd=other).returncode, 0)
-        self.assertEqual(self.hook(cwd=Path(tempfile.mkdtemp())).returncode, 0)  # not a git repository at all
+        self.assertEqual(self.hook(cwd=other, payload={"tool_name": "Write", "tool_input": {"file_path": str(other / "a.py")}}).returncode, 0)
+        outside = Path(tempfile.mkdtemp())  # not a git repository at all
+        self.assertEqual(self.hook(cwd=outside, payload={"tool_name": "Write", "tool_input": {"file_path": str(outside / "a.py")}}).returncode, 0)
+
+    def test_hook_from_a_parent_folder_gates_the_edited_repository(self):
+        parent = self.repo.parent  # a workspace folder that isn't a repository itself
+        self.assertFalse((parent / ".git").exists())
+        r = self.hook(cwd=parent, payload={"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "src" / "new.py")}})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        rel = {"tool_name": "Write", "cwd": str(parent), "tool_input": {"file_path": "%s/app.py" % self.repo.name}}
+        self.assertEqual(self.hook(cwd=parent, payload=rel).returncode, 2)
 
     def test_worktree_shares_enrollment(self):
         wt = Path(tempfile.mkdtemp()) / "wt"
@@ -1145,6 +1154,32 @@ class TestTrustedRuntime(RuntimeFixture):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
         subprocess.run([str(self.home / "runtime" / "bin" / "story-gate"), "status"], cwd=self.repo, env=e, capture_output=True)
         self.assertFalse(marker.exists())
+
+    def test_admin_and_policy_ref_commands_in_any_shape_are_refused(self):
+        rt = str(Path(self.gate).parent)
+        for c in ("python3 -I .story-gate/gate.py unenroll", "python3.11 .story-gate/gate.py unenroll",
+                  "/usr/bin/python3 .story-gate/gate.py unenroll", "bash -c 'python3 .story-gate/gate.py unenroll'",
+                  "python3 %s/gate.py unenroll" % rt, "python3 .story-gate/gate.py install --user --unsigned",
+                  "python3 %s/gate.py upgrade --from /tmp/evil" % rt,
+                  "git update-ref refs/remotes/origin/main HEAD", "git fetch . HEAD:refs/remotes/origin/main",
+                  "git -c remote.origin.url=/tmp/evil fetch origin"):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+
+    def test_git_that_hangs_fails_closed(self):
+        if os.name == "nt":
+            self.skipTest("uses a POSIX shell script as a fake git")
+        fake = Path(tempfile.mkdtemp()); (fake / "git").write_text("#!/bin/sh\nsleep 60\n"); (fake / "git").chmod(0o755)
+        e = dict(os.environ, HOME=str(self.user), PATH=str(fake) + os.pathsep + os.environ["PATH"], **self.env)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE"):
+            e.pop(k, None)
+        rt = json.loads((self.home / "runtime/active.json").read_text())["dir"]
+        code = ("import sys; sys.path.insert(0, %r); import sg_trust as T; T.GIT_TIMEOUT = 1; import runpy; "
+                "sys.argv = ['gate.py', 'hook', '--client', 'claude', '--event', 'pre']; "
+                "runpy.run_path(%r, run_name='__main__')" % (rt, str(Path(rt) / "gate.py")))
+        r = subprocess.run([self.py, "-c", code], cwd=self.repo,
+                           input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "app.py")}}),
+                           capture_output=True, text=True, env=e, timeout=60)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("BLOCKED", r.stdout + r.stderr)
 
     def test_dry_run_uninstall_and_backups(self):
         own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}, "theme": "dark"}
