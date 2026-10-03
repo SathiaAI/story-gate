@@ -11,7 +11,7 @@ description: "Per-story quality gate for any coding work, in any AI client: READ
 - ends on them, complete and delivered,
 - and is accepted by a human, not by you.
 
-Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-gate/gate.py` (`python` on Windows).
+Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate`**, the verified copy installed on this computer (if `story-gate` isn't found, use the full command story-gate's messages print). Only where story-gate isn't installed (cloud agents, where hooks don't run) use `python3 .story-gate/gate.py` (`python` on Windows). With story-gate installed, the hooks refuse running the repository's copy, because a branch can replace it.
 
 ## Your identity
 - Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.
@@ -46,13 +46,13 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-g
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
 - Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
-- Never run `install`, `install --user`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `filter` or `lockdown`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
+- Never run `install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown` or `hook-trust`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.
 - If the judge is unavailable, say so. Nothing passes without it.
 - In Cowork, Cursor Cloud and Codex cloud, hooks don't run: run `gate.py status` before editing and run the checkpoints yourself. CI is the backstop.
 
 ## Claude / Cowork specifics
-- **If the repo has no `.story-gate/`:** copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` (setup-repo runs as Paul, once).
+- **If the repo has no `.story-gate/`:** stop and ask the human to set it up: copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` themselves. Agents never run those commands.
 - **Judge key on Paul's machine:** it lives in `F:\ENV\.env`. Run `gate.py` through `device_bash` with `STORY_GATE_ENV_FILE=$HOME/mnt/ENV/.env`. A cloud shell has no key, so local verdicts there can't PASS. CI still judges, using the repo secret.
 - **Sub-agents:** use the Agent tool, with `model: haiku` for `small` and `model: sonnet` for `medium`. Sub-agents write only their evidence file.
 - **Drift with real options:** run **frontier-gate**, then give Paul plain-English options with pros/cons and a recommendation.

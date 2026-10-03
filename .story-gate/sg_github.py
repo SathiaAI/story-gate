@@ -145,6 +145,7 @@ def unresolved_threads(ctx, token, reviewers):
 def label_added_by(ctx, token, label):
     """Login of whoever most recently added `label` to the PR (and it is still on the PR), else None."""
     events = paged("/repos/%s/issues/%s/events" % (ctx["repo"], ctx["number"]), token)
+    events.sort(key=lambda e: (e.get("created_at") or "", e.get("id") or 0))  # the API promises no order: oldest first
     who, present = None, False
     for e in events:
         if (e.get("label") or {}).get("name") != label:

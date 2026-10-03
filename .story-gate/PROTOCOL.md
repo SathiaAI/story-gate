@@ -2,7 +2,7 @@
 
 Every code change belongs to a story. A story starts on defined specs, is built and tested against them, and ends on them. It passes **READY** before code is written, **CHECKPOINTS** while it's being built, and **DONE** before the work is called finished. Agents collect the evidence; `gate.py` makes the call. Never declare a gate passed yourself. Quote the line `gate.py` prints.
 
-`gate.py` = `python3 .story-gate/gate.py` (`python` on Windows). Run it from the repo root.
+`gate.py` means **`story-gate`**, the verified copy installed on this computer; run it anywhere inside the repository. If `story-gate` isn't found, use the full command story-gate's messages print. Only where story-gate isn't installed (cloud agents, where hooks don't run) use `python3 .story-gate/gate.py` (`python` on Windows) from the repo root. With story-gate installed, the hooks refuse running the repository's copy, because a branch can replace it.
 
 **Who decides what:**
 
@@ -153,6 +153,6 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 ## Rules
 - Fail closed. If the judge is unavailable, the verdict can't be PASS. Say so; don't work around it.
 - Never edit `.story-gate/` code, config or verdict files, CODEOWNERS or the story-gate workflows, with any tool, including the shell.
-- Never run the human-only commands (`install`, `install --user`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `filter`, `lockdown`), and never touch the story-gate runtime in the user folder, your tool's user-level hook settings, or git's filter settings (`.git/info/attributes`, `filter.storygate-hooks`).
+- Never run the human-only commands (`install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown`, `hook-trust`), and never touch the story-gate runtime in the user folder, your tool's user-level hook settings, or git's filter settings (`.git/info/attributes`, `filter.storygate-hooks`).
 - Don't edit `ready.json` / `done.json` by hand. Don't delete `decisions.jsonl` or `learnings.jsonl` lines (append-only).
 - Quote the `gate.py` verdict line in your reply. Never paraphrase it into a pass.

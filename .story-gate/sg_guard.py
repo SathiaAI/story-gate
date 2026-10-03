@@ -15,6 +15,7 @@ import hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 import sg_trust as T
+import sg_pin as PIN
 
 FILTER = "storygate-hooks"
 FILTERED = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json", ".codex/hooks.json", ".codex/config.toml",
@@ -175,10 +176,10 @@ def approved_for(top, path):
     approved = _git(top, "show", "%s:%s" % (sha, path))
     allowed = []
     try:
-        allowed = json.loads(T.policy_text(top, e["policy_ref"], "config.json") or "{}").get("project_hooks_allowed") or []
-    except ValueError:
+        allowed = sorted(PIN.allowed_commands(json.loads(T.policy_text(top, e["policy_ref"], "config.json") or "{}")))
+    except (ValueError, AttributeError):
         pass
-    return approved, [a for a in allowed if isinstance(a, str)]
+    return approved, allowed
 
 
 def _conflicted(data):
@@ -203,6 +204,11 @@ def filter_main(mode, path):
                 out = data  # a merge conflict: the markers make it unparseable for every tool; resolving it is your call
             else:
                 out, removed = sanitize(data, approved, allowed)
+                out, blocked = PIN.smudge(out, top, path)  # repo scripts: run only the default branch's copy, or not at all
+                if blocked:
+                    log(top, "filtered %s: %d hook(s) run repository code without pins" % (path, len(blocked)))
+                    sys.stderr.write("story-gate: %d hook(s) in %s run repository code that isn't pinned, so they won't run "
+                                     "(gate.py doctor shows how to pin them)\n" % (len(blocked), path))
                 if removed:
                     log(top, "filtered %s: removed %d unapproved entr%s" % (path, len(removed), "y" if len(removed) == 1 else "ies"))
                     sys.stderr.write("story-gate: removed %d unapproved hook entr%s or setting(s) from %s (they came from this branch, "
@@ -210,12 +216,14 @@ def filter_main(mode, path):
         else:  # clean: git is reading the working tree; map our filtered copy back to the stored version so status stays clean
             idx = _git(top, "cat-file", "blob", ":%s" % path)
             idx = idx if idx is not None else _git(top, "show", "HEAD:%s" % path)
-            out = data
-            if idx is not None and (sanitize(idx, approved, allowed)[0] == data or is_filtered_form(idx, data, allowed)):
+            plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
+            out = plain
+            if idx is not None and (PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data
+                                    or is_filtered_form(idx, plain, allowed)):
                 out = idx
             elif idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
                 try:
-                    lost = exec_strings(_load(idx)) - exec_strings(_load(data))
+                    lost = exec_strings(_load(idx)) - exec_strings(_load(plain))
                 except (ValueError, UnicodeDecodeError):
                     lost = set()
                 if lost:
@@ -387,6 +395,24 @@ def filter_active(top):
             and "hook-filter clean" in get("filter.%s.clean" % FILTER) and get("filter.%s.required" % FILTER) == "true")
 
 
+def default_hook_commands(top):
+    """Command strings in the default branch's AI-tool hook files (what it approves)."""
+    import sg_pin
+    _, sha, _ = sg_pin.policy(top)
+    if not sha:
+        return set()
+    import fnmatch
+    names = (_git(str(top), "ls-tree", "-r", "-z", "--name-only", sha) or b"").decode("utf-8", "replace").split("\0")
+    pats = [p for p in FILTERED if p.endswith(".json")]
+    cmds = set()
+    for n in [n for n in names if n and any(fnmatch.fnmatch(n, p) or fnmatch.fnmatch(n, "*/" + p) for p in pats)]:
+        try:
+            cmds |= exec_strings(_load(_git(str(top), "show", "%s:%s" % (sha, n)) or b""))
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return cmds
+
+
 HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks")
 
 
@@ -515,7 +541,10 @@ def managed_body(py, launcher, user_hooks_text="", keep=()):
 def find_project_hook(approved_text, command):
     """The (event, group) holding `command` in the default branch's .claude/settings.json, trimmed to that command.
     Refuses commands that run files from the repository: under lockdown they would run in EVERY repository."""
-    if command.startswith(("./", "../", ".\\")) or "CLAUDE_PROJECT_DIR" in command:
+    import sg_pin
+    info = sg_pin.analyse(command, ".", None)
+    if (command.startswith(("./", "../", ".\\")) or "CLAUDE_PROJECT_DIR" in command or info["runner"] or info["refs"]
+            or info["outside"] or not info["parse_ok"]):  # e.g. `python scripts/hook.py`, `npm run lint`
         raise T.TrustError("'%s' runs a file from the repository, so under lockdown any repository could supply it. "
                            "Keep only commands that run something installed on this computer." % command)
     try:

