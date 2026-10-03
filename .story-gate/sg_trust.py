@@ -436,6 +436,15 @@ def enroll(cwd, policy_ref=None, allow_local=False):
     return data[ident]
 
 
+def record_policy_seen(cwd, sha, config):
+    """Remember the policy this computer last accepted, so doctor can say when the default branch makes it weaker."""
+    _, ident = repo_identity(cwd)
+    data = read_json(enrolled_path())
+    if ident in data:
+        data[ident]["policy_seen"] = {"sha": sha, "config": config, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        write_json_atomic(enrolled_path(), data)
+
+
 def unenroll(cwd):
     _, ident = repo_identity(cwd)
     data = read_json(enrolled_path())
@@ -517,6 +526,39 @@ def tighten(policy, local):
     return out
 
 
+def weaker(old, new):
+    """Plain-English list of ways `new` policy is weaker than `old` (both full configs). Empty when it isn't."""
+    out = []
+    o, n = old or {}, new or {}
+    if o.get("mode") == "enforce" and n.get("mode") != "enforce":
+        out.append("mode went from enforce to %s" % n.get("mode"))
+    gone = sorted(set(o.get("enforce_points") or []) - set(n.get("enforce_points") or []))
+    if gone:
+        out.append("no longer enforced at: %s" % ", ".join(gone))
+    if not o.get("accept_concerns") and n.get("accept_concerns"):
+        out.append("CONCERNS verdicts now pass")
+    for k in ("pass", "concerns"):
+        try:
+            a, b = float((o.get("thresholds") or {}).get(k)), float((n.get("thresholds") or {}).get(k))
+            if b < a:
+                out.append("%s threshold lowered from %s to %s" % (k, a, b))
+        except (TypeError, ValueError):
+            pass
+    for k in ("emulated_allow_pass", "allow_self_judge_pass"):
+        if not (o.get("judge") or {}).get(k) and (n.get("judge") or {}).get(k):
+            out.append("judge setting %s turned on" % k)
+    if o.get("require_independent_review") and not n.get("require_independent_review"):
+        out.append("independent review no longer required")
+    more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
+    if more:
+        out.append("more files exempt from the gate: %s" % ", ".join(more[:5]))
+    key = lambda e: json.dumps(e, sort_keys=True)
+    added = sorted(set(map(key, n.get("project_hooks_allowed") or [])) - set(map(key, o.get("project_hooks_allowed") or [])))
+    if added:
+        out.append("project hooks newly allowed: %s" % "; ".join(added[:5]))
+    return out
+
+
 # ------------------------------------------------------------------ user-level client hooks
 def user_hook_files():
     h = user_home()
@@ -536,20 +578,24 @@ def hook_entries(py, gate):
         "claude": {"hooks": {
             "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash", "hooks": [{"type": "command", "command": cmd("claude", "pre"), "timeout": 15}]}],
             "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": cmd("claude", "post"), "timeout": 180}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd("claude", "stop"), "timeout": 60}]}]}},
+            "Stop": [{"hooks": [{"type": "command", "command": cmd("claude", "stop"), "timeout": 60}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": cmd("claude", "session"), "timeout": 15}]}]}},
         "codex": {"hooks": {
             "PreToolUse": [{"matcher": "^(apply_patch|Edit|Write|Bash|shell|local_shell|exec_command)$", "hooks": [{"type": "command", "command": cmd("codex", "pre"), "timeout": 15}]}],
             "PostToolUse": [{"matcher": "^(apply_patch|Edit|Write)$", "hooks": [{"type": "command", "command": cmd("codex", "post"), "timeout": 180}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": cmd("codex", "stop"), "timeout": 60}]}]}},
+            "Stop": [{"hooks": [{"type": "command", "command": cmd("codex", "stop"), "timeout": 60}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": cmd("codex", "session"), "timeout": 15}]}]}},
         "cursor": {"version": 1, "hooks": {  # failClosed: a crash or timeout blocks instead of letting the edit through
             "preToolUse": [{"command": cmd("cursor", "pre"), "matcher": "Write", "failClosed": True}],
             "beforeShellExecution": [{"command": cmd("cursor", "pre"), "failClosed": True}],
             "postToolUse": [{"command": cmd("cursor", "post"), "matcher": "Write"}],
-            "stop": [{"command": cmd("cursor", "stop")}]}},
+            "stop": [{"command": cmd("cursor", "stop")}],
+            "sessionStart": [{"command": cmd("cursor", "session")}]}},
         "gemini": {"hooks": {
             "BeforeTool": [{"matcher": "write_file|replace|run_shell_command", "hooks": [{"type": "command", "command": cmd("gemini", "pre"), "timeout": 15000}]}],
             "AfterTool": [{"matcher": "write_file|replace", "hooks": [{"type": "command", "command": cmd("gemini", "post"), "timeout": 180000}]}],
-            "AfterAgent": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "stop"), "timeout": 60000}]}]}},
+            "AfterAgent": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "stop"), "timeout": 60000}]}],
+            "SessionStart": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd("gemini", "session"), "timeout": 15000}]}]}},
         "windsurf": {"hooks": {
             "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "pre_run_command": [{"command": cmd("windsurf", "pre"), "show_output": True}],
