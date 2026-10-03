@@ -297,6 +297,8 @@ def unwrap_bytes(data_bytes):
 
 # ------------------------------------------------------------------ the runner (AI tool side)
 def _skip(rel):
+    """Bytecode Python leaves in YOUR working tree. Ignored only where nothing runs from the working tree (the default
+    path runs the protected copy). The protected copy and trusted-content hashes count every file."""
     parts = rel.split("/")
     return "__pycache__" in parts or rel.endswith((".pyc", ".pyo"))
 
@@ -365,9 +367,7 @@ def differing(top, sha, pins):
 def content_hash(top, pins):
     """Hash of exactly what is in the working tree under the pins (content, mode, links, ignored files)."""
     h = hashlib.sha256()
-    for rel in sorted({f for p in pins for f in _walk(top, p)}):
-        if _skip(rel):
-            continue
+    for rel in sorted({f for p in pins for f in _walk(top, p)}):  # bytecode included: a trusted run executes the working tree
         full = os.path.join(top, *rel.split("/"))
         st = os.lstat(full)
         h.update(rel.encode("utf-8", "surrogateescape") + b"\0" + str(st.st_mode).encode())
@@ -384,7 +384,8 @@ def trust_path():
 
 
 def trusted_locally(top, cmd, pins):
-    rec = T.read_json(trust_path()).get(T.repo_identity(top)[1] or "", {}).get(cmd)
+    ident = T.repo_identity(top)[1]
+    rec = T.read_json(trust_path()).get(ident, {}).get(cmd) if ident else None
     try:
         return bool(rec and rec.get("content_sha256") == content_hash(top, pins))
     except OSError:
@@ -399,6 +400,8 @@ def trust_local(top, cmd, revoke=False):
         raise T.TrustError("'%s' isn't a pinned hook in project_hooks_allowed on the default branch" % cmd)
     data = T.read_json(trust_path())
     ident = T.repo_identity(top)[1]
+    if not ident:
+        raise T.TrustError("can't identify this repository")
     if revoke:
         data.get(ident, {}).pop(cmd, None)
     else:
@@ -418,7 +421,7 @@ def cache_root():
 
 def _cache_ok(top, dest, tree):
     files = sorted(n for n in tree)
-    have = {f for f in _walk(str(dest), ".") if not _skip(f) and f != ".complete"} if dest.is_dir() else set()
+    have = {f for f in _walk(str(dest), ".") if f != ".complete"} if dest.is_dir() else set()  # any extra file (bytecode too) fails
     have = {f[2:] if f.startswith("./") else f for f in have}
     if have != set(files):
         return False
@@ -560,6 +563,7 @@ def run_approved(token):
         return refuse("hook '%s' not run: %s" % (cmd, ex))
     env = dict(os.environ)
     env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p and not _inside(p, top))  # no repo programs
+    env["PYTHONDONTWRITEBYTECODE"] = "1"  # keep the protected copy exactly as verified
     if diff:
         if not trusted_locally(top, cmd, pins):
             return refuse("hook '%s' not run: %s differ%s from %s, so this could be a branch's code. If these are your own "

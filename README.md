@@ -148,7 +148,7 @@ Codex adds its own hard-on-change layer: it asks you to trust any changed projec
 
 **Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands. To commit the *removal* of a hook the default branch never approved, turn the filter off for that commit (`gate.py filter off`, then `filter on`).
 
-**Approve commands, not scripts:** an approved hook such as `bash scripts/check.sh` runs whatever `scripts/check.sh` contains on the branch you're on. Prefer hooks that run something installed on your computer.
+**Hooks that run repository scripts are pinned:** an approved hook like `bash scripts/check.sh` runs only the default branch's copy of the script. If the branch changed it, the hook refuses. Hooks that run repository code story-gate can't pin (`npm run lint`, `python -m ...`) are removed unless a code owner explicitly accepts them. `gate.py doctor` labels every hook. Details: [docs/hook-pinning.md](docs/hook-pinning.md).
 
 **Escape hatch:** `gate.py filter off` turns the filter off for one repository and writes it to `.git/story-gate-guard.log`; `gate.py filter on` (or `enroll`) turns it back on. Doctor flags it while it's off.
 

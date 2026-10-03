@@ -45,6 +45,7 @@ Commands (run from the repo root):
   agent-env --repo owner/name        print env + git identity so AI tools act as the agent App, not as you
   agent-token --repo owner/name [--git-credential]   1-hour token for the agent App
   publish                            send outbox events to configured sinks
+  hook-trust "<hook command>" [--revoke]   human only: let YOUR edited copy of a pinned hook's files run (exactly this content)
   doctor [--repo owner/name] [--strict] [--prove]   plain-English health check; --prove plants a canary hook on a throwaway
                                      commit and shows it never reaches disk
 """

@@ -1608,6 +1608,14 @@ class TestPinnedHooks(RuntimeFixture):
         r = self.fire(wrapped)
         self.assertNotIn("PLANTED", r.stdout); self.assertIn("MAIN-COPY", r.stdout)  # rebuilt from the commit
 
+    def test_planted_bytecode_in_the_cache_is_detected(self):
+        wrapped = self.pinned_setup()
+        self.fire(wrapped)
+        (cache,) = list((self.home / "approved-cache").glob("*/scripts"))
+        cache.chmod(0o755); (cache / "__pycache__").mkdir(); (cache / "__pycache__" / "lib.cpython-39.pyc").write_bytes(b"x")
+        self.fire(wrapped)
+        self.assertFalse((cache / "__pycache__").exists())  # rebuilt: any extra file fails the check
+
     def test_stdin_and_exit_code_pass_through(self):
         self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
                         {"scripts/check.sh": "read line; echo got:$line; exit 3\n"})
