@@ -371,7 +371,11 @@ def policy_commit(top, ref):
     branch or tag with the same name (which git would otherwise prefer) can't stand in for it."""
     if not ref:
         return None
-    for full in ("refs/remotes/" + ref, "refs/heads/" + ref, "refs/tags/" + ref):
+    if "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split():
+        candidates = ("refs/remotes/" + ref,)  # a remote's branch: if the tracking ref is gone, fail closed
+    else:
+        candidates = ("refs/heads/" + ref, "refs/tags/" + ref)  # no remote (e.g. "main" in a local-only repo)
+    for full in candidates:
         if subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True).returncode == 0:
             return git_in(top, "rev-parse", "--verify", "-q", full + "^{commit}") or None
     return None
@@ -586,10 +590,18 @@ def registered_clients(gate):
     return [cl for cl, p in user_hook_files().items() if p.exists() and g in p.read_text(encoding="utf-8", errors="ignore").replace("\\\\", "/")]
 
 
+LOCAL_ONLY = (".claude/settings.local.json",)  # your own per-computer file; it only counts when a branch commits it
+
+
+def _branch_hook_files(top, hook_files):
+    tracked = set(git_in(top, "ls-files", "--", *LOCAL_ONLY).splitlines())
+    return [rel for rel in hook_files if rel not in LOCAL_ONLY or rel in tracked]
+
+
 def project_hook_findings(top, hook_files):
     """Project-level hook files that still run story-gate code from the repository (a branch could swap it)."""
     found = []
-    for rel in hook_files:
+    for rel in _branch_hook_files(top, hook_files):
         p = Path(top) / rel
         if p.is_file() and ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/"):
             found.append(rel)
@@ -603,7 +615,7 @@ def project_hook_findings(top, hook_files):
 def other_project_hooks(top, hook_files):
     """Commands from the repository's own project hook files (not story-gate's). story-gate can't vouch for them."""
     cmds = []
-    paths = [Path(top) / r for r in hook_files] + (sorted((Path(top) / ".grok" / "hooks").glob("*.json")) if (Path(top) / ".grok" / "hooks").is_dir() else [])
+    paths = [Path(top) / r for r in _branch_hook_files(top, hook_files)] + (sorted((Path(top) / ".grok" / "hooks").glob("*.json")) if (Path(top) / ".grok" / "hooks").is_dir() else [])
     for p in paths:
         if not p.is_file() or p.suffix != ".json":
             continue

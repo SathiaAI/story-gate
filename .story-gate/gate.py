@@ -1474,6 +1474,10 @@ def runtime_policy_problem(c):
     if need and T.version_tuple(VERSION) < T.version_tuple(need):
         return "this repository needs story-gate %s or newer; this computer runs %s. Upgrade: gate.py upgrade" % (need, VERSION)
     import sg_guard as SG
+    links = SG.symlinked_hook_paths(str(ROOT))
+    if links:
+        return ("this branch stores AI-tool settings as symlinks (%s). Git writes symlinks without the checkout filter, so a "
+                "branch could point your AI tool at hooks nobody approved. Replace them with regular files." % ", ".join(links[:5]))
     if SG.tampered(str(ROOT)):
         return ("the checkout filter that keeps a branch's AI-tool hooks off this computer was switched off outside story-gate. "
                 "A human turns it back on with: gate.py filter on  (or off on purpose, logged: gate.py filter off)")
@@ -2101,13 +2105,16 @@ def cmd_user(cmd, kv, rest):
             return 1
         print("Checkout filters (one per covered repository):")
         out = []
-        for top in sorted(T.read_json(T.manifest_path()).get("repos", {})):
-            if Path(top).is_dir() and T.git_in(top, "rev-parse", "--git-dir"):
+        for key, rec in sorted(T.read_json(T.manifest_path()).get("repos", {}).items()):
+            top = (rec or {}).get("toplevel") or key  # the working folder recorded at enable time (the key is the .git folder)
+            if Path(top).is_dir() and T.git_in(top, "rev-parse", "--is-inside-work-tree") == "true":
                 out += ["  %s" % top] + SG.disable_filter(top, dry)
+            elif Path(key).is_dir():  # working folder moved or gone: settings can still be restored in the .git folder
+                out += ["  %s (working folder not found; hook files weren't re-checked)" % key] + SG.disable_filter(key, dry)
             else:
-                out.append("  %s: folder not found. If it moved, run there: git config --local --remove-section filter.%s" % (top, SG.FILTER))
+                out.append("  %s: not found. If it moved, run there: git config --local --remove-section filter.%s" % (top, SG.FILTER))
                 if not dry:
-                    T.forget("repos", top)
+                    T.forget("repos", key)
         print("\n".join(out) or "  none")
         print("User-level hooks:")
         out = T.unregister_user_hooks(dry)
@@ -2155,8 +2162,10 @@ def cmd_user(cmd, kv, rest):
             if T.verify_self(prev) and any("changed" in x or "unexpected" in x for x in T.verify_self(prev)):
                 print("The previous runtime failed its integrity check; not rolling back."); return 1
             m = T.read_json(Path(prev) / "manifest.json")
+            T.launcher_path().write_text(T.LAUNCHER, encoding="utf-8")
             T.write_json_atomic(T.active_path(), {"version": m.get("version"), "dir": prev, "previous": str(HERE),
-                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json")})
+                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json"),
+                                                  "launcher_sha256": T.sha256(T.launcher_path())})
             print("Rolled back to %s." % m.get("version")); return 0
         import tempfile as _tf
         with _tf.TemporaryDirectory() as td:
@@ -2312,7 +2321,7 @@ def cmd_filter(rest):
         print("Not inside a git repository."); return 1
     what = rest[0] if rest else "status"
     if what == "off":
-        if not SG.filter_active(top):
+        if not SG.filter_active(top) and not SG.tampered(top):
             print("The checkout filter is already off here."); return 0
         print("\n".join(SG.disable_filter(top)))
         SG.log(top, "checkout filter turned OFF by %s" % (os.environ.get("USER") or os.environ.get("USERNAME") or "?"))
@@ -2396,10 +2405,15 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                                          if st["on"] else "off - recommended; gate.py lockdown explains it"))
     for tool, level, nxt in SG.client_matrix(str(ROOT)):
         print("  %-8s repository hooks: %s%s" % (tool, level, ("  (" + nxt + ")") if nxt else ""))
+    links = SG.symlinked_hook_paths(str(ROOT))
+    if links:
+        print("  PROBLEM: AI-tool settings stored as symlinks (the filter can't check them): %s" % ", ".join(links[:5]))
+        fails.append("symlinks")
     if prove:
         ok, lines = SG.prove(str(ROOT))
         print("  proof (canary hook on a throwaway commit):")
         print("\n".join(lines))
+        ok = ok and not links
         print("  proof: %s" % ("PASSED - nothing from the canary reached disk" if ok else "FAILED"))
         if not ok:
             fails.append("prove")

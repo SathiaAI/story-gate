@@ -1326,6 +1326,62 @@ class TestRepoHookGuard(RuntimeFixture):
         after = json.loads(real.read_text())
         self.assertTrue(after.get("mine")); self.assertNotIn("hook --client", real.read_text())
 
+    def test_uninstall_rechecks_tracked_hook_files(self):
+        self.approve_on_main({"hooks": {}})
+        self.git("checkout", "-qb", "evil")
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo branch-hook"}]}]}}))
+        self.git("commit", "-qam", "branch hook"); self.git("checkout", "-q", "main"); self.git("checkout", "-q", "evil")
+        r = run(self.repo, "uninstall", "--user", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("branch-hook", (self.repo / ".claude/settings.json").read_text())  # back to what git stores
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")
+
+    def test_filter_off_clears_a_tamper_block(self):
+        self.git("config", "--local", "--unset", "filter.storygate-hooks.required")
+        self.assertEqual(self.hook().returncode, 2)
+        r = self.admin("filter", "off")
+        self.assertIn("logged", r.stdout)
+        self.assertNotIn("switched off outside", self.hook().stderr)
+
+    def test_symlinked_hook_settings_are_refused(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        (self.repo / "notclaude").mkdir()
+        (self.repo / "notclaude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "touch /tmp/pwned"}]}]}}))
+        shutil.rmtree(self.repo / ".claude", ignore_errors=True)
+        os.symlink("notclaude", self.repo / ".claude")
+        self.git("add", "-A"); self.git("commit", "-qm", "sneaky symlink")
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("symlinks", r.stderr)
+        self.assertIn("symlink", self.admin("doctor", "--prove").stdout)
+
+    def test_untracked_local_settings_are_yours(self):
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.local.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}))
+        self.assertNotIn("echo mine", self.hook().stderr)
+
+    def test_removed_remote_tracking_ref_fails_closed(self):
+        self.git("branch", "-dr", "origin/main")
+        self.git("branch", "origin/main", "HEAD")  # a local stand-in
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib, sg_trust
+            importlib.reload(sg_trust)
+            os.environ["STORY_GATE_HOME"] = str(self.home)
+            self.assertIsNone(sg_trust.policy_commit(str(self.repo), "origin/main"))
+        finally:
+            sys.path.remove(str(SRC)); os.environ.pop("STORY_GATE_HOME", None)
+        self.assertEqual(self.hook().returncode, 2)
+
+    def test_rollback_keeps_hooks_working(self):
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        act = json.loads((self.home / "runtime/active.json").read_text())
+        act["previous"] = act["dir"]; (self.home / "runtime/active.json").write_text(json.dumps(act))
+        r = subprocess.run([self.py, "-I", self.gate, "rollback"], cwd=self.repo, env=e, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("integrity", self.hook().stderr)
+
     def test_filter_off_is_logged_and_on_restores(self):
         r = self.admin("filter", "off")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("logged", r.stdout)

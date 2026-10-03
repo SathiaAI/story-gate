@@ -387,6 +387,17 @@ def filter_active(top):
             and "hook-filter clean" in get("filter.%s.clean" % FILTER) and get("filter.%s.required" % FILTER) == "true")
 
 
+HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks")
+
+
+def symlinked_hook_paths(top):
+    """Covered hook files, or the folders that hold them, stored in git as symlinks. Git writes symlinks without running
+    the checkout filter, so a branch could use one to point an AI tool at unapproved hooks."""
+    specs = [":(glob)**/%s" % p for p in FILTERED + HOOK_DIRS]
+    raw = (_git(str(top), "ls-files", "-s", "-z", "--", *specs) or b"").decode("utf-8", "replace")
+    return sorted({e.split("\t", 1)[1] for e in raw.split("\0") if e.startswith("120000 ") and "\t" in e})
+
+
 def tampered(top):
     """story-gate turned the filter on here, nobody turned it off with `gate.py filter off`, yet it's not active."""
     try:

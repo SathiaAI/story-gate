@@ -544,7 +544,7 @@ def pill(v):
 
 
 def pill_level(text):
-    kind = "pass" if text.startswith("hard") else ("fail" if text == "none" else "warn")
+    kind = "pass" if text.startswith("hard:") else ("fail" if text == "none" else "warn")  # hard-on-change is not a hard stop
     return '<span class="sg-pill %s">%s</span>' % (kind, h(text, 120))
 
 
@@ -586,7 +586,7 @@ def to_html(d, artifact_note=""):
     if d.get("computer"):  # local runs only: how well this computer is protected from hooks shipped inside branches
         notes += ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">This computer: hooks shipped inside branches</h3></div>'
                   '<div class="table-responsive"><table class="table card-table"><thead><tr><th>AI tool</th><th>Protection</th><th>Next step</th></tr></thead><tbody>%s'
-                  '</tbody></table></div><div class="card-body text-secondary small">Hard = the tool itself refuses repository hooks. Partial = '
+                  '</tbody></table></div><div class="card-body text-secondary small">Hard = the tool itself refuses repository hooks. Hard-on-change = the tool asks you again whenever a hook changes. Partial = '
                   'story-gate\'s checkout filter removes unapproved hook commands in the repositories it covers. Prove it: gate.py doctor --prove</div></div>'
                   % "".join('<tr><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (h(r["tool"], 20), pill_level(r["protection"]), h(r["next"], 200))
                             for r in d["computer"]))

@@ -24,11 +24,13 @@
 |---|---|---|---|---|---|---|
 | **Checkout filter** (enrolled repositories) | Yes | Yes (`.codex/config.toml` is kept at the default branch's version) | Yes | Yes | Yes | Yes |
 | **Tool's own hard switch** | `allowManagedHooksOnly` (story-gate lockdown, optional) | Re-asks trust when a hook changes | None documented | Folder trust (`security.folderTrust.enabled`) | None documented | `/hooks-trust`, per folder |
-| **Level `doctor` reports** | hard with lockdown, otherwise partial | hard-on-change | partial | partial | partial | partial |
+| **Level `doctor` reports** | hard with lockdown (doctor can't see MDM or registry policies that override it), otherwise partial | hard-on-change | partial | partial | partial | partial |
+
+**Symlinks:** git writes symlinks without running the filter. story-gate refuses (enforce) or warns about any AI-tool settings file or folder stored as a symlink, and `doctor --prove` fails while one exists.
 
 **What's still exposed:** repositories you haven't enrolled; hook files written outside git (a script you run, a download); and, for tools without a hard switch, a hook file an agent writes directly (story-gate's pre-edit block stops agents writing hook files, in enforce mode). CI checks every PR either way.
 
-Sources for lockdown: [Claude Code managed settings](https://code.claude.com/docs/en/managed-settings) (drop-in `managed-settings.d/` files merge with `managed-settings.json`; hook lists combine) and [Claude Code hooks](https://code.claude.com/docs/en/hooks) (`allowManagedHooksOnly` blocks user, project, local and plugin hooks).
+Sources for lockdown: [Claude Code managed settings](https://code.claude.com/docs/en/managed-settings) (drop-in `managed-settings.d/` files merge with `managed-settings.json`; hook lists combine) and [Claude Code hooks](https://code.claude.com/docs/en/hooks) (`allowManagedHooksOnly` blocks user, project and local hooks, and plugin hooks except those from plugins force-enabled in managed `enabledPlugins`).
 
 ## Check it on your computer
 
