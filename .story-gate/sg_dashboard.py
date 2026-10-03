@@ -543,6 +543,11 @@ def pill(v):
     return '<span class="sg-pill %s">%s%s</span>' % (cls, icon, h(v, 12))
 
 
+def pill_level(text):
+    kind = "pass" if text.startswith("hard") else ("fail" if text == "none" else "warn")
+    return '<span class="sg-pill %s">%s</span>' % (kind, h(text, 120))
+
+
 def to_html(d, artifact_note=""):
     M = d.get("metrics", [])
     label = dict((k, l) for k, l, _ in STATUSES)
@@ -578,6 +583,13 @@ def to_html(d, artifact_note=""):
         notes += '<div class="alert alert-warning">Ownership conflicts: %s</div>' % h("; ".join("%s on %s" % (c["story"], ", ".join(c["branches"])) for c in d["conflicts"]), 1000)
     if d.get("omissions"):
         notes += '<div class="alert alert-info">Not shown: %s</div>' % h("; ".join(d["omissions"]), 1000)
+    if d.get("computer"):  # local runs only: how well this computer is protected from hooks shipped inside branches
+        notes += ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">This computer: hooks shipped inside branches</h3></div>'
+                  '<div class="table-responsive"><table class="table card-table"><thead><tr><th>AI tool</th><th>Protection</th><th>Next step</th></tr></thead><tbody>%s'
+                  '</tbody></table></div><div class="card-body text-secondary small">Hard = the tool itself refuses repository hooks. Partial = '
+                  'story-gate\'s checkout filter removes unapproved hook commands in the repositories it covers. Prove it: gate.py doctor --prove</div></div>'
+                  % "".join('<tr><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (h(r["tool"], 20), pill_level(r["protection"]), h(r["next"], 200))
+                            for r in d["computer"]))
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <title>Story-gate dashboard</title><style>%s</style><style>%s</style></head><body>
@@ -743,6 +755,8 @@ def cli(gate, kv, rest):
         if in_ci and os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
             ci_status(G, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], data)
         if not in_ci:
+            import sg_guard as SG
+            data["computer"] = [{"tool": t, "protection": p, "next": n} for t, p, n in SG.client_matrix(str(root))]
             data["omissions"] = ([local_note] if local_note else []) + ["local snapshot: includes this computer's local branches and anything not pushed"] + data["omissions"]
     out = Path(kv.get("out") or tempfile.mkdtemp(prefix="story-gate-dashboard-"))
     out.mkdir(parents=True, exist_ok=True)

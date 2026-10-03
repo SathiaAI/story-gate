@@ -86,7 +86,9 @@ python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output 
 ```
 - `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
 - It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
+- It also turns on the **checkout filter** in this repository (and in each repository you `enroll`, nowhere else): when git writes an AI tool's hook file, you get the version your default branch approved, minus any command it didn't. Settings live in the repository's own `.git` folder, never in a commit.
 - In each other repository that uses story-gate, run `gate.py enroll`.
+- **Recommended, optional, OFF unless you say yes:** `gate.py lockdown` explains Claude Code's own hard switch for repository hooks before anything changes. See [Lockdown](#lockdown-optional-off-by-default).
 - Your AI then pushes and opens PRs as **story-gate-agent[bot]**, never as you.
 
 Cloud agents need no setup here, because they already have their own GitHub identity: Codex cloud, Cursor Cloud and Copilot.
@@ -95,6 +97,7 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 1. Ask your AI to open a small test PR. The `story-gate` check should stay red until **you** approve the latest commit.
 2. Run `python3 .story-gate/gate.py doctor --repo you/your-repo --strict`. It must finish without failures.
 3. Run `python3 .story-gate/gate.py hook-selftest`. In enforce mode every tool should say **blocks**.
+4. Run `python3 .story-gate/gate.py doctor --prove`. It plants a harmless canary hook on a throwaway commit, checks it out in a throwaway folder, and shows the canary never reaches disk. Your branches and files don't change.
 
 > **Free GitHub plan?** GitHub only enforces branch rules on **private** repositories on paid plans (Pro, Team, Enterprise). story-gate still runs everywhere, but on a free private repository every check says **ADVISORY – NOT ENFORCED**. An audit job opens an issue if anything is merged without your approval.
 
@@ -126,10 +129,40 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 | Replace `.story-gate/gate.py` with its own code | Ignored. Hooks run the signed copy in your user folder, and it checks its own fingerprint every time |
 | Switch the rules to `warn` | Ignored. Rules come from the default branch; a branch can only make them stricter |
 | Delete `.story-gate` | Still checked: this repository is enrolled on your computer |
-| Add a project hook that runs branch code | Blocked in enforce mode, flagged in warn mode |
-| Get the AI to edit your user hooks or the runtime | Blocked, and `install`, `enroll` and `upgrade` are human-only commands |
+| Add a project hook that runs story-gate code from the branch | Blocked in enforce mode, flagged in warn mode |
+| Add its own hook to `.claude/settings.json`, `.cursor/hooks.json` or another AI-tool hook file | The checkout filter removes every command the default branch didn't approve before the file reaches disk. With lockdown on, Claude Code also refuses repository hooks outright |
+| Get the AI to switch the filter or lockdown off | Blocked: `filter`, `lockdown`, `install`, `enroll` and `upgrade` are human-only, and shell commands that touch the filter settings are refused |
+| Get the AI to edit your user hooks or the runtime | Blocked |
 
-What each tool promises about hooks is in [docs/client-security.md](docs/client-security.md). One honest limit: any repository can add **its own** hooks, and only the AI tool's workspace-trust setting can stop those. For branches you don't trust, don't open them in an AI tool with hooks; CI still checks every PR.
+**Three layers, honestly labelled.** `gate.py doctor` shows each tool's level on your computer, and the local dashboard shows the same table.
+
+| Layer | Covers | Strength |
+|---|---|---|
+| 1. Checkout filter (on with `enroll`) | Every AI tool, in repositories story-gate covers | **Partial:** stops hook files that arrive through git. A file written another way (a script, a download) isn't filtered; layer 3 and CI catch agents doing that |
+| 2. Lockdown (optional, OFF by default) | Claude Code, every repository on this computer | **Hard:** Claude Code's own `allowManagedHooksOnly` switch |
+| 3. Pre-edit block + CI | Agents writing hook or gate files, every PR | Blocks in enforce mode; CI checks every PR |
+
+Codex adds its own hard-on-change layer: it asks you to trust any changed project hook. Cursor, Gemini, Windsurf and Grok have no switch like lockdown, so the checkout filter is their protection. Details per tool: [docs/client-security.md](docs/client-security.md).
+
+**Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands.
+
+**Escape hatch:** `gate.py filter off` turns the filter off for one repository and writes it to `.git/story-gate-guard.log`; `gate.py filter on` (or `enroll`) turns it back on. Doctor flags it while it's off.
+
+#### Lockdown (optional, OFF by default)
+Recommended, and only ever turned on by you:
+```bash
+python3 .story-gate/gate.py lockdown                 # explains what changes and why, shows your current protection; changes nothing
+python3 .story-gate/gate.py lockdown --on            # asks you to type YES, then adds ONE file (needs admin once)
+python3 .story-gate/gate.py lockdown --bundle ./it   # files for IT: the setting, install/uninstall scripts, README-IT.md, SHA256SUMS
+python3 .story-gate/gate.py lockdown --off           # removes story-gate's file; nothing else to restore
+```
+- It adds `managed-settings.d/50-story-gate.json` next to Claude Code's managed settings. It never edits a `managed-settings.json` your IT team owns; Claude Code merges both ([Claude Code docs](https://code.claude.com/docs/en/managed-settings)).
+- The file turns on `allowManagedHooksOnly`, and carries story-gate's hooks plus a copy of your own Claude hooks, because Claude Code then ignores user and project hooks ([hooks docs](https://code.claude.com/docs/en/hooks)).
+- It affects **every** repository on the computer. To keep a project hook you rely on: `lockdown --on --keep-project-hook "<command>"`. If you change your own Claude hooks later, run `lockdown --on` again; doctor tells you when.
+- If your company manages Claude Code through MDM or the Windows registry, those win over files: give IT the bundle.
+- `uninstall --user` refuses while lockdown is on, so Claude Code is never left pointing at a removed runtime.
+
+**Uninstall puts everything back.** `uninstall --user` turns off the checkout filter in every covered repository (attributes file and git settings restored byte for byte), restores each user hook file from its backup (or removes only story-gate's entries if you've changed the file since), then removes the runtime. `unenroll` does the same for one repository.
 
 **LM Studio and Ollama** host models; they aren't coding agents. Use them as the model behind pi or Hermes, or as a local, advisory judge (see Fallbacks).
 
@@ -283,7 +316,8 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 - **Teams in CODEOWNERS:** team entries (`@org/team`) aren't resolved yet. List people, or use `approvers`.
 - **Stop hook in enforce mode:** it blocks the agent from ending the session up to 3 times in a row, then lets it end so a stuck agent can't loop forever. The PR check still blocks the merge.
 - **First PR:** the PR that adds story-gate is checked by human review only, because CI never runs gate code taken from a PR.
-- **Repository hooks:** story-gate's own hooks run a signed copy from your user folder with rules from the default branch, but a repository can still ship its own hooks for your AI tool. Only the tool's workspace trust controls those. Open untrusted branches without hooks; CI still checks every PR.
+- **Repository hooks:** the checkout filter covers hook files that arrive through git, in repositories story-gate covers. Repositories you haven't enrolled, and hook files written outside git, aren't filtered. Only Claude Code (lockdown) and Codex (trust re-prompt) have a hard switch today. Open untrusted repositories without hooks; CI still checks every PR.
+- **Other filters:** if a repository already sets a git filter on an AI-tool hook file (Git LFS, for example), story-gate doesn't override it and says so.
 - **Grok:** user and project hook merging isn't documented, so story-gate doesn't register Grok hooks (status checks by hand, CI as the backstop). Windsurf/Devin timeout and trust behaviour is undocumented.
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.

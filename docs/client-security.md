@@ -16,13 +16,26 @@
 - **Fail-open tools:** a crash or timeout lets the edit through. story-gate keeps its pre-edit hook fast (it reads local files only) and fails closed inside the hook itself. CI still checks every PR either way.
 - **Windsurf/Devin:** hooks are registered and blocking is documented, but trust and timeout behaviour aren't. Treat it as partly protected.
 - **Grok:** it also reads Claude Code's and Cursor's hook files, so it may pick up story-gate's Claude hooks. Merging isn't documented, so story-gate doesn't register Grok hooks or claim protection there. Run `gate.py status` and rely on CI.
-- **Any tool:** a repository can ship its own project hooks. Only the tool's trust setting controls those. Open untrusted branches without hooks.
+- **Any tool:** a repository can ship its own project hooks. See the next section for what story-gate does about that.
+
+## Hooks shipped inside a repository
+
+| | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build |
+|---|---|---|---|---|---|---|
+| **Checkout filter** (enrolled repositories) | Yes | Yes (`.codex/config.toml` is kept at the default branch's version) | Yes | Yes | Yes | Yes |
+| **Tool's own hard switch** | `allowManagedHooksOnly` (story-gate lockdown, optional) | Re-asks trust when a hook changes | None documented | Folder trust (`security.folderTrust.enabled`) | None documented | `/hooks-trust`, per folder |
+| **Level `doctor` reports** | hard with lockdown, otherwise partial | hard-on-change | partial | partial | partial | partial |
+
+**What's still exposed:** repositories you haven't enrolled; hook files written outside git (a script you run, a download); and, for tools without a hard switch, a hook file an agent writes directly (story-gate's pre-edit block stops agents writing hook files, in enforce mode). CI checks every PR either way.
+
+Sources for lockdown: [Claude Code managed settings](https://code.claude.com/docs/en/managed-settings) (drop-in `managed-settings.d/` files merge with `managed-settings.json`; hook lists combine) and [Claude Code hooks](https://code.claude.com/docs/en/hooks) (`allowManagedHooksOnly` blocks user, project, local and plugin hooks).
 
 ## Check it on your computer
 
 1. Run `gate.py hook-selftest` in an enrolled repository. It runs each installed hook exactly as the tool would and times it. In enforce mode every tool should say **blocks**.
 2. Open each AI tool once, with no READY story, and ask it to edit a code file. The edit should be blocked (enforce) or warned about (warn).
 3. Optional: add a hook of your own in the project settings, then confirm story-gate's hook still runs. That shows the tool runs user and project hooks together.
+4. Run `gate.py doctor --prove`. It plants a canary hook in every AI-tool hook file on a throwaway commit and shows the canary never reaches disk.
 
 The CI matrix tests story-gate's side on Windows, macOS and Linux. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
 
