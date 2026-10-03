@@ -1616,6 +1616,39 @@ class TestPinnedHooks(RuntimeFixture):
         self.fire(wrapped)
         self.assertFalse((cache / "__pycache__").exists())  # rebuilt: any extra file fails the check
 
+    def test_status_stays_clean_through_stash_rebase_and_checkout(self):
+        wrapped = self.pinned_setup()
+        (self.repo / "app.py").write_text("x = 3\n"); self.git("stash", "-q"); self.git("stash", "pop", "-q")
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "M app.py")
+        self.git("commit", "-qam", "work"); self.git("checkout", "-q", "main"); (self.repo / "other.txt").write_text("o\n"); self.git("add", "other.txt")
+        self.git("commit", "-qm", "main moves"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("rebase", "-q", "main")
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")
+        self.assertEqual(self.disk_commands(), [wrapped])
+        self.assertEqual(self.fire(wrapped).returncode, 0)
+
+    def test_relative_shebang_is_refused(self):
+        self.setup_main(["./scripts/check.sh"], [{"command": "./scripts/check.sh", "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "#!venv/bin/python\nprint(1)\n"})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("relative interpreter", r.stderr)
+
+    def test_runner_latency(self):
+        files = {"tools/run.sh": "echo ok\n"}
+        files.update({"tools/lib/f%03d.sh" % i: "x=%d\n" % i for i in range(300)})
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}], files)
+        (wrapped,) = self.disk_commands()
+        self.fire(wrapped)  # first run builds the protected copy
+        import time as _t
+        times = []
+        for _ in range(5):
+            t0 = _t.time(); r = self.fire(wrapped); times.append(_t.time() - t0)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        times.sort()
+        self.assertLess(times[-1], 3.0)  # generous for CI; typical is well under 1 s
+        print("\n[runner latency, 301 pinned files] median %.2fs max %.2fs" % (times[2], times[-1]))
+
     def test_stdin_and_exit_code_pass_through(self):
         self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
                         {"scripts/check.sh": "read line; echo got:$line; exit 3\n"})

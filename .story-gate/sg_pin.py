@@ -575,7 +575,16 @@ def run_approved(token):
             cache = ensure_cache(top, sha, pins)
         except (T.TrustError, OSError) as ex:
             return refuse("hook '%s' not run: %s" % (cmd, ex))
-        args, as_string = run_argv(tokens=rewrite(cmd, cache, pins))
+        words = rewrite(cmd, cache, pins)
+        first = Path(words[0])
+        if first.is_absolute() and _inside(first, cache) and first.is_file():  # the pinned script is run directly
+            line = first.read_bytes()[:256].split(b"\n", 1)[0]
+            if line.startswith(b"#!"):
+                interp = line[2:].strip().split()[0] if line[2:].strip() else b""
+                if not interp.startswith(b"/"):
+                    return refuse("hook '%s' not run: its script starts with a relative interpreter (%s), which would run a "
+                                  "program from the repository" % (cmd, interp.decode("utf-8", "replace")))
+        args, as_string = run_argv(tokens=words)
     try:
         return subprocess.run(args, cwd=start if os.path.isdir(start) else top, env=env).returncode  # stdin/out/err pass through
     except OSError as ex:

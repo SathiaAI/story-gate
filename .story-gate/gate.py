@@ -1646,6 +1646,16 @@ def cmd_ci(tests_dir=None):
                 problems.append("This PR changes story-gate code, hook or workflow files (%s). A code owner must review them and add "
                                 "the label '%s' to confirm%s." % (", ".join(touched), CHANGE_LABEL,
                                                                   " (it was added by %s, who is not a code owner)" % who if who else ""))
+        try:  # pinned project hooks (sg_pin): flag scripts that seem to use repository files outside their pins
+            import sg_pin as PIN
+            head_sha = git("rev-parse", "HEAD").strip()
+            for hook_cmd, ent in PIN.entries(c).items():
+                extra = PIN.unpinned_references(str(ROOT), head_sha, ent["pins"]) if ent["pins"] else []
+                if extra:
+                    notes.append("pinned hook '%s' seems to use repository files that aren't pinned (%s); add them to its pins"
+                                 % (hook_cmd, ", ".join(extra[:5])))
+        except Exception:
+            pass
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
