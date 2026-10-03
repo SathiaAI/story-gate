@@ -735,8 +735,10 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertEqual(T.weaker(old, dict(old, thresholds={"pass": 0.8, "concerns": 0.5}, enforce_points=["ci", "stop", "pre_edit"])), [])
         w = T.weaker(old, dict(old, mode="warn", enforce_points=["ci"], accept_concerns=True, thresholds={"pass": 0.6, "concerns": 0.4},
                                 judge={"allow_self_judge_pass": True}, require_independent_review=False, exempt_globs=["*.md", "src/**"],
-                                project_hooks_allowed=["echo ok", {"command": "npm run lint", "runs_repo_code": "accepted"}]))
-        self.assertEqual(len(w), 8, w)
+                                project_hooks_allowed=["echo ok", {"command": "npm run lint", "runs_repo_code": "accepted"}],
+                                test_command="true", approvers=["someone"]))
+        self.assertEqual(len(w), 10, w)
+        self.assertIn("test command changed from '' to 'true'", w)
 
     def test_change_label_must_still_be_present(self):
         G = self.G

@@ -552,6 +552,11 @@ def weaker(old, new):
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
     if more:
         out.append("more files exempt from the gate: %s" % ", ".join(more[:5]))
+    if (o.get("test_command") or "") != (n.get("test_command") or ""):  # can't tell if a new command is as strict: a human decides
+        out.append("test command changed from %r to %r" % (o.get("test_command") or "", n.get("test_command") or ""))
+    who = sorted(set(n.get("approvers") or []) - set(o.get("approvers") or []))
+    if who:
+        out.append("more people can accept work: %s" % ", ".join(who[:5]))
     key = lambda e: json.dumps(e, sort_keys=True)
     added = sorted(set(map(key, n.get("project_hooks_allowed") or [])) - set(map(key, o.get("project_hooks_allowed") or [])))
     if added:
