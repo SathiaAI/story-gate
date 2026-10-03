@@ -1,0 +1,6 @@
+# CodeRabbit settings for this repository (https://docs.coderabbit.ai/configuration/auto-review)
+reviews:
+  auto_review:
+    enabled: true
+    base_branches:   # also review stacked PRs (PRs into other feature branches); main is always included
+      - ".*"
