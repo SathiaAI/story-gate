@@ -16,7 +16,10 @@ Commands (run from the repo root):
   install --user [--clients claude,codex,cursor,gemini,windsurf] [--dry-run] [--unsigned]
                                      once per computer, as the human: install the trusted runtime + user-level hooks, enroll this repo
   uninstall --user [--dry-run]       remove the user-level hooks and the runtime
-  enroll [--policy-ref REF] | unenroll   turn checking on/off for this repository on this computer
+  enroll [--policy-ref REF] | unenroll   turn checking (and the checkout filter for AI-tool hook files) on/off for this repository
+  filter on|off|status               this repository only: the checkout filter that keeps a branch's hook changes off disk (off is logged)
+  lockdown [--on [--keep-project-hook CMD] | --off | --bundle DIR]   optional, OFF by default: Claude Code's hard switch for
+                                     repository hooks. Explains first; --on needs your explicit YES; --bundle writes files for IT
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
@@ -42,7 +45,8 @@ Commands (run from the repo root):
   agent-env --repo owner/name        print env + git identity so AI tools act as the agent App, not as you
   agent-token --repo owner/name [--git-credential]   1-hour token for the agent App
   publish                            send outbox events to configured sinks
-  doctor [--repo owner/name] [--strict]   plain-English health check (wiring, judge, branch rules, agent identity)
+  doctor [--repo owner/name] [--strict] [--prove]   plain-English health check; --prove plants a canary hook on a throwaway
+                                     commit and shows it never reaches disk
 """
 import os, sys
 
@@ -355,7 +359,7 @@ def exempt(path, c):
     return any(fnmatch.fnmatch(p, g) for g in c["exempt_globs"])
 
 
-HOOK_FILES = (".claude/settings.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json", ".gemini/settings.json",
+HOOK_FILES = (".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json", ".gemini/settings.json",
               ".devin/hooks.json", ".windsurf/hooks.json", ".grok/hooks/story-gate.json")
 
 
@@ -1317,7 +1321,17 @@ def shell_writes(cmd):
 
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
-                  "judge-calibrate"}
+                  "judge-calibrate", "lockdown", "filter"}
+# Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
+# Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
+# itself on every call (sg_guard.tampered), because text matching can't see every spelling.
+FILTER_BYPASS = re.compile(
+    r"filter\.storygate|filter\.[^\s.]*\.(?:smudge|clean|required|process)\b|\bgit\s+config\b[^|;&]*\b(?:smudge|clean|required|process)\b"
+    r"|info[/\\]attributes|attributesfile|--no-filters|GIT_ATTR|GIT_CONFIG|--config-env|\binclude\.path|\bincludeif\."
+    r"|\.git[/\\]config\b|config\.worktree|\bgit\b[^|;&]*\s-c\s*(?:filter|include|core\.attributes|core\.hookspath|remote)"
+    r"|update-ref|refs/remotes|\bremote\s+(?:add|set-url|rename|remove|rm|set-head|set-branches)\b|\bremote\.[^.\s]+\.(?:url|fetch|pushurl)",
+    re.I)
+ADMIN_CALL = re.compile(r"(?:gate|launch)\.py\s+(?:-\S+\s+)*(%s)\b" % "|".join(sorted(ADMIN_COMMANDS)))
 
 
 def touches_gate(cmd):
@@ -1325,6 +1339,9 @@ def touches_gate(cmd):
     plain = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)  # quoted free text (--summary "...") is data, not shell
     m = GATE_CLI.fullmatch(plain)
     sub = (plain.split("gate.py", 1)[1].split() or [""])[0] if m else ""
+    bare = re.sub(r"[\'\"\\]", "", cmd)  # 'filter.story''gate' and "filter".x read as what the shell will run
+    if FILTER_BYPASS.search(bare) or ADMIN_CALL.search(bare):
+        return True  # switching protection off, changing the policy source or any admin command: human only, anywhere in the line
     if sub in ADMIN_COMMANDS:
         return True  # installing, enrolling, upgrading or signing is for the human, never an agent
     if ("`" not in cmd and "$(" not in cmd and "${" not in cmd and m and plain.count(".story-gate") == 1):
@@ -1456,6 +1473,14 @@ def runtime_policy_problem(c):
     need = c.get("min_runtime_version")
     if need and T.version_tuple(VERSION) < T.version_tuple(need):
         return "this repository needs story-gate %s or newer; this computer runs %s. Upgrade: gate.py upgrade" % (need, VERSION)
+    import sg_guard as SG
+    links = SG.symlinked_hook_paths(str(ROOT))
+    if links:
+        return ("this branch stores AI-tool settings as symlinks (%s). Git writes symlinks without the checkout filter, so a "
+                "branch could point your AI tool at hooks nobody approved. Replace them with regular files." % ", ".join(links[:5]))
+    if SG.tampered(str(ROOT)):
+        return ("the checkout filter that keeps a branch's AI-tool hooks off this computer was switched off outside story-gate. "
+                "A human turns it back on with: gate.py filter on  (or off on purpose, logged: gate.py filter off)")
     found = T.project_hook_findings(ROOT, HOOK_FILES)
     if found:
         return ("project hook files run story-gate code from the branch (%s), which a branch could swap. Remove those entries "
@@ -1546,7 +1571,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_dashboard.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -2050,7 +2075,7 @@ def cmd_user(cmd, kv, rest):
                 dest = T.install_runtime(HERE, VERSION, unsigned=unsigned)
         except T.TrustError as e:
             print("NOT installed: %s" % e); return 1
-        out = T.register_user_hooks(str(Path(py).resolve()).replace("\\", "/"), str(dest / "gate.py").replace("\\", "/"), clients, dry)
+        out = T.register_user_hooks(os.path.abspath(py).replace("\\", "/"), str(T.launcher_path()).replace("\\", "/"), clients, dry)
         print("Runtime: %s" % dest)
         print("User-level hooks (%s):" % ", ".join(clients))
         print("\n".join(out) or "  nothing to change")
@@ -2063,26 +2088,66 @@ def cmd_user(cmd, kv, rest):
             if rm:
                 print("Project hook files that ran branch code (story-gate entries removed):")
                 print("\n".join(rm))
+            turn_filter_on(top, py, dry)
+        print("Recommended, optional and OFF unless you say yes: gate.py lockdown  (explains Claude Code's hard switch for "
+              "repository hooks; nothing changes without your permission)")
         print("Notes:\n  - Codex asks you to trust new hooks once: run /hooks in Codex and trust the story-gate entries."
               "\n  - Grok: reduced protection (its hook merging isn't documented); run gate.py status yourself. See docs/client-security.md."
               "\n  - Cowork, Cursor Cloud and Codex cloud have no hooks: run gate.py status yourself; CI is the backstop."
               "\n  - In each other repository with story-gate, run: gate.py enroll")
         return 0
     if cmd == "uninstall":
+        import sg_guard as SG
+        st = SG.lockdown_status()
+        if st["ours"]:
+            print("NOT uninstalled: lockdown is still on, and Claude Code's managed hooks point at the runtime.\n"
+                  "Turn it off first (needs admin), then run this again:\n  %s" % lockdown_off_command(st))
+            return 1
+        print("Checkout filters (one per covered repository):")
+        out = []
+        for key, rec in sorted(T.read_json(T.manifest_path()).get("repos", {}).items()):
+            top = (rec or {}).get("toplevel") or key  # the working folder recorded at enable time (the key is the .git folder)
+            if Path(top).is_dir() and T.git_in(top, "rev-parse", "--is-inside-work-tree") == "true":
+                out += ["  %s" % top] + SG.disable_filter(top, dry)
+            elif Path(key).is_dir():  # working folder moved or gone: settings can still be restored in the .git folder
+                out += ["  %s (working folder not found; hook files weren't re-checked)" % key] + SG.disable_filter(key, dry)
+            else:
+                out.append("  %s: not found. If it moved, run there: git config --local --remove-section filter.%s" % (top, SG.FILTER))
+                if not dry:
+                    T.forget("repos", key)
+        print("\n".join(out) or "  none")
+        print("User-level hooks:")
         out = T.unregister_user_hooks(dry)
-        print("\n".join(out) or "no story-gate hooks in your user settings")
+        print("\n".join(out) or "  no story-gate hooks in your user settings")
         if not dry and T.runtime_root().exists():
             shutil_rmtree(T.runtime_root())
             print("Removed the runtime: %s (enrollment and agent key are kept)" % T.runtime_root())
+        if not dry and not any(T.read_json(T.manifest_path()).get(k) for k in ("files", "repos")):
+            try:
+                T.manifest_path().unlink()
+            except OSError:
+                pass
         return 0
     if cmd == "enroll":
+        if dry:
+            top = T.repo_identity(os.getcwd())[0]
+            print("Would enroll %s." % top)
+            return 0 if not top else (0 if turn_filter_on(top, kv.get("python") or sys.executable, True) or True else 1)
         try:
             e = T.enroll(os.getcwd(), kv.get("policy-ref"))
         except T.TrustError as ex:
             print("NOT enrolled: %s" % ex); return 1
-        print("Enrolled %s. Policy comes from %s." % (T.repo_identity(os.getcwd())[0], e["policy_ref"]))
+        top = T.repo_identity(os.getcwd())[0]
+        print("Enrolled %s. Policy comes from %s." % (top, e["policy_ref"]))
+        turn_filter_on(top, kv.get("python") or sys.executable, dry)
         return 0
     if cmd == "unenroll":
+        import sg_guard as SG
+        top = T.repo_identity(os.getcwd())[0]
+        if top and (SG.filter_active(top) or SG.tampered(top) or dry):
+            print("Checkout filter off:\n" + "\n".join(SG.disable_filter(top, dry)))
+        if dry:
+            print("Would unenroll %s." % top); return 0
         print("Unenrolled." if T.unenroll(os.getcwd()) else "This repository was not enrolled.")
         return 0
     if cmd in ("upgrade", "rollback"):
@@ -2097,10 +2162,10 @@ def cmd_user(cmd, kv, rest):
             if T.verify_self(prev) and any("changed" in x or "unexpected" in x for x in T.verify_self(prev)):
                 print("The previous runtime failed its integrity check; not rolling back."); return 1
             m = T.read_json(Path(prev) / "manifest.json")
+            T.launcher_path().write_text(T.LAUNCHER, encoding="utf-8")
             T.write_json_atomic(T.active_path(), {"version": m.get("version"), "dir": prev, "previous": str(HERE),
-                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json")})
-            print("\n".join(T.register_user_hooks(sys.executable.replace("\\", "/"), (Path(prev) / "gate.py").as_posix(),
-                                                    T.registered_clients(HERE / "gate.py") or T.USER_CLIENTS)))
+                                                  "signed": m.get("signed"), "manifest_sha256": T.sha256(Path(prev) / "manifest.json"),
+                                                  "launcher_sha256": T.sha256(T.launcher_path())})
             print("Rolled back to %s." % m.get("version")); return 0
         import tempfile as _tf
         with _tf.TemporaryDirectory() as td:
@@ -2130,8 +2195,6 @@ def cmd_user(cmd, kv, rest):
                 dest = T.install_runtime(src, man.get("version") or "unknown")
             except T.TrustError as ex:
                 print("NOT upgraded: %s" % ex); return 1
-        clients = T.registered_clients(HERE / "gate.py") or list(T.USER_CLIENTS)
-        print("\n".join(T.register_user_hooks(sys.executable.replace("\\", "/"), (dest / "gate.py").as_posix(), clients)))
         print("Upgraded to %s. Roll back with: gate.py rollback" % man.get("version")); return 0
     if cmd == "release-sign":
         if not kv.get("key"):
@@ -2144,12 +2207,140 @@ def cmd_user(cmd, kv, rest):
     return 2
 
 
+def turn_filter_on(top, py, dry=False):
+    """Checkout filter for one enrolled repository (sg_guard): a branch's AI-tool hook changes never reach disk here."""
+    import sg_guard as SG
+    if not T.launcher_ok():
+        print("Checkout filter: needs the trusted runtime first (gate.py install --user)")
+        return False
+    ok, lines = SG.enable_filter(top, os.path.abspath(py), T.launcher_path(), dry)
+    print(("Checkout filter %s:" % ("would be turned on" if dry else "on")) if ok else "Checkout filter:")
+    print("\n".join(lines))
+    if ok and not dry:
+        print("  Prove it any time: gate.py doctor --prove")
+    return ok
+
+
+def lockdown_off_command(st):
+    import sg_guard as SG
+    b = G_config_dir() / "lockdown"
+    if os.name == "nt":
+        return 'PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"   (or delete %s)' % (b / "uninstall.ps1", st["file"])
+    return 'sudo sh "%s"   (or: sudo rm "%s")' % (b / "uninstall.sh", st["file"])
+
+
+def G_config_dir():
+    import sg_github as G
+    return G.config_dir()
+
+
+def consent(kv, question):
+    """Explicit permission: an interactive YES, or --consent yes typed by the person on the command line."""
+    if str(kv.get("consent", "")).strip().lower() == "yes":
+        return True
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(question + " Type YES to continue: ").strip() == "YES"
+    except EOFError:
+        return False
+
+
+def cmd_lockdown(kv, rest):
+    """Optional, OFF by default: Claude Code's allowManagedHooksOnly switch, only with explicit permission."""
+    import sg_guard as SG
+    user_text = rd(T.user_hook_files()["claude"])
+    st = SG.lockdown_status(user_text)
+    keep = []
+    for cmd_ in [k for k in (kv.get("keep-project-hook") or "").split("\n") if k]:
+        try:
+            keep.append(SG.find_project_hook(SG.approved_for(str(ROOT), ".claude/settings.json")[0], cmd_))
+        except T.TrustError as ex:
+            print("NOT changed: %s" % ex); return 1
+    py = os.path.abspath(kv.get("python") or sys.executable)
+    if "--on" not in rest and "--off" not in rest and not kv.get("bundle"):
+        print(SG.explain(st))
+        print("Protection on this computer against hooks shipped inside branches:")
+        for tool, level, nxt in SG.client_matrix(str(ROOT)):
+            print("  %-8s %s%s" % (tool, level, ("  (" + nxt + ")") if nxt else ""))
+        print("\nTurn on: gate.py lockdown --on    Files for IT: gate.py lockdown --bundle <folder>    Undo: gate.py lockdown --off")
+        return 0
+    if "--off" in rest:
+        if not st["ours"]:
+            print("Lockdown is already off (no story-gate file at %s)." % st["file"]); return 0
+        try:
+            Path(st["file"]).unlink()
+            print("Lockdown is OFF. Removed %s." % st["file"])
+            T.forget("lockdown", "claude")
+            return 0
+        except OSError:
+            print("Lockdown stays on until you run this one command (it needs admin rights):\n  %s" % lockdown_off_command(st))
+            return 1
+    if not T.launcher_ok():
+        print("Lockdown needs the trusted runtime first: gate.py install --user"); return 1
+    if kv.get("bundle"):
+        try:
+            dest, _ = SG.build_bundle(kv["bundle"], py, T.launcher_path(), user_text, keep)
+        except T.TrustError as ex:
+            print("NOT built: %s" % ex); return 1
+        print("Lockdown files for IT are in %s (nothing on this computer changed):" % dest)
+        print(rd(Path(dest) / "SHA256SUMS").rstrip())
+        print("Give IT README-IT.md; it says where each file goes on macOS, Linux and Windows.")
+        return 0
+    print(SG.explain(st))
+    if not consent(kv, "Turn on lockdown for Claude Code on this computer?"):
+        print("Nothing changed. Lockdown stays OFF. (To say yes from a script you typed yourself: gate.py lockdown --on --consent yes)")
+        return 1
+    bundle = G_config_dir() / "lockdown"
+    try:
+        _, body = SG.build_bundle(bundle, py, T.launcher_path(), user_text, keep)
+    except T.TrustError as ex:
+        print("NOT turned on: %s" % ex); return 1
+    T.record("lockdown", "claude", consent_at=now(), file=st["file"], bundle=str(bundle))
+    target = Path(st["file"])
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp-%d" % os.getpid())
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, target)
+        print("Lockdown is ON for Claude Code: %s\nRestart Claude Code, then check: gate.py doctor --prove" % target)
+        return 0
+    except OSError:
+        cmd = ('PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"' % (bundle / "install.ps1")) if os.name == "nt" \
+            else 'sudo sh "%s"' % (bundle / "install.sh")
+        print("You said yes. Writing %s needs admin rights, so run this one command yourself:\n  %s\n"
+              "Then restart Claude Code and check: gate.py doctor --prove" % (target, cmd))
+        return 0
+
+
+def cmd_filter(rest):
+    """Audited escape hatch: turn the checkout filter off (or back on) for this repository only."""
+    import sg_guard as SG
+    top = T.repo_identity(os.getcwd())[0]
+    if not top:
+        print("Not inside a git repository."); return 1
+    what = rest[0] if rest else "status"
+    if what == "off":
+        if not SG.filter_active(top) and not SG.tampered(top):
+            print("The checkout filter is already off here."); return 0
+        print("\n".join(SG.disable_filter(top)))
+        SG.log(top, "checkout filter turned OFF by %s" % (os.environ.get("USER") or os.environ.get("USERNAME") or "?"))
+        print("Checkout filter OFF for %s (logged). A branch's hook changes now reach disk here. Turn back on: gate.py filter on" % top)
+        return 0
+    if what == "on":
+        if not (T.enrollment(top) or {}).get("enrolled"):
+            print("This repository isn't covered by story-gate. Run gate.py enroll first."); return 1
+        return 0 if turn_filter_on(top, sys.executable) else 1
+    print("Checkout filter here: %s" % ("ON" if SG.filter_active(top) else "OFF"))
+    return 0
+
+
 def cmd_hook_selftest():
     """Run each registered user-level hook command exactly as the AI tool would, with a sample edit, and time it."""
     act = T.read_json(T.active_path())
     if not act:
         print("No trusted runtime installed. Run: gate.py install --user"); return 1
-    gate = Path(act["dir"]) / "gate.py"
+    gate = T.launcher_path()
     payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(ROOT / "story_gate_selftest.py")}, "cwd": str(ROOT)})
     limits = {"claude": 15, "codex": 15, "cursor": 15, "gemini": 15, "windsurf": 15}
     rc = 0
@@ -2176,7 +2367,7 @@ def shutil_rmtree(p):
     shutil.rmtree(p, ignore_errors=True)
 
 
-def cmd_doctor(repo=None, strict=False):
+def cmd_doctor(repo=None, strict=False, prove=False):
     """Plain-English health check. With --repo it also checks GitHub protection and agent identity."""
     import sg_github as G
     fails = []
@@ -2191,7 +2382,7 @@ def cmd_doctor(repo=None, strict=False):
         probs = T.verify_self(rt) if rt.is_dir() else ["missing"]
         print("  trusted runtime: %s (%s, %s)" % (act.get("version"), "signed" if act.get("signed") else "UNSIGNED development copy",
                                                  "intact" if not probs else "PROBLEM: " + "; ".join(probs[:2])))
-        regd = T.registered_clients(rt / "gate.py")
+        regd = T.registered_clients(T.launcher_path())
         for cl in T.USER_CLIENTS:
             print("  %-8s user hooks %s" % (cl, "on" if cl in regd else "off"))
         for cl in T.DEGRADED_CLIENTS:
@@ -2203,6 +2394,29 @@ def cmd_doctor(repo=None, strict=False):
         fails.append("runtime")
     e = T.enrollment(ROOT) or {}
     print("  this repository: %s" % ("enrolled, policy from %s" % e.get("policy_ref") if e.get("enrolled") else "NOT enrolled (gate.py enroll)"))
+    import sg_guard as SG
+    filt = SG.filter_active(str(ROOT))
+    print("  checkout filter: %s" % ("ON - a branch's hook changes can't reach disk here" if filt else
+                                     ("OFF - turn on: gate.py filter on" if e.get("enrolled") else "OFF (only enrolled repositories are covered)")))
+    if e.get("enrolled") and not filt:
+        fails.append("filter")
+    st = SG.lockdown_status(rd(T.user_hook_files()["claude"]))
+    print("  lockdown (optional): %s" % ("ON (%s)%s" % (st["file"], " - your own Claude hooks changed since; run gate.py lockdown --on again" if st["stale"] else "")
+                                         if st["on"] else "off - recommended; gate.py lockdown explains it"))
+    for tool, level, nxt in SG.client_matrix(str(ROOT)):
+        print("  %-8s repository hooks: %s%s" % (tool, level, ("  (" + nxt + ")") if nxt else ""))
+    links = SG.symlinked_hook_paths(str(ROOT))
+    if links:
+        print("  PROBLEM: AI-tool settings stored as symlinks (the filter can't check them): %s" % ", ".join(links[:5]))
+        fails.append("symlinks")
+    if prove:
+        ok, lines = SG.prove(str(ROOT))
+        print("  proof (canary hook on a throwaway commit):")
+        print("\n".join(lines))
+        ok = ok and not links
+        print("  proof: %s" % ("PASSED - nothing from the canary reached disk" if ok else "FAILED"))
+        if not ok:
+            fails.append("prove")
     found = T.project_hook_findings(ROOT, HOOK_FILES)
     if found:
         print("  WARNING: project hook files run story-gate code from the branch: %s (gate.py install --user removes them)" % ", ".join(found))
@@ -2249,7 +2463,7 @@ def cmd_doctor(repo=None, strict=False):
         print("  agent App: %s (key %s)" % (rec["slug"], "private" if G.key_is_private(rec["key"]) else "TOO OPEN - chmod 600"))
     except Exception:
         print("  agent App: none (only needed when AI tools run on this computer: gate.py setup-agent)")
-    return 1 if (strict and fails) else 0
+    return 1 if ((strict or prove) and (fails if strict else "prove" in fails)) else 0
 
 
 # ------------------------------------------------------------------ main
@@ -2317,10 +2531,12 @@ def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
-                       "--report-failure"):
+                       "--report-failure", "--prove", "--on", "--off", "--explain"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
-            kv[argv[i][2:]] = argv[i + 1]; i += 2
+            k = argv[i][2:]
+            kv[k] = (kv[k] + "\n" + argv[i + 1]) if k == "keep-project-hook" and k in kv else argv[i + 1]  # repeatable
+            i += 2
         else:
             rest.append(argv[i]); i += 1
     return kv, rest
@@ -2330,6 +2546,9 @@ def main(argv):
     if not argv:
         print(__doc__); return 0
     cmd, args = argv[0], argv[1:]
+    if cmd == "hook-filter":  # git checkout filter (sg_guard), called through the launcher: stdin -> stdout
+        import sg_guard as SG
+        return SG.filter_main(args[0], args[1])
     if cmd == "record-tests":
         if not args:
             sys.exit("usage: record-tests <ID> [-- <cmd...>]")
@@ -2345,6 +2564,10 @@ def main(argv):
         return cmd_hook_selftest()
     if cmd in ("enroll", "unenroll", "upgrade", "rollback", "release-sign"):
         return cmd_user(cmd, kv, rest)
+    if cmd == "lockdown":
+        return cmd_lockdown(kv, rest)
+    if cmd == "filter":
+        return cmd_filter(rest)
     if cmd == "plan":
         return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
     if cmd == "feature":
@@ -2402,7 +2625,7 @@ def main(argv):
     if cmd == "publish":
         return cmd_publish()
     if cmd == "doctor":
-        return cmd_doctor(kv.get("repo"), strict="--strict" in args)
+        return cmd_doctor(kv.get("repo"), strict="--strict" in args, prove="--prove" in args)
     print(__doc__); return 2
 
 

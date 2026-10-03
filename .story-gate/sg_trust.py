@@ -20,7 +20,26 @@ RELEASE_NAMESPACE = "story-gate-release"
 RELEASE_SIGNERS = "story-gate-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIN8LkolTGexkEFLGhW/dq7fmyAMw8qW8tsQUx1koD3y"
 RELEASE_FINGERPRINT = "SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4"
 RUNTIME_GLOBS = ("*.py", "PROTOCOL.md", "SKILL.md", "vendor/*")
-HOOK_SIGNATURE = re.compile(r'gate\.py"?\s+hook\s+--client')  # every story-gate hook command, repo or runtime
+HOOK_SIGNATURE = re.compile(r'(?:gate|launch)\.py"?\s+hook\s+--client')  # every story-gate hook command, repo or runtime
+LAUNCHER = '''"""story-gate launcher: hooks and git filters call this stable path; it runs the active, pinned runtime."""
+import json, os, subprocess, sys
+here = os.path.dirname(os.path.abspath(__file__))
+os.environ.setdefault("STORY_GATE_HOME", os.path.dirname(here))
+if sys.argv[1:2] == ["hook"]:
+    d = os.getcwd()
+    while not os.path.exists(os.path.join(d, ".git")):
+        if os.path.dirname(d) == d:
+            print("{}")
+            sys.exit(0)  # outside any git repository: nothing to gate
+        d = os.path.dirname(d)
+try:
+    with open(os.path.join(here, "active.json"), encoding="utf-8") as f:
+        gate = os.path.join(json.load(f)["dir"], "gate.py")
+except Exception:
+    sys.stderr.write("story-gate: the trusted runtime is missing. Run: gate.py install --user\\n")
+    sys.exit(2)
+sys.exit(subprocess.run([sys.executable, "-I", gate] + sys.argv[1:]).returncode)
+'''
 USER_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf")
 DEGRADED_CLIENTS = ("grok",)  # user-level location documented, but merging with project hooks is unverified; see docs/client-security.md
 
@@ -224,9 +243,42 @@ def install_runtime(src, version, unsigned=False, signers=RELEASE_SIGNERS):
         shutil.rmtree(dest)
     os.replace(stage, dest)
     prev = read_json(active_path()).get("dir")
+    launcher_path().write_text(LAUNCHER, encoding="utf-8")
     write_json_atomic(active_path(), {"version": version, "dir": str(dest), "previous": prev, "signed": bool(signed),
-                                      "manifest_sha256": sha256(dest / "manifest.json")})
+                                      "manifest_sha256": sha256(dest / "manifest.json"), "launcher_sha256": sha256(launcher_path())})
     return dest
+
+
+def launcher_path():
+    return runtime_root() / "launch.py"
+
+
+def launcher_ok():
+    p = launcher_path()
+    return p.is_file() and p.read_text(encoding="utf-8") == LAUNCHER and read_json(active_path()).get("launcher_sha256") == sha256(p)
+
+
+# ------------------------------------------------------------------ install manifest (so uninstall can undo everything)
+def manifest_path():
+    return G.config_dir() / "install-manifest.json"
+
+
+def record(kind, key, **data):
+    """Remember one change we made (first write wins for 'before' state), so uninstall can put it back exactly."""
+    m = read_json(manifest_path())
+    entry = m.setdefault(kind, {}).setdefault(key, {})
+    for k, v in data.items():
+        if k.endswith("_before") and k in entry:
+            continue
+        entry[k] = v
+    write_json_atomic(manifest_path(), m)
+
+
+def forget(kind, key):
+    m = read_json(manifest_path())
+    if key in m.get(kind, {}):
+        del m[kind][key]
+        write_json_atomic(manifest_path(), m)
 
 
 def verify_self(script_dir):
@@ -247,6 +299,8 @@ def verify_self(script_dir):
     extra = [f for f in runtime_files(sd) if f not in (man.get("files") or {})]
     if extra:
         problems.append("unexpected files in the runtime: %s" % ", ".join(extra[:5]))
+    if act and not launcher_ok():
+        problems.append("the launcher (%s) was changed after install" % launcher_path())
     return problems
 
 
@@ -312,9 +366,24 @@ def unenroll(cwd):
     return False
 
 
+def policy_commit(top, ref):
+    """The commit the policy ref points at right now. "origin/main" means the remote-tracking branch only: a local
+    branch or tag with the same name (which git would otherwise prefer) can't stand in for it."""
+    if not ref:
+        return None
+    if "/" in ref and ref.split("/", 1)[0] in git_in(top, "remote").split():
+        candidates = ("refs/remotes/" + ref,)  # a remote's branch: if the tracking ref is gone, fail closed
+    else:
+        candidates = ("refs/heads/" + ref, "refs/tags/" + ref)  # no remote (e.g. "main" in a local-only repo)
+    for full in candidates:
+        if subprocess.run(["git", "show-ref", "--verify", "-q", full], cwd=top, capture_output=True).returncode == 0:
+            return git_in(top, "rev-parse", "--verify", "-q", full + "^{commit}") or None
+    return None
+
+
 def policy_text(top, ref, name):
     """Contents of .story-gate/<name> on the policy ref, pinned to the commit it resolves to right now. None if absent."""
-    sha = git_in(top, "rev-parse", "--verify", "-q", ref + "^{commit}")
+    sha = policy_commit(top, ref)
     if not sha:
         return None
     r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True)
@@ -421,24 +490,72 @@ def removed_hook_json(text):
     return json.dumps(data, indent=2) + "\n"
 
 
-def apply_file(path, new_text, dry_run, out):
-    """Write with a timestamped backup; print a diff; never clobber a file we couldn't parse."""
+def apply_file(path, new_text, dry_run, out, check_json=True):
+    """Write with a backup and an install-manifest entry; print a diff; never clobber a file we couldn't parse.
+    Writes through symlinks (dotfile managers keep their link)."""
     path = Path(path)
-    old = path.read_text(encoding="utf-8") if path.exists() else ""
+    real = Path(os.path.realpath(path))
+    existed = real.exists()
+    old = real.read_text(encoding="utf-8") if existed else ""
     if old == new_text:
         out.append("  %s: already up to date" % path)
         return False
-    json.loads(new_text)  # round-trip check before anything touches disk
+    if check_json:
+        json.loads(new_text)  # round-trip check before anything touches disk
     out.extend("    " + l.rstrip("\n") for l in difflib.unified_diff(old.splitlines(True), new_text.splitlines(True),
                                                                       str(path), str(path) + " (new)", n=1))
     if dry_run:
         return True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        shutil.copy2(path, path.with_name(path.name + ".story-gate-backup-" + time.strftime("%Y%m%d%H%M%S")))
-    tmp = path.with_name(path.name + ".tmp-%d" % os.getpid())
+    real.parent.mkdir(parents=True, exist_ok=True)
+    prev = read_json(manifest_path()).get("files", {}).get(str(path)) or {}
+    edited = bool(prev.get("user_edited") or (prev and existed and sha256(real) != prev.get("sha_after")))  # you changed it since
+    backup = None
+    if existed:
+        stamp = time.strftime("%Y%m%d%H%M%S") + "-%06d" % (int(time.time() * 1e6) % 1000000)
+        backup, n = real.with_name("%s.story-gate-backup-%s" % (real.name, stamp)), 0
+        while backup.exists():  # never overwrite an earlier backup
+            n += 1
+            backup = real.with_name("%s.story-gate-backup-%s-%d" % (real.name, stamp, n))
+        shutil.copy2(real, backup)
+    tmp = real.with_name(real.name + ".tmp-%d" % os.getpid())
     tmp.write_text(new_text, encoding="utf-8")
-    os.replace(tmp, path)
+    os.replace(tmp, real)
+    record("files", str(path), existed_before=existed, backup_before=str(backup) if backup else None, sha_after=sha256(real),
+           user_edited=edited)
+    return True
+
+
+def restore_file(path, out, dry_run=False):
+    """Put a file back exactly as it was before story-gate first touched it, if nobody has changed it since.
+    If it was changed since (or the backup is gone), only story-gate's own entries are removed and your edits stay."""
+    path = Path(path)
+    e = read_json(manifest_path()).get("files", {}).get(str(path))
+    if not e:
+        return False
+    real = Path(os.path.realpath(path))
+    backup = Path(e["backup_before"]) if e.get("backup_before") else None
+    done = True
+    if not real.exists():
+        out.append("  %s: already gone" % path)
+    elif sha256(real) == e.get("sha_after") and not e.get("user_edited") and (not e.get("existed_before") or (backup and backup.is_file())):
+        if dry_run:
+            out.append("  %s: would be restored exactly as before" % path)
+            return True
+        if e.get("existed_before"):
+            shutil.copy2(backup, real)
+            out.append("  %s: restored byte for byte from %s" % (path, backup))
+        else:
+            real.unlink()
+            out.append("  %s: removed (story-gate created it)" % path)
+    else:
+        try:
+            apply_file(path, removed_hook_json(real.read_text(encoding="utf-8")), dry_run, out)
+            out.append("  %s: changed since install (or no backup), so only story-gate's entries were removed" % path)
+        except (ValueError, TrustError) as ex:
+            done = False
+            out.append("  %s: NOT changed (%s) - remove the story-gate lines by hand" % (path, ex))
+    if done and not dry_run:
+        forget("files", str(path))
     return True
 
 
@@ -457,6 +574,8 @@ def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False):
 def unregister_user_hooks(dry_run=False):
     out = []
     for cl, p in user_hook_files().items():
+        if restore_file(p, out, dry_run):
+            continue
         if p.exists():
             try:
                 apply_file(p, removed_hook_json(p.read_text(encoding="utf-8")), dry_run, out)
@@ -471,10 +590,18 @@ def registered_clients(gate):
     return [cl for cl, p in user_hook_files().items() if p.exists() and g in p.read_text(encoding="utf-8", errors="ignore").replace("\\\\", "/")]
 
 
+LOCAL_ONLY = (".claude/settings.local.json",)  # your own per-computer file; it only counts when a branch commits it
+
+
+def _branch_hook_files(top, hook_files):
+    tracked = set(git_in(top, "ls-files", "--", *LOCAL_ONLY).splitlines())
+    return [rel for rel in hook_files if rel not in LOCAL_ONLY or rel in tracked]
+
+
 def project_hook_findings(top, hook_files):
     """Project-level hook files that still run story-gate code from the repository (a branch could swap it)."""
     found = []
-    for rel in hook_files:
+    for rel in _branch_hook_files(top, hook_files):
         p = Path(top) / rel
         if p.is_file() and ".story-gate/gate.py" in p.read_text(encoding="utf-8", errors="ignore").replace("\\", "/"):
             found.append(rel)
@@ -488,7 +615,7 @@ def project_hook_findings(top, hook_files):
 def other_project_hooks(top, hook_files):
     """Commands from the repository's own project hook files (not story-gate's). story-gate can't vouch for them."""
     cmds = []
-    paths = [Path(top) / r for r in hook_files] + (sorted((Path(top) / ".grok" / "hooks").glob("*.json")) if (Path(top) / ".grok" / "hooks").is_dir() else [])
+    paths = [Path(top) / r for r in _branch_hook_files(top, hook_files)] + (sorted((Path(top) / ".grok" / "hooks").glob("*.json")) if (Path(top) / ".grok" / "hooks").is_dir() else [])
     for p in paths:
         if not p.is_file() or p.suffix != ".json":
             continue

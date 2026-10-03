@@ -45,7 +45,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` = `python3 .story-g
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
 - Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
-- Never run `install`, `install --user`, `enroll`, `upgrade`, `rollback` or `release-sign`, and never touch the story-gate runtime or your tool's user hook settings. Those are for the human.
+- Never run `install`, `install --user`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `filter` or `lockdown`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.
 - If the judge is unavailable, say so. Nothing passes without it.
 - In Cowork, Cursor Cloud and Codex cloud, hooks don't run: run `gate.py status` before editing and run the checkpoints yourself. CI is the backstop.
