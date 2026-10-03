@@ -520,8 +520,8 @@ def apply_file(path, new_text, dry_run, out, check_json=True):
     tmp = real.with_name(real.name + ".tmp-%d" % os.getpid())
     tmp.write_text(new_text, encoding="utf-8")
     os.replace(tmp, real)
-    record("files", str(path), existed_before=existed, backup_before=str(backup) if backup else None, sha_after=sha256(real),
-           user_edited=edited)
+    record("files", str(path), existed_before=existed, real_before=str(real), backup_before=str(backup) if backup else None,
+           sha_after=sha256(real), user_edited=edited)
     return True
 
 
@@ -533,6 +533,10 @@ def restore_file(path, out, dry_run=False):
     if not e:
         return False
     real = Path(os.path.realpath(path))
+    if e.get("real_before") and e["real_before"] != str(real):  # the link now points somewhere else: don't write into it
+        out.append("  %s: now points to %s (it pointed to %s at install); not restored - remove the story-gate lines by hand"
+                   % (path, real, e["real_before"]))
+        return True
     backup = Path(e["backup_before"]) if e.get("backup_before") else None
     done = True
     if not real.exists():

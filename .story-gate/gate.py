@@ -421,13 +421,15 @@ def spec_files(c):
     for s in c.get("sources") or []:
         if s.get("type") == "repo":
             files += [s[k] for k in ("prd", "trd") if s.get(k)]
-    return sorted(set(f for f in files if f and (ROOT / f).is_file()))
+    inside = lambda f: (isinstance(f, str) and not os.path.isabs(f) and not re.match(r"^[A-Za-z]:", f)
+                        and ".." not in f.replace("\\", "/").split("/"))  # never read files outside the repository
+    return sorted(set(f for f in files if f and inside(f) and (ROOT / f).is_file()))
 
 
 def policy_fingerprint(c):
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
-                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass")]}, sort_keys=True)
+                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")]}, sort_keys=True)
 
 
 def ready_hash_from(story, context, tests, spec_pairs, c):
@@ -817,7 +819,9 @@ def cmd_start(sid, client=None, model=None):
         if not p.exists() and name != "handoff.md":
             p.write_text(body.replace("{id}", sid), encoding="utf-8")
     # scoped to this branch; the start commit is the story's baseline if work is committed straight onto the base branch
-    ACTIVE.write_text("%s\n%s\n%s\n" % (sid, current_branch(), git("rev-parse", "HEAD").strip()), encoding="utf-8")
+    prev, branch = (rd(ACTIVE).splitlines() if ACTIVE.exists() else []), current_branch()
+    baseline = prev[2].strip() if len(prev) >= 3 and prev[0].strip() == sid and prev[1].strip() == branch else git("rev-parse", "HEAD").strip()
+    ACTIVE.write_text("%s\n%s\n%s\n" % (sid, branch, baseline), encoding="utf-8")  # restarting a story keeps its baseline
     emit("started", sid, load_json(sd / "coder.json"))
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
 
@@ -891,6 +895,11 @@ def work_fingerprint():
             body = hashlib.sha256(f.read_bytes()).digest()
         elif f.is_dir():  # a submodule: its checked-out commit is the evidence
             sub = git("-C", str(f), "rev-parse", "HEAD") + git("-C", str(f), "status", "--porcelain") + git("-C", str(f), "diff", "HEAD")
+            for u in sorted(git("-C", str(f), "ls-files", "--others", "--exclude-standard").splitlines()):  # new files' content too
+                try:
+                    sub += u + hashlib.sha256((f / u).read_bytes()).hexdigest()
+                except OSError:
+                    sub += u + "?"
             body = b"GITLINK:" + hashlib.sha256(sub.encode("utf-8", "replace")).digest()  # commit plus any uncommitted edits
         else:
             body = b"DELETED"
@@ -1335,6 +1344,13 @@ FILTER_BYPASS = re.compile(
 ADMIN_CALL = re.compile(r"(?:gate|launch)\.py\s+(?:-\S+\s+)*(%s)\b" % "|".join(sorted(ADMIN_COMMANDS)))
 
 
+def is_admin_or_bypass(cmd):
+    bare = re.sub(r"[\'\"\\]", "", cmd)
+    return bool(FILTER_BYPASS.search(bare) or ADMIN_CALL.search(bare)
+                or (GATE_CLI.fullmatch(re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)) and
+                    (re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd).split("gate.py", 1)[1].split() or [""])[0] in ADMIN_COMMANDS))
+
+
 def touches_gate(cmd):
     """Any write-capable command that mentions .story-gate (outside the story docs) is refused, except a plain gate.py call."""
     plain = re.sub(r"'[^']*'|\"[^\"]*\"", "Q", cmd)  # quoted free text (--summary "...") is data, not shell
@@ -1436,8 +1452,15 @@ def cmd_hook(client, event):
                 return hook_out(client, event, "STORY GATE (%s): %s" % ("BLOCKED" if enforce else "warning only", problem), enforce)
             import sg_pin as PIN
             allowed = PIN.allowed_commands(c)  # from the default branch's policy only
-            unknown = [(f, cmd) for f, cmd in T.other_project_hooks(ROOT, HOOK_FILES)
-                       if (PIN.unwrap_cmd(cmd) if PIN.unwrap_cmd(cmd) is not None else cmd) not in allowed]
+            _, psha, pcfg = PIN.policy(str(ROOT))
+            ents = PIN.entries(pcfg)
+            def approved(cmd):
+                orig = PIN.unwrap_cmd(cmd)
+                if orig is not None:  # our runner: it re-checks everything itself
+                    return orig in allowed
+                # a raw command that runs repository code must go through the runner (e.g. a file the filter skipped)
+                return cmd in allowed and PIN.classify(cmd, str(ROOT), psha, ents.get(cmd))[0] in ("plain", "accepted")
+            unknown = [(f, cmd) for f, cmd in T.other_project_hooks(ROOT, HOOK_FILES) if not approved(cmd)]
             if unknown:
                 return hook_out(client, event, "STORY GATE (%s): this branch has AI-tool hooks the default branch hasn't approved, so "
                                 "story-gate can't vouch for them: %s. If they're wanted, a code owner lists the exact commands in "
@@ -1446,6 +1469,9 @@ def cmd_hook(client, event):
         if event == "post":
             return hook_out(client, "post", post_edit(payload, c), False)  # checkpoints inform; containment happens at the next pre-edit
         msg, bad = gate_check(event, payload, c)
+        shell = shell_command(payload) if event == "pre" else None
+        if bad and shell is not None and is_admin_or_bypass(shell):
+            enforce = True  # protection itself is never warn-only: installing, trusting or switching off is for the human
         if bad and event == "pre" and msg.startswith("Story ") and "OFF COURSE" in msg:
             enforce = c["mode"] == "enforce" or "checkpoint" in c.get("enforce_points", [])
     except Exception as e:  # never crash a client; fails closed only when enforcing
@@ -2357,6 +2383,8 @@ def cmd_hook_trust(rest):
     top = T.repo_identity(os.getcwd())[0]
     if not cmds or not top:
         print('usage (inside the repository): gate.py hook-trust "<exact hook command>" [--revoke]'); return 2
+    if not revoke and not consent({}, "Let your edited copy of the files behind '%s' run as that hook?" % cmds[0]):
+        print("Nothing changed. hook-trust needs a person at a terminal to type YES (AI agents can't grant it)."); return 1
     try:
         pins = PIN.trust_local(top, cmds[0], revoke)
     except T.TrustError as ex:

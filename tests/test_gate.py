@@ -747,6 +747,29 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertFalse(m["public"]); self.assertFalse(m["hook_attributes"]["active"])
 
 
+class TestReviewFollowups(Base):
+    """Outside-diff review items (CodeRabbit) on PRs #1-#5."""
+
+    def test_restarting_a_story_keeps_its_baseline(self):
+        run(self.repo, "start", "SAT-1")
+        first = (self.repo / ".story-gate/.active").read_text().splitlines()[2]
+        (self.repo / "app.py").write_text("x = 2\n")
+        subprocess.run(["git", "commit", "-qam", "work"], cwd=self.repo, check=True)
+        run(self.repo, "start", "SAT-1")
+        self.assertEqual((self.repo / ".story-gate/.active").read_text().splitlines()[2], first)
+
+    def test_judge_max_chars_is_part_of_the_evidence(self):
+        g = load_gate(self.repo); c = g.cfg()
+        c2 = json.loads(json.dumps(c)); c2["judge"]["max_chars"] = 1000
+        self.assertNotEqual(g.ready_hash_from("s", "c", "t", [], c), g.ready_hash_from("s", "c", "t", [], c2))
+
+    def test_spec_files_outside_the_repository_are_ignored(self):
+        outside = Path(tempfile.mkdtemp()) / "secret.md"; outside.write_text("secret")
+        self.cfg(spec_files=[str(outside), "../" + outside.name, "app.py"])
+        g = load_gate(self.repo)
+        self.assertEqual(g.spec_files(g.cfg()), ["app.py"])
+
+
 class TestRound3Fixes(Base):
     def test_jev_false_turns_the_judge_off(self):
         import importlib
@@ -1394,7 +1417,9 @@ class TestRepoHookGuard(RuntimeFixture):
 
     # ---- proof
     def test_doctor_prove_passes_and_fails_honestly(self):
+        before_head = self.git("rev-parse", "HEAD").stdout.strip()
         r = self.admin("doctor", "--prove")
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), before_head)  # the canary never lands on your branch
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("PASSED", r.stdout); self.assertIn("canary removed", r.stdout)
         self.assertEqual(self.git("worktree", "list").stdout.count("\n"), 1)  # the throwaway worktree is gone
@@ -1439,6 +1464,12 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotEqual(r.returncode, 0); self.assertIn("lockdown is still on", r.stdout)  # never strand Claude's hooks
         r = self.admin("lockdown", "--off", extra=e)
         self.assertEqual(r.returncode, 0); self.assertFalse(dropin.exists())
+
+    def test_kept_project_hook_may_not_run_repository_files(self):
+        e = self.lock_env()
+        self.approve_on_main({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python scripts/hook.py"}]}]}})
+        r = self.admin("lockdown", "--on", "--consent", "yes", "--keep-project-hook", "python scripts/hook.py", extra=e)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("runs a file from the repository", r.stdout)
 
     def test_lockdown_never_touches_it_managed_file(self):
         e = self.lock_env()
@@ -1492,6 +1523,20 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertEqual(self.git("config", "--local", "--get", "filter.storygate-hooks.required").stdout.strip(), "false")
         self.assertEqual(self.git("config", "--local", "--get", "filter.storygate-hooks.smudge", check=False).stdout, "")
         self.assertFalse((self.home / "install-manifest.json").exists())
+
+    def test_restore_refuses_when_the_link_target_changed(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        run(self.repo, "uninstall", "--user", env=self.env)
+        a = self.user / "dot/a.json"; b = self.user / "dot/b.json"; a.parent.mkdir(); a.write_text("{}\n")
+        link = self.user / ".cursor/hooks.json"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(a)
+        run(self.repo, "install", "--user", "--unsigned", env=self.env)
+        b.write_text(a.read_text()); link.unlink(); link.symlink_to(b)  # same bytes, different target
+        r = run(self.repo, "uninstall", "--user", env=self.env)
+        self.assertIn("not restored", r.stdout); self.assertIn("hook --client cursor", b.read_text())
 
     def test_unenroll_turns_the_filter_off(self):
         r = self.admin("unenroll")
@@ -1559,6 +1604,32 @@ class TestPinnedHooks(RuntimeFixture):
         e = dict(os.environ); e.pop("STORY_GATE_ROOT", None); e["CLAUDE_PROJECT_DIR"] = str(self.repo)
         return subprocess.run(cmd, shell=True, cwd=self.repo, input=stdin, capture_output=True, text=True, env=e, timeout=60)
 
+    def at_terminal(self, args, typed):
+        """Run the installed runtime under a pseudo-terminal and type `typed`, like a person would."""
+        import pty, select
+        e = dict(os.environ, HOME=str(self.user), **self.env)
+        for k in ("STORY_GATE_ROOT", "GITHUB_ACTIONS", "CLAUDECODE"):
+            e.pop(k, None)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(str(self.repo)); os.execve(self.py, [self.py, "-I", self.gate, *args], e)
+        out, sent = b"", False
+        while True:
+            r, _, _ = select.select([fd], [], [], 30)
+            if not r:
+                break
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            if not sent and b"YES" in out:
+                os.write(fd, typed.encode()); sent = True
+        os.waitpid(pid, 0)
+        return out.decode("utf-8", "replace")
+
     def pinned_setup(self):
         self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}])
         (wrapped,) = self.disk_commands()
@@ -1577,8 +1648,12 @@ class TestPinnedHooks(RuntimeFixture):
         self.git("commit", "-qam", "branch edits the script")  # settings file unchanged: git never re-filters it
         r = self.fire(wrapped)
         self.assertEqual(r.returncode, 2); self.assertNotIn("BRANCH-COPY", r.stdout); self.assertIn("scripts/check.sh", r.stderr)
-        t = self.admin("hook-trust", self.CHECK)  # a human trusts exactly this content
-        self.assertEqual(t.returncode, 0, t.stdout + t.stderr)
+        t = self.admin("hook-trust", self.CHECK)  # no terminal (like an agent's shell): refused
+        self.assertNotEqual(t.returncode, 0); self.assertIn("needs a person", t.stdout)
+        if os.name == "nt":
+            self.skipTest("typing YES at a terminal is tested on POSIX")
+        t = self.at_terminal(["hook-trust", self.CHECK], "YES\n")  # a person types YES
+        self.assertIn("Trusted for exactly", t)
         self.assertIn("BRANCH-COPY", self.fire(wrapped).stdout)
         (self.repo / "scripts/check.sh").write_text("echo CHANGED-AGAIN\n")
         self.assertEqual(self.fire(wrapped).returncode, 2)  # trust was for that content only
@@ -1655,6 +1730,21 @@ class TestPinnedHooks(RuntimeFixture):
         times.sort()
         self.assertLess(times[-1], 3.0)  # generous for CI; typical is well under 1 s
         print("\n[runner latency, 301 pinned files] median %.2fs max %.2fs" % (times[2], times[-1]))
+
+    def test_raw_pinned_command_on_disk_is_not_approved(self):
+        self.pinned_setup()
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": self.CHECK}]}]}}))
+        r = self.hook()  # the raw script command, as if the filter had skipped the file
+        self.assertEqual(r.returncode, 2); self.assertIn("hasn't approved", r.stderr)
+
+    def test_admin_commands_are_blocked_even_in_warn_mode(self):
+        self.git("checkout", "-q", "main"); self.cfg(mode="warn"); self.git("commit", "-qam", "warn"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("merge", "-q", "main")
+        sh = lambda c: self.hook(payload={"tool_name": "Bash", "tool_input": {"command": c}})
+        for c in ('python3 .story-gate/gate.py hook-trust "bash scripts/check.sh"', "python3 .story-gate/gate.py filter off",
+                  "git config --local --unset filter.storygate-hooks.required"):
+            self.assertEqual(sh(c).returncode, 2, c)
+        self.assertEqual(sh("git status").returncode, 0)
 
     def test_stdin_and_exit_code_pass_through(self):
         self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],

@@ -541,7 +541,10 @@ def managed_body(py, launcher, user_hooks_text="", keep=()):
 def find_project_hook(approved_text, command):
     """The (event, group) holding `command` in the default branch's .claude/settings.json, trimmed to that command.
     Refuses commands that run files from the repository: under lockdown they would run in EVERY repository."""
-    if command.startswith(("./", "../", ".\\")) or "CLAUDE_PROJECT_DIR" in command:
+    import sg_pin
+    info = sg_pin.analyse(command, ".", None)
+    if (command.startswith(("./", "../", ".\\")) or "CLAUDE_PROJECT_DIR" in command or info["runner"] or info["refs"]
+            or info["outside"] or not info["parse_ok"]):  # e.g. `python scripts/hook.py`, `npm run lint`
         raise T.TrustError("'%s' runs a file from the repository, so under lockdown any repository could supply it. "
                            "Keep only commands that run something installed on this computer." % command)
     try:
