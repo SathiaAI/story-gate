@@ -581,9 +581,10 @@ def run_approved(token):
             line = first.read_bytes()[:256].split(b"\n", 1)[0]
             if line.startswith(b"#!"):
                 interp = line[2:].strip().split()[0] if line[2:].strip() else b""
-                if not interp.startswith(b"/"):
-                    return refuse("hook '%s' not run: its script starts with a relative interpreter (%s), which would run a "
-                                  "program from the repository" % (cmd, interp.decode("utf-8", "replace")))
+                name = interp.decode("utf-8", "replace")
+                if not interp.startswith(b"/") or _inside(name, top):
+                    return refuse("hook '%s' not run: its script's interpreter (%s) %s, which would run a program from the "
+                                  "repository" % (cmd, name, "is a relative path" if not interp.startswith(b"/") else "is inside the repository"))
         args, as_string = run_argv(tokens=words)
     try:
         return subprocess.run(args, cwd=start if os.path.isdir(start) else top, env=env).returncode  # stdin/out/err pass through

@@ -1632,7 +1632,14 @@ class TestPinnedHooks(RuntimeFixture):
                         {"scripts/check.sh": "#!venv/bin/python\nprint(1)\n"})
         (wrapped,) = self.disk_commands()
         r = self.fire(wrapped)
-        self.assertEqual(r.returncode, 2); self.assertIn("relative interpreter", r.stderr)
+        self.assertEqual(r.returncode, 2); self.assertIn("relative path", r.stderr)
+
+    def test_shebang_into_the_repository_is_refused(self):
+        self.setup_main(["./scripts/check.sh"], [{"command": "./scripts/check.sh", "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "#!%s/venv/bin/python\nprint(1)\n" % str(self.repo).replace("\\", "/")})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("inside the repository", r.stderr)
 
     def test_runner_latency(self):
         files = {"tools/run.sh": "echo ok\n"}
