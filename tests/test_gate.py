@@ -1526,6 +1526,124 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotIn('sg-pill pass">partial', html)  # partial protection is never shown as green
 
 
+class TestPinnedHooks(RuntimeFixture):
+    """Approved hooks that run repository scripts run only the default branch's copy (panel decision sg-scriptpin)."""
+
+    CHECK = "bash scripts/check.sh"
+
+    def git(self, *a, cwd=None, check=True):
+        return subprocess.run(["git", *a], cwd=cwd or self.repo, capture_output=True, text=True, check=check)
+
+    def admin(self, *args):
+        e = dict(os.environ, HOME=str(self.user), **self.env)
+        for k in ("STORY_GATE_ROOT", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE", "STORY_GATE_TRUSTED_DIR", "CLAUDECODE", "GITHUB_ACTIONS"):
+            e.pop(k, None)
+        return subprocess.run([self.py, "-I", self.gate, *args], cwd=self.repo, capture_output=True, text=True, env=e, timeout=120,
+                              stdin=subprocess.DEVNULL)
+
+    def setup_main(self, hooks, allowed, files=None):
+        self.git("checkout", "-q", "main")
+        for name, body in (files or {"scripts/check.sh": "echo MAIN-COPY\n"}).items():
+            f = self.repo / name; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(body)
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": c} for c in hooks]}]}}, indent=2))
+        self.cfg(mode="enforce", project_hooks_allowed=allowed)
+        self.git("add", "-A"); self.git("commit", "-qm", "hooks"); self.git("push", "-q", "origin", "main")
+        self.git("checkout", "-q", "feature/SAT-1-thing2"); self.git("merge", "-q", "main")
+
+    def disk_commands(self):
+        d = json.loads((self.repo / ".claude/settings.json").read_text())
+        return [h["command"] for g in d.get("hooks", {}).get("Stop", []) for h in g.get("hooks", [])]
+
+    def fire(self, cmd, stdin=""):
+        e = dict(os.environ); e.pop("STORY_GATE_ROOT", None); e["CLAUDE_PROJECT_DIR"] = str(self.repo)
+        return subprocess.run(cmd, shell=True, cwd=self.repo, input=stdin, capture_output=True, text=True, env=e, timeout=60)
+
+    def pinned_setup(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}])
+        (wrapped,) = self.disk_commands()
+        self.assertIn("run-approved", wrapped)
+        return wrapped
+
+    def test_pinned_hook_runs_the_default_branch_copy(self):
+        wrapped = self.pinned_setup()
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")  # git still sees the stored file
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("MAIN-COPY", r.stdout)
+
+    def test_branch_edit_of_a_pinned_script_is_refused(self):
+        wrapped = self.pinned_setup()
+        (self.repo / "scripts/check.sh").write_text("echo BRANCH-COPY\n")
+        self.git("commit", "-qam", "branch edits the script")  # settings file unchanged: git never re-filters it
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertNotIn("BRANCH-COPY", r.stdout); self.assertIn("scripts/check.sh", r.stderr)
+        t = self.admin("hook-trust", self.CHECK)  # a human trusts exactly this content
+        self.assertEqual(t.returncode, 0, t.stdout + t.stderr)
+        self.assertIn("BRANCH-COPY", self.fire(wrapped).stdout)
+        (self.repo / "scripts/check.sh").write_text("echo CHANGED-AGAIN\n")
+        self.assertEqual(self.fire(wrapped).returncode, 2)  # trust was for that content only
+        self.assertIn("hook-trust", (self.repo / ".git/story-gate-guard.log").read_text())
+
+    def test_new_file_in_a_pinned_folder_is_refused(self):
+        self.setup_main(["bash tools/run.sh"], [{"command": "bash tools/run.sh", "pins": ["tools"]}],
+                        {"tools/run.sh": "for f in $(dirname $0)/*.sh; do echo $f; done\n"})
+        (wrapped,) = self.disk_commands()
+        (self.repo / "tools/evil.sh").write_text("echo EVIL\n")
+        r = self.fire(wrapped)
+        self.assertEqual(r.returncode, 2); self.assertIn("tools/evil.sh", r.stderr)
+
+    def test_stdin_and_exit_code_pass_through(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "read line; echo got:$line; exit 3\n"})
+        (wrapped,) = self.disk_commands()
+        r = self.fire(wrapped, stdin='{"tool":"x"}\n')
+        self.assertEqual(r.returncode, 3, r.stderr); self.assertIn('got:{"tool":"x"}', r.stdout)
+
+    def test_unpinned_repo_scripts_and_runners_are_removed_unless_accepted(self):
+        self.setup_main([self.CHECK, "npm run lint", "echo plain-hook", "npx eslint ."],
+                        ["echo plain-hook", {"command": "npx eslint .", "runs_repo_code": "accepted"}])
+        cmds = self.disk_commands()
+        self.assertNotIn(self.CHECK, cmds); self.assertNotIn("npm run lint", cmds)  # not pinned: off disk
+        self.assertIn("echo plain-hook", cmds); self.assertIn("npx eslint .", cmds)  # plain / explicitly accepted
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")
+        out = self.admin("doctor").stdout
+        self.assertIn("BLOCKED", out); self.assertIn("ACCEPTED", out); self.assertIn('"pins": ["scripts/check.sh"]', out)
+
+    def test_runner_commands_never_get_committed(self):
+        self.pinned_setup()
+        d = json.loads((self.repo / ".claude/settings.json").read_text()); d["model"] = "x"
+        (self.repo / ".claude/settings.json").write_text(json.dumps(d))  # someone edits the filtered file
+        self.git("commit", "-qam", "edit settings")
+        stored = self.git("show", "HEAD:.claude/settings.json").stdout
+        self.assertNotIn("run-approved", stored); self.assertIn(self.CHECK, stored); self.assertIn('"model"', stored)
+
+    def test_story_gate_hook_accepts_the_runner_and_dict_entries(self):
+        self.pinned_setup()
+        r = self.hook()
+        self.assertNotIn("hasn't approved", r.stderr)
+        self.assertNotIn("internal error", r.stderr)
+
+    def test_pin_check_hints_at_missing_files(self):
+        self.setup_main([self.CHECK], [{"command": self.CHECK, "pins": ["scripts/check.sh"]}],
+                        {"scripts/check.sh": "source scripts/lib.sh\necho ok\n", "scripts/lib.sh": "x=1\n"})
+        self.assertIn("pins may be incomplete", self.admin("doctor").stdout)
+
+    def test_classifier(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib, sg_pin
+            importlib.reload(sg_pin)
+            a = sg_pin.analyse
+            self.assertTrue(a("npm run lint", str(self.repo), None)["runner"])
+            self.assertTrue(a("python -m tools.check", str(self.repo), None)["runner"])
+            self.assertFalse(a("bash x.sh && rm -rf /", str(self.repo), None)["simple"])
+            self.assertEqual(a('bash "$CLAUDE_PROJECT_DIR/scripts/a.sh"', str(self.repo), None)["refs"], ["scripts/a.sh"])
+            self.assertEqual(a("bash ../outside.sh", str(self.repo), None)["outside"], ["../outside.sh"])
+            self.assertEqual(sg_pin.unwrap_cmd(sg_pin.wrap("bash a b", "/py", "/l.py")), "bash a b")
+        finally:
+            sys.path.remove(str(SRC))
+
+
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
 class TestReleaseSignatures(unittest.TestCase):
     def test_embedded_key_matches_published_fingerprint(self):

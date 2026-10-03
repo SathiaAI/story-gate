@@ -1321,7 +1321,7 @@ def shell_writes(cmd):
 
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
-                  "judge-calibrate", "lockdown", "filter"}
+                  "judge-calibrate", "lockdown", "filter", "hook-trust"}
 # Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
 # Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
 # itself on every call (sg_guard.tampered), because text matching can't see every spelling.
@@ -1432,8 +1432,10 @@ def cmd_hook(client, event):
             problem = runtime_policy_problem(c)
             if problem:
                 return hook_out(client, event, "STORY GATE (%s): %s" % ("BLOCKED" if enforce else "warning only", problem), enforce)
-            allowed = set(c.get("project_hooks_allowed") or [])  # from the default branch's policy only
-            unknown = [(f, cmd) for f, cmd in T.other_project_hooks(ROOT, HOOK_FILES) if cmd not in allowed]
+            import sg_pin as PIN
+            allowed = PIN.allowed_commands(c)  # from the default branch's policy only
+            unknown = [(f, cmd) for f, cmd in T.other_project_hooks(ROOT, HOOK_FILES)
+                       if (PIN.unwrap_cmd(cmd) if PIN.unwrap_cmd(cmd) is not None else cmd) not in allowed]
             if unknown:
                 return hook_out(client, event, "STORY GATE (%s): this branch has AI-tool hooks the default branch hasn't approved, so "
                                 "story-gate can't vouch for them: %s. If they're wanted, a code owner lists the exact commands in "
@@ -1571,7 +1573,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_dashboard.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -2335,6 +2337,24 @@ def cmd_filter(rest):
     return 0
 
 
+def cmd_hook_trust(rest):
+    """Human-only escape hatch: let MY edited copy of a pinned hook's files run, for exactly this content. Logged."""
+    import sg_pin as PIN, sg_guard as SG
+    revoke = "--revoke" in rest
+    cmds = [r for r in rest if r != "--revoke"]
+    top = T.repo_identity(os.getcwd())[0]
+    if not cmds or not top:
+        print('usage (inside the repository): gate.py hook-trust "<exact hook command>" [--revoke]'); return 2
+    try:
+        pins = PIN.trust_local(top, cmds[0], revoke)
+    except T.TrustError as ex:
+        print("NOT changed: %s" % ex); return 1
+    SG.log(top, "hook-trust %s by %s: %s" % ("revoked" if revoke else "granted", os.environ.get("USER") or os.environ.get("USERNAME") or "?", cmds[0]))
+    print(("Revoked." if revoke else "Trusted for exactly the current content of: %s. Any further change to them needs this "
+           "again; the default branch's copy is used again once they match it.") % ", ".join(pins) if not revoke else "Revoked.")
+    return 0
+
+
 def cmd_hook_selftest():
     """Run each registered user-level hook command exactly as the AI tool would, with a sample edit, and time it."""
     act = T.read_json(T.active_path())
@@ -2405,6 +2425,17 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                                          if st["on"] else "off - recommended; gate.py lockdown explains it"))
     for tool, level, nxt in SG.client_matrix(str(ROOT)):
         print("  %-8s repository hooks: %s%s" % (tool, level, ("  (" + nxt + ")") if nxt else ""))
+    import sg_pin as PIN
+    rows = PIN.report(str(ROOT), SG.default_hook_commands(str(ROOT)))
+    if rows:
+        label = {"plain": "runs nothing from the repository", "pinned": "PINNED - runs only the default branch's copy",
+                 "accepted": "ACCEPTED - runs repository code unverified", "blocked": "BLOCKED - runs repository code, not pinned"}
+        print("  project hooks approved on the default branch:")
+        for cmd_, tier, hint in rows:
+            print("    %-58s %s%s" % (cmd_[:58], label[tier], ("\n      -> " + hint) if hint else ""))
+    age = PIN.policy_age_days(str(ROOT))
+    if age is not None and age > 7:
+        print("  WARNING: last git fetch was %d days ago; hooks use approvals from your local copy of the default branch" % age)
     links = SG.symlinked_hook_paths(str(ROOT))
     if links:
         print("  PROBLEM: AI-tool settings stored as symlinks (the filter can't check them): %s" % ", ".join(links[:5]))
@@ -2549,6 +2580,9 @@ def main(argv):
     if cmd == "hook-filter":  # git checkout filter (sg_guard), called through the launcher: stdin -> stdout
         import sg_guard as SG
         return SG.filter_main(args[0], args[1])
+    if cmd == "run-approved":  # a pinned project hook, called by the AI tool through the launcher (sg_pin)
+        import sg_pin as PIN
+        return PIN.run_approved(args[0] if args else "")
     if cmd == "record-tests":
         if not args:
             sys.exit("usage: record-tests <ID> [-- <cmd...>]")
@@ -2568,6 +2602,8 @@ def main(argv):
         return cmd_lockdown(kv, rest)
     if cmd == "filter":
         return cmd_filter(rest)
+    if cmd == "hook-trust":
+        return cmd_hook_trust(rest)
     if cmd == "plan":
         return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
     if cmd == "feature":
