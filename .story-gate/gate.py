@@ -1463,7 +1463,7 @@ def edited_paths(payload):
     return paths
 
 
-def hook_out(client, event, msg, block):
+def hook_out(client, event, msg, block, notice=None):
     """Exit 2 + stderr blocks in every client that has hooks. Warnings use each client's visible channel."""
     if block:
         sys.stderr.write(msg + "\n")
@@ -1472,7 +1472,10 @@ def hook_out(client, event, msg, block):
         print("{}"); return 0
     if event == "session":  # instructions for the agent at session start, from the verified copy (not repository files)
         if client in ("claude", "codex", "gemini"):
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": msg}}))
+            out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": msg}}
+            if notice:
+                out["systemMessage"] = notice  # shown to the person, not only the agent
+            print(json.dumps(out))
         elif client == "cursor":
             print(json.dumps({"additional_context": msg}))
         else:
@@ -1529,7 +1532,16 @@ def cmd_hook(client, event):
                 return hook_out(client, "post", "", False)
             return hook_out(client, event, "STORY GATE (BLOCKED): %s" % e, True)  # unknown mode: fail closed
         if event == "session":
-            return hook_out(client, "session", session_context(c), False) if RUNTIME else hook_out(client, "session", "", False)
+            if not RUNTIME:
+                return hook_out(client, "session", "", False)
+            notice = None
+            e = enrolled()
+            changes = policy_weakened(e)[0] if e else []
+            if changes:
+                notice = ("story-gate: the rules on %s got weaker since you last accepted them (%s). Check with gate.py doctor; "
+                          "if it was intended, accept with gate.py enroll." % (e["policy_ref"], "; ".join(changes)))
+            ctx = session_context(c) + ("\n\nTell the person at the start of your first reply: " + notice if notice else "")
+            return hook_out(client, "session", ctx, False, notice)
         point = {"pre": "pre_edit", "stop": "stop", "post": "checkpoint"}.get(event, event)
         enforce = c["mode"] == "enforce" or point in c.get("enforce_points", [])
         if RUNTIME and event != "post":
@@ -1986,11 +1998,13 @@ def accept_policy(top, ref):
 def policy_weakened(e):
     """(changes, current sha): how the default branch's policy got weaker since this computer last accepted it."""
     sha = T.policy_commit(e["toplevel"], e["policy_ref"])
-    seen = e.get("policy_seen") or {}
-    if not seen:
+    seen = e.get("policy_seen")
+    if seen is None:  # enrolled before this check existed: doctor records the current rules as the starting point
         return [], sha
+    if not isinstance(seen, dict) or not isinstance(seen.get("config"), dict):
+        return ["this computer's record of the accepted rules is unreadable"], sha  # never silently re-accept
     now_cfg = full_config(T.policy_text(e["toplevel"], e["policy_ref"], "config.json"))
-    return T.weaker(seen.get("config"), now_cfg), sha
+    return T.weaker(seen["config"], now_cfg), sha
 
 
 def session_context(c):

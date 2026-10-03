@@ -1224,6 +1224,16 @@ class TestTrustedRuntime(RuntimeFixture):
         other = Path(tempfile.mkdtemp()); subprocess.run(["git", "init", "-q", str(other)], check=True)
         self.assertEqual(self.session("claude", cwd=other).stdout.strip(), "{}")  # not enrolled: says nothing
 
+    def test_unreadable_policy_baseline_is_never_silently_accepted(self):
+        ep = self.home / "enrolled.json"; data = json.loads(ep.read_text())
+        for v in data.values():
+            v["policy_seen"] = {"sha": "x", "config": "garbage"}
+        ep.write_text(json.dumps(data))
+        e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
+        for _ in range(2):
+            out = subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
+            self.assertIn("unreadable", out)
+
     def test_doctor_warns_when_the_default_branch_loosens_the_rules(self):
         e = dict(os.environ, HOME=str(self.user), **self.env); e.pop("STORY_GATE_ROOT", None)
         doc = lambda: subprocess.run([self.py, "-I", self.gate, "doctor"], cwd=self.repo, env=e, capture_output=True, text=True).stdout
@@ -1234,6 +1244,9 @@ class TestTrustedRuntime(RuntimeFixture):
         out = doc()
         self.assertIn("got weaker", out); self.assertIn("mode went from enforce to warn", out); self.assertIn("pass threshold lowered", out)
         self.assertIn("got weaker", doc())  # doctor doesn't accept a weaker policy by itself
+        r = self.session("claude")
+        self.assertIn("got weaker", json.loads(r.stdout)["systemMessage"])  # the person sees it when a session starts
+        self.assertIn("got weaker", json.loads(self.session("cursor").stdout)["additional_context"])
         subprocess.run([self.py, "-I", self.gate, "enroll"], cwd=self.repo, env=e, capture_output=True, stdin=subprocess.DEVNULL)
         self.assertNotIn("got weaker", doc())  # the human accepted it
 
