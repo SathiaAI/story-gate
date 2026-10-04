@@ -63,7 +63,7 @@ Set up story-gate in this repo: https://github.com/SathiaAI/story-gate
 
 **Steps 2 to 5** happen on a page that opens in your browser. It tells you exactly what to click, and ticks each step off when it's done.
 
-<p align="center"><img src="docs/assets/setup-page.png" alt="The setup page in the browser: sign in, give your AI its own login, add the judge key, approve the setup. Finished steps show a green tick." width="70%"></p>
+<p align="center"><img src="docs/assets/setup-page.png" alt="The setup page in the browser: sign in, give your AI its own login, add the judge key, approve the setup, tick the AI tools to protect. Finished steps show a green tick." width="70%"></p>
 
 **What you need:** a GitHub account, your project on GitHub, and an AI coding tool. Nothing else; your AI installs the rest.
 
