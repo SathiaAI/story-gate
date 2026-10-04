@@ -1146,7 +1146,7 @@ def report_facts(sid, in_ci=False):
 
 
 def cmd_report(sid, out=None, open_=False, in_ci=False):
-    """Write a story's HTML validation report, optionally open it in a browser, and return zero."""
+    """Build the validation page for a story and write it to out (default: a per-user temp folder)."""
     import sg_report as R
     sd = sdir(sid)
     if not sd.exists():
@@ -1173,7 +1173,7 @@ def cmd_report(sid, out=None, open_=False, in_ci=False):
 
 
 def cmd_evidence(sid, src, kv):
-    """Record a screenshot for the named scenario, exiting with an error if it cannot be added."""
+    """Add a checked screenshot to the story's evidence, for the validation page."""
     import sg_report as R, sg_validation as V
     sd = sdir(sid)
     if not sd.exists():
@@ -3200,7 +3200,7 @@ def flags(argv):
 
 
 def main(argv):
-    """Parse command-line arguments, dispatch the selected command, and return its exit status."""
+    """Dispatch argv's command (e.g. start, score, report, evidence) to its handler; return the process exit code."""
     if not argv:
         print(__doc__); return 0
     cmd, args = argv[0], argv[1:]

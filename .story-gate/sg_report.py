@@ -40,7 +40,7 @@ def image_info(data):
 
 
 def check_image(data):
-    """Return image type and dimensions; raise ValueError for invalid headers or exceeded size limits."""
+    """(kind, width, height) if data is a PNG or JPEG within the size and side limits, else ValueError."""
     kind, w, h = image_info(data)
     if len(data) > MAX_IMAGE:
         raise ValueError("%d KB is over the %d KB limit; crop it or save it as JPEG" % (len(data) // 1000, MAX_IMAGE // 1000))
@@ -50,7 +50,7 @@ def check_image(data):
 
 
 def evidence_list(doc):
-    """Return dictionary entries from an evidence list, or an empty list for a malformed document."""
+    """The evidence.json records as a list, or [] if doc has none or is malformed."""
     e = doc.get("evidence") if isinstance(doc, dict) else None
     return [x for x in e if isinstance(x, dict)] if isinstance(e, list) else []
 
@@ -111,7 +111,7 @@ def load_images(sd, doc):
 
 # ------------------------------------------------------------------ safe text
 def esc(s, n=2000):
-    """Convert a value to text, remove control characters, truncate it, and escape it for HTML."""
+    """s as a plain string, control characters stripped, truncated to n, HTML-escaped."""
     s = s if isinstance(s, str) else ("" if s is None else str(s))
     return html.escape(re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", s)[:n], quote=True)
 
@@ -138,7 +138,7 @@ def md_html(text):
         para, lst, i = [], None, 0
 
         def flush():
-            """Render and clear the pending paragraph and list into the Markdown output."""
+            """Close the paragraph or list in progress and append it to out."""
             nonlocal para, lst
             if para:
                 out.append("<p>%s</p>" % inline(" ".join(para))); para = []
@@ -195,7 +195,7 @@ figure img{max-width:100%;height:auto;border:1px solid var(--sg-line);border-rad
 
 
 def tag(kind):
-    """Return an HTML badge for a 'checked' or 'reported' fact; reject other kinds with KeyError."""
+    """The small "checked" or "reported" label shown next to a fact on the page."""
     return '<span class="sg-tag %s">%s</span>' % (kind, {"checked": "checked", "reported": "reported"}[kind])
 
 
@@ -209,7 +209,7 @@ def to_html(f):
     proved = len([a for a, s in cov.items() if s == "ok"])
 
     def verdict_cell(label, v):
-        """Render a labelled verdict card, marking missing and stale verdicts explicitly."""
+        """The KPI card HTML for one gate verdict (READY or DONE), stale or missing verdicts shown plainly."""
         st = (v or {}).get("overall")
         stale = v and not v.get("fresh")
         return ('<div class="col-6 col-md-3"><div class="card sg-kpi"><div class="card-body"><div class="subheader">%s</div>'
@@ -232,7 +232,7 @@ def to_html(f):
             by_ac.setdefault(a, []).append(s)
 
     def run_of(s):
-        """Return a scenario's result, freshness, source label, and current pass/fail status."""
+        """(result, is-fresh, who-ran-it tag, PASS/FAIL/None) for one recorded scenario."""
         r = res.get(s.get("name")) if isinstance(s.get("name"), str) else None
         r = r or {}
         fresh = r.get("spec") == f["spec_hash"](s) and r.get("fingerprint") == f["fingerprint"]

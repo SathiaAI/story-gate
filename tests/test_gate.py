@@ -3572,7 +3572,7 @@ class TestValidation(Base):
 
 
 def tiny_png(w=2, h=2):
-    """Build a red RGB PNG fixture with the requested dimensions using only the standard library."""
+    """A valid, tiny PNG of width w and height h, for evidence tests."""
     import struct, zlib
     raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
     chunk = lambda k, d: struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d) & 0xffffffff)
@@ -3591,19 +3591,19 @@ class TestValidationPage(Base):
         return self._tmp
 
     def R(self):
-        """Reload and return the report module from the source checkout."""
+        """The sg_report module, freshly reloaded so each test sees its own state."""
         sys.path.insert(0, str(SRC))
         import importlib, sg_report
         return importlib.reload(sg_report)
 
     def ready(self):
-        """Create and score a ready story, keeping its directory for validation page tests."""
+        """Start SAT-1 and score it READY, so tests can go straight to evidence and the report."""
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         self.sd = self.repo / ".story-gate/stories/SAT-1"
 
     def test_image_checks(self):
-        """Image headers yield dimensions; unsupported formats and excessive sizes are rejected."""
+        """image_info and check_image accept good PNGs and JPEGs and reject bad or oversized ones."""
         R = self.R()
         self.assertEqual(R.image_info(tiny_png(3, 5)), ("png", 3, 5))
         jpg = b"\xff\xd8\xff\xe0" + b"\x00\x10" + b"JFIF\x00" + b"\x00" * 9 + b"\xff\xc0\x00\x11\x08\x00\x07\x00\x09" + b"\x00" * 20
@@ -3614,7 +3614,7 @@ class TestValidationPage(Base):
         self.assertRaises(ValueError, R.check_image, tiny_png() + b"\x00" * R.MAX_IMAGE)
 
     def test_evidence_command(self):
-        """Evidence requires a recorded scenario and valid image, and remains a protected story record."""
+        """`evidence` rejects unknown scenarios, non-images and symlinks, and otherwise records the screenshot."""
         self.ready()
         self.fill_validation()
         shot = self.tmp() / "shot.png"; shot.write_bytes(tiny_png())
@@ -3635,7 +3635,7 @@ class TestValidationPage(Base):
         self.assertEqual(run(self.repo, "scenarios", "SAT-1").returncode, 0)  # screenshots are records: not "code changes"
 
     def test_hostile_records_do_not_break_the_page(self):
-        """Malformed scenario fields render safely, and oversized result text is handled promptly."""
+        """A malformed scenario record still builds the page, and a huge result_section input stays fast."""
         self.ready()
         self.fill_validation()
         doc = json.loads((self.sd / "scenarios.json").read_text())
@@ -3650,7 +3650,7 @@ class TestValidationPage(Base):
         self.assertLess(time.time() - t0, 2)
 
     def test_one_screenshot_can_show_two_scenarios(self):
-        """The same screenshot can be recorded independently for two scenarios."""
+        """The same image file can be recorded as evidence for more than one scenario."""
         self.ready()
         self.fill_validation()
         run(self.repo, "scenario", "SAT-1", "--name", "second", "--ac", "AC-1", "--expect", "ok", "--", PY, "-c", "print('ok')")
@@ -3660,7 +3660,7 @@ class TestValidationPage(Base):
         self.assertEqual(len(json.loads((self.sd / "evidence.json").read_text())["evidence"]), 2)
 
     def test_markdown_is_escaped(self):
-        """Markdown renders supported formatting while escaping HTML and leaving links inactive."""
+        """md_html renders headings, tables and Mermaid source, but strips scripts, raw HTML and links."""
         R = self.R()
         out = R.md_html("## Hi <b>x</b>\n\n<script>alert(1)</script>\n\n- a [link](javascript:alert(1))\n- `<img src=x onerror=1>`\n\n"
                         "| a | b |\n|---|---|\n| <i>1</i> | 2 |\n\n```mermaid\nflowchart LR\nA-->B\n```\n")
@@ -3669,7 +3669,7 @@ class TestValidationPage(Base):
         self.assertIn("&lt;script&gt;", out); self.assertIn("<h3>", out); self.assertIn("<table", out); self.assertIn("Mermaid source", out)
 
     def test_report_page(self):
-        """Reports escape story text, omit altered evidence, and default to a location outside the repo."""
+        """The built page escapes agent text, embeds images as data URIs, drops a changed screenshot, and defaults outside the repo."""
         self.ready()
         (self.repo / "app.py").write_text("x = 5\n")
         self.fill_validation()
@@ -3697,7 +3697,7 @@ class TestValidationPage(Base):
         self.assertTrue(where.is_file()); self.assertNotIn(self.repo.resolve(), where.resolve().parents)
 
     def test_ci_summary_shows_the_result_and_builds_the_page(self):
-        """CI quotes the result as plain text and builds the report for artifact upload."""
+        """`ci` puts validation.md's Result in the GitHub summary as plain text and builds the page as an artifact."""
         self.ready()
         (self.repo / "app.py").write_text("x = 5\n")
         self.fill_validation()
