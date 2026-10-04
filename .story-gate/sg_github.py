@@ -434,8 +434,8 @@ def setup_agent(owner=None, org=False, code=None, open_browser=True):
 
 def page(inner):
     return ("<!doctype html><meta charset=utf-8><title>story-gate setup</title><style>body{font:16px/1.5 system-ui,sans-serif;"
-            "background:#FFF8F2;color:#29122B;max-width:640px;margin:10vh auto;padding:0 24px}button{background:#FF4B20;color:#29122B;"
-            "border:0;border-radius:10px;padding:12px 18px;font-weight:600}</style>" + inner)
+            "background:#FFF8F2;color:#1F2327;max-width:640px;margin:10vh auto;padding:0 24px}button{background:#FFD84D;color:#1F2327;"
+            "border:2px solid #1F2327;border-radius:10px;padding:12px 18px;font-weight:600}</style>" + inner)
 
 
 def agent_record():

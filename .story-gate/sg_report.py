@@ -188,7 +188,7 @@ def md_html(text):
 CSS = """
 .sg-code{color:var(--sg-ink);background:var(--sg-card);border:1px solid var(--sg-line);padding:.75rem;border-radius:6px;white-space:pre-wrap;word-break:break-word;font-size:.85rem}
 .sg-tag{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;padding:.1rem .45rem;border-radius:4px;border:1px solid var(--sg-line)}
-.sg-tag.checked{border-color:#2E7D4F} .sg-tag.reported{border-color:var(--sg-tangelo)}
+.sg-tag.checked{border-color:#2E7D4F} .sg-tag.reported{border-color:var(--sg-accent-text)}
 figure img{max-width:100%;height:auto;border:1px solid var(--sg-line);border-radius:6px}
 .sg-doc h2,.sg-doc h3{margin-top:1.25rem} .sg-nowrap{white-space:nowrap} code{color:var(--sg-ink)} details summary{cursor:pointer}
 """
