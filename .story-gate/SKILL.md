@@ -44,6 +44,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
+- Write for a non-coder: short sentences, active voice, plain words, a Mermaid diagram where a picture is clearer (PROTOCOL.md > Writing). This covers chat replies, PR descriptions, the story's plain summary, handoffs and learnings.
 - Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
 - Never run `install`, `install --user`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `filter`, `lockdown` or `hook-trust`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.

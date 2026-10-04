@@ -3100,5 +3100,150 @@ class TestCIWorkflowRuns(Base):
         self.assertTrue({"gate.py", "sg_trust.py", "sg_judges.py", "sg_github.py", "config.json"} <= copied, copied)
 
 
+class TestPlainWriting(Base):
+    """STE-style plain-writing proxy (PROTOCOL.md > Writing): what is scored, how sentences split, and how it reports.
+    Advisory by default; blocks only when writing.enforce is true."""
+
+    def W(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib, sg_writing
+            return importlib.reload(sg_writing)
+        finally:
+            sys.path.remove(str(SRC))
+
+    def test_sentence_splitter_edge_cases(self):
+        W = self.W()
+        self.assertEqual(len(W.sentences("Use e.g. the flag. Then run it.")), 2)
+        self.assertEqual(len(W.sentences("Version v0.5.0 is out. Pi is 3.14 here.")), 2)
+        self.assertEqual(len(W.sentences("Edit config.json and gate.py now.")), 1)
+        self.assertEqual(len(W.sentences("Is it done? Yes! It is.")), 3)
+        self.assertEqual(len(W.sentences("Café crème is fine. Über gut.")), 2)
+
+    def test_only_prose_is_scored(self):
+        W = self.W()
+        text = ("---\nid: X\n---\n# Heading that is long " + "word " * 40 + "\n\n```python\n" + "x = 1 " * 50 + "\n```\n\n"
+                "| a | b |\n|---|---|\n| " + "cell " * 40 + "| x |\n\n> " + "quote " * 40 + "\n\n"
+                "```mermaid\nflowchart LR\n  A --> B\n```\n\nSee https://example.com/" + "a" * 50 + " for more. Run `" + "x " * 40 + "` now.\n")
+        r = W.score_text(text)
+        self.assertEqual(r["checked"], 2); self.assertEqual(r["score"], 1.0)
+        self.assertIsNone(W.score_text("```\ncode only\n```\n")["score"])  # nothing to score: not applicable
+        self.assertEqual(W.report({"x": ""}, 0.8)["status"], "not_applicable")
+
+    def test_limits_instructions_paragraphs_and_lists(self):
+        W = self.W()
+        self.assertEqual(W.score_text("Run " + "the tests " * 10 + "now.")["score"], 0.0)          # 22 words, instruction: max 20
+        self.assertEqual(W.score_text("The tests " + "run fine " * 10 + "now.")["score"], 1.0)      # 23 words, description: max 25
+        para = " ".join("This is sentence %d." % i for i in range(8))
+        r = W.score_text(para)
+        self.assertEqual((r["checked"], r["passed"], r["long_paragraphs"]), (8, 6, 1))           # sentences 7 and 8 fail
+        self.assertEqual(W.score_text("- One item here.\n- Two item here.\n- " + "word " * 30)["passed"], 2)
+        self.assertGreaterEqual(W.score_text("The edit was blocked by the hook.")["passive"], 1)
+
+    def test_diagram_detection(self):
+        W = self.W()
+        self.assertTrue(W.has_diagram("x\n```mermaid\nflowchart LR\n  A-->B\n```\n"))
+        self.assertTrue(W.has_diagram("```mermaid\n%% note\nsequenceDiagram\n  A->>B: hi\n```"))
+        self.assertFalse(W.has_diagram("```mermaid\nnot a diagram\n```"))
+        self.assertFalse(W.has_diagram("```mermaid\nflowchart LR\n  A-->B\n"))  # never closed
+        self.assertFalse(W.has_diagram("```python\nflowchart = 1\n```"))
+
+    CORPUS_PLAIN = [
+        "## What changed\nThe login page now shows an error when the password is wrong. Before, it showed nothing.\n",
+        "## What changed\nWe added a retry to the upload. It tries three times. Then it shows a clear message.\n",
+        "## How to verify\n1. Run the tests.\n2. Open the page.\n3. Type a wrong password.\n4. See the red message.\n",
+        "## Known limits\nThe retry does not cover large files. We track this in a new story.\n",
+        "## What changed\nThe report now loads in one second. We cache the totals for five minutes.\n",
+    ]
+    CORPUS_DENSE = [
+        "## What changed\nIn order to facilitate the eventual consolidation of the heterogeneous authentication flows that were previously "
+        "implemented across multiple services, the middleware layer has been refactored such that token validation is now performed "
+        "centrally before any downstream handler is invoked, which also means that legacy session cookies are being deprecated.\n",
+        "## How to verify\nRun the full integration suite with the staging configuration and the feature flag enabled and then compare "
+        "the generated snapshot artifacts against the baseline that was captured before the migration was applied to the database.\n",
+        "## Known limits\nBecause the upstream provider throttles requests in a way that is not documented and that varies depending on "
+        "the region and the time of day, the retry policy that has been implemented may still fail under sustained load conditions.\n",
+        "## What changed\nThe exporter was rewritten so that it streams rows directly from the cursor into the compressed archive "
+        "instead of materialising the whole result set in memory first, which had been causing out-of-memory errors on large tenants.\n",
+        "## Release and rollback\nShip behind the flag, monitor the error-rate dashboard and the latency percentiles for at least two "
+        "full business days across all regions, and roll back by disabling the flag and redeploying the previous container image.\n",
+    ]
+
+    def test_corpus_separates_plain_from_dense_handoffs(self):
+        # 10 handoff excerpts: the plain ones meet the 0.8 target, the dense ones don't (a sanity check, not a calibration)
+        W = self.W()
+        for t in self.CORPUS_PLAIN:
+            self.assertGreaterEqual(W.score_text(t)["score"], 0.8, t)
+        for t in self.CORPUS_DENSE:
+            self.assertLess(W.score_text(t)["score"], 0.8, t)
+
+    def test_score_reports_writing_as_advice_and_enforce_makes_it_a_check(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertIn("advice     story.md has no '## Plain summary'", r.stdout)
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())
+        self.assertNotIn("plain_writing", v["checks"]); self.assertTrue(v["writing"]["advice"])
+        st = self.repo / ".story-gate/stories/SAT-1/story.md"
+        st.write_text(st.read_text() + "\n## Plain summary\nThis helps users sign in. The page shows a clear error. Tests prove it.\n")
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertIn("plain-English score 1.00", r.stdout); self.assertNotIn("advice", r.stdout)
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, writing={"enforce": True, "target": 0.8})
+        st.write_text(st.read_text().replace("This helps users sign in.", "This " + "very " * 30 + "long sentence helps users."))
+        run(self.repo, "score", "SAT-1", "ready")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())
+        self.assertEqual(v["checks"]["plain_writing"]["status"], "FAIL")
+        self.assertIn("below the target", v["checks"]["plain_writing"]["why"])
+
+    def test_done_asks_for_a_diagram_when_many_files_change(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            g = load_gate(self.repo)
+        finally:
+            sys.path.remove(str(SRC))
+        sd = self.repo / ".story-gate/stories/SAT-1"; sd.mkdir(parents=True, exist_ok=True)
+        (sd / "handoff.md").write_text("## What changed\nWe split the parser. Each part has one job.\n")
+        c = g.cfg()
+        w = g.writing_report(sd, "SAT-1", "done", c, ["a.py", "b.py", "c.py", "d.py", "e.py"])
+        self.assertTrue(w.get("diagram_missing")); self.assertIn("mermaid", " ".join(w["advice"]))
+        (sd / "handoff.md").write_text("## What changed\nWe split the parser.\n\n```mermaid\nflowchart LR\n  A-->B\n```\n")
+        self.assertFalse(g.writing_report(sd, "SAT-1", "done", c, ["a.py", "b.py", "c.py", "d.py", "e.py"]).get("diagram_missing"))
+        self.assertFalse(g.writing_report(sd, "SAT-1", "done", c, ["a.py"]).get("diagram_missing"))
+
+    def test_writing_never_runs_in_the_hooks(self):
+        # the score is advice on evidence files; the hook path (security) must not load or depend on it
+        import ast
+        tree = ast.parse((SRC / "gate.py").read_text(encoding="utf-8"))
+        users = {f.name for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                 for n in ast.walk(f) if isinstance(n, ast.Import) and any(a.name == "sg_writing" for a in n.names)}
+        self.assertEqual(users, {"writing_report", "writing_summary"})
+        top = [n for n in tree.body if isinstance(n, ast.Import) and any(a.name == "sg_writing" for a in n.names)]
+        self.assertEqual(top, [])
+
+    def test_branch_can_only_tighten_writing_policy(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib, sg_trust as T
+            T = importlib.reload(T)
+        finally:
+            sys.path.remove(str(SRC))
+        base = {"writing": {"target": 0.8, "enforce": False}}
+        self.assertEqual(T.tighten(base, {"writing": {"enforce": True, "target": 0.9}})["writing"], {"target": 0.9, "enforce": True})
+        self.assertEqual(T.tighten(base, {"writing": {"target": 0.1}})["writing"]["target"], 0.8)
+        self.assertIn("plain-writing check no longer enforced", T.weaker({"writing": {"enforce": True}}, {"writing": {"enforce": False}}))
+
+    def test_ci_summary_scores_the_pr_description(self):
+        ev = self.repo.parent / (self.repo.name + "-event.json")
+        ev.write_text(json.dumps({"pull_request": {"body": "This PR fixes the login error. It adds one test."}}))
+        self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        sys.path.insert(0, str(SRC)); os.environ["GITHUB_EVENT_PATH"] = str(ev)
+        try:
+            g = load_gate(self.repo)
+            lines = g.writing_summary(None)
+        finally:
+            sys.path.remove(str(SRC)); os.environ.pop("GITHUB_EVENT_PATH", None)
+        self.assertTrue(any(l.startswith("| PR description | 1.00") for l in lines), lines)
+
+
 if __name__ == "__main__":
     unittest.main()

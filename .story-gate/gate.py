@@ -193,6 +193,8 @@ DEFAULT_CONFIG = {
     "checkpoint": {"every_edits": 10},
     "project_hooks_allowed": [],
     "dashboard_issue": None,
+    # Plain writing (PROTOCOL.md > Writing): an STE-style proxy score, not ASD-STE100 compliance. Advisory unless enforce.
+    "writing": {"standard": "ste-style", "target": 0.8, "enforce": False, "diagram_min_files": 5},
 }
 
 # ------------------------------------------------------------------ checks
@@ -812,6 +814,10 @@ source: TODO (linear:{id} | repo:path | control-hub:doc-id | other)
 depends_on: []
 consumers: []
 ---
+## Plain summary
+TODO: 3 to 6 short sentences a non-coder can read (PROTOCOL.md > Writing): who this helps, what changes, how we know it works.
+
+## Story (word for word from the source)
 TODO: paste the full story text: who/why, scope, out of scope, interfaces, NFRs, acceptance criteria (AC-1, AC-2, ...).
 """,
     "context.md": """# Context for {id}
@@ -836,7 +842,7 @@ TODO (paste relevant hits from `gate.py learnings <words>` with their ids, or 'N
     "handoff.md": """# Handoff: {id}
 
 ## What changed
-TODO
+TODO (plain English, short sentences. When the change touches several parts, add a ```mermaid diagram of how they connect)
 
 ## Interfaces and contracts
 TODO (APIs, schemas, events, env vars, versions — exact names)
@@ -1043,6 +1049,34 @@ def diff_against(base):
     return mb, sorted(names), diff
 
 
+def writing_report(sd, sid, phase, c, files=()):
+    """Advisory plain-writing report for text the agent wrote: the story's plain summary (READY), the handoff and this
+    story's learnings (DONE). The word-for-word story, quotes and code are never scored."""
+    import sg_writing as W
+    w = c.get("writing") or {}
+    target = float(w.get("target", 0.8))
+    advice = []
+    if phase == "ready":
+        summ = W.section(rd(sd / "story.md"), "Plain summary")
+        if not summ.strip() or "TODO" in summ:
+            advice.append("story.md has no '## Plain summary' yet: add 3 to 6 short sentences a non-coder can read")
+        rep_ = W.report({"story.md plain summary": summ}, target)
+    else:
+        learn = "\n".join(str(r.get("summary", "")) + ". " + str(r.get("rule", "")) for r in jsonl(LEARNINGS) if r.get("story") == sid)
+        handoff = rd(sd / "handoff.md")
+        rep_ = W.report({"handoff.md": handoff, "learnings": learn}, target)
+        code = [f for f in files if not exempt(f, c)]
+        if len(code) >= int(w.get("diagram_min_files", 5)) and not W.has_diagram(handoff):
+            advice.append("this change touches %d code files: add a ```mermaid diagram to handoff.md that shows how the parts connect" % len(code))
+            rep_["diagram_missing"] = True
+    if rep_["status"] == "below_target":
+        worst = next((p for p in rep_["parts"].values() if p["examples"]), None)
+        advice.append("plain writing %.2f is below the target %.2f (%d of %d sentences pass)%s" % (
+            rep_["score"], target, rep_["passed"], rep_["checked"], (": " + worst["examples"][0]) if worst else ""))
+    rep_["advice"] = advice
+    return rep_
+
+
 def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     """ci_trust: None = local run (waivers/decisions shown as proposals), True = CI with a code owner's approval
     on the head commit (honoured), False = CI without it (ignored). results = per-test outcomes from CI's own run."""
@@ -1053,6 +1087,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     mx = int(c["judge"].get("max_chars", 90000))
     if phase == "ready":
         structural, fm = struct_ready(sd)
+        wr = writing_report(sd, sid, "ready", c)
         pl = sections(rd(sd / "context.md")).get("## Prior learnings", "").strip().lower()
         skip = {"learnings_applied"} if pl.startswith("none") and "searched" in pl else set()  # skip only with search evidence
         state = {"story": rd(sd / "story.md")[:mx // 3], "context": rd(sd / "context.md")[:mx // 3],
@@ -1063,6 +1098,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         if results is None:
             results = (load_json(sd / "test_results.json").get("junit") or None)
         structural = struct_done(sd, sid, files, c, diff, results, truncated=len(diff) > budget)
+        wr = writing_report(sd, sid, "done", c, files)
         skip = set()
         learn = [l for l in rd(LEARNINGS).splitlines() if '"%s"' % sid in l]
         state = {"story": rd(sd / "story.md")[:mx // 6], "context": rd(sd / "context.md")[:mx // 6],
@@ -1071,12 +1107,14 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
                  "diff": diff[:budget], "diff_truncated": len(diff) > budget}
     else:
         sys.exit("phase must be ready or done")
+    if (c.get("writing") or {}).get("enforce"):  # opt-in, after calibration: plain writing becomes a real check
+        structural["plain_writing"] = (not wr["advice"], "; ".join(wr["advice"]))
     judged = judge(phase, state, c, sd, skip)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     v = verdict(structural, judged, dec, wav, c)
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
-              "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION})
+              "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
     wj(sd / ("%s.json" % phase), v)
     failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED")]
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
@@ -1219,6 +1257,16 @@ def print_verdict(v):
     for k, x in sorted(v["checks"].items(), key=lambda kv: (kv[1].get("group", ""), kv[0])):
         if x["status"] != "PASS":
             print("  %-10s %-24s %s" % (x["status"], k, x.get("why") or "score=%s" % x.get("score")))
+    w = v.get("writing") or {}
+    if w.get("score") is not None:
+        print("  writing    plain-English score %.2f (target %.2f, STE-style proxy)" % (w["score"], w.get("target", 0.8)))
+        for name, part in (w.get("parts") or {}).items():
+            if part.get("score") is not None:
+                print("             %-24s %.2f (%d sentences, %d long paragraphs, %d passive)" % (
+                    name, part["score"], part["checked"], part["long_paragraphs"], part["passive"]))
+    for a in w.get("advice") or []:
+        if "plain_writing" not in v["checks"]:
+            print("  advice     " + a)
 
 
 def append_decision(sid, rec):
@@ -1758,7 +1806,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -1918,6 +1966,7 @@ def cmd_ci(tests_dir=None):
         lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
     if sid and (STORIES / sid / "trace.md").exists():
         lines += ["", rd(STORIES / sid / "trace.md")]
+    lines += writing_summary(sid)
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
         if recs:
@@ -1926,6 +1975,31 @@ def cmd_ci(tests_dir=None):
     summary(lines)
     print("story-gate CI: %s (%s mode, %d code files)" % ("OK" if not problems else "%d problem(s)" % len(problems), "enforce" if enforce else "warn", len(code)))
     return 1 if (problems and enforce) else 0
+
+
+def writing_summary(sid):
+    """CI summary lines: plain-writing scores for the story's own text and the PR description (advisory)."""
+    import sg_writing as W
+    target = float((cfg().get("writing") or {}).get("target", 0.8))
+    rows = []
+    for ph in ("ready", "done"):
+        w = load_json(STORIES / sid / ("%s.json" % ph)).get("writing") if sid else None
+        if w and w.get("score") is not None:
+            rows.append("| %s (%s) | %.2f | %s |" % ("story summary" if ph == "ready" else "handoff + learnings", ph.upper(), w["score"],
+                                                   "; ".join(w.get("advice") or []) or "-"))
+    try:
+        body = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))["pull_request"].get("body") or ""
+    except Exception:
+        body = None
+    if body is not None:
+        r = W.report({"PR description": body}, target)
+        if r["score"] is not None:
+            ex = (r["parts"]["PR description"]["examples"] or [""])[0]
+            rows.append("| PR description | %.2f | %s |" % (r["score"], ex.replace("|", "/") or "-"))
+    if not rows:
+        return []
+    return (["", "### Plain writing (advisory, STE-style; target %.2f)" % target, "", "| Text | Score | Advice |", "|---|---|---|"]
+            + rows)
 
 
 def cmd_audit():
@@ -2023,6 +2097,7 @@ don't run) use `{py} .story-gate/gate.py <command>`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
 3. Before saying you are done: run tests via `story-gate record-tests`, write `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
+5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
 """ + BLOCK_END
 

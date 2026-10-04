@@ -115,7 +115,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - In Claude clients, that's `/engineering:code-review`.
    - This is a self-check. The proof comes from the independent reviewers on the PR (`config.json` → `reviewers`, e.g. CodeRabbit or Codex), whose threads must all be resolved.
 
-2. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md`:
+2. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md` in plain English (see **Writing**):
    - Sections: What changed · Interfaces and contracts · How to verify · Known limits · Downstream consumers · Release and rollback (or "Not applicable: reason") · Drift decisions.
    - Downstream stories read this. Write it for a stranger.
 
@@ -139,6 +139,38 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - It shows the evidence in the check summary.
 3. A **code owner approves the latest commit** in GitHub's own review screen. A comment is not an approval, and any new push cancels the approval. Then the human merges.
 4. After the merge, an audit job opens an issue if anything was merged without that approval.
+
+## Writing (plain English for a non-coder)
+
+The person who accepts the work may not be a coder. Write so that they can read it once and understand it.
+This applies to your chat replies, PR descriptions, the story's `## Plain summary`, `handoff.md` and learnings.
+
+**Rules** (STE-style: based on the ideas of ASD-STE100, not certified to it):
+1. Keep each sentence short. An instruction has 20 words or fewer. Any other sentence has 25 words or fewer.
+2. Write one instruction or one idea in each sentence.
+3. Use the active voice. Write "The hook blocks the edit", not "The edit is blocked by the hook".
+4. Use plain, common words. Use the same word for the same thing every time.
+5. Keep paragraphs to 6 sentences or fewer. Use lists and tables for steps and comparisons.
+6. Start with the result, then give the reason.
+7. Explain a technical term the first time you use it, in five words or fewer.
+
+**Diagrams:** use a diagram when it is clearer than text: a flow, a sequence of calls, how parts connect.
+Use a fenced ```` ```mermaid ```` block. GitHub draws it. Example:
+
+```mermaid
+flowchart LR
+  A[Agent edits code] --> B{READY passed?}
+  B -- yes --> C[Edit allowed]
+  B -- no --> D[Edit blocked]
+```
+
+When a change touches several parts (`config.json` → `writing.diagram_min_files`, default 5 files), put a diagram in `handoff.md`.
+
+**Do not rewrite:** the story text you copied word for word, quotes from the PRD or TRD, code, commands, file names and the `gate.py` verdict line.
+
+**The score:** `gate.py score` measures rules 1 and 5 on the plain summary (READY) and on the handoff and learnings (DONE).
+It is the share of sentences that pass (`config.json` → `writing.target`, default 0.8). The CI summary also scores the PR description.
+It is advice. It blocks only when the owner sets `writing.enforce` to `true`, after calibration on about 20 stories.
 
 ## Waivers and drift decisions are proposals
 - **Recording them:** `gate.py waive <ID> <check> --by <who> --reason "…"` and `gate.py decide …`. Each one is tied to the exact evidence it was made on.
