@@ -2642,6 +2642,9 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(self.req(port, "/signin?t=" + wz.secret, b"", origin="https://evil.example")[0], 403)
         st, body = self.req(port, "/?t=" + wz.secret)
         self.assertEqual(st, 200); self.assertIn("Give your AI its own GitHub login", body); self.assertIn("me/proj", body)
+        # the 2-second refresh must not rebuild the links: a link swapped out mid-click silently does nothing
+        self.assertIn("p.dataset.url!==s.pr.url", body); self.assertIn("d.dataset.code!==s.device.code", body)
+        self.assertIn("Opens GitHub in a new tab", body)
 
     def test_judge_key_goes_to_a_secret_and_never_back_to_the_page(self):
         G, S = self.G, self.S
@@ -2670,6 +2673,9 @@ class TestGuidedSetup(unittest.TestCase):
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": True}, "private": True, "owner": {"type": "User"}, "plan": {"name": "free"}}, {})
         wz.start_signin()
         self.assertEqual(wz.st["signin"]["status"], "ok"); self.assertTrue(wz.private_free)
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": True}, "private": True, "owner": {"type": "User"}}, {})
+        wz.start_signin()  # the sign-in token can't see the plan: unknown is not "free", so no false warning
+        self.assertEqual(wz.st["signin"]["status"], "ok"); self.assertFalse(wz.private_free)
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": False}, "default_branch": "main"}, {})
         wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
         wz.start_signin()  # a teammate: story-gate is already on GitHub, so no admin rights, key or pull request needed
@@ -2694,6 +2700,15 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertIn(".github/CODEOWNERS", calls[0][1]); self.assertIn(".story-gate/gate.py", calls[0][1])
         self.assertEqual(calls[1][1], ["me"])
         self.assertEqual(wz.st["merge"]["status"], "ok")
+        self.assertFalse(wz.private_free)
+        G.setup_repo = lambda root, repo, owners, tok, dry_run=False: ["Ruleset: NOT created (HTTP 403 Upgrade to GitHub Pro)", "Actions: ok"]
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login, wz.private = "me", True
+        wz.open_pr()
+        for _ in range(100):
+            if wz.st["done"]["status"] == "ok": break
+            time.sleep(0.1)
+        self.assertTrue(wz.private_free)  # GitHub refused the rules: free plan, private repository -> the page warns
 
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T

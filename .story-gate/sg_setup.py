@@ -89,6 +89,7 @@ class Wizard:
         self.device = None
         self.pr = None
         self.private_free = False
+        self.private = False
         self.already = False  # the repository already has story-gate on GitHub (a teammate's computer)
         self.base = "main"
         self.lock = threading.Lock()
@@ -146,14 +147,17 @@ class Wizard:
         elif not (info.get("permissions") or {}).get("admin"):
             self.set("signin", "error", "%s isn't an admin of %s, so story-gate can't set its rules. Ask the owner to run setup." % (self.login, self.repo))
             return
-        self.private_free = bool(info.get("private")) and not self._paid(tok, info.get("owner") or {})
+        self.private = bool(info.get("private"))
+        self.private_free = self.private and self._paid(tok, info.get("owner") or {}) is False
         self.set("signin", "ok", "Signed in as %s" % self.login)
 
     def _paid(self, tok, owner):
-        """True only when GitHub confirms a paid plan for the repository's owner (then private-repo rules are enforced)."""
+        """True/False when GitHub shows the owner's plan; None when it doesn't (the sign-in token has no `user` scope and
+        orgs show their plan only to owners). Unknown is not "free": the ruleset result after the merge settles it."""
         path = "/user" if owner.get("type") == "User" else "/orgs/%s" % owner.get("login")
         st, o, _ = G.call("GET", path, tok)
-        return st == 200 and ((o.get("plan") or {}).get("name") or "free") != "free"
+        name = (o.get("plan") or {}).get("name") if st == 200 and isinstance(o, dict) else None
+        return None if not name else name != "free"
 
     # ---- step 2: the AI's own GitHub login (agent App)
     def agent_installed(self):
@@ -231,6 +235,8 @@ class Wizard:
         (tmp / ".github" / "CODEOWNERS").write_text("* @%s\n" % self.login, encoding="utf-8")
         notes = G.setup_repo(tmp, self.repo, [self.login], self.token)  # CODEOWNERS already merged; this sets the rules
         shutil.rmtree(tmp, ignore_errors=True)
+        if self.private and any(n.startswith("Ruleset: NOT created (HTTP 403") for n in notes):
+            self.private_free = True  # GitHub refused the rules: a private repository on the free plan
         self.set("merge", "ok", "Merged. " + " ".join(n for n in notes if n.startswith(("Ruleset", "Actions"))))
         self.finish(base)
 
@@ -345,7 +351,7 @@ main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash 
 .eyebrow{color:var(--tangelo);letter-spacing:.2em;font-size:13px;font-weight:600;text-transform:uppercase}
 .lead{color:var(--muted);margin:0 0 28px}.step{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:12px 0;display:flex;gap:16px}
 .n{font:600 28px/1 "Clash Display",system-ui;color:var(--tangelo);min-width:28px}.step h2{font-size:18px;margin:0 0 4px}.step p{margin:0;color:var(--muted)}
-.step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--aubergine)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--tangelo)}.msg{margin-top:8px;font-size:14px}
+.step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--aubergine)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--tangelo)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
 button,.btn{background:var(--tangelo);color:var(--aubergine);border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
 button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
@@ -374,8 +380,8 @@ def page(wz):
 const T=%s;async function go(a,body){await fetch('/'+a+'?t='+T,{method:'POST',body:body||''});tick()}
 async function tick(){const s=await (await fetch('/state?t='+T)).json();
 for(const [k,v] of Object.entries(s.steps)){const e=document.getElementById('s-'+k);if(!e)continue;e.className='step '+v.status;e.querySelector('.msg').textContent=v.status=='ok'?'✓ '+v.msg:v.msg}
-const d=document.getElementById('dev');if(s.device&&s.steps.signin.status!='ok'){d.innerHTML='Enter this code at <a target=_blank href="'+s.device.uri+'">'+s.device.uri+'</a><br><span class=code></span>';d.querySelector('.code').textContent=s.device.code}else d.innerHTML='';
-const p=document.getElementById('pr');if(s.pr){p.innerHTML='<a class=btn target=_blank>Review and merge on GitHub</a>';p.querySelector('a').href=s.pr.url;p.previousElementSibling.style.display='none'}
+const d=document.getElementById('dev');if(s.device&&s.steps.signin.status!='ok'){if(d.dataset.code!==s.device.code){d.dataset.code=s.device.code;d.innerHTML='Enter this code at <a target=_blank rel=noopener></a><br><span class=code></span>';const a=d.querySelector('a');a.href=a.textContent=s.device.uri;d.querySelector('.code').textContent=s.device.code}}else{d.innerHTML='';d.dataset.code=''}
+const p=document.getElementById('pr');if(s.pr&&p.dataset.url!==s.pr.url){p.dataset.url=s.pr.url;p.innerHTML='<a class=btn target=_blank rel=noopener>Review and merge on GitHub</a><p class=hint>Opens GitHub in a new tab. Click the green <b>Merge pull request</b> button there, then come back to this page.</p>';p.querySelector('a').href=s.pr.url;p.previousElementSibling.style.display='none'}
 document.getElementById('free').style.display=s.private_free?'block':'none'}
 tick();setInterval(tick,2000)</script>""" % json.dumps(t)
     return page_shell(
