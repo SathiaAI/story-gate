@@ -2,14 +2,14 @@
 
 # story-gate
 
-**Ship production-grade work with AI coding tools, without being a coder.** story-gate makes your AI write down what it will build before it builds it, checks the work against that plan, and won't let anything merge until **you** approve it.
+**Ship production-grade work with AI coding tools, without being a coder.** story-gate makes your AI write down what it will build before it builds it, checks the work against that plan, and won't let anything merge until **you** approve it (on free GitHub plans with private repositories it warns instead; see *Good to know*).
 
 It works in Claude Code, Codex, Cursor, Gemini CLI, Hermes, Windsurf and cloud agents.
 
 1. Your AI writes the story and its tests first.
 2. An independent judge scores the work, for a fraction of a cent.
 3. Fixed rules decide whether it's ready.
-4. You approve. Nothing merges without you.
+4. You approve. Where GitHub enforces branch rules, nothing merges without you.
 
 ## Set it up in 5 steps
 
@@ -77,4 +77,4 @@ When the person asks you to set up story-gate:
 If the setup page reports an error, read it to the person and follow its instructions. Run `story-gate init` again to continue; it skips what is already done on GitHub.
 </details>
 
-<sub>Tests: `python -m unittest tests/test_gate.py tests/test_packaging.py` · CI runs them on Linux, Windows and macOS. MIT licensed. story-gate by Viaknox.</sub>
+<sub>Tests: `python -m unittest tests/test_gate.py tests/test_packaging.py`. CI runs `tests/test_gate.py` on Linux, Windows and macOS; the packaging tests run locally for now. MIT licensed. story-gate by Viaknox.</sub>

@@ -2570,9 +2570,6 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         self.assertNotIn("topsecret", str(cm.exception))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestGuidedSetup(unittest.TestCase):
     """story-gate init: the browser page and the setup pull request (GitHub calls are faked; no network)."""
@@ -2582,6 +2579,8 @@ class TestGuidedSetup(unittest.TestCase):
         import importlib, sg_github as G, sg_setup as S
         self.G, self.S = G, importlib.reload(S)
         keep_github_fakes_local(self, G)
+        saved = {n: getattr(G, n) for n in ("set_repo_secret", "open_setup_pr", "pr_merged", "setup_repo", "whoami", "human_token", "device_flow")}
+        self.addCleanup(lambda: [setattr(G, n, f) for n, f in saved.items()])
         self.tmp = Path(tempfile.mkdtemp())
         self.home = self.tmp / "home"; self.home.mkdir()
         self.old_env = dict(os.environ)
@@ -2696,6 +2695,37 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(calls[1][1], ["me"])
         self.assertEqual(wz.st["merge"]["status"], "ok")
 
+    def test_doctor_checks_the_path_command_without_running_it(self):
+        import sg_trust as T
+        marker = self.tmp / "ran"
+        good = self.tmp / "story-gate"
+        good.write_text("#!/bin/sh\ntouch %s\n# from story_gate.cli import main\n" % marker); good.chmod(0o755)
+        bad = self.tmp / "other"; bad.write_text("#!/bin/sh\ntouch %s\n" % marker); bad.chmod(0o755)
+        self.assertTrue(T.leads_to_runtime(str(good))); self.assertFalse(T.leads_to_runtime(str(bad)))
+        self.assertFalse(T.leads_to_runtime(str(self.tmp / "missing")))
+        self.assertFalse(marker.exists())  # inspected, never executed
+
+    def test_setup_pr_stops_when_the_repo_lookup_fails(self):
+        self.G.call = lambda m, p, tok=None, body=None, accept=None: (404, {"message": "Not Found"}, {})
+        wz = self.S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        with self.assertRaises(RuntimeError) as e:
+            wz.open_pr()
+        self.assertIn("HTTP 404", str(e.exception))
+
+    def test_signin_uses_storygate_device_flow_when_not_signed_in(self):
+        G, S = self.G, self.S
+        self.assertTrue(S.OAUTH_CLIENT_ID.startswith("Ov23"))
+        G.human_token = lambda: None
+        got = {}
+        G.device_flow = lambda cid, on_code=None, **kw: got.setdefault("cid", cid) and None
+        S.Wizard._signed_in = lambda self, tok: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+        wz.start_signin()
+        for _ in range(50):
+            if got: break
+            time.sleep(0.05)
+        self.assertEqual(got.get("cid"), S.OAUTH_CLIENT_ID)
+
     def test_cli_hands_commands_to_the_runtime_once_installed(self):
         root = Path(__file__).resolve().parents[1]
         sys.path.insert(0, str(root))
@@ -2706,3 +2736,7 @@ class TestGuidedSetup(unittest.TestCase):
         (rt / "launch.py").write_text("")
         (rt / "active.json").write_text(json.dumps({"dir": str(rt / "0.4.0")}))
         self.assertEqual(C.runtime_launcher(), rt / "launch.py")
+
+
+if __name__ == "__main__":
+    unittest.main()

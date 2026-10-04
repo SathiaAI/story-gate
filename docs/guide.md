@@ -1,5 +1,7 @@
 <!-- The full reference. The short version is the README. -->
-> **This is the full guide.** Most people only need the [README](../README.md): ask your AI to set up story-gate and follow the page. The manual steps below are for people who prefer to run each command themselves.
+> **This is the full guide.** Once story-gate is installed on your computer, `gate.py <command>` below means `story-gate <command>`; before that, use `python3 .story-gate/gate.py <command>`.
+>
+> Most people only need the [README](../README.md): ask your AI to set up story-gate and follow the page. The manual steps below are for people who prefer to run each command themselves.
 
 <p align="center"><img src="assets/header.jpg" alt="story-gate by Viaknox. Every story starts on spec, is tested against spec, and ends on spec. Ink drawing of a city rail station with a bright orange buffer stop at the end of the track." width="100%"></p>
 
@@ -89,22 +91,22 @@ python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output 
 ```
 - `install --user` also adds a **`story-gate` command** (in the runtime's `bin` folder; add that folder to your PATH to type it). It runs the verified copy, so AI tools use `story-gate start`, `story-gate score` and so on instead of the repository's `gate.py`. If it isn't on PATH, story-gate's messages print the full command.
 - At the start of each AI session in an enrolled repository, story-gate tells the agent how to work with it, from the verified copy (Claude Code, Codex, Cursor, Gemini) and asks it to follow them over repository files. It's guidance, not a lock: the hooks and CI do the enforcing. Codex asks you to trust the new hook once (`/hooks`).
-- `gate.py doctor` warns when the rules on your default branch got **weaker** since this computer last accepted them (enforce to warn, lower thresholds, newly allowed project hooks, more exempt files...). If it was intended, run `gate.py enroll` to accept. A pull request that loosens the rules gets the same plain-English list in its story-gate check. The same warning appears to you when an AI session starts (Claude Code, Codex, Gemini; in Cursor the agent is asked to pass it on).
+- `story-gate doctor` warns when the rules on your default branch got **weaker** since this computer last accepted them (enforce to warn, lower thresholds, newly allowed project hooks, more exempt files...). If it was intended, run `story-gate enroll` to accept. A pull request that loosens the rules gets the same plain-English list in its story-gate check. The same warning appears to you when an AI session starts (Claude Code, Codex, Gemini; in Cursor the agent is asked to pass it on).
 - **Until the first signed release:** plain `install --user` stops with "NOT installed: no signed release". Use `--unsigned` (doctor reports the copy as unsigned); once a signed release is out, run `install --user` again without it.
 - `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
 - It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
 - It also turns on the **checkout filter** in this repository (and in each repository you `enroll`, nowhere else): when git writes an AI tool's hook file, you get the version your default branch approved, minus any command it didn't. Settings live in the repository's own `.git` folder, never in a commit.
-- In each other repository that uses story-gate, run `gate.py enroll`. Rules must come from a remote's branch (`origin/main` by default). For a repository with no remote, `enroll --allow-local-policy` works but is weaker (anything on this computer can move a local branch), and doctor says so.
-- **Recommended, optional, OFF unless you say yes:** `gate.py lockdown` explains Claude Code's own hard switch for repository hooks before anything changes. See [Lockdown](#lockdown-optional-off-by-default).
+- In each other repository that uses story-gate, run `story-gate enroll`. Rules must come from a remote's branch (`origin/main` by default). For a repository with no remote, `enroll --allow-local-policy` works but is weaker (anything on this computer can move a local branch), and doctor says so.
+- **Recommended, optional, OFF unless you say yes:** `story-gate lockdown` explains Claude Code's own hard switch for repository hooks before anything changes. See [Lockdown](#lockdown-optional-off-by-default).
 - Your AI then pushes and opens PRs as **story-gate-agent[bot]**, never as you.
 
 Cloud agents need no setup here, because they already have their own GitHub identity: Codex cloud, Cursor Cloud and Copilot.
 
 **Step 5 · Prove it works** (1 minute)
 1. Ask your AI to open a small test PR. The `story-gate` check should stay red until **you** approve the latest commit.
-2. Run `python3 .story-gate/gate.py doctor --repo you/your-repo --strict`. It must finish without failures.
-3. Run `python3 .story-gate/gate.py hook-selftest`. In enforce mode every tool should say **blocks**.
-4. Run `python3 .story-gate/gate.py doctor --prove`. It plants a harmless canary hook on a throwaway commit, checks it out in a throwaway folder, and shows the canary never reaches disk. Your branches and files don't change.
+2. Run `story-gate doctor --repo you/your-repo --strict`. It must finish without failures.
+3. Run `story-gate hook-selftest`. In enforce mode every tool should say **blocks**.
+4. Run `story-gate doctor --prove`. It plants a harmless canary hook on a throwaway commit, checks it out in a throwaway folder, and shows the canary never reaches disk. Your branches and files don't change.
 
 > **Free GitHub plan?** GitHub only enforces branch rules on **private** repositories on paid plans (Pro, Team, Enterprise). story-gate still runs everywhere, but on a free private repository every check says **ADVISORY – NOT ENFORCED**. An audit job opens an issue if anything is merged without your approval.
 

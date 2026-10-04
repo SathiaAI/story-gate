@@ -19,7 +19,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import sg_github as G  # noqa: E402
 
-OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "")  # story-gate's own OAuth app (device flow); empty: use `gh`
+# story-gate's own OAuth app (SathiaAI, device flow only; a client ID is public, there is no secret). Empty: fall back to `gh`.
+OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "Ov23liAhA19MDXrS9a4S")
 STEPS = ("signin", "agent", "key", "merge", "done")
 
 
@@ -203,7 +204,10 @@ class Wizard:
     def open_pr(self):
         self.set("merge", "working", "Preparing the setup pull request")
         st, info, _ = G.call("GET", "/repos/%s" % self.repo, self.token)
-        base = info.get("default_branch") or "main"
+        if st != 200 or not isinstance(info, dict) or not info.get("default_branch"):
+            raise RuntimeError("couldn't read %s from GitHub (HTTP %s). Check you're signed in with the right account, then press "
+                               "the button again." % (self.repo, st))
+        base = info["default_branch"]
         git(self.top, "fetch", "--quiet", "origin", base)
         files = setup_files(self.top, base, self.py)
         co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* @%s\n" % self.login)

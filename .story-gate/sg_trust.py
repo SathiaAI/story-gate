@@ -292,12 +292,13 @@ def shim_problems(py=None):
 
 
 def leads_to_runtime(exe):
-    """True when this `story-gate` (e.g. the one `uv tool install` puts on PATH) hands every command to the active runtime."""
+    """True when this `story-gate` (e.g. the one `uv tool install` puts on PATH) is story-gate's own console script,
+    which hands every command to the active runtime. Read-only: the file is inspected, never run."""
     try:
-        r = subprocess.run([exe, "runtime-path"], capture_output=True, text=True, timeout=20)
-        act = read_json(active_path()).get("dir")
-        return bool(act) and r.returncode == 0 and Path(r.stdout.strip()).resolve() == Path(act).resolve()
-    except Exception:
+        with open(exe, "rb") as f:
+            head = f.read(1 << 20)  # uv's Windows launcher embeds the script; on macOS/Linux it is a short Python file
+        return b"story_gate.cli" in head
+    except OSError:
         return False
 
 
