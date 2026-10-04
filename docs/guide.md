@@ -370,7 +370,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 
 ## Fallbacks
 
-<p align="center"><img src="assets/fallbacks.png" alt="Judge trust tiers: Jev on any route can pass; any other model is capped at concerns; no judge means human review only" width="100%"></p>
+<p align="center"><img src="assets/fallbacks.png" alt="Judge trust tiers: Jev on any route can pass; any other model is capped at concerns; with no judge, agents' own scores are capped at concerns" width="100%"></p>
 
 | You don't have… | What happens |
 |---|---|
