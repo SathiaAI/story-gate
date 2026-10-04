@@ -25,7 +25,7 @@ PASSIVE = re.compile(r"\b(?:is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?\w+(?:
 WORD = re.compile(r"[A-Za-zÀ-ɏ0-9][\w'’-]*")
 
 
-FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)")
+FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
 
@@ -36,10 +36,13 @@ def blocks(text):
     for line in (text or "").replace("\r\n", "\n").split("\n"):
         if fence is None:
             m = FENCE_OPEN.match(line)
+            if m and m.group(1)[0] == "`" and "`" in m.group(2):
+                m = None  # ```a`b``` is inline code, not a fence (CommonMark: no backtick in a backtick fence's info)
             if m:
                 if cur:
                     out.append(("text", None, cur)); cur = []
-                fence = (m.group(1)[0], len(m.group(1)), m.group(2).lower())
+                info = m.group(2).strip()
+                fence = (m.group(1)[0], len(m.group(1)), info.split()[0].lower() if info else "")
                 continue
             cur.append(line)
         else:

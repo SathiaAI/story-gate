@@ -3227,6 +3227,8 @@ class TestPlainWriting(Base):
         self.assertEqual(W.score_text(text)["checked"], 1)
         self.assertFalse(W.has_diagram("````md\n```mermaid\nflowchart LR\n  A-->B\n```\n````\n"))  # an example inside code
         self.assertTrue(W.has_diagram("~~~mermaid\nflowchart LR\n  A-->B\n~~~\n"))
+        # ```a`b``` is inline code, not a fence: the long prose after it is still scored
+        self.assertEqual(W.score_text("```a`b```\n\nThis " + "very " * 30 + "long sentence is prose.\n")["passed"], 0)
         # tables without leading pipes are not prose
         table = "Name | Value\n--- | ---\n" + "word " * 40 + "| x\n\nShort text here.\n"
         self.assertEqual(W.score_text(table)["checked"], 1)
