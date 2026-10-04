@@ -264,6 +264,15 @@ def sections_missing(text):
     return out
 
 
+def result_section(text, limit=1200):
+    """The '## Result' section of validation.md, plain text, capped (for the CI summary)."""
+    m = re.search(r"(?ms)^## Result[ \t]*$(.*?)(?=^## |\Z)", (text or "")[:200_000].replace("\r\n", "\n"))
+    body = m.group(1)[:limit * 4].strip() if m else ""
+    if not body or re.search(r"(?m)^\s*TODO\b", body):
+        return ""
+    return body[:limit] + (" ..." if len(body) > limit else "")
+
+
 def summary_lines(doc, results, ac_ids, fingerprint, in_ci):
     """Markdown table for the CI summary: scenario -> ACs -> who ran it -> result."""
     specs = specs_of(doc)

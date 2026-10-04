@@ -1,6 +1,6 @@
 ---
 name: story-gate
-description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed and shown working by a scenario run that CI repeats, a plain-English validation summary for the owner, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
+description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story, or when the user wants proof that AI-written code works before it merges. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
 ---
 
 # Story Gate
@@ -37,8 +37,9 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
    - For every AC, run the feature for real and record it: `scenario <ID> --name ... --ac AC-1 --expect <text> -- <command>`. CI runs these again.
-   - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason').
+   - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason'). Add screenshots with `evidence`.
    - Write `handoff.md` (all seven sections), then run `learn` (`--type error|pattern` also needs `--root-cause` and `--rule`), then run `score <ID> done`.
+   - Show the owner: `report <ID> --open` builds the validation page. Show it for a change they can see; otherwise point to validation.md.
    - Any later change to code, tests, `tests.json` or the specs makes the verdict out of date: re-run `record-tests` and re-score.
 4. **ACCEPTANCE:** open the PR as the agent. CI re-checks everything, and a code owner approves the latest commit and merges. You never approve or merge.
 5. **DRIFT:** never resolved silently.

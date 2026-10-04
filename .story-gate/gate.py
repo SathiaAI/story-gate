@@ -33,6 +33,8 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
+  evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
+  report <ID> [--out FILE] [--open]  build the validation page (one HTML file) for the owner
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
   decide <ID> --drift story|spec|none --by WHO --note TEXT [--phase ready|build|done]  record the drift decision
   waive <ID> <check> --by WHO --reason TEXT                     record a waiver
@@ -1125,6 +1127,72 @@ def cmd_scenarios(sid):
     return 0 if all(r.get("passed") for r in res.values()) else 1
 
 
+def report_facts(sid, in_ci=False):
+    """Everything the validation page shows, read from the story's records (sg_report renders it)."""
+    import sg_validation as V, sg_report as R
+    c, sd = cfg(), sdir(sid)
+    fp = work_fingerprint()
+    doc, res = load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json"))
+    ids = acs(sd)
+    tr = load_json(sd / "test_results.json")
+    if tr:
+        tr = dict(tr, fresh=tr.get("fingerprint") == fp)
+    verdicts = {}
+    for ph in ("ready", "done"):
+        v = load_v(sid, ph)
+        verdicts[ph] = dict(v, fresh=not stale(v, c, sd)) if v else None
+    images, skipped = R.load_images(sd, load_json(sd / "evidence.json"))
+    story = rd(sd / "story.md")
+    return {"id": sid, "title": front_matter(story).get("title", ""), "summary": sections(story).get("## Plain summary", ""),
+            "generated_at": now(), "branch": os.environ.get("SG_HEAD_REF") or current_branch(), "commit": git("rev-parse", "HEAD").strip(),
+            "ready": verdicts["ready"], "done": verdicts["done"], "tests": tr, "acs": ids,
+            "coverage": V.coverage(doc, res, [a for a, _, _ in ids], fp, in_ci), "scenarios": V.specs_of(doc), "results": res,
+            "fingerprint": fp, "spec_hash": V.spec_hash, "validation_md": rd(sd / "validation.md"), "images": images, "images_skipped": skipped}
+
+
+def cmd_report(sid, out=None, open_=False, in_ci=False):
+    """Write a story's HTML validation report, optionally open it in a browser, and return zero."""
+    import sg_report as R
+    sd = sdir(sid)
+    if not sd.exists():
+        sys.exit("no story folder; run: start %s" % sid)
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:  # outside the repository by default (the page is a view, not a record), in a folder only you can write
+        import tempfile
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        base = Path(tempfile.gettempdir()) / ("story-gate-reports-%s" % uid if uid else "story-gate-reports")
+        base.mkdir(mode=0o700, exist_ok=True)
+        if base.is_symlink() or (hasattr(os, "getuid") and base.stat().st_uid != uid):
+            sys.exit("story-gate: %s is not yours; use --out to choose where the page goes" % base)
+        path = base / ("%s-%s.html" % (re.sub(r"[^\w.-]", "_", ROOT.name), sid))
+    if path.is_symlink():
+        path.unlink()  # write the page itself, never through a link someone left there
+    path.write_text(R.to_html(report_facts(sid, in_ci)), encoding="utf-8")
+    print("story-gate: validation page for %s -> %s" % (sid, path))
+    if open_:
+        import webbrowser
+        webbrowser.open(path.resolve().as_uri())
+    return 0
+
+
+def cmd_evidence(sid, src, kv):
+    """Record a screenshot for the named scenario, exiting with an error if it cannot be added."""
+    import sg_report as R, sg_validation as V
+    sd = sdir(sid)
+    if not sd.exists():
+        sys.exit("no story folder; run: start %s" % sid)
+    names = {s.get("name") for s in V.specs_of(load_json(sd / "scenarios.json"))}
+    try:
+        rec = R.add_evidence(sd, src, kv.get("scenario", ""), kv.get("caption", ""), names)
+    except (OSError, ValueError) as e:
+        sys.exit("story-gate: screenshot not added: %s" % e)
+    print("story-gate: screenshot added for scenario '%s' (%dx%d, %d KB). It shows on the validation page, marked as "
+          "reported by the agent." % (rec["scenario"], rec["width"], rec["height"], rec["bytes"] // 1000))
+    return 0
+
+
 def resolve_base(base):
     """First of base, origin/base, master, origin/master that exists; on the base branch itself use its upstream."""
     if not git("rev-parse", "--git-dir").strip():
@@ -1925,7 +1993,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -2111,6 +2179,18 @@ def cmd_ci(tests_dir=None):
         lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
     if sid and (STORIES / sid / "trace.md").exists():
         lines += ["", rd(STORIES / sid / "trace.md")]
+    if sid and code and (STORIES / sid / "validation.md").exists():
+        import sg_validation as V
+        res_ = V.result_section(rd(STORIES / sid / "validation.md"))
+        if res_:  # shown as plain text in a code block: the agent's words can't add links, images or mentions here
+            fence = "`" * max(3, 1 + max([len(m) for m in re.findall(r"`+", res_)] or [0]))
+            lines += ["", "### Result (from validation.md, written by the agent)", "", fence + "text", res_, fence]
+        if os.environ.get("RUNNER_TEMP"):
+            try:
+                cmd_report(sid, str(Path(os.environ["RUNNER_TEMP"]) / "sg-report" / ("validation-%s.html" % sid)), in_ci=True)
+                lines += ["", "The full validation page is attached to this run as the **story-gate-validation** artifact."]
+            except Exception as e:
+                lines += ["", "The validation page could not be built: %s" % str(e)[:200]]
     if sid and (STORIES / sid / "scenarios.json").exists():
         import sg_validation as V
         lines += V.summary_lines(load_json(STORIES / sid / "scenarios.json"), V.results_of(load_json(STORIES / sid / "scenario_results.json")),
@@ -2245,7 +2325,7 @@ found, use the full command a story-gate message prints. Only where story-gate i
 don't run) use `{py} .story-gate/gate.py <command>`.
 1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
-3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`.
+3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
 5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, validation.md, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
@@ -2329,6 +2409,10 @@ TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=stor
             rm -f "$RUNNER_TEMP/sg/$f"
             git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"
           done
+          mkdir -p "$RUNNER_TEMP/sg/vendor"  # styles and logo for the HTML pages (data, never run)
+          for f in tabler.min.css viaknox-wordmark.svg; do
+            git show "$BASE:.story-gate/vendor/$f" > "$RUNNER_TEMP/sg/vendor/$f" 2>/dev/null || rm -f "$RUNNER_TEMP/sg/vendor/$f"
+          done
           # Settings and judge calibration are read from the base branch's copies; the PR's own files stay as evidence.
           export STORY_GATE_TRUSTED_DIR="$RUNNER_TEMP/sg\""""
 CI_YML = MANAGED + """
@@ -2403,6 +2487,13 @@ jobs:
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: story-gate-validation
+          path: ${{ runner.temp }}/sg-report
+          if-no-files-found: ignore
+          retention-days: 14
 """
 AUDIT_YML = MANAGED + """
 name: story-gate-audit
@@ -3173,6 +3264,14 @@ def main(argv):
         return cmd_plan(rest[0], kv.get("title", ""), kv.get("feature")) or 0
     if cmd == "feature":
         return cmd_feature(rest[0] if rest else "", kv.get("title", ""), kv.get("description", "")) or 0
+    if cmd == "report":
+        if not rest:
+            sys.exit("usage: report <ID> [--out FILE] [--open]")
+        return cmd_report(rest[0], kv.get("out"), "--open" in rest)
+    if cmd == "evidence":
+        if len(rest) < 2 or not kv.get("scenario"):
+            sys.exit("usage: evidence <ID> <image file> --scenario NAME [--caption TEXT]")
+        return cmd_evidence(rest[0], rest[1], kv)
     if cmd == "dashboard":
         import sg_dashboard as D
         return D.cli(sys.modules[__name__], kv, rest)
