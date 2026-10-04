@@ -72,7 +72,7 @@ When `drift_decision` is ESCALATED, `gate.py` has already queued a `story_gate.d
    - Who or what changed it. Name the session, commit or decision, if known.
    - The options: change the story, change the PRD/TRD, or split the work.
 2. Send it to the **orchestrator / architect** and to the **session that owns the conflicting change**. Use the channels configured as sinks (Linear comment, control-hub event, command or webhook) and the owner's HANDOFF.md.
-3. If there are real options to weigh, use the **frontier-gate** skill (Jev triage → frontier panel). Its decision becomes the recommendation.
+3. If there are real options to weigh, list them in plain English, each with pros and cons, and give your recommendation. If your client has a multi-model review skill, run the options through it first.
 4. The human owner or the architect decides. Record it:
    `gate.py decide <ID> --drift story|spec|none --by <who> --note "<why>"`
 5. Apply the decision at the source: update the PRD/TRD, or update the story. Then re-score.

@@ -443,7 +443,7 @@ def agent_record():
     if not p.exists():
         raise RuntimeError("no agent App yet. Run: gate.py setup-agent")
     rec = json.loads(p.read_text(encoding="utf-8"))
-    if not os.path.isfile(rec.get("key", "")):  # same folder seen from another OS (e.g. F:\ENV from a Linux sandbox)
+    if not os.path.isfile(rec.get("key", "")):  # same folder seen from another OS (e.g. a Windows drive seen from a Linux sandbox)
         rec["key"] = str(config_dir() / Path(rec.get("key", "").replace("\\", "/")).name)
     return rec
 
