@@ -53,7 +53,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 ## Claude / Cowork specifics
 - **If the repo has no `.story-gate/`:** stop and ask the human to set it up: copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` themselves. Agents never run those commands.
-- **Judge key:** local verdicts read the key from `judge.env` in the human's story-gate user folder, or from the file that `STORY_GATE_ENV_FILE` names. Never ask for the key and never copy it. A cloud shell has no key, so local verdicts there can't PASS. CI still judges, using the repo secret.
+- **Judge key:** local verdicts read the key from the environment variable that `judge.api_key_env` names (default per provider, e.g. `OPENROUTER_API_KEY`). If it isn't set, they read `judge.env` in the human's story-gate user folder, or the file that `STORY_GATE_ENV_FILE` names. Never ask for the key and never copy it. With no key (common in cloud shells), local verdicts can't PASS. CI still judges, using the repo secret.
 - **Sub-agents:** use the Agent tool, with `model: haiku` for `small` and `model: sonnet` for `medium`. Sub-agents write only their evidence file.
 - **Drift with real options:** give the human plain-English options, each with pros and cons, and your recommendation.
 - **Report:**
