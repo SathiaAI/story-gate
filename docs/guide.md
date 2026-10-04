@@ -3,7 +3,7 @@
 >
 > Most people only need the [README](../README.md): ask your AI to set up story-gate and follow the page. The manual steps below are for people who prefer to run each command themselves.
 
-<p align="center"><img src="assets/header.jpg" alt="story-gate by Viaknox. Every story starts on spec, is tested against spec, and ends on spec. Ink drawing of a city rail station with a bright orange buffer stop at the end of the track." width="100%"></p>
+<p align="center"><img src="assets/header.jpg" alt="story-gate by Viaknox. Every story starts on spec, is tested against spec, and ends on spec. The story-gate raven mark, a raven in glasses holding a checklist. Ink drawing of a city rail station with a yellow buffer stop at the end of the track." width="100%"></p>
 
 **story-gate** is a quality gate for AI coding work that runs the same way in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf/Devin, Grok Build, Muse, Cowork and cloud agents.
 
@@ -50,7 +50,7 @@ Every client has different hooks and models, so until now there has been no sing
 
 ## Setup in about 10 minutes
 
-<p align="center"><img src="assets/setup.png" alt="Five setup steps: add story-gate, name the humans, add the judge key, give the AI its own ID, prove it works" width="100%"></p>
+<p align="center"><img src="assets/setup.png" alt="Five setup steps: 1 ask your AI, 2 sign in to GitHub, 3 give your AI its own login, 4 add the judge key, 5 approve the setup" width="100%"></p>
 
 You do this once per repository. If you don't want to type commands, open your AI tool in the repository and say **"set up story-gate using the README"**. It runs each step and stops whenever a click has to be yours.
 
@@ -370,7 +370,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 
 ## Fallbacks
 
-<p align="center"><img src="assets/fallbacks.png" alt="Judge trust tiers: Jev on any route can pass; any other model is capped at concerns; no judge means human review only" width="100%"></p>
+<p align="center"><img src="assets/fallbacks.png" alt="Judge trust tiers: Jev on any route can pass; any other model is capped at concerns; with no judge, agents' own scores are capped at concerns" width="100%"></p>
 
 | You don't have… | What happens |
 |---|---|

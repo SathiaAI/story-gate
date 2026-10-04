@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="theme.css"><style>
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:31px;margin-top:60px}
+.grid .card{padding:42px 36px 36px}
+.grid h3{margin:26px 0 12px}
+.grid p{font-size:23px;line-height:1.52;color:var(--muted);margin-bottom:22px}.dark p{color:var(--offwhite)}
+.grid code{font-size:22px}
+</style></head><body>
+<div class="top"><img src="../story-gate-mark-small.svg" alt=""><div class="eyebrow">TURNING IT ON</div></div>
+<h1>Start by warning. Then block one point at a time.</h1>
+<p class="lede">Everything lives in <code>.story-gate/config.json</code>. CI always reads the copy from the pull request's target branch, so a pull request cannot loosen its own rules.</p>
+<div class="grid">
+<div class="card"><span class="tag">STEP 0</span><h3>Warn</h3><p>Everything reports, nothing blocks. Tune for a few weeks.</p><code>"mode": "warn"</code></div>
+<div class="card"><span class="tag">STEP 1</span><h3>CI</h3><p>Pull requests can't merge until the gates pass and a human approves.</p><code>"ci"</code></div>
+<div class="card"><span class="tag">STEP 2</span><h3>Before edits</h3><p>No code edits until READY passes.</p><code>"pre_edit"</code></div>
+<div class="card"><span class="tag">STEP 3</span><h3>Mid-story</h3><p>Off course freezes edits; "done" waits for DONE.</p><code>"checkpoint"</code> <code>"stop"</code></div>
+<div class="card dark"><span class="tag solid">FULL</span><h3>Enforce</h3><p>Every point blocks.</p><code>"mode": "enforce"</code></div>
+</div>
+<footer><span class="l"><img src="../story-gate-mark-small.svg" alt="">story-gate · MIT · github.com/SathiaAI/story-gate</span><span class="by">by <img src="../../../.story-gate/vendor/viaknox-wordmark.svg" alt="Viaknox"></span></footer>
+</body></html>
