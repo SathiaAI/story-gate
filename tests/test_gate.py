@@ -2698,10 +2698,13 @@ class TestGuidedSetup(unittest.TestCase):
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T
         marker = self.tmp / "ran"
-        good = self.tmp / "story-gate"
-        good.write_text("#!/bin/sh\ntouch %s\n# from story_gate.cli import main\n" % marker); good.chmod(0o755)
+        good = self.tmp / "story-gate"  # what uv/pip write for a console script
+        good.write_text("#!/usr/bin/python3\n# -*- coding: utf-8 -*-\nimport sys\nfrom story_gate.cli import main\n"
+                        "if __name__ == \"__main__\":\n    sys.exit(main())\n")
         bad = self.tmp / "other"; bad.write_text("#!/bin/sh\ntouch %s\n" % marker); bad.chmod(0o755)
-        self.assertTrue(T.leads_to_runtime(str(good))); self.assertFalse(T.leads_to_runtime(str(bad)))
+        sneaky = self.tmp / "sneaky"; sneaky.write_text("#!/bin/sh\ntouch %s\n# from story_gate.cli import main\nx=story_gate.cli\n" % marker)
+        self.assertTrue(T.leads_to_runtime(str(good)))
+        self.assertFalse(T.leads_to_runtime(str(bad))); self.assertFalse(T.leads_to_runtime(str(sneaky)))
         self.assertFalse(T.leads_to_runtime(str(self.tmp / "missing")))
         self.assertFalse(marker.exists())  # inspected, never executed
 

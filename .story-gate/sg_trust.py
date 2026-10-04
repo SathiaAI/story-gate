@@ -297,7 +297,7 @@ def leads_to_runtime(exe):
     try:
         with open(exe, "rb") as f:
             head = f.read(1 << 20)  # uv's Windows launcher embeds the script; on macOS/Linux it is a short Python file
-        return b"story_gate.cli" in head
+        return bool(re.search(rb"(?m)^from story_gate\.cli import main\r?$", head))  # the console-script import, not a comment
     except OSError:
         return False
 

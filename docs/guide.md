@@ -1,5 +1,5 @@
 <!-- The full reference. The short version is the README. -->
-> **This is the full guide.** Once story-gate is installed on your computer, `gate.py <command>` below means `story-gate <command>`; before that, use `python3 .story-gate/gate.py <command>`.
+> **This is the full guide.** Once story-gate is installed on your computer, `gate.py <command>` below means `story-gate <command>`; before that, use `python3 .story-gate/gate.py <command>` (`python .story-gate\gate.py <command>` on Windows).
 >
 > Most people only need the [README](../README.md): ask your AI to set up story-gate and follow the page. The manual steps below are for people who prefer to run each command themselves.
 
