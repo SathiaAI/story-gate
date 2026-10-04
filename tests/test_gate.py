@@ -1233,6 +1233,7 @@ class TestTrustedRuntime(RuntimeFixture):
         cfgp.write_bytes(b"\xef\xbb\xbf" + cfgp.read_bytes())  # what Windows PowerShell 5 / Notepad can save
         g("commit", "-qam", "bom"); g("push", "-q", "origin", "main"); g("checkout", "-q", "feature/SAT-1-thing2"); g("fetch", "-q", "origin")
         r = self.hook()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)  # enforce mode still blocks: no READY for SAT-1
         self.assertNotIn("unreadable", r.stdout + r.stderr)
         self.assertIn("mode: enforce", json.loads(self.session("claude").stdout)["hookSpecificOutput"]["additionalContext"])
 
