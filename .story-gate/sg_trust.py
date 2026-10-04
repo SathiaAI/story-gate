@@ -490,7 +490,12 @@ def _resolve_policy_commit(top, ref):
 
 
 def policy_text(top, ref, name):
-    """Contents of .story-gate/<name> on the policy ref, pinned to the commit it resolves to right now. None if absent."""
+    """Return .story-gate/<name> from ref's resolved policy commit in repository top.
+
+    Decode UTF-8 with an optional BOM, replacing invalid bytes. Return None when
+    the ref cannot be resolved, the file is absent, or Git fails or times out.
+    OSError from starting Git propagates.
+    """
     sha = policy_commit(top, ref)
     if not sha:
         return None

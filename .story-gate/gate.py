@@ -264,7 +264,13 @@ def enrolled():
 
 
 def policy_json(name):
-    """A settings file from where policy comes from: CI's trusted copy, the enrolled default branch, or the working tree."""
+    """Return settings file text from CI's trusted copy, the enrolled policy ref, or the working tree.
+
+    Decode UTF-8 with an optional BOM; do not parse JSON. Return None for a missing
+    file or an unsuccessful or timed-out Git read. Raise ConfigError for an
+    untrusted enrollment policy source. OSError and local UnicodeDecodeError
+    propagate; Git reads replace invalid UTF-8 bytes.
+    """
     e = enrolled()
     if e:
         bad = T.policy_source_problem(e)
@@ -278,7 +284,12 @@ def policy_json(name):
 def cfg():
     """Load and validate configuration, allowing enrolled local settings only to tighten policy.
 
-    Raise ConfigError for missing required policy or invalid configuration.
+    Return settings merged over defaults, accepting an optional UTF-8 BOM.
+    Outside CI, a missing unenrolled local config uses defaults. Unreadable or
+    invalid JSON in an enrolled working-tree config is ignored.
+    Raise ConfigError for missing or untrusted required policy, invalid policy
+    JSON or a non-object value, an invalid mode, or unknown enforcement points.
+    Policy read errors propagate, as do errors from malformed setting shapes.
     """
     p = trusted("config.json")
     c = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -1982,7 +1993,11 @@ Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
 
 
 def full_config(text):
-    """DEFAULT_CONFIG with a config.json text laid over it (None or unreadable text gives the defaults)."""
+    """Return a fresh DEFAULT_CONFIG overlaid with config.json text, stripping leading BOMs.
+
+    None, empty text, invalid JSON, or a non-object JSON value gives the defaults.
+    Merge dictionary settings one level deep; replace other values without validation.
+    """
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
         user = json.loads(text.lstrip("\ufeff")) if text else {}
