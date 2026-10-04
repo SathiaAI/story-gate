@@ -56,6 +56,7 @@ You ask for a feature. Your AI writes the story and the tests, and story-gate ch
 - **Free GitHub plan, private repository:** GitHub doesn't enforce "must be approved" there. story-gate still checks every pull request and marks it **ADVISORY**.
 - **Your AI never uses your GitHub login.** It works through its own login (step 3), so it can't approve or merge its own work.
 - **Branches can't switch story-gate off.** The rules come from your main branch, and the checks run from a verified copy on your computer. See [security](docs/client-security.md).
+- **Plain English.** Your AI writes replies, PR descriptions, story summaries and handoffs in short, plain sentences, with diagrams where a picture is clearer. story-gate scores this (an STE-style score, target 80%) and gives advice. See [plain writing](docs/guide.md#plain-writing).
 - **Pilot:** story-gate is pre-1.0. Signed releases are coming; until then, setup installs from a pinned version on GitHub.
 
 ## Learn more

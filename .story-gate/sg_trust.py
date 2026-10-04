@@ -566,6 +566,22 @@ def tighten(policy, local):
     out["judge"] = j
     if local.get("require_independent_review"):
         out["require_independent_review"] = True
+    w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
+    if isinstance(lw, dict):
+        if lw.get("enforce") is True:
+            w["enforce"] = True
+        try:
+            if "target" in lw:
+                w["target"] = max(float(w.get("target", 0)), float(lw["target"]))
+        except (TypeError, ValueError):
+            pass
+        try:
+            if "diagram_min_files" in lw and int(lw["diagram_min_files"]) >= 1:
+                w["diagram_min_files"] = min(int(w.get("diagram_min_files", 5)), int(lw["diagram_min_files"]))
+        except (TypeError, ValueError):
+            pass
+    if w:
+        out["writing"] = w
     return out
 
 
@@ -592,6 +608,19 @@ def weaker(old, new):
             out.append("judge setting %s turned on" % k)
     if o.get("require_independent_review") and not n.get("require_independent_review"):
         out.append("independent review no longer required")
+    ow, nw = o.get("writing") or {}, n.get("writing") or {}
+    if ow.get("enforce") and not nw.get("enforce"):
+        out.append("plain-writing check no longer enforced")
+    try:
+        if ow.get("enforce") and float(nw.get("target", 0)) < float(ow.get("target", 0)):
+            out.append("plain-writing target lowered from %s to %s" % (ow.get("target"), nw.get("target")))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if ow.get("enforce") and int(nw.get("diagram_min_files", 5)) > int(ow.get("diagram_min_files", 5)):
+            out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
+    except (TypeError, ValueError):
+        pass
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
     if more:
         out.append("more files exempt from the gate: %s" % ", ".join(more[:5]))

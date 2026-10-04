@@ -262,6 +262,24 @@ The result is one of three: **ON_TRACK**; **AT_RISK** (fix the named cause); or 
 
 Waivers and drift decisions written by an agent are **proposals**. They count only after a code owner approves the commit that contains them.
 
+### Plain writing
+
+story-gate asks every AI to write for a non-coder. The rules are in `.story-gate/PROTOCOL.md` > Writing: short sentences, one idea per sentence, active voice, plain words, short paragraphs, and a Mermaid diagram where a picture is clearer.
+
+| What | Where it is scored | When |
+|---|---|---|
+| The story's plain summary | `## Plain summary` in `story.md` | READY |
+| Handoff and learnings | `handoff.md`, `learn` entries | DONE |
+| PR description | the PR check's summary | CI |
+| Chat replies | not scored (story-gate can't see them); the rules still apply | always |
+
+**The score** is the share of sentences that pass two measurable rules: an instruction has 20 words or fewer, any other sentence 25 or fewer, and a paragraph has 6 sentences or fewer. Code, tables, quotes, headings and links are skipped. The word-for-word story text is never scored.
+
+- It is an **STE-style** score: it follows ideas from ASD-STE100, but it is not ASD-STE100 compliance and does not use the STE dictionary.
+- Default target: `0.8` (`config.json` → `writing.target`).
+- It is **advice** until you set `writing.enforce` to `true`. Do that after about 20 stories, once the score agrees with what you find readable.
+- When a change touches 5 or more code files (`writing.diagram_min_files`), story-gate asks for a Mermaid diagram in `handoff.md`.
+
 ## E. Turning things on and off
 
 <p align="center"><img src="assets/rollout.png" alt="Rollout ladder from warn mode to full enforcement" width="100%"></p>
