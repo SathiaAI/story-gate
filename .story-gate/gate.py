@@ -2827,6 +2827,14 @@ def turn_filter_on(top, py, dry=False):
 
 
 def lockdown_off_command(st):
+    """Return instructions for removing story-gate's Claude Code lockdown.
+
+    ``st`` is a lockdown status mapping whose ``file`` is the managed settings
+    file to remove. Instructions use administrator PowerShell on Windows or
+    sudo elsewhere, with manual deletion as an alternative; no command is run.
+    Creates the user config directory if needed, propagating OSError on failure.
+    Raises KeyError if ``st`` lacks ``file``.
+    """
     b = G_config_dir() / "lockdown"
     if os.name == "nt":
         return 'PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"   (or delete %s)' % (b / "uninstall.ps1", st["file"])
