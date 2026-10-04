@@ -276,6 +276,10 @@ def policy_json(name):
 
 
 def cfg():
+    """Load and validate configuration, allowing enrolled local settings only to tighten policy.
+
+    Raise ConfigError for missing required policy or invalid configuration.
+    """
     p = trusted("config.json")
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.environ.get("STORY_GATE_TRUSTED_DIR") and not p.is_file():

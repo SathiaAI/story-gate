@@ -1226,6 +1226,7 @@ class TestTrustedRuntime(RuntimeFixture):
 
     # ---- #6: the verified copy tells each session what to run; #7: doctor says when the rules got weaker
     def test_config_saved_with_a_bom_still_works(self):
+        """BOM-prefixed policy stays readable by hooks and preserves enforce-mode session guidance."""
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         g("stash", "-u"); g("checkout", "-q", "main")
         cfgp = self.repo / ".story-gate/config.json"
