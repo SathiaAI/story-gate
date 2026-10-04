@@ -12,7 +12,7 @@ Rules this module keeps:
     CI is what verifies them.
   - Stdlib only. No network except the GitHub API when publishing, with the workflow's own token.
 """
-import html, json, os, re, statistics, subprocess, sys, tempfile, time
+import html, json, os, re, statistics, subprocess, tempfile, time
 from datetime import datetime, timezone
 from pathlib import Path
 

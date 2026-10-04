@@ -1,9 +1,9 @@
 ---
 name: story-gate
-description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story, or when the user wants proof that AI-written code works before it merges. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
+description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story; when the user wants proof that AI-written code works before it merges; or when they ask to set up story-gate. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
 ---
 
-# Story Gate
+# story-gate
 
 **Success criteria.** A story:
 - starts on defined specs,
@@ -12,6 +12,20 @@ description: "Quality gate for AI coding work. Use it whenever the repository ha
 - and is accepted by a human, not by you.
 
 Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate`**, the verified copy installed on this computer (if `story-gate` isn't found, use the full command story-gate's messages print). Only where story-gate isn't installed (cloud agents, where hooks don't run) use `python3 .story-gate/gate.py` (`python` on Windows). With story-gate installed, the hooks refuse running the repository's copy, because a branch can replace it.
+
+## When the repository has no `.story-gate/` folder
+
+This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
+
+1. Tell the human what you will run, and wait for a clear yes:
+   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `story-gate init`, in the project folder
+   - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
+2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
+3. The human signs in to GitHub, creates the AI's own login, adds the judge key and merges the setup pull request. Never do these steps for them, and never see or type the key.
+4. When `init` prints that story-gate is protecting the repository, run `story-gate doctor` and report its summary in plain words.
+
+If a step fails, read the error to the human and stop. Never copy story-gate files by hand, and never write hook files yourself.
 
 ## Your identity
 - Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.
@@ -27,7 +41,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 | never | Frontier models are not used for gate work | |
 
 - **If your client can't choose a model for sub-agents** (or has no sub-agents), do the steps yourself, in order.
-- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
+- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/SathiaAI/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
 
 ## The moments
 1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start <ID> --model <your model id>`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
@@ -55,7 +69,6 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 - In Cowork, Cursor Cloud and Codex cloud, hooks don't run: run `gate.py status` before editing and run the checkpoints yourself. CI is the backstop.
 
 ## Claude / Cowork specifics
-- **If the repo has no `.story-gate/`:** stop and ask the human to set it up: copy it from github.com/SathiaAI/story-gate, then run `gate.py install` and `gate.py setup-repo` themselves. Agents never run those commands.
 - **Judge key:** local verdicts read the key from the environment variable that `judge.api_key_env` names (default per provider, e.g. `OPENROUTER_API_KEY`). If it isn't set, they read `judge.env` in the human's story-gate user folder, or the file that `STORY_GATE_ENV_FILE` names. Never ask for the key and never copy it. With no key (common in cloud shells), local verdicts can't PASS. CI still judges, using the repo secret.
 - **Sub-agents:** use the Agent tool, with `model: haiku` for `small` and `model: sonnet` for `medium`. Sub-agents write only their evidence file.
 - **Drift with real options:** give the human plain-English options, each with pros and cons, and your recommendation.

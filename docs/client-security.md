@@ -50,3 +50,12 @@ Sources for lockdown: [Claude Code managed settings](https://code.claude.com/doc
 The CI matrix tests story-gate's side on Linux, Windows and macOS. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
 
 Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [Codex hooks](https://developers.openai.com/codex/hooks) · [Cursor hooks](https://cursor.com/docs/agent/hooks) · [Gemini CLI hooks](https://geminicli.com/docs/hooks/) · [Windsurf/Devin hooks](https://docs.windsurf.com/windsurf/cascade/hooks) · [Grok hooks](https://docs.x.ai/build/features/hooks) · [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) · [VS Code hooks](https://code.visualstudio.com/docs/agents/reference/hooks-reference) · [Antigravity hooks](https://antigravity.google/docs/hooks)
+
+## Installing from a skill marketplace
+
+The marketplace package (Claude Code plugin, Agent Plugins, Gemini CLI extension) carries **one skill and nothing else**: no hooks, no MCP servers, no commands.
+
+- The skill is guidance. It protects nothing by itself.
+- In a repository without `.story-gate/`, the skill asks you before it installs story-gate (`uv tool install …@vX.Y.Z`, then `story-gate init`). You do the GitHub sign-in, the AI's login, the judge key and the merge yourself.
+- Hooks come only from story-gate's verified runtime on your computer. A marketplace update can change the skill's text, but never your hooks.
+- A test fails if the package ever gains a hooks file, an MCP server or a second skill.
