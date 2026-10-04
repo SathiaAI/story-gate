@@ -498,7 +498,7 @@ def policy_text(top, ref, name):
         r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True, timeout=GIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         return None  # cfg() then fails closed
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    return r.stdout.decode("utf-8-sig", "replace") if r.returncode == 0 else None  # a BOM (Notepad) is not an error
 
 
 def tighten(policy, local):

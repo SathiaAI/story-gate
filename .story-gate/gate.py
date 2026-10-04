@@ -272,7 +272,7 @@ def policy_json(name):
             raise ConfigError("this repository is enrolled but its %s - the gate fails closed" % bad)
         return T.policy_text(e["toplevel"], e["policy_ref"], name)
     p = trusted(name)
-    return p.read_text(encoding="utf-8") if p.is_file() else None
+    return p.read_text(encoding="utf-8-sig") if p.is_file() else None  # -sig: Windows editors often add a BOM
 
 
 def cfg():
@@ -292,7 +292,7 @@ def cfg():
             raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % ex.__class__.__name__)
         if e:  # the working tree may only tighten the default branch's policy
             try:
-                local = json.loads((GATE / "config.json").read_text(encoding="utf-8")) if (GATE / "config.json").is_file() else {}
+                local = json.loads((GATE / "config.json").read_text(encoding="utf-8-sig")) if (GATE / "config.json").is_file() else {}
             except Exception:
                 local = {}
             base = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -1981,7 +1981,7 @@ def full_config(text):
     """DEFAULT_CONFIG with a config.json text laid over it (None or unreadable text gives the defaults)."""
     c = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        user = json.loads(text) if text else {}
+        user = json.loads(text.lstrip("\ufeff")) if text else {}
     except ValueError:
         user = {}
     for k, v in (user.items() if isinstance(user, dict) else []):
