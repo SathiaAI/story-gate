@@ -33,7 +33,9 @@ except Exception:
     sys.exit(2)
 sys.exit(subprocess.run([sys.executable, "-I", gate] + sys.argv[1:]).returncode)
 '''
-USER_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf")
+USER_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf", "vscode", "hermes")
+# Set up by default even when the tool isn't found (older installs did); vscode and hermes only when found on this computer.
+ALWAYS_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf")
 DEGRADED_CLIENTS = ("grok",)  # user-level location documented, but merging with project hooks is unverified; see docs/client-security.md
 
 
@@ -53,6 +55,29 @@ class TrustError(Exception):
 # ------------------------------------------------------------------ locations
 def user_home():
     return Path(os.environ.get("STORY_GATE_USER_HOME") or Path.home())
+
+
+def hermes_home():
+    """Hermes Agent's data folder: HERMES_HOME, else %LOCALAPPDATA%\\hermes on Windows, else ~/.hermes.
+    Source: hermes-agent hermes_constants.get_hermes_home (installation docs: Windows uses %LOCALAPPDATA%\\hermes)."""
+    if os.environ.get("HERMES_HOME", "").strip():
+        return Path(os.path.expanduser(os.path.expandvars(os.environ["HERMES_HOME"].strip())))
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA") and not os.environ.get("STORY_GATE_USER_HOME"):
+        return Path(os.environ["LOCALAPPDATA"]) / "hermes"
+    return user_home() / ".hermes"
+
+
+def detected_clients():
+    """The AI tools whose settings folder exists on this computer (a hint for the setup page, never a security decision)."""
+    h = user_home()
+    marks = {"claude": [h / ".claude"], "codex": [h / ".codex"], "cursor": [h / ".cursor"], "gemini": [h / ".gemini"],
+             "windsurf": [h / ".codeium" / "windsurf"], "vscode": [h / ".copilot", h / ".vscode"], "hermes": [hermes_home()]}
+    return [cl for cl in USER_CLIENTS if any(p.is_dir() for p in marks[cl])]
+
+
+def default_clients():
+    found = detected_clients()
+    return [cl for cl in USER_CLIENTS if cl in ALWAYS_CLIENTS or cl in found]
 
 
 def runtime_root():
@@ -595,12 +620,20 @@ def user_hook_files():
     h = user_home()
     return {"claude": h / ".claude" / "settings.json", "codex": h / ".codex" / "hooks.json",
             "cursor": h / ".cursor" / "hooks.json", "gemini": h / ".gemini" / "settings.json",
-            "windsurf": h / ".codeium" / "windsurf" / "hooks.json"}
+            "windsurf": h / ".codeium" / "windsurf" / "hooks.json",
+            "vscode": h / ".copilot" / "hooks" / "story-gate.json",  # VS Code agent hooks, user level (a file of our own)
+            "hermes": hermes_home() / "config.yaml"}  # Hermes reads shell hooks only from the `hooks:` block of config.yaml
+
+
+def hermes_extra_files():
+    """Hermes files story-gate writes besides config.yaml: the skill, and the approval for our own hook commands."""
+    return {"skill": hermes_home() / "skills" / "story-gate" / "SKILL.md",
+            "allowlist": hermes_home() / "shell-hooks-allowlist.json"}
 
 
 def user_protected_paths():
     """Places an agent must never write: the runtime, enrollment, agent key, and the user-level hook files."""
-    return [G.config_dir()] + list(user_hook_files().values())
+    return [G.config_dir()] + list(user_hook_files().values()) + list(hermes_extra_files().values())
 
 
 def hook_entries(py, gate):
@@ -632,7 +665,91 @@ def hook_entries(py, gate):
             "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "pre_run_command": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "post_cascade_response": [{"command": cmd("windsurf", "stop"), "show_output": True}]}},
+        # VS Code ignores matchers (every tool call runs the hook), so gate.py skips tools that neither edit nor run commands.
+        # Source: https://code.visualstudio.com/docs/agents/reference/hooks-reference
+        "vscode": {"hooks": {
+            "PreToolUse": [{"type": "command", "command": cmd("vscode", "pre"), "timeout": 15}],
+            "PostToolUse": [{"type": "command", "command": cmd("vscode", "post"), "timeout": 180}],
+            "Stop": [{"type": "command", "command": cmd("vscode", "stop"), "timeout": 60}],
+            "SessionStart": [{"type": "command", "command": cmd("vscode", "session"), "timeout": 15}]}},
+        # Hermes: pre_verify is its Stop (once per turn after edits). fail_closed: a crash or timeout blocks the edit.
+        # Source: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks
+        "hermes": {"hooks": {
+            "pre_tool_call": [{"matcher": "^(write_file|patch|terminal|execute_code)$", "command": cmd("hermes", "pre"), "timeout": 15,
+                               "fail_closed": True}],
+            "post_tool_call": [{"matcher": "^(write_file|patch)$", "command": cmd("hermes", "post"), "timeout": 180}],
+            "pre_verify": [{"command": cmd("hermes", "stop"), "timeout": 60}]}},
     }
+
+
+HERMES_BEGIN = "# >>> story-gate: managed block (story-gate uninstall --user removes it) >>>"
+HERMES_END = "# <<< story-gate <<<"
+
+
+def _yaml_str(v):
+    return "'%s'" % str(v).replace("'", "''") if isinstance(v, str) else ("true" if v is True else "false" if v is False else str(v))
+
+
+def hermes_block(entry):
+    """Our `hooks:` block for Hermes's config.yaml, as plain YAML text between markers (no YAML library needed)."""
+    lines = [HERMES_BEGIN, "hooks:"]
+    for ev, items in entry["hooks"].items():
+        lines.append("  %s:" % ev)
+        for it in items:
+            keys = ["matcher", "command", "timeout", "fail_closed"]
+            first = True
+            for k in keys:
+                if k in it:
+                    lines.append("%s%s: %s" % ("    - " if first else "      ", k, _yaml_str(it[k])))
+                    first = False
+    return "\n".join(lines + [HERMES_END]) + "\n"
+
+
+def _strip_block(text):
+    """Text without our managed block (and the blank line we added before it)."""
+    out, skip = [], False
+    for line in text.splitlines(True):
+        if line.rstrip("\r\n") == HERMES_BEGIN:
+            skip = True
+            if out and not out[-1].strip():
+                out.pop()
+            continue
+        if skip:
+            if line.rstrip("\r\n") == HERMES_END:
+                skip = False
+            continue
+        out.append(line)
+    if skip:
+        raise TrustError("the story-gate block in this file has no end marker; fix it by hand")
+    return "".join(out)
+
+
+def merged_hermes_yaml(text, entry):
+    """config.yaml with our block replaced or appended. Refuses (TrustError) when the file already has its own top-level
+    `hooks:` key: merging into someone's YAML without a YAML parser could break their config, so that is done by hand."""
+    rest = _strip_block(text)
+    import re as _re
+    if _re.search(r"(?m)^hooks\s*:", rest):
+        raise TrustError("it already has a `hooks:` section; add the story-gate entries to it by hand")
+    if rest and not rest.endswith("\n"):
+        rest += "\n"
+    return rest + ("\n" if rest.strip() else "") + hermes_block(entry)
+
+
+def hermes_allowlist(text, entry, remove=False):
+    """Hermes asks once per (event, command) before running a new shell hook, and skips the hook when nobody can answer
+    (its desktop app, the gateway). The person running setup approves exactly story-gate's own commands here."""
+    data = json.loads(text) if text.strip() else {}
+    if not isinstance(data, dict):
+        raise TrustError("expected a JSON object")
+    ours_ = lambda e: isinstance(e, dict) and bool(HOOK_SIGNATURE.search(str(e.get("command", ""))))
+    keep = [e for e in data.get("approvals", []) if not ours_(e)]
+    if not remove:
+        now_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        keep += [{"event": ev, "command": it["command"], "approved_at": now_, "approved_by": "story-gate install --user"}
+                 for ev, items in entry["hooks"].items() for it in items]
+    data["approvals"] = keep
+    return json.dumps(data, indent=2) + "\n"
 
 
 def ours(entry):
@@ -745,21 +862,38 @@ def restore_file(path, out, dry_run=False):
     return True
 
 
-def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False):
+def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False, skill_src=None):
     out, files, entries = [], user_hook_files(), hook_entries(py, gate)
     for cl in clients:
         p = files[cl]
         try:
             text = p.read_text(encoding="utf-8") if p.exists() else ""
-            apply_file(p, merged_hook_json(text, entries[cl]), dry_run, out)
+            if cl == "hermes":
+                register_hermes(p, text, entries[cl], dry_run, out, skill_src)
+            else:
+                apply_file(p, merged_hook_json(text, entries[cl]), dry_run, out)
         except (ValueError, TrustError) as e:
-            out.append("  %s: NOT changed - the file isn't plain JSON (%s). Add the story-gate hooks by hand (see README)." % (p, e))
+            out.append("  %s: NOT changed (%s). Add the story-gate hooks by hand (docs/client-security.md)." % (p, e))
     return out
+
+
+def register_hermes(p, text, entry, dry_run, out, skill_src):
+    new = merged_hermes_yaml(text, entry)  # raises before anything is written when the file isn't ours to change
+    ex = hermes_extra_files()
+    allow = ex["allowlist"].read_text(encoding="utf-8-sig") if ex["allowlist"].exists() else ""
+    apply_file(p, new, dry_run, out, check_json=False)
+    apply_file(ex["allowlist"], hermes_allowlist(allow, entry), dry_run, out)
+    out.append("  %s: approved story-gate's own Hermes hooks (you ran this setup; nothing else was approved)" % ex["allowlist"])
+    if skill_src and Path(skill_src).is_file():
+        apply_file(ex["skill"], Path(skill_src).read_text(encoding="utf-8"), dry_run, out, check_json=False)
 
 
 def unregister_user_hooks(dry_run=False):
     out = []
+    unregister_hermes(dry_run, out)
     for cl, p in user_hook_files().items():
+        if cl == "hermes":
+            continue
         if restore_file(p, out, dry_run):
             continue
         if p.exists():
@@ -768,6 +902,25 @@ def unregister_user_hooks(dry_run=False):
             except (ValueError, TrustError) as e:
                 out.append("  %s: NOT changed (%s)" % (p, e))
     return out
+
+
+def unregister_hermes(dry_run, out):
+    """Hermes's config.yaml and allowlist are shared with Hermes itself, so only our block and our approvals come out;
+    the skill folder story-gate created is put back as it was."""
+    p, ex = user_hook_files()["hermes"], hermes_extra_files()
+    for f, fix in ((p, _strip_block), (ex["allowlist"], lambda t: hermes_allowlist(t, {"hooks": {}}, remove=True))):
+        if not f.exists():
+            continue
+        try:
+            text = f.read_text(encoding="utf-8-sig")
+            new = fix(text)
+            if new != text:
+                apply_file(f, new, dry_run, out, check_json=f.suffix == ".json")
+        except (ValueError, TrustError) as e:
+            out.append("  %s: NOT changed (%s) - remove the story-gate lines by hand" % (f, e))
+        if not dry_run:
+            forget("files", str(f))
+    restore_file(ex["skill"], out, dry_run)
 
 
 def registered_clients(gate):

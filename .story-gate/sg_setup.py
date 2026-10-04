@@ -22,6 +22,14 @@ import sg_github as G  # noqa: E402
 # story-gate's own OAuth app (SathiaAI, device flow only; a client ID is public, there is no secret). Empty: fall back to `gh`.
 OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "Ov23liAhA19MDXrS9a4S")
 STEPS = ("signin", "agent", "key", "merge", "done")
+# AI tools story-gate can check live on this computer (user-level hooks), in the order the page lists them.
+HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("vscode", "VS Code (Copilot agent)"),
+                ("hermes", "Hermes"), ("gemini", "Gemini CLI"), ("windsurf", "Windsurf"))
+# Tools with no verified live checks yet: they follow the rules in AGENTS.md / the skill, and GitHub checks their pull requests.
+OTHER_TOOLS = (("Antigravity", "rules + skill; live checks once we've verified its hooks"), ("pi", "rules + skill"),
+               ("Roo Code", "rules + skill"), ("ChatGPT", "GitHub checks its pull requests"),
+               ("Google AI Studio", "GitHub checks its pull requests"))
+GH_USER = __import__("re").compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
 
 def git(cwd, *a):
@@ -90,6 +98,10 @@ class Wizard:
         self.pr = None
         self.private_free = False
         self.private = False
+        import sg_trust as T
+        self.found = T.detected_clients()
+        self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
+        self.approvers = []  # other people who accept work (CODEOWNERS), besides the person signing in
         self.already = False  # the repository already has story-gate on GitHub (a teammate's computer)
         self.base = "main"
         self.lock = threading.Lock()
@@ -102,7 +114,18 @@ class Wizard:
     def snapshot(self):
         with self.lock:
             return {"steps": json.loads(json.dumps(self.st)), "login": self.login, "repo": self.repo, "device": self.device,
-                    "pr": self.pr, "private_free": self.private_free}
+                    "pr": self.pr, "private_free": self.private_free, "clients": list(self.clients),
+                    "approvers": list(self.approvers)}
+
+    def set_clients(self, text):
+        """The AI tools to protect on this computer, as ticked on the page (only tools story-gate can check live)."""
+        want = [x for x in (text or "").split(",") if x]
+        known = [cl for cl, _ in HOOKED_TOOLS]
+        if not want or any(x not in known for x in want):
+            return False
+        with self.lock:
+            self.clients = [cl for cl in known if cl in want]
+        return True
 
     def background(self, fn):
         threading.Thread(target=self._guard, args=(fn,), daemon=True).start()
@@ -205,8 +228,29 @@ class Wizard:
         self.set("key", "ok", "Saved as a GitHub secret and on this computer (never in the repository)")
 
     # ---- step 4: setup pull request, then branch rules after the merge
-    def open_pr(self):
+    def check_approvers(self, text):
+        """Other GitHub users who may approve work. Each must exist and have write access, or GitHub ignores them as owners."""
+        names, bad = [], []
+        for raw in (text or "").replace(",", " ").split():
+            n = raw.strip().lstrip("@")
+            if not n or n.lower() == (self.login or "").lower() or n.lower() in (x.lower() for x in names):
+                continue
+            if not GH_USER.match(n):
+                bad.append("'%s' isn't a GitHub username" % raw)
+                continue
+            st, info, _ = G.call("GET", "/repos/%s/collaborators/%s/permission" % (self.repo, n), self.token)
+            perm = (info or {}).get("permission") if st == 200 and isinstance(info, dict) else None
+            if perm not in ("admin", "maintain", "write"):
+                bad.append("%s can't approve yet: they need write access to %s (Settings > Collaborators)" % (n, self.repo))
+                continue
+            names.append(n)
+        if bad:
+            raise RuntimeError("; ".join(bad) + ". Fix the list, then press the button again.")
+        return names
+
+    def open_pr(self, approvers_text=""):
         self.set("merge", "working", "Preparing the setup pull request")
+        self.approvers = self.check_approvers(approvers_text)
         st, info, _ = G.call("GET", "/repos/%s" % self.repo, self.token)
         if st != 200 or not isinstance(info, dict) or not info.get("default_branch"):
             raise RuntimeError("couldn't read %s from GitHub (HTTP %s). Check you're signed in with the right account, then press "
@@ -214,7 +258,9 @@ class Wizard:
         base = info["default_branch"]
         git(self.top, "fetch", "--quiet", "origin", base)
         files = setup_files(self.top, base, self.py)
-        co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* @%s\n" % self.login)
+        owners = [self.login] + self.approvers
+        co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
+              % " ".join("@" + o for o in owners))
         files.setdefault(co[0], co[1].encode())
         body = ("This adds story-gate: the settings, the agent instructions and three workflows (the PR check, the audit and the "
                 "dashboard). It was prepared by `story-gate init`. Merge it to finish setup; branch rules are applied right after.")
@@ -232,8 +278,9 @@ class Wizard:
             return
         tmp = Path(tempfile.mkdtemp(prefix="sg-rules-"))
         (tmp / ".github").mkdir()
-        (tmp / ".github" / "CODEOWNERS").write_text("* @%s\n" % self.login, encoding="utf-8")
-        notes = G.setup_repo(tmp, self.repo, [self.login], self.token)  # CODEOWNERS already merged; this sets the rules
+        owners = [self.login] + self.approvers
+        (tmp / ".github" / "CODEOWNERS").write_text("* %s\n" % " ".join("@" + o for o in owners), encoding="utf-8")
+        notes = G.setup_repo(tmp, self.repo, owners, self.token)  # CODEOWNERS already merged; this sets the rules
         shutil.rmtree(tmp, ignore_errors=True)
         if self.private and any(n.startswith("Ruleset: NOT created (HTTP 403") for n in notes):
             self.private_free = True  # GitHub refused the rules: a private repository on the free plan
@@ -246,7 +293,8 @@ class Wizard:
         git(self.top, "fetch", "--quiet", "origin", base)
         if git(self.top, "rev-parse", "--abbrev-ref", "HEAD") == base and not git(self.top, "status", "--porcelain"):
             git(self.top, "merge", "--ff-only", "--quiet", "origin/" + base)
-        r = subprocess.run([sys.executable, str(HERE / "gate.py"), "install", "--user", "--unsigned", "--python", self.py],
+        r = subprocess.run([sys.executable, str(HERE / "gate.py"), "install", "--user", "--unsigned", "--python", self.py,
+                            "--clients", ",".join(self.clients)],
                            cwd=str(self.top), capture_output=True, text=True, env=dict(os.environ, STORY_GATE_ROOT=str(self.top)))
         if r.returncode:
             self.set("done", "error", "Couldn't turn on protection on this computer: %s" % (r.stdout + r.stderr)[-400:])
@@ -320,7 +368,10 @@ def make_handler(wz):
                 wz.set("key", "working", "Saving")
                 wz.background(lambda: wz.save_key(form.get("key", [""])[0]))
             elif act == "merge" and wz.token:
-                wz.background(wz.open_pr)
+                wz.background(lambda: wz.open_pr(form.get("approvers", [""])[0]))
+            elif act == "tools":
+                if not wz.set_clients(form.get("clients", [""])[0]):
+                    return self._send(400, json.dumps({"error": "Tick at least one tool."}), "application/json")
             return self._send(200, json.dumps(wz.snapshot()), "application/json")
     return H
 
@@ -354,9 +405,21 @@ main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash 
 .step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--aubergine)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--tangelo)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
 button,.btn{background:var(--tangelo);color:var(--aubergine);border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
 button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
+.lbl{display:block;margin-top:10px;font-weight:600}.lbl span{font-weight:400;color:var(--muted);font-size:14px}.lbl input{display:block;margin-top:6px}
+.tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
 .by svg{height:14px;width:auto;vertical-align:-2px}.note{background:var(--tangelo);color:var(--aubergine);border-radius:14px;padding:14px 18px;margin-top:18px}.foot{margin-top:28px;color:var(--muted);font-size:13px}
 """
+
+
+def tools_html(wz):
+    """Tickboxes for the tools story-gate can check live (found ones pre-ticked), then the ones covered another way."""
+    rows = "".join("<label class=tool><input type=checkbox name=c value=%s%s> %s%s</label>"
+                   % (cl, " checked" if cl in wz.clients else "", html.escape(name), " <span>found on this computer</span>" if cl in wz.found else "")
+                   for cl, name in HOOKED_TOOLS)
+    other = "".join("<li><b>%s</b>: %s</li>" % (html.escape(n), html.escape(d)) for n, d in OTHER_TOOLS)
+    return ("<form id=tools onchange=\"tools(this)\">%s</form><p class=msg id=toolmsg></p><p class=hint>Also covered, without live checks: </p><ul class=other>%s</ul>"
+            % (rows, other))
 
 
 def page(wz):
@@ -371,13 +434,19 @@ def page(wz):
          "<form onsubmit=\"event.preventDefault();go('key',new URLSearchParams(new FormData(this)))\"><input name=key type=password "
          "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
-         "<button onclick=\"go('merge')\">Open the pull request</button><div id=pr></div>"),
-        ("done", "Done", "Protection turns on for this computer and story-gate checks itself.", ""),
+         "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
+         "<label class=lbl>Who else approves work? <span>(optional: GitHub usernames, with write access to this repository)</span>"
+         "<input name=approvers autocomplete=off placeholder='e.g. alex, sam'></label>"
+         "<button>Open the pull request</button></form><div id=pr></div>"),
+        ("done", "Protect your AI tools", "Live checks turn on for the tools ticked below, then story-gate checks itself. "
+         "Change the ticks before you merge.", tools_html(wz)),
     ]
     cards = "".join("<section class=step id=s-%s><div class=n>%s</div><div><h2>%s</h2><p>%s</p><div class=act>%s</div><div class=msg></div></div></section>"
                     % (k, i + 2 if k != "done" else "&#10003;", h, p, a) for i, (k, h, p, a) in enumerate(steps))
     js = """<script>
 const T=%s;async function go(a,body){await fetch('/'+a+'?t='+T,{method:'POST',body:body||''});tick()}
+async function tools(f){const c=[...f.querySelectorAll('input:checked')].map(i=>i.value).join(',');const r=await fetch('/tools?t='+T,{method:'POST',body:new URLSearchParams({clients:c})});
+document.getElementById('toolmsg').textContent=r.ok?'':'Tick at least one tool.'}
 async function tick(){const s=await (await fetch('/state?t='+T)).json();
 for(const [k,v] of Object.entries(s.steps)){const e=document.getElementById('s-'+k);if(!e)continue;e.className='step '+v.status;e.querySelector('.msg').textContent=v.status=='ok'?'✓ '+v.msg:v.msg}
 const d=document.getElementById('dev');if(s.device&&s.steps.signin.status!='ok'){if(d.dataset.code!==s.device.code){d.dataset.code=s.device.code;d.innerHTML='Enter this code at <a target=_blank rel=noopener></a><br><span class=code></span>';const a=d.querySelector('a');a.href=a.textContent=s.device.uri;d.querySelector('.code').textContent=s.device.code}}else{d.innerHTML='';d.dataset.code=''}

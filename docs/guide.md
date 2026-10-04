@@ -5,7 +5,7 @@
 
 <p align="center"><img src="assets/header.jpg" alt="story-gate by Viaknox. Every story starts on spec, is tested against spec, and ends on spec. Ink drawing of a city rail station with a bright orange buffer stop at the end of the track." width="100%"></p>
 
-**story-gate** is a quality gate for AI coding work that runs the same way in Claude Code, Codex, Cursor, Gemini CLI, Windsurf/Devin, Grok Build, Muse, Cowork and cloud agents.
+**story-gate** is a quality gate for AI coding work that runs the same way in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf/Devin, Grok Build, Muse, Cowork and cloud agents.
 
 1. Cheap agents gather the evidence.
 2. An independent judge scores it.
@@ -125,7 +125,9 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 | **Windsurf / Devin** | `.agents/skills` | Yes (user-level hooks; timeout and trust behaviour unverified) | Run `checkpoint` | Yes | Pick the model in the UI |
 | **Grok Build** | `.claude/skills`, AGENTS.md | Reduced protection: run `status` (see [client security](client-security.md)) | Run `checkpoint` | Through CI | Not confirmed |
 | **pi** | AGENTS.md | Through CI (a pi extension can add hooks; not shipped yet) | Run `checkpoint` | Through CI | Any model you configure |
-| **Hermes Agent** | A Hermes skill + AGENTS.md | Through CI | Run `checkpoint` | Through CI | Any model you configure |
+| **Hermes Agent** | The story-gate skill (installed in Hermes's `skills`) + AGENTS.md | Yes, including `terminal` and `execute_code` | Yes | Yes (`pre_verify`) | Any model you configure |
+| **VS Code (Copilot agent)** | `.agents/skills`, AGENTS.md | Yes, including terminal commands (hooks are a VS Code Preview feature) | Yes | Yes | Pick the model in the UI |
+| **Antigravity, Roo Code** | `.agents/skills`, AGENTS.md | Through CI | Run `checkpoint` | Through CI | Pick the model in the UI |
 | **Muse Code** | `.agents/skills`, AGENTS.md | Not confirmed | Run `checkpoint` | Through CI | One model family: steps run inline |
 | **Claude Cowork** | The story-gate skill | No (hooks don't run there) | Run `checkpoint` | Through CI | Yes |
 | **Cursor Cloud, Codex cloud** | AGENTS.md | No (hooks don't run in the cloud) | Run `checkpoint` | Through CI | Built in |
@@ -156,7 +158,7 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 
 Codex adds its own hard-on-change layer: it asks you to trust any changed project hook. Cursor, Gemini, Windsurf and Grok have no switch like lockdown, so the checkout filter is their protection. Details per tool: [docs/client-security.md](client-security.md).
 
-**What the filter checks:** every hook entry, MCP server and command-like setting (`apiKeyHelper`, `statusLine`, Gemini's `discoveryCommand`, ...) must match the default branch's version; `env`, `permissions`, `mcpServers` and plugin settings must be identical to it. Files covered, in any folder: `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `.devin/hooks.json`, `.windsurf/hooks.json`, `.grok/hooks/*.json`.
+**What the filter checks:** every hook entry, MCP server and command-like setting (`apiKeyHelper`, `statusLine`, Gemini's `discoveryCommand`, ...) must match the default branch's version; `env`, `permissions`, `mcpServers` and plugin settings must be identical to it. Files covered, in any folder: `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `.devin/hooks.json`, `.windsurf/hooks.json`, `.grok/hooks/*.json`, `.github/hooks/*.json` (VS Code), `.agents/hooks.json` (Antigravity).
 
 **Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands. To commit the *removal* of a hook the default branch never approved, turn the filter off for that commit (`gate.py filter off`, then `filter on`).
 
