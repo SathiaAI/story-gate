@@ -10,7 +10,7 @@
 
 Stdlib only. Nothing here talks to the network.
 """
-import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+import difflib, hashlib, json, os, re, shutil, subprocess, tempfile, time
 from pathlib import Path
 
 

@@ -1,6 +1,6 @@
 # Releasing story-gate (maintainers)
 
-People install story-gate on their computers with `gate.py install --user`. That command only accepts a release signed with the story-gate release key, so every release needs a signature.
+People install story-gate on their computers with `gate.py install --user`. That command only accepts a release signed with the story-gate release key, so every signed release needs a signature. Until the first signed release, setup installs with `--unsigned` and says so; the steps below are for signed releases.
 
 **Release key**
 - Public key: embedded in `.story-gate/sg_trust.py` (`RELEASE_SIGNERS`).

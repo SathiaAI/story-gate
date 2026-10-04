@@ -403,7 +403,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.5.0")
+        self.assertEqual(g.VERSION, "0.6.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -3101,7 +3101,7 @@ class TestCIWorkflowRuns(Base):
         if os.name == "nt" or not shutil.which("bash"):
             self.skipTest("the workflow step is bash on Ubuntu")
         load = lambda: __import__("importlib.util").util
-        g = subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "sg", "--allow-empty"], cwd=self.repo)
+        subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "sg", "--allow-empty"], cwd=self.repo)
         sys.path.insert(0, str(SRC))
         try:
             spec = load().spec_from_file_location("g_ci", self.repo / ".story-gate/gate.py"); gm = load().module_from_spec(spec)
@@ -3668,7 +3668,6 @@ class TestValidationPage(Base):
         self.fill_validation()
         doc = json.loads((self.sd / "scenarios.json").read_text())
         doc["scenarios"].append({"name": "weird", "acs": [["AC-1"], {"a": 1}], "argv": 5})
-        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         (self.sd / "scenarios.json").write_text(json.dumps(doc))
         out = self.tmp() / "p.html"
         self.assertEqual(run(self.repo, "report", "SAT-1", "--out", str(out)).returncode, 0)
@@ -3888,7 +3887,6 @@ class TestMarketplacePackaging(unittest.TestCase):
         self.assertEqual(market["plugins"][0]["description"], agent["description"])
 
     def test_agent_plugins_manifest_uses_only_schema_fields(self):
-        import re
         m = self.j("plugin.json")
         self.assertEqual(m["$schema"], "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json")
         allowed = {"$schema", "name", "version", "description", "author", "homepage", "repository", "license", "keywords", "extensions"}

@@ -141,7 +141,7 @@ sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE)
 import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 
@@ -2827,7 +2827,6 @@ def turn_filter_on(top, py, dry=False):
 
 
 def lockdown_off_command(st):
-    import sg_guard as SG
     b = G_config_dir() / "lockdown"
     if os.name == "nt":
         return 'PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "%s"   (or delete %s)' % (b / "uninstall.ps1", st["file"])

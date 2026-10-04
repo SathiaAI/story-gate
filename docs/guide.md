@@ -12,7 +12,7 @@
 3. Fixed rules decide.
 4. A human accepts.
 
-**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-hows-it-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
+**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-how-its-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
 
 ---
 
@@ -75,7 +75,7 @@ This step:
 Commit and merge the CODEOWNERS file. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
 
 **Step 3 · Add the judge key** (2 minutes)
-1. Create a key at openrouter.ai. Jev costs fractions of a cent per check.
+1. Create a key at openrouter.ai. The default judge is Jev, a scoring model from TypeSafe, used through OpenRouter. It costs a fraction of a cent per check.
 2. In your repository, open **Settings › Secrets and variables › Actions › New repository secret**.
 3. Name it `OPENROUTER_API_KEY` and paste the key.
 

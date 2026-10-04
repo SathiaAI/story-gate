@@ -3,7 +3,7 @@ name: story-gate
 description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story; when the user wants proof that AI-written code works before it merges; or when they ask to set up story-gate. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
 ---
 
-# Story Gate
+# story-gate
 
 **Success criteria.** A story:
 - starts on defined specs,
@@ -27,7 +27,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 | never | Frontier models are not used for gate work | |
 
 - **If your client can't choose a model for sub-agents** (or has no sub-agents), do the steps yourself, in order.
-- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
+- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/SathiaAI/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
 
 ## The moments
 1. **READY:** run `start <ID> --model <your model id>`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.

@@ -3,7 +3,7 @@ name: story-gate
 description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story; when the user wants proof that AI-written code works before it merges; or when they ask to set up story-gate. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
 ---
 
-# Story Gate
+# story-gate
 
 **Success criteria.** A story:
 - starts on defined specs,
@@ -18,7 +18,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
 
 1. Tell the human what you will run, and wait for a clear yes:
-   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.5.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init`, in the project folder
 2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
 3. The human signs in to GitHub, creates the AI's own login, adds the judge key and merges the setup pull request. Never do these steps for them, and never see or type the key.
@@ -40,7 +40,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 | never | Frontier models are not used for gate work | |
 
 - **If your client can't choose a model for sub-agents** (or has no sub-agents), do the steps yourself, in order.
-- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see the README for the other options.
+- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/SathiaAI/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
 
 ## The moments
 1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start <ID> --model <your model id>`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
