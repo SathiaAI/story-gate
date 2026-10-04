@@ -133,6 +133,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - Sections: Result · Acceptance criteria · Scenarios run · Bugs found and fixed · Lessons learnt · Known limits · Demo.
    - **Demo:** steps the owner can follow to try it (what to open, what to type or click, what they should see). For an internal change with nothing to see, write `Not demo-able: <reason>`.
    - Write plain English (see **Writing**). Report only what happened. The CI check shows the scenario results next to it.
+   - **Screenshots** (for anything a person sees): `gate.py evidence <ID> shot.png --scenario "<scenario name>" --caption "…"`. PNG or JPEG, 300 KB each, 10 per story. They show on the validation page, marked as reported.
 
 4. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md` in plain English (see **Writing**):
    - Sections: What changed · Interfaces and contracts · How to verify · Known limits · Downstream consumers · Release and rollback (or "Not applicable: reason") · Drift decisions.
@@ -145,9 +146,13 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 6. `gate.py score <ID> done`. This checks the diff against the story and TRD, the tests against the plan, traceability, scenarios for every acceptance criterion, validation.md, deferrals, handoff quality and learnings. Act on it as in READY.
 
-7. `gate.py publish` sends events to the configured sinks (control-hub, webhook, custom command).
+7. **Show the owner.** Run `gate.py report <ID> --open`. It builds one HTML page: the verdicts, every AC with its scenario runs, the screenshots and validation.md. Each fact is marked *checked* (CI or story-gate) or *reported* (you).
+   - If the change can be demoed, show the owner that page (open it, or attach the file). In chat, say in 2 or 3 lines what now works.
+   - If it can't be demoed, validation.md is enough. Point the owner to it.
 
-8. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
+8. `gate.py publish` sends events to the configured sinks (control-hub, webhook, custom command).
+
+9. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
 
 ## ACCEPTANCE (the human's part)
 

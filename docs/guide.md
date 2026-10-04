@@ -274,6 +274,14 @@ flowchart LR
 
 **`validation.md`** is the owner's one-page summary. `start` creates the template. Your AI fills in seven sections: Result, Acceptance criteria, Scenarios run, Bugs found and fixed, Lessons learnt, Known limits, Demo. **Demo** gives the steps to try the change yourself, or `Not demo-able: <reason>` for internal work. The PR check shows the scenario results next to it, marked **CI (checked)** or **agent's computer (reported)**.
 
+**The validation page.** `story-gate report SAT-1 --open` builds one HTML file for the owner. It shows the READY and DONE verdicts, every AC with its scenario runs, the screenshots and `validation.md`.
+- Each fact is marked **checked** (CI ran it, or story-gate worked it out from its own records) or **reported** (the AI wrote it, or ran it on its own computer).
+- The page is a view, not a record. It is saved outside your repository, in your temporary folder, unless you pass `--out`.
+- It runs nothing. Everything the AI wrote is escaped, there are no scripts, and nothing loads from the internet.
+- Mermaid diagrams show as source on the page. GitHub draws them in `validation.md`.
+- **Screenshots:** `story-gate evidence SAT-1 shot.png --scenario "<name>" --caption "…"`. PNG or JPEG only, 300 KB each, 2 MB and 10 images per story. A screenshot is always *reported*: a picture is not proof.
+- **In CI** the PR check builds the page after scoring. It attaches the page to the run as the **story-gate-validation** artifact (kept 14 days), and puts the Result section in the check summary. Older workflows get the artifact after `story-gate install` runs again.
+
 **Stories started before this existed:** run `story-gate start <ID>` again. It adds the template and keeps everything else.
 
 ### ACCEPTANCE: in CI, on GitHub
