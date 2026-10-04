@@ -119,6 +119,7 @@ class TestVerdict(Base):
 
 class TestDone(Base):
     def test_done_flow(self):
+        """The DONE gate fails until tests, handoff, learnings and now validation are all in place, then passes."""
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready()
         self.assertEqual(run(self.repo, "score", "SAT-1", "ready").returncode, 0)
@@ -300,6 +301,7 @@ class TestHardening(Base):
 
 class TestRegressions(Base):
     def test_green_run_survives_git_add_and_commit(self):
+        """A DONE PASS, including validation, survives `git add` and `git commit` of the same code."""
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         (self.repo / "new_mod.py").write_text("y = 1\n"); (self.repo / "test_new_mod.py").write_text("def test_ac1_x():\n    pass\n")
@@ -3318,19 +3320,23 @@ class TestValidation(Base):
         return self._tmp
 
     def V(self):
+        """Import (or re-import) sg_validation fresh, so tests see the module under test, not a stale copy."""
         sys.path.insert(0, str(SRC))
         import importlib, sg_validation
         return importlib.reload(sg_validation)
 
     def ready(self):
+        """Get SAT-1 through READY and set self.sd to its story folder, ready for DONE-phase tests."""
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         self.sd = self.repo / ".story-gate/stories/SAT-1"
 
     def results(self):
+        """The current scenario_results.json results for self.sd."""
         return json.loads((self.sd / "scenario_results.json").read_text())["results"]
 
     def test_start_writes_the_template_and_in_flight_stories_get_it(self):
+        """`start` writes validation.md's template, and a story started before validation existed gets it too."""
         self.ready()
         self.assertIn("## Demo", (self.sd / "validation.md").read_text())
         (self.sd / "validation.md").unlink()  # a story started before validation existed
@@ -3340,6 +3346,7 @@ class TestValidation(Base):
         self.assertEqual(V.sections_missing((self.sd / "validation.md").read_text()), [s[3:] for s in V.SECTIONS])
 
     def test_sections_need_real_content(self):
+        """sections_missing() flags absent, emptied or still-TODO sections; CRLF text is read fine."""
         V = self.V()
         body = "".join("## %s\nreal\n" % s[3:] for s in V.SECTIONS)
         self.assertEqual(V.sections_missing(body), [])
@@ -3348,6 +3355,7 @@ class TestValidation(Base):
         self.assertEqual(V.sections_missing(body.replace("\n", "\r\n")), [])
 
     def test_scenario_needs_an_assertion_known_acs_and_a_command(self):
+        """`scenario` rejects specs missing --expect, with an unknown AC, with no command, or with bad regex/timeout."""
         self.ready()
         for extra, why in ((["--ac", "AC-1", "--", PY, "-c", "print(1)"], "needs --expect"),
                            (["--ac", "AC-9", "--expect", "1", "--", PY, "-c", "print(1)"], "unknown acceptance criteria AC-9"),
@@ -3360,6 +3368,7 @@ class TestValidation(Base):
         self.assertFalse((self.sd / "scenarios.json").exists())
 
     def test_pass_fail_by_exit_and_output_and_replace_by_name(self):
+        """A scenario passes or fails on exit code and output match; recording the same name replaces it; --remove deletes it."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "neg", "--ac", "AC-1", "--exit", "3", "--expect", "denied",
                 "--", PY, "-c", "import sys; print('access denied'); sys.exit(3)")
@@ -3375,12 +3384,14 @@ class TestValidation(Base):
         self.assertNotIn("neg", self.results())
 
     def test_no_shell_and_quoting_kept(self):
+        """A scenario's argv reaches the command unchanged: no shell is involved, so quoting and specials survive."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "argv", "--ac", "AC-1", "--expect", r"^a b;c \$HOME$",
                 "--", PY, "-c", "import sys; print(sys.argv[1])", "a b;c $HOME")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_timeout_and_background_children_do_not_hang(self):
+        """A scenario stops after --timeout, and a child process it leaves running doesn't hold the run open."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "slow", "--ac", "AC-1", "--expect", "x", "--timeout", "2",
                 "--", PY, "-c", "import time; time.sleep(60)")
@@ -3394,6 +3405,7 @@ class TestValidation(Base):
         self.assertLess(time.time() - t0, 30)
 
     def test_a_run_that_changes_the_code_does_not_count(self):
+        """A scenario that creates or edits a repository file fails, naming the file, so it can't test stale code as current."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "sneaky", "--ac", "AC-1", "--expect", "ok",
                 "--", PY, "-c", "open('app.py','a').write('#x\\n'); print('ok')")
@@ -3401,6 +3413,7 @@ class TestValidation(Base):
         self.assertIn("changed files in the repository (app.py)", self.results()["sneaky"]["note"])
 
     def test_secrets_are_redacted_from_the_output(self):
+        """redact() removes secret-looking env values and token shapes from scenario output, but keeps ordinary text."""
         V = self.V()
         env = {"MY_API_KEY": "supersecretvalue123", "PATH": "/bin"}
         out = V.redact("key=supersecretvalue123 tok=ghp_" + "a" * 30 + " Bearer abcdefghijklmnopqrstuvwxyz", env)
@@ -3408,6 +3421,7 @@ class TestValidation(Base):
         self.assertIn("/bin", V.redact("/bin", env))
 
     def test_done_needs_a_fresh_passing_scenario_for_every_ac(self):
+        """struct_done() requires a passing scenario per AC on the current code; stale code or a hand-edited spec fails it again."""
         self.ready()
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         c = g.cfg()
@@ -3427,6 +3441,7 @@ class TestValidation(Base):
         self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c)["scenarios_prove_acs"][0], "FAIL")
 
     def test_in_ci_only_ci_runs_count_and_local_only_is_concerns(self):
+        """In CI, a local-only scenario doesn't count as FAIL but as CONCERNS; a local run of a non-local-only AC still fails."""
         self.ready()
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         c = g.cfg()
@@ -3438,6 +3453,7 @@ class TestValidation(Base):
         self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["scenarios_prove_acs"][0], "CONCERNS")
 
     def test_ci_merge_keeps_only_ci_runs_and_local_only_runs(self):
+        """`ci` replaces local results with CI's own run, keeps local-only results as is, and drops an agent's forged pass."""
         self.ready()
         (self.repo / "app.py").write_text("x = 5\n")
         self.fill_validation()
@@ -3459,6 +3475,7 @@ class TestValidation(Base):
         self.assertNotIn("app runs", self.results())  # no CI run: nothing counts, the agent's record is gone
 
     def test_ci_tests_job_runs_the_scenarios(self):
+        """`ci-tests` runs non-local-only scenarios on the PR code and records their results for the `ci` job."""
         self.ready()
         self.fill_validation()
         run(self.repo, "scenario", "SAT-1", "--name", "browser", "--ac", "AC-1", "--expect", "ok", "--local-only", "desktop", "--", PY, "-c", "print('ok')")
@@ -3469,6 +3486,7 @@ class TestValidation(Base):
         self.assertTrue(res["app runs"]["passed"]); self.assertNotIn("browser", res)
 
     def test_agents_cannot_edit_the_records(self):
+        """The pre-tool hook blocks writes to scenarios.json and scenario_results.json, but allows validation.md."""
         self.ready()
         for f in ("scenarios.json", "scenario_results.json"):
             p = {"tool_name": "Write", "tool_input": {"file_path": ".story-gate/stories/SAT-1/" + f}}
@@ -3478,6 +3496,7 @@ class TestValidation(Base):
         self.assertNotIn("must not edit", run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p)).stdout)
 
     def test_turning_it_off_is_a_weakening_and_local_config_can_only_turn_it_on(self):
+        """Turning off validation.required is reported as a weakening; a working-tree override may only turn it on."""
         sys.path.insert(0, str(SRC))
         import sg_trust as T
         self.assertIn("validation", " ".join(T.weaker({"validation": {"required": True}}, {"validation": {"required": False}})))
@@ -3487,6 +3506,7 @@ class TestValidation(Base):
         self.assertFalse(T.tighten({"validation": {"required": False}}, {"validation": {"required": False}})["validation"]["required"])
 
     def test_off_means_no_validation_checks(self):
+        """With validation.required off, struct_done() reports neither scenarios_prove_acs nor validation_written."""
         self.ready()
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, validation={"required": False})
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
@@ -3494,11 +3514,13 @@ class TestValidation(Base):
         self.assertNotIn("scenarios_prove_acs", out); self.assertNotIn("validation_written", out)
 
     def test_judge_sees_validation_with_a_visible_cut(self):
+        """cut() returns short text unchanged, and marks longer text with a visible, countable cut notice."""
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         self.assertEqual(g.cut("abc", 5), "abc")
         self.assertIn("[... cut: 7 more characters not shown]", g.cut("a" * 10, 3))
 
     def test_review_round_0_fixes(self):
+        """Review round 0: an always-matching --expect is rejected, and malformed scenario/result shapes never crash."""
         V = self.V()
         s = {"name": "a", "acs": ["AC-1"], "argv": ["x"], "expect_exit": 0, "expect_output": ".*", "timeout": 5, "local_only": ""}
         self.assertIn("matches empty output", " ".join(V.problems(s, ["AC-1"])))
@@ -3517,6 +3539,7 @@ class TestValidation(Base):
         self.assertEqual(V.sections_missing(body.replace("## Result\nreal", "## Result\n  TODO: fill in")), ["Result"])
 
     def test_tail_of_long_output_is_matched(self):
+        """--expect is checked against the end of very long output, which is what gets kept and matched."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "long", "--ac", "AC-1", "--expect", "FINISHED",
                 "--", PY, "-c", "print('x' * 2500000); print('FINISHED')")
@@ -3524,6 +3547,7 @@ class TestValidation(Base):
         self.assertTrue(self.results()["long"]["output_tail"].rstrip().endswith("FINISHED"))
 
     def test_created_files_are_named_and_void_the_run(self):
+        """A scenario that writes a new file fails, naming that file in the result's note."""
         self.ready()
         r = run(self.repo, "scenario", "SAT-1", "--name", "writes", "--ac", "AC-1", "--expect", "ok",
                 "--", PY, "-c", "open('report.txt','w').write('r'); print('ok')")
@@ -3531,6 +3555,7 @@ class TestValidation(Base):
         self.assertIn("report.txt", self.results()["writes"]["note"])
 
     def test_every_recorded_scenario_must_pass(self):
+        """A failing recorded scenario fails scenarios_prove_acs even for an AC otherwise proved; removing it clears the FAIL."""
         self.ready()
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         self.fill_validation()
@@ -3541,6 +3566,7 @@ class TestValidation(Base):
         self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], g.cfg())["scenarios_prove_acs"][0], "PASS")
 
     def test_done_evidence_is_the_same_whoever_ran_the_scenario(self):
+        """inputs_hash() for DONE is unchanged when only who/when/how-long a scenario ran differs, not whether it passed."""
         self.ready()
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         self.fill_validation()
@@ -3552,6 +3578,7 @@ class TestValidation(Base):
         self.assertEqual(g.inputs_hash(self.sd, "done"), local)  # decisions and waivers made locally still apply in CI
 
     def test_scenarios_cannot_overwrite_ci_test_results(self):
+        """A scenario run during `ci-tests` can't forge results.json: the real test command's exit code still wins."""
         self.ready()
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, test_command='%s -c "import sys; sys.exit(4)"' % PY)
         td = self.tmp() / "ci2"
@@ -3563,6 +3590,7 @@ class TestValidation(Base):
         self.assertEqual(json.loads((td / "results.json").read_text())["exit_code"], 4)
 
     def test_ci_summary_lists_scenarios(self):
+        """summary_lines() lists each scenario's coverage and result, and names any AC not proved in CI."""
         V = self.V()
         doc = {"scenarios": [{"name": "a", "acs": ["AC-1"], "argv": ["x"], "expect_exit": 0, "expect_output": "o", "timeout": 5, "local_only": ""}]}
         h = V.spec_hash(doc["scenarios"][0])
