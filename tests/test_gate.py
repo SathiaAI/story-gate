@@ -3787,6 +3787,12 @@ class TestReadmeMessaging(unittest.TestCase):
         self.assertRegex(description, r"(?i)\bhuman\b[^.;]*\bapproves\b[^.;]*\bGitHub\b")
         self.assertRegex(description, r"(?i)\bnever approve or merge\b")
 
+    def test_both_skill_descriptions_trigger_for_setup_requests(self):
+        # Marketplace installs must activate even before .story-gate/ exists.
+        for path in (SRC.parent / "skills" / "story-gate" / "SKILL.md", SRC / "SKILL.md"):
+            with self.subTest(path=path):
+                self.assertIn("ask to set up story-gate", self.skill_description(path))
+
     def test_readme_local_markdown_links_resolve(self):
         import re
         from urllib.parse import unquote, urlsplit
@@ -3910,6 +3916,90 @@ class TestMarketplacePackaging(unittest.TestCase):
     def test_skill_name_matches_its_folder(self):
         text = (self.ROOT / "skills" / "story-gate" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("\nname: story-gate\n", text.split("---", 2)[1] + "\n")
+
+    def test_claude_and_gemini_manifests_contain_only_metadata(self):
+        # A denylist alone misses new capability fields, such as Gemini hooks
+        # or Claude output styles, that would expand this guidance-only package.
+        metadata = {"name", "version", "description", "author", "homepage",
+                    "repository", "license", "keywords"}
+        for rel, allowed in ((".claude-plugin/plugin.json", metadata),
+                             ("gemini-extension.json", {"name", "version", "description"})):
+            with self.subTest(manifest=rel):
+                self.assertLessEqual(set(self.j(rel)), allowed)
+
+    def test_agent_manifest_does_not_enable_extensions(self):
+        # `extensions` is schema-valid but must not introduce capabilities here.
+        self.assertFalse(self.j("plugin.json").get("extensions"))
+
+    def test_marketplace_entry_cannot_add_inline_capabilities(self):
+        # Claude can receive component declarations from the catalog entry too.
+        entries = self.j(".claude-plugin/marketplace.json")["plugins"]
+        self.assertEqual(len(entries), 1)
+        self.assertLessEqual(set(entries[0]), {"name", "source", "description"})
+
+    def test_marketplace_source_resolves_to_the_packaged_skill(self):
+        entry = self.j(".claude-plugin/marketplace.json")["plugins"][0]
+        plugin_root = (self.ROOT / entry["source"]).resolve()
+        self.assertEqual(plugin_root, self.ROOT.resolve())
+        manifest = json.loads((plugin_root / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(entry["name"], manifest["name"])
+        self.assertTrue((plugin_root / "skills" / manifest["name"] / "SKILL.md").is_file())
+
+    def test_skill_tree_contains_only_the_guidance_file(self):
+        # Recursion catches nested duplicate skills and bundled scripts that
+        # the immediate-child SKILL.md glob does not see.
+        root = self.ROOT / "skills"
+        files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+        self.assertEqual(files, ["story-gate/SKILL.md"])
+        self.assertFalse(any(p.is_symlink() for p in root.rglob("*")),
+                         "the packaged skill must not redirect to an external payload")
+
+    def test_every_documented_install_reference_uses_the_exact_release(self):
+        import re
+        pin = "git+https://github.com/SathiaAI/story-gate@v%s" % self.version()
+        for rel in ("skills/story-gate/SKILL.md", "README.md"):
+            with self.subTest(path=rel):
+                text = (self.ROOT / rel).read_text(encoding="utf-8")
+                refs = re.findall(r"git\+https://github\.com/SathiaAI/story-gate[^\s`\"<>)]*", text)
+                self.assertTrue(refs, "missing install reference")
+                # Presence of one good pin must not hide a stale, floating, or
+                # suffix-matching pin (e.g. v0.5.0rc1) elsewhere in the guide.
+                for ref in refs:
+                    self.assertEqual(ref, pin)
+
+    def setup_guidance(self):
+        text = (self.ROOT / "skills" / "story-gate" / "SKILL.md").read_text(encoding="utf-8")
+        heading = "## When the repository has no `.story-gate/` folder"
+        self.assertIn(heading, text)
+        return text.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    def test_setup_guidance_orders_consent_install_init_and_verification(self):
+        import re
+        setup = self.setup_guidance()
+        steps = re.findall(r"^\d+\. (.*?)(?=^\d+\. |\Z)", setup, re.M | re.S)
+        self.assertEqual(len(steps), 4)
+        self.assertIn("wait for a clear yes", steps[0])
+        self.assertIn("`uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v%s`" %
+                      self.version(), steps[0])
+        self.assertIn("`story-gate init`, in the project folder", steps[0])
+        self.assertIn("`story-gate init` in the background", steps[1])
+        self.assertIn("setup page in the browser", steps[1])
+        self.assertIn("When `init` prints that story-gate is protecting the repository", steps[3])
+        self.assertIn("run `story-gate doctor`", steps[3])
+
+    def test_setup_guidance_keeps_credentials_and_merge_with_the_human(self):
+        setup = self.setup_guidance()
+        self.assertRegex(setup, r"The human signs in to GitHub, creates the AI's own login, "
+                               r"adds the judge key and merges the setup pull request\.")
+        self.assertIn("Never do these steps for them", setup)
+        self.assertIn("never see or type the key", setup)
+
+    def test_setup_guidance_stops_on_failure_and_forbids_manual_hook_installation(self):
+        setup = self.setup_guidance()
+        self.assertIn("If a step fails, read the error to the human and stop", setup)
+        self.assertIn("Never copy story-gate files by hand", setup)
+        self.assertIn("never write hook files yourself", setup)
+        self.assertIn("Nothing is protected until setup finishes and `story-gate doctor` says so", setup)
 
     def test_setup_steps_pin_the_current_release(self):
         pin = "git+https://github.com/SathiaAI/story-gate@v%s" % self.version()
