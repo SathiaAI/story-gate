@@ -36,6 +36,15 @@ class Base(unittest.TestCase):
         p = self.repo / ".story-gate/config.json"
         c = json.loads(p.read_text()); c.update(kw); p.write_text(json.dumps(c))
 
+    def fill_validation(self, sid="SAT-1"):
+        """validation.md filled in, and a passing scenario for AC-1 on the current code (call after the last code edit)."""
+        sd = self.repo / ".story-gate/stories" / sid
+        (sd / "validation.md").write_text("# V\n" + "".join("## %s\nreal\n" % s for s in (
+            "Result", "Acceptance criteria", "Scenarios run", "Bugs found and fixed", "Lessons learnt", "Known limits", "Demo")))
+        r = run(self.repo, "scenario", sid, "--name", "app runs", "--ac", "AC-1", "--expect", "ok", "--", PY, "-c", "print('ok')")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
     def fill_ready(self, sid="SAT-1", self_score=0.9, drift="none"):
         sd = self.repo / ".story-gate/stories" / sid
         (sd / "story.md").write_text("---\nid: %s\ntitle: T\nsource: linear:%s\ndepends_on: []\n---\n" % (sid, sid) + "As a user I want X so that Y. " * 20)
@@ -127,6 +136,12 @@ class TestDone(Base):
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         self.assertNotEqual(run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "x").returncode, 0)  # errors need root cause + rule
         run(self.repo, "learn", "SAT-1", "--type", "error", "--summary", "pytest import path wrong", "--root-cause", "no conftest", "--rule", "add conftest.py at repo root", "--tags", "pytest")
+        r = run(self.repo, "score", "SAT-1", "done")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/done.json").read_text())
+        self.assertEqual(v["checks"]["validation_written"]["status"], "FAIL")  # the template from `start` is still TODO
+        self.assertEqual(v["checks"]["scenarios_prove_acs"]["status"], "FAIL")
+        self.assertIn("AC-1", v["checks"]["scenarios_prove_acs"]["why"])
+        self.fill_validation()
         r = run(self.repo, "score", "SAT-1", "done")
         self.assertEqual(r.returncode, 0, r.stdout)
         (self.repo / "app.py").write_text("x = 5\n")  # code changed after green run -> stale
@@ -292,6 +307,7 @@ class TestRegressions(Base):
         h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Release and rollback", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "no new learnings")
+        self.fill_validation()
         self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
         subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "work"], cwd=self.repo)
         r = run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}")
@@ -376,6 +392,7 @@ class TestRound1Fixes(Base):
         h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits", "Downstream consumers", "Release and rollback", "Drift decisions"))
         (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
         run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "none")
+        self.fill_validation()
         self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0)
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "import sys; sys.exit(1)")
         self.assertIn("DONE gate", run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}").stdout)
@@ -3288,6 +3305,263 @@ class TestPlainWriting(Base):
         finally:
             sys.path.remove(str(SRC)); os.environ.pop("GITHUB_EVENT_PATH", None)
         self.assertTrue(any(l.startswith("| PR description | 1.00") for l in lines), lines)
+
+
+class TestValidation(Base):
+    """PR #17: validation.md and scenario runs prove each acceptance criterion works when it runs."""
+
+    def V(self):
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_validation
+        return importlib.reload(sg_validation)
+
+    def ready(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        self.sd = self.repo / ".story-gate/stories/SAT-1"
+
+    def results(self):
+        return json.loads((self.sd / "scenario_results.json").read_text())["results"]
+
+    def test_start_writes_the_template_and_in_flight_stories_get_it(self):
+        self.ready()
+        self.assertIn("## Demo", (self.sd / "validation.md").read_text())
+        (self.sd / "validation.md").unlink()  # a story started before validation existed
+        run(self.repo, "start", "SAT-1")
+        self.assertIn("Not demo-able", (self.sd / "validation.md").read_text())
+        V = self.V()
+        self.assertEqual(V.sections_missing((self.sd / "validation.md").read_text()), [s[3:] for s in V.SECTIONS])
+
+    def test_sections_need_real_content(self):
+        V = self.V()
+        body = "".join("## %s\nreal\n" % s[3:] for s in V.SECTIONS)
+        self.assertEqual(V.sections_missing(body), [])
+        self.assertEqual(V.sections_missing(body.replace("## Demo\nreal", "## Demo\nTODO later")), ["Demo"])
+        self.assertEqual(V.sections_missing(body.replace("## Bugs found and fixed\nreal\n", "")), ["Bugs found and fixed"])
+        self.assertEqual(V.sections_missing(body.replace("\n", "\r\n")), [])
+
+    def test_scenario_needs_an_assertion_known_acs_and_a_command(self):
+        self.ready()
+        for extra, why in ((["--ac", "AC-1", "--", PY, "-c", "print(1)"], "needs --expect"),
+                           (["--ac", "AC-9", "--expect", "1", "--", PY, "-c", "print(1)"], "unknown acceptance criteria AC-9"),
+                           (["--ac", "AC-1", "--expect", "1"], "needs a command"),
+                           (["--ac", "AC-1", "--expect", "(", "--", PY, "-c", "print(1)"], "not a valid regular expression"),
+                           (["--ac", "AC-1", "--expect", "1", "--timeout", "9999", "--", PY, "-c", "print(1)"], "--timeout must be")):
+            r = run(self.repo, "scenario", "SAT-1", "--name", "s", *extra)
+            self.assertNotEqual(r.returncode, 0, extra)
+            self.assertIn(why, r.stdout + r.stderr, extra)
+        self.assertFalse((self.sd / "scenarios.json").exists())
+
+    def test_pass_fail_by_exit_and_output_and_replace_by_name(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "neg", "--ac", "AC-1", "--exit", "3", "--expect", "denied",
+                "--", PY, "-c", "import sys; print('access denied'); sys.exit(3)")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.results()["neg"]["passed"])
+        r = run(self.repo, "scenario", "SAT-1", "--name", "neg", "--ac", "AC-1", "--expect", "denied", "--", PY, "-c", "print('ok')")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("did NOT match", r.stdout)
+        self.assertFalse(self.results()["neg"]["passed"])
+        self.assertEqual(len(json.loads((self.sd / "scenarios.json").read_text())["scenarios"]), 1)
+        run(self.repo, "scenario", "SAT-1", "--name", "neg", "--remove")
+        self.assertEqual(json.loads((self.sd / "scenarios.json").read_text())["scenarios"], [])
+        self.assertNotIn("neg", self.results())
+
+    def test_no_shell_and_quoting_kept(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "argv", "--ac", "AC-1", "--expect", r"^a b;c \$HOME$",
+                "--", PY, "-c", "import sys; print(sys.argv[1])", "a b;c $HOME")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_timeout_and_background_children_do_not_hang(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "slow", "--ac", "AC-1", "--expect", "x", "--timeout", "2",
+                "--", PY, "-c", "import time; time.sleep(60)")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("timeout", self.results()["slow"]["note"])
+        # a child left running (a server the demo started) holds no pipe open: the run ends when the scenario does
+        code = ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); print('started')")
+        t0 = time.time()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "server", "--ac", "AC-1", "--expect", "started", "--", PY, "-c", code)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(time.time() - t0, 30)
+
+    def test_a_run_that_changes_the_code_does_not_count(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "sneaky", "--ac", "AC-1", "--expect", "ok",
+                "--", PY, "-c", "open('app.py','a').write('#x\\n'); print('ok')")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("changed files in the repository (app.py)", self.results()["sneaky"]["note"])
+
+    def test_secrets_are_redacted_from_the_output(self):
+        V = self.V()
+        env = {"MY_API_KEY": "supersecretvalue123", "PATH": "/bin"}
+        out = V.redact("key=supersecretvalue123 tok=ghp_" + "a" * 30 + " Bearer abcdefghijklmnopqrstuvwxyz", env)
+        self.assertNotIn("supersecretvalue123", out); self.assertNotIn("ghp_", out); self.assertNotIn("abcdefghijklmnop", out)
+        self.assertIn("/bin", V.redact("/bin", env))
+
+    def test_done_needs_a_fresh_passing_scenario_for_every_ac(self):
+        self.ready()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        c = g.cfg()
+        self.fill_validation()
+        out = g.struct_done(self.sd, "SAT-1", ["app.py"], c)
+        self.assertEqual(out["scenarios_prove_acs"][0], "PASS")
+        self.assertTrue(out["validation_written"][0])
+        (self.repo / "app.py").write_text("x = 99\n")  # code changed after the run: the run no longer proves anything
+        out = g.struct_done(self.sd, "SAT-1", ["app.py"], c)
+        self.assertEqual(out["scenarios_prove_acs"][0], "FAIL")
+        self.assertIn("AC-1", out["scenarios_prove_acs"][1])
+        self.assertEqual(run(self.repo, "scenarios", "SAT-1").returncode, 0)  # run them all again on the new code
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c)["scenarios_prove_acs"][0], "PASS")
+        doc = json.loads((self.sd / "scenarios.json").read_text())  # a hand-edited spec no longer matches its result
+        doc["scenarios"][0]["expect_output"] = "anything"
+        (self.sd / "scenarios.json").write_text(json.dumps(doc))
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c)["scenarios_prove_acs"][0], "FAIL")
+
+    def test_in_ci_only_ci_runs_count_and_local_only_is_concerns(self):
+        self.ready()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        c = g.cfg()
+        self.fill_validation()
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["scenarios_prove_acs"][0], "FAIL")
+        r = run(self.repo, "scenario", "SAT-1", "--name", "browser", "--ac", "AC-1", "--expect", "ok",
+                "--local-only", "needs a desktop browser", "--", PY, "-c", "print('ok')")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["scenarios_prove_acs"][0], "CONCERNS")
+
+    def test_ci_merge_keeps_only_ci_runs_and_local_only_runs(self):
+        self.ready()
+        (self.repo / "app.py").write_text("x = 5\n")
+        self.fill_validation()
+        run(self.repo, "scenario", "SAT-1", "--name", "browser", "--ac", "AC-1", "--expect", "ok", "--local-only", "desktop", "--", PY, "-c", "print('ok')")
+        res = self.results()  # the agent forges a pass for a scenario CI must run
+        res["app runs"]["passed"] = True
+        (self.sd / "scenario_results.json").write_text(json.dumps({"results": res}))
+        td = self.repo / "_ci"; td.mkdir()
+        (td / "results.json").write_text(json.dumps({"exit_code": 0, "command": "pytest"}))
+        (td / "scenarios.json").write_text(json.dumps({"results": {"app runs": {"spec": "x", "passed": False, "note": "boom"},
+                                                                   "browser": {"passed": True, "spec": "forged"}}}))
+        r = run(self.repo, "ci", "--tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
+        merged = self.results()
+        self.assertFalse(merged["app runs"]["passed"]); self.assertEqual(merged["app runs"]["source"], "ci")
+        self.assertEqual(merged["browser"]["source"], "local")  # CI never ran it; the artifact can't overwrite it
+        (td / "scenarios.json").unlink()
+        r = run(self.repo, "ci", "--tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
+        self.assertIn("The tests job ran no scenarios", r.stdout)  # an old workflow: say how to update it
+        self.assertNotIn("app runs", self.results())  # no CI run: nothing counts, the agent's record is gone
+
+    def test_ci_tests_job_runs_the_scenarios(self):
+        self.ready()
+        self.fill_validation()
+        run(self.repo, "scenario", "SAT-1", "--name", "browser", "--ac", "AC-1", "--expect", "ok", "--local-only", "desktop", "--", PY, "-c", "print('ok')")
+        td = self.repo.parent / (self.repo.name + "-ci")
+        r = run(self.repo, "ci-tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
+        self.assertIn("scenarios: 1 of 1 passed", r.stdout)
+        res = json.loads((td / "scenarios.json").read_text())["results"]
+        self.assertTrue(res["app runs"]["passed"]); self.assertNotIn("browser", res)
+
+    def test_agents_cannot_edit_the_records(self):
+        self.ready()
+        for f in ("scenarios.json", "scenario_results.json"):
+            p = {"tool_name": "Write", "tool_input": {"file_path": ".story-gate/stories/SAT-1/" + f}}
+            r = run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p))
+            self.assertIn("must not edit gate files", r.stdout, f)
+        p = {"tool_name": "Write", "tool_input": {"file_path": ".story-gate/stories/SAT-1/validation.md"}}
+        self.assertNotIn("must not edit", run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p)).stdout)
+
+    def test_turning_it_off_is_a_weakening_and_local_config_can_only_turn_it_on(self):
+        sys.path.insert(0, str(SRC))
+        import sg_trust as T
+        self.assertIn("validation", " ".join(T.weaker({"validation": {"required": True}}, {"validation": {"required": False}})))
+        self.assertIn("validation", " ".join(T.weaker({}, {"validation": {"required": False}})))
+        self.assertEqual(T.weaker({}, {"validation": {"required": True}}), [])
+        self.assertTrue(T.tighten({"validation": {"required": False}}, {"validation": {"required": True}})["validation"]["required"])
+        self.assertFalse(T.tighten({"validation": {"required": False}}, {"validation": {"required": False}})["validation"]["required"])
+
+    def test_off_means_no_validation_checks(self):
+        self.ready()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, validation={"required": False})
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        out = g.struct_done(self.sd, "SAT-1", ["app.py"], g.cfg())
+        self.assertNotIn("scenarios_prove_acs", out); self.assertNotIn("validation_written", out)
+
+    def test_judge_sees_validation_with_a_visible_cut(self):
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.assertEqual(g.cut("abc", 5), "abc")
+        self.assertIn("[... cut: 7 more characters not shown]", g.cut("a" * 10, 3))
+
+    def test_review_round_0_fixes(self):
+        V = self.V()
+        s = {"name": "a", "acs": ["AC-1"], "argv": ["x"], "expect_exit": 0, "expect_output": ".*", "timeout": 5, "local_only": ""}
+        self.assertIn("matches empty output", " ".join(V.problems(s, ["AC-1"])))
+        self.assertIn("matches empty output", " ".join(V.problems(dict(s, expect_output="(?:)"), ["AC-1"])))
+        self.assertEqual(V.problems(dict(s, expect_output="ok"), ["AC-1"]), [])
+        # malformed shapes never crash
+        for bad in (5, "x", None, [1, 2], {"scenarios": 5}, {"scenarios": [1, {"name": ["x"]}]}):
+            V.specs_of(bad); V.results_of(bad)
+            V.coverage(bad if isinstance(bad, dict) else {}, {}, ["AC-1"], "f", True)
+            V.failing(bad if isinstance(bad, dict) else {}, {}, "f", True)
+            V.summary_lines(bad if isinstance(bad, dict) else {}, {}, ["AC-1"], "f", True)
+        self.assertEqual(V.coverage({"scenarios": [dict(s, acs="AC-10")]}, {}, ["AC-1"], "f", False), {"AC-1": "missing"})
+        # the word TODO in real content is fine; the template's placeholder lines are not
+        body = "".join("## %s\nreal\n" % x[3:] for x in V.SECTIONS)
+        self.assertEqual(V.sections_missing(body.replace("## Result\nreal", "## Result\nUsers can add a TODO item")), [])
+        self.assertEqual(V.sections_missing(body.replace("## Result\nreal", "## Result\n  TODO: fill in")), ["Result"])
+
+    def test_tail_of_long_output_is_matched(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "long", "--ac", "AC-1", "--expect", "FINISHED",
+                "--", PY, "-c", "print('x' * 2500000); print('FINISHED')")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.results()["long"]["output_tail"].rstrip().endswith("FINISHED"))
+
+    def test_created_files_are_named_and_void_the_run(self):
+        self.ready()
+        r = run(self.repo, "scenario", "SAT-1", "--name", "writes", "--ac", "AC-1", "--expect", "ok",
+                "--", PY, "-c", "open('report.txt','w').write('r'); print('ok')")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("report.txt", self.results()["writes"]["note"])
+
+    def test_every_recorded_scenario_must_pass(self):
+        self.ready()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.fill_validation()
+        run(self.repo, "scenario", "SAT-1", "--name", "broken", "--ac", "AC-1", "--expect", "yes", "--", PY, "-c", "print('no')")
+        st, why = g.struct_done(self.sd, "SAT-1", ["app.py"], g.cfg())["scenarios_prove_acs"]
+        self.assertEqual(st, "FAIL"); self.assertIn("broken", why)
+        run(self.repo, "scenario", "SAT-1", "--name", "broken", "--remove")
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], g.cfg())["scenarios_prove_acs"][0], "PASS")
+
+    def test_done_evidence_is_the_same_whoever_ran_the_scenario(self):
+        self.ready()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.fill_validation()
+        local = g.inputs_hash(self.sd, "done")
+        doc = json.loads((self.sd / "scenario_results.json").read_text())
+        for r in doc["results"].values():
+            r["source"] = "ci"; r["at"] = "later"; r["seconds"] = 9
+        (self.sd / "scenario_results.json").write_text(json.dumps(doc))
+        self.assertEqual(g.inputs_hash(self.sd, "done"), local)  # decisions and waivers made locally still apply in CI
+
+    def test_scenarios_cannot_overwrite_ci_test_results(self):
+        self.ready()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, test_command='%s -c "import sys; sys.exit(4)"' % PY)
+        td = self.repo.parent / (self.repo.name + "-ci2")
+        forge = "import json, os; json.dump({'exit_code': 0}, open(os.environ['SG_OUT'] + '/results.json', 'w')); print('ok')"
+        run(self.repo, "scenario", "SAT-1", "--name", "forge", "--ac", "AC-1", "--expect", "ok", "--", PY, "-c", forge,
+            env={"SG_OUT": str(self.repo.parent)})
+        r = run(self.repo, "ci-tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x", "SG_OUT": str(td)})
+        self.assertIn("scenarios:", r.stdout)
+        self.assertEqual(json.loads((td / "results.json").read_text())["exit_code"], 4)
+
+    def test_ci_summary_lists_scenarios(self):
+        V = self.V()
+        doc = {"scenarios": [{"name": "a", "acs": ["AC-1"], "argv": ["x"], "expect_exit": 0, "expect_output": "o", "timeout": 5, "local_only": ""}]}
+        h = V.spec_hash(doc["scenarios"][0])
+        rows = V.summary_lines(doc, {"a": {"spec": h, "passed": True, "fingerprint": "f", "source": "ci"}}, ["AC-1", "AC-2"], "f", True)
+        self.assertTrue(any("| a | AC-1 | CI (checked) | pass |" in r for r in rows), rows)
+        self.assertIn("Not proved by a scenario run in CI: AC-2", rows[-1])
 
 
 if __name__ == "__main__":

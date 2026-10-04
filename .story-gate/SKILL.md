@@ -1,6 +1,6 @@
 ---
 name: story-gate
-description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
+description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed and shown working by a scenario run that CI repeats, a plain-English validation summary for the owner, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
 ---
 
 # Story Gate
@@ -36,6 +36,8 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
    - Run `record-tests`.
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
+   - For every AC, run the feature for real and record it: `scenario <ID> --name ... --ac AC-1 --expect <text> -- <command>`. CI runs these again.
+   - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason').
    - Write `handoff.md`, run `learn`, then run `score <ID> done`.
 4. **ACCEPTANCE:** open the PR as the agent. CI re-checks everything, and a code owner approves the latest commit and merges. You never approve or merge.
 5. **DRIFT:** never resolved silently.
@@ -44,7 +46,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
-- Write for a non-coder: short sentences, active voice, plain words, a Mermaid diagram where a picture is clearer (PROTOCOL.md > Writing). This covers chat replies, PR descriptions, the story's plain summary, handoffs and learnings.
+- Write for a non-coder: short sentences, active voice, plain words, a Mermaid diagram where a picture is clearer (PROTOCOL.md > Writing). This covers chat replies, PR descriptions, the story's plain summary, validation.md, handoffs and learnings.
 - Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
 - Never run `install`, `install --user`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `filter`, `lockdown` or `hook-trust`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.

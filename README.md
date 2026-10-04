@@ -49,13 +49,14 @@ Set up story-gate in this repo: https://github.com/SathiaAI/story-gate
 
 <p align="center"><img src="docs/assets/lifecycle.png" alt="The story lifecycle in four moments: Ready, Checkpoints, Done and Acceptance, with the checks in each" width="100%"></p>
 
-You ask for a feature. Your AI writes the story and the tests, and story-gate checks they're good enough to build from (**READY**). While it builds, story-gate checks it's still on course (**CHECKPOINTS**). When it's finished, the tests must prove every acceptance criterion (**DONE**). Then it opens a pull request, and **you approve and merge**.
+You ask for a feature. Your AI writes the story and the tests, and story-gate checks they're good enough to build from (**READY**). While it builds, story-gate checks it's still on course (**CHECKPOINTS**). When it's finished, the tests must prove every acceptance criterion, and your AI must run the feature for real and show you the result (**DONE**). Then it opens a pull request, and **you approve and merge**.
 
 ## Good to know
 
 - **Free GitHub plan, private repository:** GitHub doesn't enforce "must be approved" there. story-gate still checks every pull request and marks it **ADVISORY**.
 - **Your AI never uses your GitHub login.** It works through its own login (step 3), so it can't approve or merge its own work.
 - **Branches can't switch story-gate off.** The rules come from your main branch, and the checks run from a verified copy on your computer. See [security](docs/client-security.md).
+- **Proof, not promises.** Before your AI says "done", it runs the feature the way a user would, once for every acceptance criterion. The pull request check runs those again. You get a one-page `validation.md`: what works, what was tested, bugs found, lessons, and steps to try it yourself. See [proof it works](docs/guide.md#proof-it-works-scenarios-and-validationmd).
 - **Plain English.** Your AI writes replies, PR descriptions, story summaries and handoffs in short, plain sentences, with diagrams where a picture is clearer. story-gate scores this (an STE-style score, target 80%) and gives advice. See [plain writing](docs/guide.md#plain-writing).
 - **Pilot:** story-gate is pre-1.0. Signed releases are coming; until then, setup installs from a pinned version on GitHub.
 
