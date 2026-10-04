@@ -723,4 +723,5 @@ def client_matrix(top=None):
         ("gemini", soft, "turn on Gemini folder trust (security.folderTrust.enabled) for untrusted folders"),
         ("windsurf", soft, "no hard switch documented"),
         ("grok", soft, "trust folders only with /hooks-trust when you mean it"),
+        ("vscode", soft, "VS Code's Workspace Trust decides whether a folder's own hooks run"),
     ]

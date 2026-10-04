@@ -2979,12 +2979,99 @@ class TestHermesInstall(unittest.TestCase):
         allow.write_text(json.dumps({"approvals": []}))  # e.g. someone cleared Hermes's approvals
         self.assertIn("hasn't approved", " ".join(self.T.hermes_problems()))
 
+    def test_vscode_hooks_file_is_ours_and_removed_on_uninstall(self):
+        self.install(("vscode",))
+        f = self.tmp / "user" / ".copilot" / "hooks" / "story-gate.json"
+        hooks = json.loads(f.read_text())["hooks"]
+        self.assertEqual(sorted(hooks), ["PostToolUse", "PreToolUse", "SessionStart", "Stop"])
+        self.assertIn("--client vscode --event pre", hooks["PreToolUse"][0]["command"])
+        self.T.unregister_user_hooks()
+        self.assertFalse(f.exists())
+
+    def test_vscode_set_up_only_when_found(self):
+        self.assertNotIn("vscode", self.T.default_clients())
+        (self.tmp / "user" / ".copilot").mkdir(parents=True)
+        self.assertIn("vscode", self.T.default_clients())
+
     def test_hermes_set_up_only_when_found(self):
         shutil.rmtree(self.tmp / "hermes")
         self.assertNotIn("hermes", self.T.default_clients())
         (self.tmp / "hermes").mkdir()
         self.assertIn("hermes", self.T.default_clients())
         self.assertIn("claude", self.T.default_clients())  # the original five stay on by default
+
+
+class TestVSCodeHooks(Base):
+    """VS Code (Copilot agent). Payloads are the shapes recorded in a live VS Code session (October 2026): Claude-style tool
+    names (Write, Edit, Read, Bash, Glob, AskUserQuestion) with path/file_text/old_str keys. VS Code ignores matchers, so
+    read-only tools must pass; a block is a "deny" decision (VS Code labels a bare exit 2 as "hook errored")."""
+
+    def hook(self, event, payload):
+        return run(self.repo, "hook", "--client", "vscode", "--event", event, stdin=json.dumps(payload))
+
+    def p(self, tool, **ti):
+        return {"hook_event_name": "PreToolUse", "session_id": "s", "timestamp": "t", "cwd": str(self.repo), "tool_name": tool, "tool_input": ti}
+
+    def denied(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+        self.assertEqual((out["hookEventName"], out["permissionDecision"]), ("PreToolUse", "deny"))
+        return out["permissionDecisionReason"]
+
+    def test_edits_and_commands_denied_reads_pass(self):
+        self.cfg(mode="enforce")
+        app = str(self.repo / "app.py")
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("Write", path=str(self.repo / "hello.py"), file_text="print(1)\n"))))
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("Edit", path=app, old_str="x = 1", new_str="x = 2"))))
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("Bash", command="echo y > app.py", description="d"))))
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("create_file", filePath=app, content="x"))))  # toolNames.ts style
+        multi = self.p("multi_replace_string_in_file", replacements=[{"filePath": ".story-gate/config.json", "oldString": "a", "newString": "b"}])
+        self.assertIn("gate files", self.denied(self.hook("pre", multi)))
+        for tool, ti in (("Read", {"path": app}), ("Glob", {"pattern": "**.json", "paths": str(self.repo)}),
+                         ("AskUserQuestion", {"question": "story id?"}), ("Bash", {"command": "git status --short"})):
+            r = self.hook("pre", self.p(tool, **ti))
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "{}"), tool)
+        # fail closed: a tool we don't know (here one that writes) goes through the checks; so does an unknown shell tool
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("save_file", target=app, text="x"))))
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("run_in_terminal2", command="echo y > app.py"))))
+        r = self.hook("pre", self.p("run_in_terminal2", command="cat .story-gate/config.json > /tmp/x; echo z > .story-gate/config.json"))
+        self.assertIn("story-gate files", self.denied(r))
+        self.cfg(mode="warn")
+        r = self.hook("pre", self.p("Edit", path=app, old_str="x = 1", new_str="x = 2"))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"], "PreToolUse")  # a warning, not a deny
+        self.assertNotIn("permissionDecision", r.stdout)
+
+    def test_stop_blocks_until_done(self):
+        self.cfg(mode="enforce", judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 3\n")
+        r = self.hook("stop", {"hook_event_name": "Stop", "stop_hook_active": False})
+        self.assertEqual(r.returncode, 2); self.assertIn("DONE gate", r.stderr)
+
+
+class TestInstallFromPackage(unittest.TestCase):
+    def test_skill_sends_agents_to_the_verified_command(self):
+        # live VS Code test: the skill said `python3 .story-gate/gate.py`, the hooks refused it, and the agent got stuck
+        skill = (SRC / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`gate.py` means **`story-gate`**", skill)
+        self.assertNotIn("`gate.py` = `python3 .story-gate/gate.py`", skill)
+
+    """`story-gate install` from the installed package (uv tool) gives the repository its own copy: CI runs it, and
+    AGENTS.md sends agents to .story-gate/PROTOCOL.md (found missing in a live VS Code test)."""
+
+    def test_repository_gets_gate_protocol_and_skills(self):
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
+        pkg = tmp / "pkg" / "_payload"
+        shutil.copytree(SRC, pkg, ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl", "config.json", "judge-calibration.json"))
+        repo = tmp / "repo"; repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        e = dict(os.environ, HOME=str(tmp / "home")); e.pop("STORY_GATE_ROOT", None)
+        r = subprocess.run([PY, str(pkg / "gate.py"), "install"], cwd=repo, capture_output=True, text=True, env=e, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for f in (".story-gate/gate.py", ".story-gate/PROTOCOL.md", ".story-gate/config.json", ".agents/skills/story-gate/SKILL.md",
+                  ".claude/skills/story-gate/SKILL.md"):
+            self.assertTrue((repo / f).is_file(), f)
 
 
 if __name__ == "__main__":
