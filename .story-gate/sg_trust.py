@@ -33,8 +33,8 @@ except Exception:
     sys.exit(2)
 sys.exit(subprocess.run([sys.executable, "-I", gate] + sys.argv[1:]).returncode)
 '''
-USER_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf", "hermes")
-# Set up by default even when the tool isn't found (older installs did); hermes only when found on this computer.
+USER_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf", "vscode", "hermes")
+# Set up by default even when the tool isn't found (older installs did); vscode and hermes only when found on this computer.
 ALWAYS_CLIENTS = ("claude", "codex", "cursor", "gemini", "windsurf")
 DEGRADED_CLIENTS = ("grok",)  # user-level location documented, but merging with project hooks is unverified; see docs/client-security.md
 
@@ -71,7 +71,7 @@ def detected_clients():
     """The AI tools whose settings folder exists on this computer (a hint for the setup page, never a security decision)."""
     h = user_home()
     marks = {"claude": [h / ".claude"], "codex": [h / ".codex"], "cursor": [h / ".cursor"], "gemini": [h / ".gemini"],
-             "windsurf": [h / ".codeium" / "windsurf"], "hermes": [hermes_home()]}
+             "windsurf": [h / ".codeium" / "windsurf"], "vscode": [h / ".copilot", h / ".vscode"], "hermes": [hermes_home()]}
     return [cl for cl in USER_CLIENTS if any(p.is_dir() for p in marks[cl])]
 
 
@@ -621,6 +621,7 @@ def user_hook_files():
     return {"claude": h / ".claude" / "settings.json", "codex": h / ".codex" / "hooks.json",
             "cursor": h / ".cursor" / "hooks.json", "gemini": h / ".gemini" / "settings.json",
             "windsurf": h / ".codeium" / "windsurf" / "hooks.json",
+            "vscode": h / ".copilot" / "hooks" / "story-gate.json",  # VS Code agent hooks, user level (a file of our own)
             "hermes": hermes_home() / "config.yaml"}  # Hermes reads shell hooks only from the `hooks:` block of config.yaml
 
 
@@ -664,6 +665,14 @@ def hook_entries(py, gate):
             "pre_write_code": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "pre_run_command": [{"command": cmd("windsurf", "pre"), "show_output": True}],
             "post_cascade_response": [{"command": cmd("windsurf", "stop"), "show_output": True}]}},
+        # VS Code ignores matchers (every tool call runs the hook), so gate.py skips tools that neither edit nor run commands.
+        # Source: https://code.visualstudio.com/docs/agents/reference/hooks-reference ; tool names seen live: Read, Write, Edit,
+        # Bash, Glob, AskUserQuestion (VS Code's Copilot agent, October 2026).
+        "vscode": {"hooks": {
+            "PreToolUse": [{"type": "command", "command": cmd("vscode", "pre"), "timeout": 15}],
+            "PostToolUse": [{"type": "command", "command": cmd("vscode", "post"), "timeout": 180}],
+            "Stop": [{"type": "command", "command": cmd("vscode", "stop"), "timeout": 60}],
+            "SessionStart": [{"type": "command", "command": cmd("vscode", "session"), "timeout": 15}]}},
         # Hermes: pre_verify is its Stop (once per turn after edits). fail_closed: a crash or timeout blocks the edit.
         # Source: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks
         "hermes": {"hooks": {

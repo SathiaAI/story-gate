@@ -4,7 +4,7 @@
 
 **Ship production-grade work with AI coding tools, without being a coder.** story-gate makes your AI write down what it will build before it builds it, checks the work against that plan, and won't let anything merge until **you** approve it (on free GitHub plans with private repositories it warns instead; see *Good to know*).
 
-It works in Claude Code, Codex, Cursor, Gemini CLI, Hermes, Windsurf and cloud agents. The setup page ticks the ones it finds on your computer; [what each tool gets](docs/client-security.md).
+It works in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf and cloud agents. The setup page ticks the ones it finds on your computer; [what each tool gets](docs/client-security.md).
 
 1. Your AI writes the story and its tests first.
 2. An independent judge scores the work, for a fraction of a cent.

@@ -5,7 +5,7 @@
 
 <p align="center"><img src="assets/header.jpg" alt="story-gate by Viaknox. Every story starts on spec, is tested against spec, and ends on spec. Ink drawing of a city rail station with a bright orange buffer stop at the end of the track." width="100%"></p>
 
-**story-gate** is a quality gate for AI coding work that runs the same way in Claude Code, Codex, Cursor, Gemini CLI, Hermes, Windsurf/Devin, Grok Build, Muse, Cowork and cloud agents.
+**story-gate** is a quality gate for AI coding work that runs the same way in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf/Devin, Grok Build, Muse, Cowork and cloud agents.
 
 1. Cheap agents gather the evidence.
 2. An independent judge scores it.
@@ -126,7 +126,7 @@ Cloud agents need no setup here, because they already have their own GitHub iden
 | **Grok Build** | `.claude/skills`, AGENTS.md | Reduced protection: run `status` (see [client security](client-security.md)) | Run `checkpoint` | Through CI | Not confirmed |
 | **pi** | AGENTS.md | Through CI (a pi extension can add hooks; not shipped yet) | Run `checkpoint` | Through CI | Any model you configure |
 | **Hermes Agent** | The story-gate skill (installed in Hermes's `skills`) + AGENTS.md | Yes, including `terminal` and `execute_code` | Yes | Yes (`pre_verify`) | Any model you configure |
-| **VS Code (Copilot agent)** | `.agents/skills`, AGENTS.md | Through CI (live checks coming next) | Run `checkpoint` | Through CI | Pick the model in the UI |
+| **VS Code (Copilot agent)** | `.agents/skills`, AGENTS.md | Yes, including terminal commands (VS Code agent hooks are a Preview feature) | Yes | Yes | Pick the model in the UI |
 | **Antigravity, Roo Code** | `.agents/skills`, AGENTS.md | Through CI | Run `checkpoint` | Through CI | Pick the model in the UI |
 | **Muse Code** | `.agents/skills`, AGENTS.md | Not confirmed | Run `checkpoint` | Through CI | One model family: steps run inline |
 | **Claude Cowork** | The story-gate skill | No (hooks don't run there) | Run `checkpoint` | Through CI | Yes |
