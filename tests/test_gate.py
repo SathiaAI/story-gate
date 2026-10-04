@@ -144,7 +144,6 @@ class TestHooks(Base):
         "gemini": {"hook_event_name": "BeforeTool", "tool_name": "write_file", "tool_input": {"file_path": "app.py"}},
         "windsurf": {"agent_action_name": "pre_write_code", "tool_info": {"file_path": "app.py"}},
         "grok": {"hookEventName": "PreToolUse", "toolName": "Edit", "toolInput": {"file_path": "app.py"}, "workspaceRoot": "."},
-        "vscode": {"hook_event_name": "PreToolUse", "tool_name": "replace_string_in_file", "tool_input": {"filePath": "app.py"}, "timestamp": "t"},
     }
 
     def test_warn_mode_never_blocks_and_is_visible(self):
@@ -1552,13 +1551,14 @@ class TestRepoHookGuard(RuntimeFixture):
     def test_older_filter_list_is_brought_up_to_date(self):
         attrs = self.repo / ".git/info/attributes"
         old = attrs.read_text().replace("**/.github/hooks/*.json filter=storygate-hooks\n", "").replace("**/.agents/hooks.json filter=storygate-hooks\n", "")
-        attrs.write_text("*.png binary\n" + old + "*.jpg binary\n")
+        attrs.write_bytes(("*.png binary\n" + old + "*.jpg binary\n").replace("\n", "\r\n").encode())  # as Windows tools write it
         self.assertNotIn(".github/hooks", attrs.read_text())
         self.admin("filter", "on")
         new = attrs.read_text()
         self.assertIn("**/.github/hooks/*.json filter=storygate-hooks", new); self.assertIn("**/.agents/hooks.json filter=storygate-hooks", new)
         self.assertIn("*.png binary", new); self.assertIn("*.jpg binary", new)  # your own lines stay
         self.assertEqual(new.count("filter=storygate-hooks"), len(self.guard().FILTERED))
+        self.assertNotIn(b"\r\r", attrs.read_bytes()); self.assertNotIn(b"hooks\n", attrs.read_bytes())  # CRLF kept, not mixed
 
     def test_conflicting_filter_is_never_overridden(self):
         solo = Path(tempfile.mkdtemp())
@@ -2780,7 +2780,7 @@ class TestGuidedSetup(unittest.TestCase):
         inst = next(a for a in seen if "install" in a)
         self.assertEqual(inst[inst.index("--clients") + 1], "claude,hermes")
         page = S.page(wz)
-        self.assertIn("value=hermes checked", page); self.assertIn("Google AI Studio", page); self.assertIn("Who else approves work?", page)
+        self.assertIn("value=hermes checked", page); self.assertIn("Google AI Studio", page); self.assertIn("Who else can approve work?", page); self.assertIn("Any one of you can approve", page)
 
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T
@@ -2828,28 +2828,11 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(C.runtime_launcher(), rt / "launch.py")
 
 
-class TestVSCodeAndHermesHooks(Base):
-    """VS Code (Copilot agent) and Hermes: hook output each tool understands, and tools that only read are never gated."""
+class TestHermesHooks(Base):
+    """Hermes: hook output it understands (exit 2 blocks a tool call; pre_verify reads JSON)."""
 
     def hook(self, client, event, payload):
         return run(self.repo, "hook", "--client", client, "--event", event, stdin=json.dumps(payload))
-
-    def test_vscode_gates_edits_and_commands_but_not_reads(self):
-        self.cfg(mode="enforce")
-        read = {"hook_event_name": "PreToolUse", "tool_name": "read_file", "tool_input": {"filePath": "app.py", "startLine": 1}}
-        self.assertEqual(self.hook("vscode", "pre", read).returncode, 0)  # VS Code ignores matchers: reads must pass
-        edit = {"hook_event_name": "PreToolUse", "tool_name": "create_file", "tool_input": {"filePath": "new.py", "content": "x"}}
-        self.assertEqual(self.hook("vscode", "pre", edit).returncode, 2)
-        multi = {"hook_event_name": "PreToolUse", "tool_name": "multi_replace_string_in_file",
-                 "tool_input": {"replacements": [{"filePath": ".story-gate/config.json", "oldString": "a", "newString": "b"}]}}
-        r = self.hook("vscode", "pre", multi)
-        self.assertEqual(r.returncode, 2); self.assertIn("must not edit gate files", r.stderr)  # paths inside replacements count
-        sh = {"hook_event_name": "PreToolUse", "tool_name": "run_in_terminal", "tool_input": {"command": "echo hi > app.py"}}
-        self.assertEqual(self.hook("vscode", "pre", sh).returncode, 2)
-        self.cfg(mode="warn")
-        r = self.hook("vscode", "pre", edit)
-        self.assertEqual(r.returncode, 0)
-        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"], "PreToolUse")  # Claude Code's format
 
     def test_hermes_blocks_edits_and_shell_with_exit_2(self):
         self.cfg(mode="enforce")
@@ -2877,8 +2860,8 @@ class TestVSCodeAndHermesHooks(Base):
         self.assertEqual(json.loads(self.hook("hermes", "stop", p).stdout or "{}"), {})
 
 
-class TestHermesAndVSCodeInstall(unittest.TestCase):
-    """install --user for Hermes (YAML block + approvals + skill) and VS Code (a hooks file of our own); uninstall undoes it."""
+class TestHermesInstall(unittest.TestCase):
+    """install --user for Hermes (YAML block + approvals + skill); uninstall undoes it."""
 
     def setUp(self):
         sys.path.insert(0, str(SRC))
@@ -2898,7 +2881,7 @@ class TestHermesAndVSCodeInstall(unittest.TestCase):
         os.environ.clear(); os.environ.update(self.old_env)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def install(self, clients=("hermes", "vscode")):
+    def install(self, clients=("hermes",)):
         return self.T.register_user_hooks("C:/py/python.exe", "C:/Users/a b/AppData/Roaming/story-gate/runtime/launch.py", list(clients),
                                           skill_src=self.skill)
 
@@ -2944,20 +2927,42 @@ class TestHermesAndVSCodeInstall(unittest.TestCase):
         self.assertIn("by hand", "\n".join(out))
         self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate").exists())  # nothing half-done
 
-    def test_vscode_hooks_file_is_ours_and_removed_on_uninstall(self):
-        self.install(("vscode",))
-        f = self.tmp / "user" / ".copilot" / "hooks" / "story-gate.json"
-        hooks = json.loads(f.read_text())["hooks"]
-        self.assertEqual(sorted(hooks), ["PostToolUse", "PreToolUse", "SessionStart", "Stop"])
-        self.assertIn("--client vscode --event pre", hooks["PreToolUse"][0]["command"])
-        self.T.unregister_user_hooks()
-        self.assertFalse(f.exists())
+    def test_hermes_yaml_edge_cases(self):
+        T, e = self.T, {"hooks": {"pre_tool_call": [{"command": "x 'y'", "timeout": 15, "fail_closed": True}]}}
+        for bad in ('"hooks":\n  a: 1\n', "a: 1\n...\n", "a: 1\n---\nb: 2\n", "a: [1,\n"):
+            with self.assertRaises(T.TrustError, msg=bad):
+                T.merged_hermes_yaml(bad, e)
+        ok = {"---\na: 1\n": None, "a: 1\r\nb: 2\r\n": None, "a: |\n  text\n  more\n": None, "": None, "# only a comment": None}
+        try:
+            import yaml
+        except ImportError:
+            yaml = None
+        for text in ok:
+            new = T.merged_hermes_yaml(text, e)
+            if "\r\n" in text:
+                self.assertNotIn("\n", new.replace("\r\n", ""))  # the file keeps its own line endings
+            if yaml:
+                data = yaml.safe_load(new)
+                self.assertEqual(data["hooks"]["pre_tool_call"][0]["command"], "x 'y'")
+                if text.startswith("a: |"):
+                    self.assertEqual(data["a"], "text\nmore\n")  # the block scalar before ours is unchanged
+            self.assertEqual(T._hermes_commands(new), [("pre_tool_call", "x 'y'")])
 
-    def test_vscode_and_hermes_set_up_only_when_found(self):
+    def test_doctor_catches_a_missing_hermes_approval_and_other_profiles(self):
+        (self.tmp / "hermes" / "profiles" / "work").mkdir(parents=True)
+        (self.tmp / "hermes" / "profiles" / "work" / "config.yaml").write_text("a: 1\n")
+        out = self.install(("hermes",))
+        self.assertIn("work", "\n".join(out)); self.assertEqual(self.T.hermes_profiles(), ["work"])
+        self.assertEqual(self.T.hermes_problems(), [])
+        allow = self.tmp / "hermes" / "shell-hooks-allowlist.json"
+        allow.write_text(json.dumps({"approvals": []}))  # e.g. someone cleared Hermes's approvals
+        self.assertIn("hasn't approved", " ".join(self.T.hermes_problems()))
+
+    def test_hermes_set_up_only_when_found(self):
         shutil.rmtree(self.tmp / "hermes")
-        self.assertNotIn("hermes", self.T.default_clients()); self.assertNotIn("vscode", self.T.default_clients())
-        (self.tmp / "hermes").mkdir(); (self.tmp / "user" / ".copilot").mkdir(parents=True)
-        self.assertIn("hermes", self.T.default_clients()); self.assertIn("vscode", self.T.default_clients())
+        self.assertNotIn("hermes", self.T.default_clients())
+        (self.tmp / "hermes").mkdir()
+        self.assertIn("hermes", self.T.default_clients())
         self.assertIn("claude", self.T.default_clients())  # the original five stay on by default
 
 

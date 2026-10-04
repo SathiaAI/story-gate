@@ -4,7 +4,7 @@
 
 **Ship production-grade work with AI coding tools, without being a coder.** story-gate makes your AI write down what it will build before it builds it, checks the work against that plan, and won't let anything merge until **you** approve it (on free GitHub plans with private repositories it warns instead; see *Good to know*).
 
-It works in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf and cloud agents. The setup page ticks the ones it finds on your computer; [what each tool gets](docs/client-security.md).
+It works in Claude Code, Codex, Cursor, Gemini CLI, Hermes, Windsurf and cloud agents. The setup page ticks the ones it finds on your computer; [what each tool gets](docs/client-security.md).
 
 1. Your AI writes the story and its tests first.
 2. An independent judge scores the work, for a fraction of a cent.
@@ -29,7 +29,7 @@ Set up story-gate in this repo: https://github.com/SathiaAI/story-gate
 
 **The judge key (step 4):** make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add a few dollars of credit. Each check costs a fraction of a cent. The key goes straight into a GitHub secret, and your AI never sees it.
 
-**Who approves:** you, plus anyone you add in step 5 (they need write access to the repository).
+**Who approves:** you, plus anyone you add in step 5 (they need write access to the repository). Any one of you can approve.
 
 **Teammates:** each person pastes the same sentence once on their own computer. Their setup skips steps 4 and 5.
 

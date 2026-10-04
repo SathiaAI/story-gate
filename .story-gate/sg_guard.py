@@ -300,11 +300,12 @@ def enable_filter(top, py, launcher, dry_run=False):
     if ATTR_MARK in old:  # turned on by an older story-gate: bring its list of covered files up to date, keep everything else
         lines, kept, inside = old.split("\n"), [], False
         for l in lines:
-            if l == ATTR_MARK:
+            bare, eol = l.rstrip("\r"), l[len(l.rstrip("\r")):]  # Windows line endings stay as they were
+            if bare == ATTR_MARK:
                 inside = True
-                kept.extend(attr_lines())
+                kept.extend(x + eol for x in attr_lines())
                 continue
-            if inside and l.endswith(" filter=%s" % FILTER):
+            if inside and bare.endswith(" filter=%s" % FILTER):
                 continue
             inside = False
             kept.append(l)

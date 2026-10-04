@@ -23,10 +23,10 @@ import sg_github as G  # noqa: E402
 OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "Ov23liAhA19MDXrS9a4S")
 STEPS = ("signin", "agent", "key", "merge", "done")
 # AI tools story-gate can check live on this computer (user-level hooks), in the order the page lists them.
-HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("vscode", "VS Code (Copilot agent)"),
-                ("hermes", "Hermes"), ("gemini", "Gemini CLI"), ("windsurf", "Windsurf"))
+HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("hermes", "Hermes"), ("gemini", "Gemini CLI"),
+                ("windsurf", "Windsurf"))
 # Tools with no verified live checks yet: they follow the rules in AGENTS.md / the skill, and GitHub checks their pull requests.
-OTHER_TOOLS = (("Antigravity", "rules + skill; live checks once we've verified its hooks"), ("pi", "rules + skill"),
+OTHER_TOOLS = (("VS Code (Copilot agent)", "rules + skill; live checks coming next"), ("Antigravity", "rules + skill; live checks once we've verified its hooks"), ("pi", "rules + skill"),
                ("Roo Code", "rules + skill"), ("ChatGPT", "GitHub checks its pull requests"),
                ("Google AI Studio", "GitHub checks its pull requests"))
 GH_USER = __import__("re").compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
@@ -406,7 +406,7 @@ main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash 
 button,.btn{background:var(--tangelo);color:var(--aubergine);border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
 button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
 .lbl{display:block;margin-top:10px;font-weight:600}.lbl span{font-weight:400;color:var(--muted);font-size:14px}.lbl input{display:block;margin-top:6px}
-.tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
+.tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.tool em{color:var(--muted);font-size:13px;font-style:normal;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
 .by svg{height:14px;width:auto;vertical-align:-2px}.note{background:var(--tangelo);color:var(--aubergine);border-radius:14px;padding:14px 18px;margin-top:18px}.foot{margin-top:28px;color:var(--muted);font-size:13px}
 """
@@ -415,7 +415,8 @@ button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;bo
 def tools_html(wz):
     """Tickboxes for the tools story-gate can check live (found ones pre-ticked), then the ones covered another way."""
     rows = "".join("<label class=tool><input type=checkbox name=c value=%s%s> %s%s</label>"
-                   % (cl, " checked" if cl in wz.clients else "", html.escape(name), " <span>found on this computer</span>" if cl in wz.found else "")
+                   % (cl, " checked" if cl in wz.clients else "", html.escape(name), (" <span>found on this computer</span>" if cl in wz.found else "")
+                      + (" <em>(story-gate approves its own check inside Hermes for you)</em>" if cl == "hermes" else ""))
                    for cl, name in HOOKED_TOOLS)
     other = "".join("<li><b>%s</b>: %s</li>" % (html.escape(n), html.escape(d)) for n, d in OTHER_TOOLS)
     return ("<form id=tools onchange=\"tools(this)\">%s</form><p class=msg id=toolmsg></p><p class=hint>Also covered, without live checks: </p><ul class=other>%s</ul>"
@@ -435,7 +436,8 @@ def page(wz):
          "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
          "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
-         "<label class=lbl>Who else approves work? <span>(optional: GitHub usernames, with write access to this repository)</span>"
+         "<label class=lbl>Who else can approve work? <span>(optional: GitHub usernames with write access to this repository. "
+         "Any one of you can approve.)</span>"
          "<input name=approvers autocomplete=off placeholder='e.g. alex, sam'></label>"
          "<button>Open the pull request</button></form><div id=pr></div>"),
         ("done", "Protect your AI tools", "Live checks turn on for the tools ticked below, then story-gate checks itself. "
