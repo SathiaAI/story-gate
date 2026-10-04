@@ -3571,5 +3571,140 @@ class TestValidation(Base):
         self.assertIn("Not proved by a scenario run in CI: AC-2", rows[-1])
 
 
+def tiny_png(w=2, h=2):
+    import struct, zlib
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
+    chunk = lambda k, d: struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+class TestValidationPage(Base):
+    """PR #18: the validation page (one safe HTML file) and screenshots."""
+
+    def tmp(self):
+        """A scratch folder outside the repository, removed after the test."""
+        if not hasattr(self, "_tmp"):
+            self._tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, self._tmp, True)
+        return self._tmp
+
+    def R(self):
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_report
+        return importlib.reload(sg_report)
+
+    def ready(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        self.sd = self.repo / ".story-gate/stories/SAT-1"
+
+    def test_image_checks(self):
+        R = self.R()
+        self.assertEqual(R.image_info(tiny_png(3, 5)), ("png", 3, 5))
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00\x10" + b"JFIF\x00" + b"\x00" * 9 + b"\xff\xc0\x00\x11\x08\x00\x07\x00\x09" + b"\x00" * 20
+        self.assertEqual(R.image_info(jpg), ("jpg", 9, 7))
+        for bad in (b"GIF89a....", b"<svg onload=alert(1)>", b"", b"\x89PNG\r\n\x1a\n"):
+            self.assertRaises(ValueError, R.image_info, bad)
+        self.assertRaises(ValueError, R.check_image, tiny_png(5000, 2))
+        self.assertRaises(ValueError, R.check_image, tiny_png() + b"\x00" * R.MAX_IMAGE)
+
+    def test_evidence_command(self):
+        self.ready()
+        self.fill_validation()
+        shot = self.tmp() / "shot.png"; shot.write_bytes(tiny_png())
+        r = run(self.repo, "evidence", "SAT-1", str(shot), "--scenario", "nope")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("no recorded scenario", r.stdout + r.stderr)
+        r = run(self.repo, "evidence", "SAT-1", str(shot), "--scenario", "app runs", "--caption", "the login page")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        doc = json.loads((self.sd / "evidence.json").read_text())
+        self.assertEqual(len(doc["evidence"]), 1)
+        self.assertTrue((self.sd / "evidence" / doc["evidence"][0]["file"]).is_file())
+        txt = self.tmp() / "notes.png"; txt.write_text("not an image")
+        self.assertIn("not a PNG or JPEG", run(self.repo, "evidence", "SAT-1", str(txt), "--scenario", "app runs").stderr)
+        if os.name != "nt":
+            link = self.tmp() / "link.png"; link.symlink_to(shot)
+            self.assertIn("not a regular file", run(self.repo, "evidence", "SAT-1", str(link), "--scenario", "app runs").stderr)
+        p = {"tool_name": "Write", "tool_input": {"file_path": ".story-gate/stories/SAT-1/evidence/x.png"}}
+        self.assertIn("must not edit gate files", run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p)).stdout)
+        self.assertEqual(run(self.repo, "scenarios", "SAT-1").returncode, 0)  # screenshots are records: not "code changes"
+
+    def test_hostile_records_do_not_break_the_page(self):
+        self.ready()
+        self.fill_validation()
+        doc = json.loads((self.sd / "scenarios.json").read_text())
+        doc["scenarios"].append({"name": "weird", "acs": [["AC-1"], {"a": 1}], "argv": 5})
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        (self.sd / "scenarios.json").write_text(json.dumps(doc))
+        out = self.tmp() / "p.html"
+        self.assertEqual(run(self.repo, "report", "SAT-1", "--out", str(out)).returncode, 0)
+        sys.path.insert(0, str(SRC)); import importlib, sg_validation; importlib.reload(sg_validation)
+        t0 = time.time()
+        self.assertTrue(sg_validation.result_section("## Result\n" + "<" * 300000 + "\n## Demo\nx"))
+        self.assertLess(time.time() - t0, 2)
+
+    def test_one_screenshot_can_show_two_scenarios(self):
+        self.ready()
+        self.fill_validation()
+        run(self.repo, "scenario", "SAT-1", "--name", "second", "--ac", "AC-1", "--expect", "ok", "--", PY, "-c", "print('ok')")
+        shot = self.tmp() / "shot.png"; shot.write_bytes(tiny_png())
+        for n in ("app runs", "second"):
+            self.assertEqual(run(self.repo, "evidence", "SAT-1", str(shot), "--scenario", n).returncode, 0)
+        self.assertEqual(len(json.loads((self.sd / "evidence.json").read_text())["evidence"]), 2)
+
+    def test_markdown_is_escaped(self):
+        R = self.R()
+        out = R.md_html("## Hi <b>x</b>\n\n<script>alert(1)</script>\n\n- a [link](javascript:alert(1))\n- `<img src=x onerror=1>`\n\n"
+                        "| a | b |\n|---|---|\n| <i>1</i> | 2 |\n\n```mermaid\nflowchart LR\nA-->B\n```\n")
+        self.assertNotIn("<script", out); self.assertNotIn("<b>", out); self.assertNotIn("<i>", out); self.assertNotIn("<img", out)
+        self.assertNotIn("href", out)
+        self.assertIn("&lt;script&gt;", out); self.assertIn("<h3>", out); self.assertIn("<table", out); self.assertIn("Mermaid source", out)
+
+    def test_report_page(self):
+        self.ready()
+        (self.repo / "app.py").write_text("x = 5\n")
+        self.fill_validation()
+        v = self.sd / "validation.md"
+        v.write_text(v.read_text().replace("## Result\nreal", "## Result\nLogin works. <script>alert('x')</script>"))
+        shot = self.tmp() / "shot.png"; shot.write_bytes(tiny_png())
+        run(self.repo, "evidence", "SAT-1", str(shot), "--scenario", "app runs", "--caption", 'cap"><script>')
+        out = self.tmp() / "page.html"
+        r = run(self.repo, "report", "SAT-1", "--out", str(out))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        page = out.read_text()
+        self.assertNotIn("<script", page.lower())
+        self.assertIn("default-src 'none'", page)
+        self.assertIn("data:image/png;base64,", page)
+        self.assertIn("app runs", page); self.assertIn("1/1", page)
+        self.assertIn('class="sg-tag reported"', page)
+        # a screenshot changed after it was recorded is not shown
+        f = next((self.sd / "evidence").iterdir()); f.write_bytes(tiny_png(4, 4))
+        run(self.repo, "report", "SAT-1", "--out", str(out))
+        page = out.read_text()
+        self.assertNotIn("data:image/png;base64,", page); self.assertIn("changed after it was recorded", page)
+        # default output is outside the repository
+        r = run(self.repo, "report", "SAT-1")
+        where = Path(r.stdout.split("-> ", 1)[1].strip())
+        self.assertTrue(where.is_file()); self.assertNotIn(self.repo.resolve(), where.resolve().parents)
+
+    def test_ci_summary_shows_the_result_and_builds_the_page(self):
+        self.ready()
+        (self.repo / "app.py").write_text("x = 5\n")
+        self.fill_validation()
+        v = self.sd / "validation.md"
+        v.write_text(v.read_text().replace("## Result\nreal", "## Result\nLogin works now. ![x](https://evil/x.png) <b>hi</b>"))
+        td = self.repo / "_ci"; td.mkdir()
+        (td / "results.json").write_text(json.dumps({"exit_code": 0, "command": "pytest"}))
+        tmp = self.tmp() / "runner"; tmp.mkdir()
+        summary = self.tmp() / "summary.md"
+        run(self.repo, "ci", "--tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x", "RUNNER_TEMP": str(tmp), "GITHUB_STEP_SUMMARY": str(summary)})
+        s = summary.read_text()
+        block = s.split("### Result (from validation.md, written by the agent)", 1)[1]
+        self.assertTrue(block.startswith("\n\n```text\nLogin works now."), block[:80])  # plain text: no images, links or HTML
+        self.assertTrue((tmp / "sg-report" / "validation-SAT-1.html").is_file())
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.assertIn("name: story-gate-validation", g.CI_YML)
+
+
 if __name__ == "__main__":
     unittest.main()
