@@ -882,8 +882,9 @@ def register_hermes(p, text, entry, dry_run, out, skill_src):
     new = merged_hermes_yaml(text, entry)  # raises before anything is written when the file isn't ours to change
     ex = hermes_extra_files()
     allow = ex["allowlist"].read_text(encoding="utf-8-sig") if ex["allowlist"].exists() else ""
+    new_allow = hermes_allowlist(allow, entry)  # also before any write: a broken approvals file leaves config.yaml alone
     apply_file(p, new, dry_run, out, check_json=False)
-    apply_file(ex["allowlist"], hermes_allowlist(allow, entry), dry_run, out)
+    apply_file(ex["allowlist"], new_allow, dry_run, out)
     out.append("  %s: approved story-gate's own Hermes hooks (you ran this setup; nothing else was approved)" % ex["allowlist"])
     others = hermes_profiles()
     if others:

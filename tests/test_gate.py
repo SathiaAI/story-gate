@@ -2935,6 +2935,12 @@ class TestHermesInstall(unittest.TestCase):
         self.T.unregister_user_hooks()
         self.assertFalse(self.cfgp.exists()); self.assertFalse((self.tmp / "hermes" / "shell-hooks-allowlist.json").exists())
 
+    def test_broken_hermes_approvals_file_changes_nothing(self):
+        (self.tmp / "hermes" / "shell-hooks-allowlist.json").write_text("[1, 2]")
+        before = self.cfgp.read_text()
+        out = self.install(("hermes",))
+        self.assertIn("NOT changed", "\n".join(out)); self.assertEqual(self.cfgp.read_text(), before)
+
     def test_hermes_with_its_own_hooks_section_is_left_alone(self):
         self.cfgp.write_text("hooks:\n  pre_tool_call:\n    - command: mine.sh\n", encoding="utf-8")
         out = self.install(("hermes",))
