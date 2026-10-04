@@ -289,6 +289,13 @@ def filter_conflicts(top):
 
 
 def enable_filter(top, py, launcher, dry_run=False):
+    """Enable or refresh the repository's checkout filter; return (success, messages).
+
+    Update local attributes and Git settings, record their prior state, and reapply
+    the filter to tracked hook files without unstaged changes. Existing unrelated
+    attribute lines and the managed marker's line endings are retained. Conflicts
+    or rejected Git settings return False; filesystem and process errors propagate.
+    With `dry_run`, report proposed settings without writing or reapplying files."""
     top = str(top)
     out = []
     conflicts = filter_conflicts(top)

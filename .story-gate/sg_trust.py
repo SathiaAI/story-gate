@@ -59,6 +59,9 @@ def user_home():
 
 def hermes_home():
     """Hermes Agent's data folder: HERMES_HOME, else %LOCALAPPDATA%\\hermes on Windows, else ~/.hermes.
+
+    Expand environment variables and ~ in a nonblank HERMES_HOME. STORY_GATE_USER_HOME
+    replaces the home directory for the .hermes fallback and bypasses LOCALAPPDATA.
     Source: hermes-agent hermes_constants.get_hermes_home (installation docs: Windows uses %LOCALAPPDATA%\\hermes)."""
     if os.environ.get("HERMES_HOME", "").strip():
         return Path(os.path.expanduser(os.path.expandvars(os.environ["HERMES_HOME"].strip())))
@@ -76,6 +79,7 @@ def detected_clients():
 
 
 def default_clients():
+    """Return Claude, Codex, Cursor, Gemini, and Windsurf, plus Hermes if its settings directory exists."""
     found = detected_clients()
     return [cl for cl in USER_CLIENTS if cl in ALWAYS_CLIENTS or cl in found]
 
@@ -631,7 +635,7 @@ def hermes_extra_files():
 
 
 def user_protected_paths():
-    """Places an agent must never write: the runtime, enrollment, agent key, and the user-level hook files."""
+    """Places an agent must never write: runtime, enrollment, agent key, user hooks, and Hermes skill and approvals."""
     return [G.config_dir()] + list(user_hook_files().values()) + list(hermes_extra_files().values())
 
 
@@ -679,6 +683,7 @@ HERMES_END = "# <<< story-gate <<<"
 
 
 def _yaml_str(v):
+    """Format a hook scalar as YAML: quote and escape strings, lowercase booleans, stringify other values."""
     return "'%s'" % str(v).replace("'", "''") if isinstance(v, str) else ("true" if v is True else "false" if v is False else str(v))
 
 
@@ -698,7 +703,9 @@ def hermes_block(entry, nl="\n"):
 
 
 def _strip_block(text):
-    """Text without our managed block (and the blank line we added before it)."""
+    """Return text without our managed blocks and one blank line immediately before each.
+
+    Preserve other text and line endings; raise TrustError if a block has no end marker."""
     out, skip = [], False
     for line in text.splitlines(True):
         if line.rstrip("\r\n") == HERMES_BEGIN:
@@ -717,8 +724,13 @@ def _strip_block(text):
 
 
 def merged_hermes_yaml(text, entry):
-    """config.yaml with our block replaced or appended. Refuses (TrustError) when the file already has its own top-level
-    `hooks:` key: merging into someone's YAML without a YAML parser could break their config, so that is done by hand."""
+    """Return config.yaml text with our managed block replaced or appended.
+
+    Raise TrustError for an unterminated managed block, an existing top-level hooks
+    key, a flow-style document, document end markers or later document starts, or a
+    detected unfinished flow collection on the last content line. An initial ---
+    is allowed. New lines use CRLF if present in the remaining text, otherwise LF;
+    this performs conservative checks, not full YAML validation."""
     rest = _strip_block(text)
     # Any spelling of a top-level `hooks` key (plain, quoted, or YAML's explicit `? hooks`): a second one would replace it.
     if re.search(r"(?m)^(?:\?[ \t]+)?([\"']?)hooks\1[ \t]*(?::|$)", rest):
@@ -738,8 +750,12 @@ def merged_hermes_yaml(text, entry):
 
 
 def hermes_allowlist(text, entry, remove=False):
-    """Hermes asks once per (event, command) before running a new shell hook, and skips the hook when nobody can answer
-    (its desktop app, the gateway). The person running setup approves exactly story-gate's own commands here."""
+    """Return approval JSON with story-gate commands replaced, or removed when `remove` is True.
+
+    Keep unrelated approvals and fields; new approvals use `entry`'s event/command
+    pairs with UTC timestamps. Blank input starts an empty object. Malformed JSON
+    raises JSONDecodeError, a non-object raises TrustError, and a non-iterable
+    approvals value raises TypeError. Nothing is written here."""
     data = json.loads(text) if text.strip() else {}
     if not isinstance(data, dict):
         raise TrustError("expected a JSON object")
@@ -864,6 +880,13 @@ def restore_file(path, out, dry_run=False):
 
 
 def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False, skill_src=None):
+    """Install hooks for the selected clients and return change reports.
+
+    Back up changed files and record them for uninstall. Hermes also gets command
+    approvals and, if `skill_src` is an existing file, a copy of that skill.
+    `dry_run` reports changes without writing. ValueError and TrustError become
+    per-client reports; unknown client IDs raise KeyError. I/O errors and TypeError
+    from malformed approval data propagate."""
     out, files, entries = [], user_hook_files(), hook_entries(py, gate)
     for cl in clients:
         p = files[cl]
@@ -879,6 +902,13 @@ def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False, skill_src
 
 
 def register_hermes(p, text, entry, dry_run, out, skill_src):
+    """Install the Hermes hook block, command approvals, and an optional skill file.
+
+    Append changes and profile warnings to `out`; `dry_run` performs no writes.
+    Validate config and approval text before writing either; TrustError, JSON
+    parsing errors, TypeError from malformed approvals, and I/O errors propagate.
+    Later write or skill-read failures can leave earlier changes in place. Missing
+    `skill_src` files are skipped."""
     new = merged_hermes_yaml(text, entry)  # raises before anything is written when the file isn't ours to change
     ex = hermes_extra_files()
     allow = ex["allowlist"].read_text(encoding="utf-8-sig") if ex["allowlist"].exists() else ""
@@ -895,6 +925,11 @@ def register_hermes(p, text, entry, dry_run, out, skill_src):
 
 
 def unregister_user_hooks(dry_run=False):
+    """Remove story-gate user hooks and Hermes extras, returning change reports.
+
+    Restore recorded files when safe; otherwise remove story-gate entries where
+    possible. Parsing and trust failures become reports; I/O errors propagate.
+    `dry_run` reports proposed changes without writing."""
     out = []
     unregister_hermes(dry_run, out)
     for cl, p in user_hook_files().items():
@@ -911,7 +946,9 @@ def unregister_user_hooks(dry_run=False):
 
 
 def hermes_profiles():
-    """Other Hermes profiles (each has its own config.yaml): story-gate protects only the main one, so it says so."""
+    """Return sorted names of profiles with config.yaml under the current Hermes home.
+
+    Return an empty list on OSError; these profiles need their own hook installation."""
     d = hermes_home() / "profiles"
     try:
         return sorted(p.name for p in d.iterdir() if p.is_dir() and (p / "config.yaml").is_file())
@@ -939,7 +976,12 @@ def _hermes_commands(text):
 
 def hermes_problems():
     """Problems that would leave Hermes's live checks silently off. Hermes skips a hook command it hasn't approved when
-    nobody can answer its prompt, so each command in our block must have a matching approval (same event, same text)."""
+    nobody can answer its prompt, so each command in our block must have a matching approval (same event, same text).
+
+    Return no problems when config.yaml or our marker is absent. Caught approval-file
+    read, JSON, or object-shape errors count as no approvals; config read errors
+    and TypeError from malformed approval entries propagate. A block with no
+    recognized commands is reported as damaged."""
     p, ex = user_hook_files()["hermes"], hermes_extra_files()
     if not p.is_file() or HERMES_BEGIN not in p.read_text(encoding="utf-8-sig", errors="ignore"):
         return []
@@ -960,8 +1002,12 @@ def hermes_problems():
 
 
 def unregister_hermes(dry_run, out):
-    """Hermes's config.yaml and allowlist are shared with Hermes itself, so only our block and our approvals come out;
-    the skill folder story-gate created is put back as it was."""
+    """Remove our Hermes config block and approvals, and restore the skill file when safe.
+
+    Delete config or approval files only if story-gate created them and they are
+    empty after removal. Append results to `out`; `dry_run` makes no changes.
+    Parsing and trust errors become reports; I/O errors propagate. A skill changed
+    since installation may be left in place with a report for manual cleanup."""
     p, ex = user_hook_files()["hermes"], hermes_extra_files()
     for f, fix in ((p, _strip_block), (ex["allowlist"], lambda t: hermes_allowlist(t, {"hooks": {}}, remove=True))):
         if not f.exists():

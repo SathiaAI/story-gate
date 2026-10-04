@@ -88,6 +88,9 @@ class Wizard:
     """State machine behind the page. Each step records ok / error / waiting; the page polls /state."""
 
     def __init__(self, top, repo, py, token=None, open_browser=True):
+        """Initialize setup for local `top` and GitHub `repo` (owner/name), using `py` for hooks.
+
+        Preselect detected tools, or Claude, Codex, and Cursor when none are found."""
         self.top, self.repo, self.py, self.open_browser = Path(top), repo, py, open_browser
         self.secret = secrets.token_urlsafe(24)
         self.agent_state = secrets.token_urlsafe(16)
@@ -112,13 +115,17 @@ class Wizard:
             self.st[step] = {"status": status, "msg": msg}
 
     def snapshot(self):
+        """Return page state, copying steps, clients, and approvers while holding the lock."""
         with self.lock:
             return {"steps": json.loads(json.dumps(self.st)), "login": self.login, "repo": self.repo, "device": self.device,
                     "pr": self.pr, "private_free": self.private_free, "clients": list(self.clients),
                     "approvers": list(self.approvers)}
 
     def set_clients(self, text):
-        """The AI tools to protect on this computer, as ticked on the page (only tools story-gate can check live)."""
+        """Select comma-separated client IDs in page order, removing duplicates.
+
+        Return False without changing the selection if no IDs remain or any are
+        unknown; otherwise return True. Empty entries are ignored; spaces are not stripped."""
         want = [x for x in (text or "").split(",") if x]
         known = [cl for cl, _ in HOOKED_TOOLS]
         if not want or any(x not in known for x in want):
@@ -229,7 +236,12 @@ class Wizard:
 
     # ---- step 4: setup pull request, then branch rules after the merge
     def check_approvers(self, text):
-        """Other GitHub users who may approve work. Each must exist and have write access, or GitHub ignores them as owners."""
+        """Return additional approvers from comma- or whitespace-separated GitHub usernames.
+
+        Strip leading @ signs and skip the signed-in user and duplicates ignoring case.
+        Require admin, maintain, or write access to this repository. Raise RuntimeError
+        for invalid names or permission responses that do not confirm access; network
+        and response-decoding errors propagate. Empty input returns an empty list."""
         names, bad = [], []
         for raw in (text or "").replace(",", " ").split():
             n = raw.strip().lstrip("@")
@@ -249,6 +261,11 @@ class Wizard:
         return names
 
     def open_pr(self, approvers_text=""):
+        """Validate additional approvers, prepare the setup PR, and wait for merge in the background.
+
+        `approvers_text` is parsed by check_approvers. Store the approvers and PR details
+        on the wizard; an existing open setup PR may be reused. Validation, setup, and
+        GitHub failures propagate; the background wrapper reports them on the page."""
         self.set("merge", "working", "Preparing the setup pull request")
         self.approvers = self.check_approvers(approvers_text)
         st, info, _ = G.call("GET", "/repos/%s" % self.repo, self.token)
@@ -269,6 +286,11 @@ class Wizard:
         self.background(lambda: self._wait_merge(base))
 
     def _wait_merge(self, base):
+        """Poll for merge up to 1,800 times, sleeping two seconds between attempts.
+
+        On merge, configure GitHub rules and Actions permissions for the selected owners,
+        then finish local setup using `base`. Exhausted polling sets the merge step to
+        error and returns; API, filesystem, and finish errors propagate to the background wrapper."""
         for _ in range(1800):
             if G.pr_merged(self.token, self.repo, self.pr["number"]):
                 break
@@ -289,6 +311,11 @@ class Wizard:
 
     # ---- last: protect this computer and check everything
     def finish(self, base):
+        """Fetch `base`, install user hooks for the selected clients, and run doctor.
+
+        Attempt a fast-forward only on a clean checkout of `base`. A failed install or
+        FAIL lines from doctor set the done step to error; otherwise mark it ok.
+        Process launch errors and Git timeouts propagate to the background wrapper."""
         self.set("done", "working", "Turning on protection on this computer")
         git(self.top, "fetch", "--quiet", "origin", base)
         if git(self.top, "rev-parse", "--abbrev-ref", "HEAD") == base and not git(self.top, "status", "--porcelain"):
@@ -306,6 +333,7 @@ class Wizard:
 
 # ------------------------------------------------------------------ the page
 def make_handler(wz):
+    """Return an HTTP handler bound to the wizard for setup pages, state, and actions."""
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -354,6 +382,11 @@ def make_handler(wz):
             return self._send(404, "not found")
 
         def do_POST(self):
+            """Handle a setup action after checking the loopback Host, token, and Origin.
+
+            Reject invalid access with 403 and invalid tool selections with 400; otherwise
+            return the current state as JSON, even for an unknown action. Key saving and PR preparation run in the background. Invalid
+            Content-Length values raise ValueError; request I/O errors propagate."""
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(u.query)
             origin = self.headers.get("Origin", "")
@@ -413,7 +446,7 @@ button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;bo
 
 
 def tools_html(wz):
-    """Tickboxes for the tools story-gate can check live (found ones pre-ticked), then the ones covered another way."""
+    """Return tool checkboxes reflecting wz.clients, detection hints, and tools without live checks."""
     rows = "".join("<label class=tool><input type=checkbox name=c value=%s%s> %s%s</label>"
                    % (cl, " checked" if cl in wz.clients else "", html.escape(name), (" <span>found on this computer</span>" if cl in wz.found else "")
                       + (" <em>(story-gate approves its own check inside Hermes for you)</em>" if cl == "hermes" else ""))
@@ -424,6 +457,7 @@ def tools_html(wz):
 
 
 def page(wz):
+    """Render the setup page with the wizard's tool selection and token for actions and polling."""
     t = wz.secret
     steps = [
         ("signin", "Sign in to GitHub", "So story-gate can set up this repository for you.",

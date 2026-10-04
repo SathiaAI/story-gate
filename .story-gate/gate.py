@@ -1330,7 +1330,9 @@ SHELL_TOOLS = ("bash", "shell", "run_shell_command", "terminal", "exec_command",
 
 
 def shell_command(payload):
-    """The shell command an agent is about to run, or None for non-shell tools."""
+    """Return command text, including Hermes execute_code source, or None if unrecognized.
+
+    List commands are joined with spaces; patch text in tool input is excluded."""
     name = str(payload.get("tool_name") or payload.get("toolName") or "").lower()
     ti = payload.get("tool_input") or payload.get("toolInput") or payload.get("tool_info") or {}
     if isinstance(payload.get("command"), str) and not ti:  # Cursor beforeShellExecution
@@ -1481,7 +1483,12 @@ def edited_paths(payload):
 
 
 def hook_out(client, event, msg, block, notice=None):
-    """Exit 2 + stderr blocks in every client that has hooks. Warnings use each client's visible channel."""
+    """Write a client hook response and return its exit status.
+
+    Blocking responses use stderr and return 2, except Hermes stop events: any
+    nonempty message requests a JSON block, regardless of `block`, and returns 0.
+    Other responses return 0; Hermes pre-event warnings are suppressed. `notice`
+    adds a user-visible session message for Claude, Codex, and Gemini."""
     if client == "hermes" and event == "stop":  # pre_verify: exit 2 isn't read here; "block" + reason means keep working
         print(json.dumps({"decision": "block", "reason": msg}) if msg else "{}")
         return 0
@@ -1671,7 +1678,13 @@ def post_edit(payload, c):
 
 
 def gate_check(event, payload, c):
-    """Returns (message, problem?)."""
+    """Return (message, problem) for a pre-edit or stop check; callers decide enforcement.
+
+    Pre-edit checks require READY and containment for code writes, including Hermes
+    execute_code calls with no detected paths. Stop checks require DONE for code
+    changes, skip retries in warn mode unless stop is enforced, and update .stops
+    to let the session end at STOP_LIMIT retries. Invalid retry counters raise
+    ValueError or TypeError; filesystem errors propagate to the caller."""
     if event == "pre":
         cmd = shell_command(payload)
         if cmd is not None and RUNTIME and runs_repo_gate_code(cmd):
@@ -2285,7 +2298,11 @@ def dash_yml():
 
 
 def cmd_user(cmd, kv, rest):
-    """install --user / uninstall --user / enroll / unenroll / upgrade / rollback / release-sign."""
+    """install --user / uninstall --user / enroll / unenroll / upgrade / rollback / release-sign.
+
+    Install defaults to the original five clients plus Hermes when detected; an
+    explicit clients option overrides that list. Hermes also gets hook approvals
+    and the bundled skill. Unknown clients raise SystemExit before installation."""
     dry = "--dry-run" in rest
     if cmd == "install":
         py = kv.get("python") or sys.executable
@@ -2611,7 +2628,11 @@ def cmd_hook_trust(rest):
 
 
 def cmd_hook_selftest():
-    """Run each registered user-level hook command exactly as the AI tool would, with a sample edit, and time it."""
+    """Invoke the trusted pre-edit launcher for each registered client with a sample edit.
+
+    Return 0 if every invocation exits 0 or 2 in less than half its 15-second
+    budget; return 1 for other results or a missing runtime. A 60-second subprocess
+    timeout raises TimeoutExpired, and process launch errors propagate."""
     act = T.read_json(T.active_path())
     if not act:
         print("No trusted runtime installed. Run: gate.py install --user"); return 1
@@ -2643,7 +2664,12 @@ def shutil_rmtree(p):
 
 
 def cmd_doctor(repo=None, strict=False, prove=False):
-    """Plain-English health check. With --repo it also checks GitHub protection and agent identity."""
+    """Plain-English health check. With --repo it also checks GitHub protection and agent identity.
+
+    Hermes checks include matching hook approvals and a report of other profiles.
+    Return 1 for invalid configuration, any recorded failure with `strict`, or a
+    failed checkout-filter proof with `prove`; otherwise return 0. May advance the
+    accepted policy baseline and contact the configured judge and GitHub."""
     import sg_github as G
     fails = []
     try:
