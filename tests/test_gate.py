@@ -3310,6 +3310,13 @@ class TestPlainWriting(Base):
 class TestValidation(Base):
     """PR #17: validation.md and scenario runs prove each acceptance criterion works when it runs."""
 
+    def tmp(self):
+        """A scratch folder outside the repository, removed after the test."""
+        if not hasattr(self, "_tmp"):
+            self._tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, self._tmp, True)
+        return self._tmp
+
     def V(self):
         sys.path.insert(0, str(SRC))
         import importlib, sg_validation
@@ -3455,7 +3462,7 @@ class TestValidation(Base):
         self.ready()
         self.fill_validation()
         run(self.repo, "scenario", "SAT-1", "--name", "browser", "--ac", "AC-1", "--expect", "ok", "--local-only", "desktop", "--", PY, "-c", "print('ok')")
-        td = self.repo.parent / (self.repo.name + "-ci")
+        td = self.tmp() / "ci"
         r = run(self.repo, "ci-tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
         self.assertIn("scenarios: 1 of 1 passed", r.stdout)
         res = json.loads((td / "scenarios.json").read_text())["results"]
@@ -3547,10 +3554,10 @@ class TestValidation(Base):
     def test_scenarios_cannot_overwrite_ci_test_results(self):
         self.ready()
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, test_command='%s -c "import sys; sys.exit(4)"' % PY)
-        td = self.repo.parent / (self.repo.name + "-ci2")
+        td = self.tmp() / "ci2"
         forge = "import json, os; json.dump({'exit_code': 0}, open(os.environ['SG_OUT'] + '/results.json', 'w')); print('ok')"
         run(self.repo, "scenario", "SAT-1", "--name", "forge", "--ac", "AC-1", "--expect", "ok", "--", PY, "-c", forge,
-            env={"SG_OUT": str(self.repo.parent)})
+            env={"SG_OUT": str(self.tmp())})
         r = run(self.repo, "ci-tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x", "SG_OUT": str(td)})
         self.assertIn("scenarios:", r.stdout)
         self.assertEqual(json.loads((td / "results.json").read_text())["exit_code"], 4)

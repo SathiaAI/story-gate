@@ -159,7 +159,7 @@ def run(s, root, work_state, source, timeout=None):
                 pass
             size = buf.seek(0, 2)
             buf.seek(max(0, size - MATCH_LIMIT))  # the end of the output: where results and errors are
-            out = buf.read(MATCH_LIMIT).decode("utf-8", "replace")
+            out = buf.read(MATCH_LIMIT).decode("utf-8", "replace").replace("\r\n", "\n")  # Windows line ends: '$' still matches
     except OSError as e:
         note = "could not start: %s" % e
     matched = bool(code is not None and re.search(s["expect_output"], out))
