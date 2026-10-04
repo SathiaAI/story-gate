@@ -490,7 +490,12 @@ def _resolve_policy_commit(top, ref):
 
 
 def policy_text(top, ref, name):
-    """Contents of .story-gate/<name> on the policy ref, pinned to the commit it resolves to right now. None if absent."""
+    """Return .story-gate/<name> from ref's resolved policy commit in repository top.
+
+    Decode UTF-8 with an optional BOM, replacing invalid bytes. Return None when
+    the ref cannot be resolved, the file is absent, or Git fails or times out.
+    OSError from starting Git propagates.
+    """
     sha = policy_commit(top, ref)
     if not sha:
         return None
@@ -498,7 +503,7 @@ def policy_text(top, ref, name):
         r = subprocess.run(["git", "show", "%s:.story-gate/%s" % (sha, name)], cwd=top, capture_output=True, timeout=GIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         return None  # cfg() then fails closed
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    return r.stdout.decode("utf-8-sig", "replace") if r.returncode == 0 else None  # a BOM (Notepad) is not an error
 
 
 def tighten(policy, local):
