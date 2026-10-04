@@ -3031,6 +3031,11 @@ class TestVSCodeHooks(Base):
                          ("AskUserQuestion", {"question": "story id?"}), ("Bash", {"command": "git status --short"})):
             r = self.hook("pre", self.p(tool, **ti))
             self.assertEqual((r.returncode, r.stdout.strip()), (0, "{}"), tool)
+        # fail closed: a tool we don't know (here one that writes) goes through the checks; so does an unknown shell tool
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("save_file", target=app, text="x"))))
+        self.assertIn("READY", self.denied(self.hook("pre", self.p("run_in_terminal2", command="echo y > app.py"))))
+        r = self.hook("pre", self.p("run_in_terminal2", command="cat .story-gate/config.json > /tmp/x; echo z > .story-gate/config.json"))
+        self.assertIn("story-gate files", self.denied(r))
         self.cfg(mode="warn")
         r = self.hook("pre", self.p("Edit", path=app, old_str="x = 1", new_str="x = 2"))
         self.assertEqual(r.returncode, 0)

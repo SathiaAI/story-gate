@@ -1327,7 +1327,18 @@ def detect_client(payload, hint):
 
 STOP_LIMIT = 3  # blocked stops in a row before an enforce-mode session is allowed to end (CI still blocks)
 SHELL_TOOLS = ("bash", "shell", "run_shell_command", "terminal", "exec_command", "local_shell", "execute_code", "run_in_terminal")
-EDIT_TOOL = re.compile(r"edit|write|create|replace|insert|patch|delete|remove|rename|move", re.I)  # VS Code tools that change files
+# VS Code runs every hook for every tool (no matchers). Fail closed: only these tools, which only read or ask, skip the
+# checks; anything else (a new or unknown tool) goes through them. Names seen live (Read, Glob, ...) and from
+# microsoft/vscode-copilot-chat toolNames.ts (October 2026).
+VSCODE_READ_ONLY = frozenset(x.lower() for x in (
+    "Read", "Glob", "Grep", "LS", "AskUserQuestion", "TodoWrite", "WebFetch", "WebSearch",
+    "read_file", "file_search", "grep_search", "semantic_search", "list_dir", "get_errors", "get_changed_files",
+    "read_project_structure", "search_workspace_symbols", "view_image", "fetch_webpage", "test_failure", "get_vscode_api",
+    "github_repo", "test_search", "get_project_setup_info", "get_search_view_results", "get_terminal_output",
+    "terminal_selection", "terminal_last_command", "get_task_output", "read_notebook_cell_output",
+    "copilot_getnotebooksummary", "manage_todo_list", "vscode_get_confirmation", "vscode_get_confirmation_with_options",
+    "vscode_get_terminal_confirmation", "vscode_askquestions", "tool_search", "resolve_memory_file_uri"))
+SHELLISH = re.compile(r"bash|shell|terminal|run_task|create_and_run_task|exec", re.I)  # VS Code tools that run commands
 
 
 def shell_command(payload):
@@ -1340,7 +1351,8 @@ def shell_command(payload):
         cmd = ti.get("command") or ti.get("command_line") or ti.get("cmd") or (ti.get("code") if name == "execute_code" else None)
         if isinstance(cmd, list):
             cmd = " ".join(map(str, cmd))
-        if isinstance(cmd, str) and "*** Begin Patch" not in cmd and (name in SHELL_TOOLS or "command_line" in ti or not name):
+        if isinstance(cmd, str) and "*** Begin Patch" not in cmd and (name in SHELL_TOOLS or "command_line" in ti or not name
+                                                                      or SHELLISH.search(name)):
             return cmd
     return None
 
@@ -1601,8 +1613,7 @@ def cmd_hook(client, event):
                                 "story-gate can't vouch for them: %s. If they're wanted, a code owner lists the exact commands in "
                                 "project_hooks_allowed in .story-gate/config.json on the default branch."
                                 % ("BLOCKED" if enforce else "warning only", "; ".join("%s: %s" % (f, cmd[:80]) for f, cmd in unknown[:5])), enforce)
-        if (event == "pre" and client == "vscode" and shell_command(payload) is None
-                and not EDIT_TOOL.search(str(payload.get("tool_name") or ""))):
+        if event == "pre" and client == "vscode" and str(payload.get("tool_name") or "").lower() in VSCODE_READ_ONLY:
             return hook_out(client, event, "", False)  # VS Code runs the hook for every tool (no matchers): reads pass
         if event == "post":
             return hook_out(client, "post", post_edit(payload, c), False)  # checkpoints inform; containment happens at the next pre-edit
