@@ -491,6 +491,7 @@ def spec_files(c):
 
 
 def policy_fingerprint(c):
+    """Hash of the policy settings that affect scoring, so a stricter config re-scores stored verdicts."""
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
@@ -505,6 +506,7 @@ def ready_hash_from(story, context, tests, spec_pairs, c):
 
 
 def inputs_hash(sd, phase, c=None):
+    """Hash of the evidence a phase's verdict rests on, so it is re-scored when any of that evidence changes."""
     if phase == "ready":
         try:
             c = c or cfg()
@@ -726,6 +728,7 @@ def wj_text(p, text):
 
 
 def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False):
+    """Structural (non-judge) DONE checks: the ready gate, tests, handoff, learnings and now validation evidence."""
     out = {}
     rj = load_json(sd / "ready.json")
     out["ready_gate_passed"] = (passed(rj, c, sd), "READY gate not passed or out of date (overall=%s; the story, test plan or PRD/TRD changed since) - re-run READY" % rj.get("overall", "never run"))
@@ -910,6 +913,7 @@ CLIENT_ENV = (("CLAUDECODE", "claude-code"), ("CURSOR_TRACE_ID", "cursor"), ("CO
 
 
 def cmd_start(sid, client=None, model=None):
+    """Create (or complete) a story's folder, including validation.md's template for stories started before it existed."""
     sd = sdir(sid)
     sd.mkdir(parents=True, exist_ok=True)
     client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
@@ -1098,6 +1102,7 @@ def cmd_scenario(sid, kv, remove, argv):
 
 
 def print_scenario(s, r):
+    """Print one scenario's result (pass/fail, exit code, whether the output matched) to the console."""
     print("story-gate: scenario '%s' (%s) %s - exit %s (expected %s), output %s%s" % (
         s.get("name"), ", ".join(map(str, s.get("acs") or [])), "PASSED" if r.get("passed") else "FAILED", r.get("exit_code"), s.get("expect_exit"),
         "matched" if r.get("output_matched") else "did NOT match --expect", ("; " + r["note"]) if r.get("note") else ""))
@@ -3094,6 +3099,7 @@ def cmd_setup(cmd, kv, rest):
 
 
 def flags(argv):
+    """Split argv into (--key value / --flag) pairs and the remaining positional arguments."""
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
@@ -3109,6 +3115,7 @@ def flags(argv):
 
 
 def main(argv):
+    """CLI entry point: dispatch argv[0] to the matching command, printing usage when there's none."""
     if not argv:
         print(__doc__); return 0
     cmd, args = argv[0], argv[1:]

@@ -60,6 +60,7 @@ def redact(text, env=None):
 
 
 def spec_hash(s):
+    """Fingerprint of a scenario's own fields, so a result is only trusted against the spec that produced it."""
     keep = {k: s.get(k) for k in ("name", "acs", "argv", "expect_exit", "expect_output", "timeout", "local_only")}
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -109,11 +110,13 @@ def specs_of(doc):
 
 
 def results_of(doc):
+    """The scenario results in a scenario_results.json document; anything malformed is dropped, never a crash."""
     r = doc.get("results") if isinstance(doc, dict) else None
     return {k: v for k, v in r.items() if isinstance(v, dict)} if isinstance(r, dict) else {}
 
 
 def _kill(p):
+    """Best-effort kill of a scenario's whole process group (or process tree on Windows)."""
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, timeout=30)
@@ -128,6 +131,7 @@ def _kill(p):
 
 
 def fingerprint_of(state):
+    """Hash a work_state() mapping down to the short fingerprint stored with a scenario result."""
     h = hashlib.sha256()
     for n, body in sorted(state.items()):
         h.update(n.encode("utf-8", "replace") + b"\0" + body)
