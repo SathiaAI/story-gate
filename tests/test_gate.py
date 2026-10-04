@@ -3716,5 +3716,123 @@ class TestValidationPage(Base):
         self.assertIn("name: story-gate-validation", g.CI_YML)
 
 
+class TestReadmeMessaging(unittest.TestCase):
+    """Acceptance checks for the README and the two distributed skill descriptions."""
+
+    def skill_description(self, path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "---", str(path))
+        self.assertIn("---", lines[1:], "missing closing frontmatter delimiter: %s" % path)
+        header = lines[1:lines.index("---", 1)]
+        self.assertIn("name: story-gate", header)
+        descriptions = [line.removeprefix("description: ") for line in header
+                        if line.startswith("description: ")]
+        self.assertEqual(len(descriptions), 1, str(path))
+        # These files use JSON-compatible quoted YAML scalars. Parsing catches
+        # unescaped quotes/control characters without adding a YAML dependency.
+        description = json.loads(descriptions[0])
+        self.assertIsInstance(description, str)
+        self.assertTrue(description.strip(), str(path))
+        return description
+
+    def test_skill_descriptions_are_valid_frontmatter_strings(self):
+        for path in (SRC.parent / "SKILL.md", SRC / "SKILL.md"):
+            with self.subTest(path=path):
+                self.skill_description(path)
+
+    def test_distributed_skill_descriptions_stay_in_sync(self):
+        # The root skill and installable payload have different bodies, but
+        # clients must receive the same automatic-triggering description.
+        self.assertEqual(self.skill_description(SRC.parent / "SKILL.md"),
+                         self.skill_description(SRC / "SKILL.md"))
+
+    def test_skill_description_includes_triggers_and_proof_requirements(self):
+        description = self.skill_description(SRC / "SKILL.md")
+        for term in (".story-gate/", "feature", "bug fix", "story", "READY",
+                     "checkpoints", "acceptance criteria", "tests", "scenarios",
+                     "CI", "validation.md", "handoff", "learnings", "DONE"):
+            with self.subTest(term=term):
+                self.assertIn(term, description)
+
+    def test_skill_description_reserves_approval_and_merge_for_the_human(self):
+        description = self.skill_description(SRC / "SKILL.md")
+        self.assertRegex(description, r"(?i)\bhuman\b[^.;]*\bapproves\b[^.;]*\bGitHub\b")
+        self.assertRegex(description, r"(?i)\bnever approve or merge\b")
+
+    def test_readme_local_markdown_links_resolve(self):
+        import re
+        from urllib.parse import unquote, urlsplit
+
+        readme = (SRC.parent / "README.md").read_text(encoding="utf-8")
+        links = re.findall(r"\[[^\]]+\]\(([^\s)]+)\)", readme)
+        self.assertTrue(links, "README should link to the detailed guides")
+        for link in links:
+            url = urlsplit(link)
+            if url.scheme or url.netloc or not url.path:
+                continue
+            with self.subTest(link=link):
+                self.assertTrue((SRC.parent / unquote(url.path)).is_file(), link)
+
+    def test_readme_embeds_validation_screenshot_with_alternative_text(self):
+        from html.parser import HTMLParser
+
+        class Images(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.images = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "img":
+                    self.images.append(dict(attrs))
+
+        parser = Images()
+        parser.feed((SRC.parent / "README.md").read_text(encoding="utf-8"))
+        screenshots = [attrs for attrs in parser.images
+                       if attrs.get("src") == "docs/assets/validation-page.png"]
+        self.assertEqual(len(screenshots), 1, "README must show the bundled validation example")
+        self.assertTrue(screenshots[0].get("alt", "").strip(), "provide a text alternative")
+        self.assertTrue((SRC.parent / screenshots[0]["src"]).is_file())
+
+    def test_validation_screenshot_is_complete_png(self):
+        import struct
+        import zlib
+
+        # Catch missing/LFS-pointer assets, truncated uploads and corrupt chunks
+        # without depending on an image library or snapshotting the image bytes.
+        data = (SRC.parent / "docs/assets/validation-page.png").read_bytes()
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        offset = 8
+        chunks = []
+        compressed = bytearray()
+        while offset < len(data):
+            self.assertGreaterEqual(len(data) - offset, 12, "truncated PNG chunk")
+            size, kind = struct.unpack_from(">I4s", data, offset)
+            end = offset + 8 + size
+            self.assertLessEqual(end + 4, len(data), "truncated %r chunk" % kind)
+            payload = data[offset + 8:end]
+            checksum = struct.unpack_from(">I", data, end)[0]
+            self.assertEqual(zlib.crc32(kind + payload) & 0xffffffff, checksum, repr(kind))
+            if not chunks:
+                self.assertEqual(kind, b"IHDR")
+                self.assertEqual(size, 13)
+                width, height = struct.unpack_from(">II", payload)
+                self.assertGreater(width, 0)
+                self.assertGreater(height, 0)
+            if kind == b"IDAT":
+                compressed.extend(payload)
+            chunks.append(kind)
+            offset = end + 4
+            if kind == b"IEND":
+                self.assertEqual(size, 0)
+                break
+        self.assertEqual(chunks[-1], b"IEND", "missing end of image")
+        self.assertEqual(offset, len(data), "unexpected data after IEND")
+        self.assertTrue(compressed, "missing image data")
+        decoder = zlib.decompressobj()
+        self.assertTrue(decoder.decompress(compressed), "empty image data")
+        self.assertTrue(decoder.eof, "incomplete compressed image data")
+        self.assertFalse(decoder.unused_data, "unexpected data after compressed image")
+
+
 if __name__ == "__main__":
     unittest.main()
