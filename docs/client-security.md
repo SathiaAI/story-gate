@@ -2,15 +2,15 @@
 
 `gate.py install --user` puts story-gate's hooks in each tool's **user** settings and points them at the signed copy in your user folder. Until the first signed release is published, pilots install with `gate.py install --user --unsigned` (doctor then says the copy is unsigned). This table says what each tool's own documentation promises, so we only claim protection where the tool does. Checked October 2026. "Unverified" means the tool's docs don't say.
 
-| | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build |
-|---|---|---|---|---|---|---|
-| **User-level hook file** | `~/.claude/settings.json` | `~/.codex/hooks.json` | `~/.cursor/hooks.json` | `~/.gemini/settings.json` | `~/.codeium/windsurf/hooks.json` | `~/.grok/hooks/*.json` |
-| **User and project hooks both run** | Yes | Yes | Yes (any "deny" wins) | Unverified | Yes | Unverified |
-| **A blocking pre-edit hook stops the edit** | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) |
-| **Trust step for project hooks** | Not documented for settings hooks | Yes, per hook, re-asked when a hook changes | Workspace trust | Changed hooks are flagged | Unverified | Folder-level (`/hooks-trust`) |
-| **If a hook times out or crashes** | The edit goes ahead (fail-open) | Unverified | Goes ahead unless `failClosed: true` (story-gate sets it) | Goes ahead (warning) | Unverified | Goes ahead; default timeout is only 5 s |
-| **Session-start instructions from the verified copy** | Yes (`SessionStart`) | Yes (`SessionStart`) | Yes (`sessionStart`) | Yes (`SessionStart`) | No (hooks can't add context) | Unverified |
-| **story-gate support** | Full | Full (trust the hooks once in `/hooks`) | Full | Full | Registered; behaviour partly unverified | Reduced protection: not registered |
+| | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build | Hermes |
+|---|---|---|---|---|---|---|---|
+| **User-level hook file** | `~/.claude/settings.json` | `~/.codex/hooks.json` | `~/.cursor/hooks.json` | `~/.gemini/settings.json` | `~/.codeium/windsurf/hooks.json` | `~/.grok/hooks/*.json` | `hooks:` block in `config.yaml` (`HERMES_HOME`; Windows `%LOCALAPPDATA%\hermes`) |
+| **User and project hooks both run** | Yes | Yes | Yes (any "deny" wins) | Unverified | Yes | Unverified | No project hooks |
+| **A blocking pre-edit hook stops the edit** | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) | Yes (exit 2) |
+| **Trust step for project hooks** | Not documented for settings hooks | Yes, per hook, re-asked when a hook changes | Workspace trust | Changed hooks are flagged | Unverified | Folder-level (`/hooks-trust`) | Asks once per hook command (story-gate approves its own when you run setup) |
+| **If a hook times out or crashes** | The edit goes ahead (fail-open) | Unverified | Goes ahead unless `failClosed: true` (story-gate sets it) | Goes ahead (warning) | Unverified | Goes ahead; default timeout is only 5 s | Blocks for edits and commands (`fail_closed: true` on `pre_tool_call`); the end-of-turn check fails open |
+| **Session-start instructions from the verified copy** | Yes (`SessionStart`) | Yes (`SessionStart`) | Yes (`sessionStart`) | Yes (`SessionStart`) | No (hooks can't add context) | Unverified | No (reads AGENTS.md and the skill) |
+| **story-gate support** | Full | Full (trust the hooks once in `/hooks`) | Full | Full | Registered; behaviour partly unverified | Reduced protection: not registered | Full: edits, commands, and the end of each turn that edited code (`pre_verify`) |
 
 **What this means**
 - **Claude Code, Codex, Cursor:** story-gate's hooks run from your user settings alongside any project hooks, and a "block" from story-gate stops the edit.
@@ -19,15 +19,18 @@
 - **Fail-open tools:** a crash or timeout lets the edit through. story-gate keeps its pre-edit hook fast (it reads local files only) and fails closed inside the hook itself. CI still checks every PR either way.
 - **Windsurf/Devin:** hooks are registered and blocking is documented, but trust and timeout behaviour aren't. Treat it as partly protected.
 - **Grok:** it also reads Claude Code's and Cursor's hook files, so it may pick up story-gate's Claude hooks. Merging isn't documented, so story-gate doesn't register Grok hooks or claim protection there. Run `gate.py status` and rely on CI.
+- **VS Code (Copilot agent):** live checks are coming next, after a test in a real VS Code session. Until then it follows the rules (AGENTS.md, `.agents/skills`) and CI checks its pull requests. story-gate already keeps a branch's `.github/hooks/*.json` (VS Code's project hooks) off disk.
+- **Hermes:** story-gate checks edits (`write_file`, `patch`), commands (`terminal`, `execute_code`; a Python cell always needs a READY story, since it can write anywhere) and the end of each turn that edited code (`pre_verify`; Hermes skips it on turns without edits, and CI still checks the pull request). Hermes asks you once before running a new hook command and skips it when nobody can answer (its desktop app, the gateway), so `install --user` approves exactly story-gate's own commands in `shell-hooks-allowlist.json`; `uninstall --user` takes them out. If your `config.yaml` already has its own `hooks:` section or uses YAML document markers, story-gate doesn't edit it and tells you what to add. `doctor` fails if Hermes's approval no longer matches the hook commands (Hermes would skip them). Other Hermes profiles keep their own settings and aren't protected unless you run `install --user` with `HERMES_HOME` set to that profile's folder; `doctor` lists them. Pre-edit warnings (warn mode) reach Hermes at the end of the turn. The skill goes in `skills/story-gate`.
+- **Antigravity:** documents hooks in `.agents/hooks.json`; story-gate keeps a branch's version of that file off disk, but doesn't register Antigravity hooks until we've seen them run. pi, Roo Code: rules + skill, CI. ChatGPT and Google AI Studio don't work on your computer's files: CI checks their pull requests.
 - **Any tool:** a repository can ship its own project hooks. See the next section for what story-gate does about that.
 
 ## Hooks shipped inside a repository
 
-| | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build |
-|---|---|---|---|---|---|---|
-| **Checkout filter** (enrolled repositories) | Yes | Yes (`.codex/config.toml` is kept at the default branch's version) | Yes | Yes | Yes | Yes |
-| **Tool's own hard switch** | `allowManagedHooksOnly` (story-gate lockdown, optional) | Re-asks trust when a hook changes | None documented | Folder trust (`security.folderTrust.enabled`) | None documented | `/hooks-trust`, per folder |
-| **Level `doctor` reports** | hard with lockdown (doctor can't see MDM or registry policies that override it), otherwise partial | hard-on-change | partial | partial | partial | partial |
+| | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build | Hermes |
+|---|---|---|---|---|---|---|---|
+| **Checkout filter** (enrolled repositories) | Yes | Yes (`.codex/config.toml` is kept at the default branch's version) | Yes | Yes | Yes | Yes | Not needed (no project hooks) |
+| **Tool's own hard switch** | `allowManagedHooksOnly` (story-gate lockdown, optional) | Re-asks trust when a hook changes | None documented | Folder trust (`security.folderTrust.enabled`) | None documented | `/hooks-trust`, per folder | n/a |
+| **Level `doctor` reports** | hard with lockdown (doctor can't see MDM or registry policies that override it), otherwise partial | hard-on-change | partial | partial | partial | partial | n/a |
 
 **Symlinks:** git writes symlinks without running the filter. story-gate refuses (enforce) or warns about any AI-tool settings file or folder stored as a symlink, and `doctor --prove` fails while one exists.
 
@@ -46,4 +49,4 @@ Sources for lockdown: [Claude Code managed settings](https://code.claude.com/doc
 
 The CI matrix tests story-gate's side on Linux, Windows and macOS. Steps 2 and 3 confirm the tool's side, which no automated test outside the tool can do.
 
-Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [Codex hooks](https://developers.openai.com/codex/hooks) · [Cursor hooks](https://cursor.com/docs/agent/hooks) · [Gemini CLI hooks](https://geminicli.com/docs/hooks/) · [Windsurf/Devin hooks](https://docs.windsurf.com/windsurf/cascade/hooks) · [Grok hooks](https://docs.x.ai/build/features/hooks)
+Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks) · [Codex hooks](https://developers.openai.com/codex/hooks) · [Cursor hooks](https://cursor.com/docs/agent/hooks) · [Gemini CLI hooks](https://geminicli.com/docs/hooks/) · [Windsurf/Devin hooks](https://docs.windsurf.com/windsurf/cascade/hooks) · [Grok hooks](https://docs.x.ai/build/features/hooks) · [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) · [Antigravity hooks](https://antigravity.google/docs/hooks)

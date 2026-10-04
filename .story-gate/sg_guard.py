@@ -20,7 +20,8 @@ import sg_pin as PIN
 FILTER = "storygate-hooks"
 FILTERED = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json", ".codex/hooks.json", ".codex/config.toml",
             ".cursor/hooks.json", ".cursor/mcp.json", ".gemini/settings.json", ".devin/hooks.json", ".windsurf/hooks.json",
-            ".grok/hooks/*.json")  # matched at any depth (a tool started in a sub-folder reads that folder's files)
+            ".grok/hooks/*.json", ".github/hooks/*.json", ".agents/hooks.json")  # matched at any depth (a tool started in a sub-folder reads that folder's files)
+# .github/hooks/*.json: VS Code agent hooks; .agents/hooks.json: Antigravity hooks (both run commands on this computer).
 # Top-level settings a branch may not change from the default branch's version: they run programs, reach the network,
 # load servers or plugins, or loosen permissions.
 GUARDED_KEYS = {"env", "permissions", "mcpServers", "enableAllProjectMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers",
@@ -296,7 +297,21 @@ def enable_filter(top, py, launcher, dry_run=False):
     settings = filter_settings(py, launcher)
     attrs = info_attributes(top)
     old = attrs.read_bytes().decode("latin-1") if attrs.is_file() else ""  # latin-1: every byte round-trips exactly
-    new = old if ATTR_MARK in old else (old + ("" if not old or old.endswith("\n") else "\n") + "\n".join(attr_lines()) + "\n")
+    if ATTR_MARK in old:  # turned on by an older story-gate: bring its list of covered files up to date, keep everything else
+        lines, kept, inside = old.split("\n"), [], False
+        for l in lines:
+            bare, eol = l.rstrip("\r"), l[len(l.rstrip("\r")):]  # Windows line endings stay as they were
+            if bare == ATTR_MARK:
+                inside = True
+                kept.extend(x + eol for x in attr_lines())
+                continue
+            if inside and bare.endswith(" filter=%s" % FILTER):
+                continue
+            inside = False
+            kept.append(l)
+        new = "\n".join(kept)
+    else:
+        new = old + ("" if not old or old.endswith("\n") else "\n") + "\n".join(attr_lines()) + "\n"
     out.append("  %s: %s" % (attrs, "already set" if new == old else "adds %d lines (local to this computer, never committed)" % len(attr_lines())))
     out += ["  git config --local %s = %s" % (k, v) for k, v in settings.items()]
     if dry_run:
@@ -413,7 +428,7 @@ def default_hook_commands(top):
     return cmds
 
 
-HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks")
+HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks", ".github", ".github/hooks", ".agents")
 
 
 def symlinked_hook_paths(top):

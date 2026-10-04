@@ -1537,6 +1537,29 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")  # git still sees a clean tree
         self.assertIn("removed", (self.repo / ".git/story-gate-guard.log").read_text())
 
+    def test_vscode_and_antigravity_branch_hooks_never_reach_disk(self):
+        self.git("checkout", "-qb", "evil2")
+        (self.repo / ".github/hooks").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".github/hooks/x.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"type": "command", "command": "touch /tmp/pwned"}]}}))
+        (self.repo / ".agents").mkdir(exist_ok=True)
+        (self.repo / ".agents/hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"command": "touch /tmp/pwned"}]}}))
+        self.git("add", "-A"); self.git("commit", "-qm", "sneak hooks in for VS Code and Antigravity")
+        self.git("checkout", "-q", "main"); self.git("checkout", "-q", "evil2")
+        on_disk = (self.repo / ".github/hooks/x.json").read_text() + (self.repo / ".agents/hooks.json").read_text()
+        self.assertNotIn("pwned", on_disk)
+
+    def test_older_filter_list_is_brought_up_to_date(self):
+        attrs = self.repo / ".git/info/attributes"
+        old = attrs.read_text().replace("**/.github/hooks/*.json filter=storygate-hooks\n", "").replace("**/.agents/hooks.json filter=storygate-hooks\n", "")
+        attrs.write_bytes(("*.png binary\n" + old + "*.jpg binary\n").replace("\n", "\r\n").encode())  # as Windows tools write it
+        self.assertNotIn(".github/hooks", attrs.read_text())
+        self.admin("filter", "on")
+        new = attrs.read_text()
+        self.assertIn("**/.github/hooks/*.json filter=storygate-hooks", new); self.assertIn("**/.agents/hooks.json filter=storygate-hooks", new)
+        self.assertIn("*.png binary", new); self.assertIn("*.jpg binary", new)  # your own lines stay
+        self.assertEqual(new.count("filter=storygate-hooks"), len(self.guard().FILTERED))
+        self.assertNotIn(b"\r\r", attrs.read_bytes()); self.assertNotIn(b"hooks\n", attrs.read_bytes())  # CRLF kept, not mixed
+
     def test_conflicting_filter_is_never_overridden(self):
         solo = Path(tempfile.mkdtemp())
         shutil.copytree(self.repo / ".story-gate", solo / ".story-gate", ignore=shutil.ignore_patterns("stories"))
@@ -1628,6 +1651,17 @@ class TestRepoHookGuard(RuntimeFixture):
         r = self.hook()
         self.assertEqual(r.returncode, 2); self.assertIn("symlinks", r.stderr)
         self.assertIn("symlink", self.admin("doctor", "--prove").stdout)
+
+    def test_symlinked_github_folder_is_refused(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        (self.repo / "gh/hooks").mkdir(parents=True)
+        (self.repo / "gh/hooks/x.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"type": "command", "command": "touch /tmp/pwned"}]}}))
+        shutil.rmtree(self.repo / ".github", ignore_errors=True)
+        os.symlink("gh", self.repo / ".github")  # VS Code would read gh/hooks/*.json through it, past the filter
+        self.git("add", "-A"); self.git("commit", "-qm", "sneaky .github symlink")
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("symlinks", r.stderr)
 
     def test_untracked_local_settings_are_yours(self):
         (self.repo / ".claude").mkdir(exist_ok=True)
@@ -2710,6 +2744,55 @@ class TestGuidedSetup(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue(wz.private_free)  # GitHub refused the rules: free plan, private repository -> the page warns
 
+    def test_other_approvers_need_write_access_and_join_codeowners(self):
+        G, S = self.G, self.S
+        perms = {"alex": "write", "sam": "read"}
+        def call(m, p, tok=None, body=None, accept=None):
+            if "/collaborators/" in p:
+                n = p.split("/collaborators/")[1].split("/")[0]
+                return (200, {"permission": perms[n]}, {}) if n in perms else (404, {"message": "Not Found"}, {})
+            return (200, {"default_branch": "main"}, {})
+        G.call = call
+        files = {}
+        G.open_setup_pr = lambda tok, repo, f, **kw: files.update(f) or {"number": 7, "url": "https://github.com/me/proj/pull/7", "branch": "b"}
+        G.pr_merged = lambda tok, repo, n: True
+        owners = []
+        G.setup_repo = lambda root, repo, o, tok, dry_run=False: owners.extend(o) or ["Ruleset: created"]
+        S.Wizard.finish = lambda self, base: self.set("done", "ok", "fake finish")
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        with self.assertRaises(RuntimeError) as e:
+            wz.open_pr("alex, sam, ghost, bad_name!")
+        msg = str(e.exception)
+        self.assertIn("sam can't approve yet", msg); self.assertIn("ghost can't approve yet", msg); self.assertIn("isn't a GitHub username", msg)
+        self.assertEqual(files, {})  # no pull request until the list is right
+        wz.open_pr("@alex me ALEX")  # '@', the signer and repeats are tidied up
+        for _ in range(100):
+            if wz.st["done"]["status"] == "ok": break
+            time.sleep(0.1)
+        self.assertIn(b"* @me @alex\n", files[".github/CODEOWNERS"])
+        self.assertEqual(owners, ["me", "alex"])
+
+    def test_tool_ticks_reach_the_computer_install(self):
+        S = self.S
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        self.assertFalse(wz.set_clients("")); self.assertFalse(wz.set_clients("claude,notatool"))
+        self.assertTrue(wz.set_clients("hermes,claude"))
+        self.assertEqual(wz.clients, ["claude", "hermes"])  # page order, known tools only
+        seen = []
+        real = S.subprocess.run
+        def fake(args, **kw):
+            seen.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        S.subprocess.run = fake
+        self.addCleanup(lambda: setattr(S.subprocess, "run", real))
+        S.git = lambda *a: ""
+        wz.finish("main")
+        inst = next(a for a in seen if "install" in a)
+        self.assertEqual(inst[inst.index("--clients") + 1], "claude,hermes")
+        page = S.page(wz)
+        self.assertIn("value=hermes checked", page); self.assertIn("Google AI Studio", page); self.assertIn("Who else can approve work?", page); self.assertIn("Any one of you can approve", page)
+
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T
         marker = self.tmp / "ran"
@@ -2754,6 +2837,154 @@ class TestGuidedSetup(unittest.TestCase):
         (rt / "launch.py").write_text("")
         (rt / "active.json").write_text(json.dumps({"dir": str(rt / "0.4.0")}))
         self.assertEqual(C.runtime_launcher(), rt / "launch.py")
+
+
+class TestHermesHooks(Base):
+    """Hermes: hook output it understands (exit 2 blocks a tool call; pre_verify reads JSON)."""
+
+    def hook(self, client, event, payload):
+        return run(self.repo, "hook", "--client", client, "--event", event, stdin=json.dumps(payload))
+
+    def test_hermes_blocks_edits_and_shell_with_exit_2(self):
+        self.cfg(mode="enforce")
+        for p in ({"hook_event_name": "pre_tool_call", "tool_name": "write_file", "tool_input": {"path": "app.py", "content": "x"}},
+                  {"hook_event_name": "pre_tool_call", "tool_name": "patch", "tool_input": {"mode": "replace", "path": "app.py"}},
+                  {"hook_event_name": "pre_tool_call", "tool_name": "terminal", "tool_input": {"command": "echo x > app.py"}}):
+            r = self.hook("hermes", "pre", p)
+            self.assertEqual(r.returncode, 2, p); self.assertIn("BLOCKED", r.stderr)
+        code = {"hook_event_name": "pre_tool_call", "tool_name": "execute_code",
+                "tool_input": {"code": "open('.story-gate/config.json','w').write('{}')"}}
+        r = self.hook("hermes", "pre", code)
+        self.assertEqual(r.returncode, 2); self.assertIn("story-gate files", r.stderr)
+        computed = {"hook_event_name": "pre_tool_call", "tool_name": "execute_code",
+                    "tool_input": {"code": "import pathlib; pathlib.Path('ap' + 'p.py').write_text('y')"}}
+        r = self.hook("hermes", "pre", computed)  # no literal target: still needs a READY story
+        self.assertEqual(r.returncode, 2); self.assertIn("READY", r.stderr)
+
+    def test_hermes_end_of_turn_keeps_working_with_a_reason(self):
+        self.cfg(mode="enforce", judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 3\n")
+        p = {"hook_event_name": "pre_verify", "tool_name": None, "tool_input": None, "extra": {"attempt": 0}}
+        r = self.hook("hermes", "stop", p)
+        self.assertEqual(r.returncode, 0)  # pre_verify ignores exit codes; the JSON is what keeps Hermes working
+        out = json.loads(r.stdout)
+        self.assertEqual(out["decision"], "block"); self.assertIn("DONE gate", out["reason"])
+        self.cfg(mode="warn", enforce_points=[])
+        p["extra"]["attempt"] = 1  # warn mode nags once per turn, like the other tools
+        self.assertEqual(json.loads(self.hook("hermes", "stop", p).stdout or "{}"), {})
+
+
+class TestHermesInstall(unittest.TestCase):
+    """install --user for Hermes (YAML block + approvals + skill); uninstall undoes it."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_trust as T
+        self.tmp = Path(tempfile.mkdtemp())
+        self.old_env = dict(os.environ)
+        os.environ.update(STORY_GATE_HOME=str(self.tmp / "sg"), STORY_GATE_USER_HOME=str(self.tmp / "user"),
+                          HERMES_HOME=str(self.tmp / "hermes"))
+        self.T = importlib.reload(T)
+        (self.tmp / "hermes").mkdir()
+        self.cfgp = self.tmp / "hermes" / "config.yaml"
+        self.cfgp.write_text("model:\n  default: x\n# my notes\n", encoding="utf-8")
+        (self.tmp / "hermes" / "shell-hooks-allowlist.json").write_text(json.dumps({"approvals": [{"event": "pre_tool_call", "command": "mine.sh"}]}))
+        self.skill = self.tmp / "SKILL.md"; self.skill.write_text("---\nname: story-gate\ndescription: d\n---\nbody\n")
+
+    def tearDown(self):
+        os.environ.clear(); os.environ.update(self.old_env)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def install(self, clients=("hermes",)):
+        return self.T.register_user_hooks("C:/py/python.exe", "C:/Users/a b/AppData/Roaming/story-gate/runtime/launch.py", list(clients),
+                                          skill_src=self.skill)
+
+    def test_hermes_block_approvals_skill_and_clean_uninstall(self):
+        self.install()
+        text = self.cfgp.read_text()
+        self.assertTrue(text.startswith("model:\n  default: x\n# my notes\n"))  # the person's settings are untouched
+        self.assertIn(self.T.HERMES_BEGIN, text); self.assertIn("pre_verify:", text); self.assertIn("fail_closed: true", text)
+        try:
+            import yaml  # optional: when PyYAML is around, prove Hermes will read the block as intended
+        except ImportError:
+            yaml = None
+        if yaml:
+            hooks = yaml.safe_load(text)["hooks"]
+            cmd = hooks["pre_tool_call"][0]["command"]
+            self.assertEqual(cmd, '"C:/py/python.exe" -I "C:/Users/a b/AppData/Roaming/story-gate/runtime/launch.py" hook --client hermes --event pre')
+            self.assertEqual(hooks["pre_tool_call"][0]["matcher"], "^(write_file|patch|terminal|execute_code)$")
+        allow = json.loads((self.tmp / "hermes" / "shell-hooks-allowlist.json").read_text())["approvals"]
+        self.assertEqual(allow[0]["command"], "mine.sh")  # the person's own approvals stay
+        self.assertEqual(sorted(a["event"] for a in allow[1:]), ["post_tool_call", "pre_tool_call", "pre_verify"])
+        self.assertTrue((self.tmp / "hermes" / "skills" / "story-gate" / "SKILL.md").is_file())
+        self.install()  # again: replaced, not duplicated
+        self.assertEqual(self.cfgp.read_text().count(self.T.HERMES_BEGIN), 1)
+        self.assertEqual(len(json.loads((self.tmp / "hermes" / "shell-hooks-allowlist.json").read_text())["approvals"]), 4)
+        self.assertIn("hermes", self.T.registered_clients("C:/Users/a b/AppData/Roaming/story-gate/runtime/launch.py"))
+        self.T.unregister_user_hooks()
+        self.assertEqual(self.cfgp.read_text(), "model:\n  default: x\n# my notes\n")
+        self.assertEqual(json.loads((self.tmp / "hermes" / "shell-hooks-allowlist.json").read_text())["approvals"],
+                         [{"event": "pre_tool_call", "command": "mine.sh"}])
+        self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate" / "SKILL.md").exists())
+
+    def test_hermes_files_story_gate_created_are_removed_again(self):
+        self.cfgp.unlink(); (self.tmp / "hermes" / "shell-hooks-allowlist.json").unlink()
+        self.install(("hermes",))
+        self.assertTrue(self.cfgp.is_file())
+        self.T.unregister_user_hooks()
+        self.assertFalse(self.cfgp.exists()); self.assertFalse((self.tmp / "hermes" / "shell-hooks-allowlist.json").exists())
+
+    def test_broken_hermes_approvals_file_changes_nothing(self):
+        (self.tmp / "hermes" / "shell-hooks-allowlist.json").write_text("[1, 2]")
+        before = self.cfgp.read_text()
+        out = self.install(("hermes",))
+        self.assertIn("NOT changed", "\n".join(out)); self.assertEqual(self.cfgp.read_text(), before)
+
+    def test_hermes_with_its_own_hooks_section_is_left_alone(self):
+        self.cfgp.write_text("hooks:\n  pre_tool_call:\n    - command: mine.sh\n", encoding="utf-8")
+        out = self.install(("hermes",))
+        self.assertEqual(self.cfgp.read_text(), "hooks:\n  pre_tool_call:\n    - command: mine.sh\n")
+        self.assertIn("by hand", "\n".join(out))
+        self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate").exists())  # nothing half-done
+
+    def test_hermes_yaml_edge_cases(self):
+        T, e = self.T, {"hooks": {"pre_tool_call": [{"command": "x 'y'", "timeout": 15, "fail_closed": True}]}}
+        for bad in ('"hooks":\n  a: 1\n', "a: 1\n...\n", "a: 1\n---\nb: 2\n", "a: [1,\n", "? hooks\n: {}\n", "{a: 1, hooks: {}}\n"):
+            with self.assertRaises(T.TrustError, msg=bad):
+                T.merged_hermes_yaml(bad, e)
+        ok = {"---\na: 1\n": None, "a: 1\r\nb: 2\r\n": None, "a: |\n  text\n  more\n": None, "": None, "# only a comment": None}
+        try:
+            import yaml
+        except ImportError:
+            yaml = None
+        for text in ok:
+            new = T.merged_hermes_yaml(text, e)
+            if "\r\n" in text:
+                self.assertNotIn("\n", new.replace("\r\n", ""))  # the file keeps its own line endings
+            if yaml:
+                data = yaml.safe_load(new)
+                self.assertEqual(data["hooks"]["pre_tool_call"][0]["command"], "x 'y'")
+                if text.startswith("a: |"):
+                    self.assertEqual(data["a"], "text\nmore\n")  # the block scalar before ours is unchanged
+            self.assertEqual(T._hermes_commands(new), [("pre_tool_call", "x 'y'")])
+
+    def test_doctor_catches_a_missing_hermes_approval_and_other_profiles(self):
+        (self.tmp / "hermes" / "profiles" / "work").mkdir(parents=True)
+        (self.tmp / "hermes" / "profiles" / "work" / "config.yaml").write_text("a: 1\n")
+        out = self.install(("hermes",))
+        self.assertIn("work", "\n".join(out)); self.assertEqual(self.T.hermes_profiles(), ["work"])
+        self.assertEqual(self.T.hermes_problems(), [])
+        allow = self.tmp / "hermes" / "shell-hooks-allowlist.json"
+        allow.write_text(json.dumps({"approvals": []}))  # e.g. someone cleared Hermes's approvals
+        self.assertIn("hasn't approved", " ".join(self.T.hermes_problems()))
+
+    def test_hermes_set_up_only_when_found(self):
+        shutil.rmtree(self.tmp / "hermes")
+        self.assertNotIn("hermes", self.T.default_clients())
+        (self.tmp / "hermes").mkdir()
+        self.assertIn("hermes", self.T.default_clients())
+        self.assertIn("claude", self.T.default_clients())  # the original five stay on by default
 
 
 if __name__ == "__main__":
