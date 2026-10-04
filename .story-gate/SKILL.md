@@ -1,6 +1,6 @@
 ---
 name: story-gate
-description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story, or when the user wants proof that AI-written code works before it merges. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
+description: "Quality gate for AI coding work. Use it whenever the repository has a .story-gate/ folder and you start, build or finish a feature, bug fix or story; when the user wants proof that AI-written code works before it merges; or when they ask to set up story-gate. Before code: write the story, its acceptance criteria and tests, and pass READY. While coding: run checkpoints that catch drift and scope creep. Before saying done: run the tests, run the feature for every acceptance criterion (scenarios that CI repeats), write a plain-English validation.md and handoff, record learnings, and pass DONE. A human approves on GitHub; you never approve or merge."
 ---
 
 # Story Gate

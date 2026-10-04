@@ -8,7 +8,7 @@ People install story-gate on their computers with `gate.py install --user`. That
 - The private key stays with the maintainer, never in this repository or in CI.
 
 **Steps**
-1. Merge the release to `main` and bump `VERSION` in `.story-gate/gate.py`.
+1. Merge the release to `main` and bump `VERSION` in `.story-gate/gate.py`. Bump the same version in `pyproject.toml`, `plugin.json`, `.claude-plugin/plugin.json` and `gemini-extension.json`, and in the install pin (`@vX.Y.Z`) in `README.md` and `skills/story-gate/SKILL.md`. `tests/test_gate.py` (`TestMarketplacePackaging`) fails until they all match.
 2. On the maintainer's computer, from a clean checkout of `main`:
    ```bash
    python3 .story-gate/gate.py release-sign --key /path/to/release_ed25519

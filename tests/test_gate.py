@@ -3764,14 +3764,14 @@ class TestReadmeMessaging(unittest.TestCase):
         return description
 
     def test_skill_descriptions_are_valid_frontmatter_strings(self):
-        for path in (SRC.parent / "SKILL.md", SRC / "SKILL.md"):
+        for path in (SRC.parent / "skills" / "story-gate" / "SKILL.md", SRC / "SKILL.md"):
             with self.subTest(path=path):
                 self.skill_description(path)
 
     def test_distributed_skill_descriptions_stay_in_sync(self):
         # The root skill and installable payload have different bodies, but
         # clients must receive the same automatic-triggering description.
-        self.assertEqual(self.skill_description(SRC.parent / "SKILL.md"),
+        self.assertEqual(self.skill_description(SRC.parent / "skills" / "story-gate" / "SKILL.md"),
                          self.skill_description(SRC / "SKILL.md"))
 
     def test_skill_description_includes_triggers_and_proof_requirements(self):
@@ -3860,6 +3860,65 @@ class TestReadmeMessaging(unittest.TestCase):
         self.assertTrue(decoder.decompress(compressed), "empty image data")
         self.assertTrue(decoder.eof, "incomplete compressed image data")
         self.assertFalse(decoder.unused_data, "unexpected data after compressed image")
+
+
+class TestMarketplacePackaging(unittest.TestCase):
+    """The repository is a plugin for skill marketplaces: one skill, no hooks, manifests in step with the release."""
+    ROOT = SRC.parent
+
+    def j(self, rel):
+        return json.loads((self.ROOT / rel).read_text(encoding="utf-8"))
+
+    def version(self):
+        import re
+        return re.search(r'^VERSION = "([^"]+)"', (SRC / "gate.py").read_text(encoding="utf-8"), re.M).group(1)
+
+    def test_manifests_agree_with_each_other_and_the_release(self):
+        agent, claude, gemini = self.j("plugin.json"), self.j(".claude-plugin/plugin.json"), self.j("gemini-extension.json")
+        market = self.j(".claude-plugin/marketplace.json")
+        v = self.version()
+        for m in (agent, claude, gemini):
+            self.assertEqual(m["name"], "story-gate")
+            self.assertEqual(m["version"], v)
+            self.assertEqual(m["description"], agent["description"])
+        self.assertIn('version = "%s"' % v, (self.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(market["name"], "story-gate")
+        self.assertTrue(market["owner"]["name"])
+        self.assertEqual([(p["name"], p["source"]) for p in market["plugins"]], [("story-gate", "./")])
+        self.assertEqual(market["plugins"][0]["description"], agent["description"])
+
+    def test_agent_plugins_manifest_uses_only_schema_fields(self):
+        import re
+        m = self.j("plugin.json")
+        self.assertEqual(m["$schema"], "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json")
+        allowed = {"$schema", "name", "version", "description", "author", "homepage", "repository", "license", "keywords", "extensions"}
+        self.assertLessEqual(set(m), allowed)
+        self.assertLessEqual(set(m["author"]), {"name", "email", "url"})
+        self.assertRegex(m["name"], r"^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+
+    def test_one_skill_and_no_hooks_or_servers_in_the_package(self):
+        # Hooks come only from story-gate's verified runtime; a plugin update must never be able to change them.
+        skills = sorted(p.parent.name for p in (self.ROOT / "skills").glob("*/SKILL.md"))
+        self.assertEqual(skills, ["story-gate"])
+        self.assertFalse((self.ROOT / "SKILL.md").exists(), "a root SKILL.md would load as a second copy in some clients")
+        for rel in ("hooks", "hooks.json", ".mcp.json", "mcp.json", "commands", "agents"):
+            self.assertFalse((self.ROOT / rel).exists(), rel)
+        for m in (self.j("plugin.json"), self.j(".claude-plugin/plugin.json")):
+            self.assertFalse({"hooks", "mcpServers", "skills", "commands", "agents"} & set(m))
+        self.assertFalse({"mcpServers", "contextFileName", "excludeTools"} & set(self.j("gemini-extension.json")))
+
+    def test_skill_name_matches_its_folder(self):
+        text = (self.ROOT / "skills" / "story-gate" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("\nname: story-gate\n", text.split("---", 2)[1] + "\n")
+
+    def test_setup_steps_pin_the_current_release(self):
+        pin = "git+https://github.com/SathiaAI/story-gate@v%s" % self.version()
+        skill = (self.ROOT / "skills" / "story-gate" / "SKILL.md").read_text(encoding="utf-8")
+        for text, where in ((skill, "skill"), ((self.ROOT / "README.md").read_text(encoding="utf-8"), "README")):
+            self.assertIn(pin, text, where)
+        self.assertIn("story-gate init", skill)
+        self.assertIn("wait for a clear yes", skill)  # the agent asks before installing anything
+        self.assertNotIn("copy it from github.com", skill)  # never hand-copy story-gate files
 
 
 if __name__ == "__main__":
