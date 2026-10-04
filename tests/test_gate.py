@@ -2930,6 +2930,13 @@ class TestHermesAndVSCodeInstall(unittest.TestCase):
                          [{"event": "pre_tool_call", "command": "mine.sh"}])
         self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate" / "SKILL.md").exists())
 
+    def test_hermes_files_story_gate_created_are_removed_again(self):
+        self.cfgp.unlink(); (self.tmp / "hermes" / "shell-hooks-allowlist.json").unlink()
+        self.install(("hermes",))
+        self.assertTrue(self.cfgp.is_file())
+        self.T.unregister_user_hooks()
+        self.assertFalse(self.cfgp.exists()); self.assertFalse((self.tmp / "hermes" / "shell-hooks-allowlist.json").exists())
+
     def test_hermes_with_its_own_hooks_section_is_left_alone(self):
         self.cfgp.write_text("hooks:\n  pre_tool_call:\n    - command: mine.sh\n", encoding="utf-8")
         out = self.install(("hermes",))

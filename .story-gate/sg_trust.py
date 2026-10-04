@@ -914,7 +914,12 @@ def unregister_hermes(dry_run, out):
         try:
             text = f.read_text(encoding="utf-8-sig")
             new = fix(text)
-            if new != text:
+            created = not (read_json(manifest_path()).get("files", {}).get(str(f)) or {"existed_before": True}).get("existed_before")
+            if created and (not new.strip() or json.loads(new) == {"approvals": []} if f.suffix == ".json" else not new.strip()):
+                if not dry_run:
+                    f.unlink()
+                out.append("  %s: removed (story-gate created it)" % f)
+            elif new != text:
                 apply_file(f, new, dry_run, out, check_json=f.suffix == ".json")
         except (ValueError, TrustError) as e:
             out.append("  %s: NOT changed (%s) - remove the story-gate lines by hand" % (f, e))

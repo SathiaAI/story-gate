@@ -442,7 +442,7 @@ def page(wz):
          "Change the ticks before you merge.", tools_html(wz)),
     ]
     cards = "".join("<section class=step id=s-%s><div class=n>%s</div><div><h2>%s</h2><p>%s</p><div class=act>%s</div><div class=msg></div></div></section>"
-                    % (k, i + 2 if k != "done" else "&#10003;", h, p, a) for i, (k, h, p, a) in enumerate(steps))
+                    % (k, i + 2, h, p, a) for i, (k, h, p, a) in enumerate(steps))
     js = """<script>
 const T=%s;async function go(a,body){await fetch('/'+a+'?t='+T,{method:'POST',body:body||''});tick()}
 async function tools(f){const c=[...f.querySelectorAll('input:checked')].map(i=>i.value).join(',');const r=await fetch('/tools?t='+T,{method:'POST',body:new URLSearchParams({clients:c})});
