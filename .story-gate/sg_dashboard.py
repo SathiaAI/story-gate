@@ -424,7 +424,7 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
         if k in M:
             head.append("| %s | **%s** |" % (M[k]["label"], fmt(M[k])))
     counts = [(lab, len([s for s in d["stories"] if s["status"] == k])) for k, lab, _ in STATUSES]
-    chart = ["", "```mermaid", "pie showDataSidebar", "    title Stories by stage"] + ['    "%s" : %d' % (lab, n) for lab, n in counts if n] + ["```"]
+    chart = ["", "```mermaid", "pie showData", "    title Stories by stage"] + ['    "%s" : %d' % (lab, n) for lab, n in counts if n] + ["```"]
     agents = ["", "## Who is working on what", "", "| Story | Agent | Model | Status | Done | Drift | CI check | Last report |", "|---|---|---|---|---|---|---|---|"]
     act = [s for s in d["stories"] if s["status"] in ("in_progress", "blocked", "in_review")]
     for s in act:

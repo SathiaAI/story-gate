@@ -2270,6 +2270,11 @@ class TestDashboard(Base):
         self.assertEqual(state["issues"][0]["state"], "open")
         self.assertIn("Skipped", self.D.publish_issue(G, "o/r", "t", "old", "2026-10-02T00"))
 
+    def test_issue_pie_chart_uses_valid_mermaid(self):
+        """The pinned issue's chart uses mermaid's documented `pie showData` keyword, so GitHub renders it."""
+        md = self.D.to_markdown(self.data)
+        self.assertIn("```mermaid\npie showData\n", md)
+
     def test_ci_status_and_rate_limit_backoff(self):
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         seen = {"n": 0}
