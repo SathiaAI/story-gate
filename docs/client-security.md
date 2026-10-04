@@ -59,3 +59,4 @@ The marketplace package (Claude Code plugin, Agent Plugins, Gemini CLI extension
 - In a repository without `.story-gate/`, the skill asks you before it installs story-gate (`uv tool install …@vX.Y.Z`, then `story-gate init`). You do the GitHub sign-in, the AI's login, the judge key and the merge yourself.
 - Hooks come only from story-gate's verified runtime on your computer. A marketplace update can change the skill's text, but never your hooks.
 - A test fails if the package ever gains a hooks file, an MCP server or a second skill.
+- The Claude Code plugin and Anthropic's plugin directory install only the `plugin/` folder: the skill, its README, the mark and the license. None of story-gate's code comes with it; the skill installs the pinned release only after you agree.

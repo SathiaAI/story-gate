@@ -3952,8 +3952,9 @@ class TestMarketplacePackaging(unittest.TestCase):
 
     def test_manifests_agree_with_each_other_and_the_release(self):
         agent, claude, gemini = self.j("plugin.json"), self.j(".claude-plugin/plugin.json"), self.j("gemini-extension.json")
-        market = self.j(".claude-plugin/marketplace.json")
+        market, directory = self.j(".claude-plugin/marketplace.json"), self.j("plugin/.claude-plugin/plugin.json")
         v = self.version()
+        self.assertEqual(directory, claude, "the directory plugin's manifest is the same as the repository's")
         for m in (agent, claude, gemini):
             self.assertEqual(m["name"], "story-gate")
             self.assertEqual(m["version"], v)
@@ -3961,7 +3962,7 @@ class TestMarketplacePackaging(unittest.TestCase):
         self.assertIn('version = "%s"' % v, (self.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(market["name"], "story-gate")
         self.assertTrue(market["owner"]["name"])
-        self.assertEqual([(p["name"], p["source"]) for p in market["plugins"]], [("story-gate", "./")])
+        self.assertEqual([(p["name"], p["source"]) for p in market["plugins"]], [("story-gate", "./plugin")])
         self.assertEqual(market["plugins"][0]["description"], agent["description"])
 
     def test_agent_plugins_manifest_uses_only_schema_fields(self):
@@ -3979,7 +3980,9 @@ class TestMarketplacePackaging(unittest.TestCase):
         self.assertFalse((self.ROOT / "SKILL.md").exists(), "a root SKILL.md would load as a second copy in some clients")
         for rel in ("hooks", "hooks.json", ".mcp.json", "mcp.json", "commands", "agents"):
             self.assertFalse((self.ROOT / rel).exists(), rel)
-        for m in (self.j("plugin.json"), self.j(".claude-plugin/plugin.json")):
+        for rel in ("hooks", "hooks.json", ".mcp.json", "mcp.json", "commands", "agents"):
+            self.assertFalse((self.ROOT / "plugin" / rel).exists(), "plugin/" + rel)
+        for m in (self.j("plugin.json"), self.j(".claude-plugin/plugin.json"), self.j("plugin/.claude-plugin/plugin.json")):
             self.assertFalse({"hooks", "mcpServers", "skills", "commands", "agents"} & set(m))
         self.assertFalse({"mcpServers", "contextFileName", "excludeTools"} & set(self.j("gemini-extension.json")))
 
@@ -4009,7 +4012,7 @@ class TestMarketplacePackaging(unittest.TestCase):
     def test_marketplace_source_resolves_to_the_single_discoverable_skill(self):
         entry, = self.j(".claude-plugin/marketplace.json")["plugins"]
         source = (self.ROOT / entry["source"]).resolve()
-        self.assertEqual(source, self.ROOT.resolve())
+        self.assertEqual(source, (self.ROOT / "plugin").resolve())
         manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], entry["name"])
         # Recursive discovery also catches accidentally nested copies of the skill.
@@ -4020,6 +4023,7 @@ class TestMarketplacePackaging(unittest.TestCase):
         metadata = {"name", "version", "description", "author", "homepage", "repository", "license", "keywords"}
         for rel, allowed in (("plugin.json", metadata | {"$schema"}),
                              (".claude-plugin/plugin.json", metadata),
+                             ("plugin/.claude-plugin/plugin.json", metadata),
                              ("gemini-extension.json", {"name", "version", "description"})):
             with self.subTest(path=rel):
                 manifest = self.j(rel)
@@ -4027,6 +4031,27 @@ class TestMarketplacePackaging(unittest.TestCase):
                 for field in ("name", "version", "description"):
                     self.assertIsInstance(manifest[field], str)
                     self.assertTrue(manifest[field].strip(), field)
+
+    def test_directory_plugin_folder_carries_the_same_skill(self):
+        same = (self.ROOT / "skills/story-gate/SKILL.md").read_bytes()
+        self.assertEqual((self.ROOT / "plugin/skills/story-gate/SKILL.md").read_bytes(), same, "copy skills/story-gate/SKILL.md into plugin/")
+        self.assertEqual((self.ROOT / "plugin/LICENSE").read_bytes(), (self.ROOT / "LICENSE").read_bytes())
+
+    def test_directory_plugin_folder_passes_the_directory_file_rules(self):
+        import re
+        # Anthropic's directory reads only plugin/: a README of 40+ words outside code, small text files and plain images.
+        readme = (self.ROOT / "plugin/README.md").read_text(encoding="utf-8")
+        self.assertGreaterEqual(len(re.sub(r"```.*?```", "", readme, flags=re.S).split()), 40)
+        for heading in ("## Example use cases", "## What it runs, sends and fetches"):
+            self.assertIn(heading, readme)
+        files = [p for p in (self.ROOT / "plugin").rglob("*") if p.is_file()]
+        self.assertLessEqual(len(files), 512)
+        for p in files:
+            with self.subTest(path=p.relative_to(self.ROOT).as_posix()):
+                self.assertFalse(p.is_symlink())
+                self.assertIn(p.suffix.lower(), {".md", ".json", ".svg", ".png", ""})
+                self.assertLess(p.stat().st_size, 256 * 1024)
+                self.assertNotIn(p.name, {".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
 if __name__ == "__main__":

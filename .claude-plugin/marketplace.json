@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "story-gate",
-      "source": "./",
+      "source": "./plugin",
       "description": "Make your AI prove its work before it ships: it plans before it builds, checks its course while it builds, shows every goal working, and waits for a person to approve on GitHub. Works in Claude Code, Codex, Cursor, VS Code, Gemini CLI and Hermes."
     }
   ]
