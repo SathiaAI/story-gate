@@ -22,6 +22,7 @@ Commands (run from the repo root):
                                      repository hooks. Explains first; --on needs your explicit YES; --bundle writes files for IT
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
+  init                               guided setup in your browser: sign in, the AI's own login, judge key, one pull request
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
   feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
   plan <ID> --title T [--feature F]  add a story to the backlog (not started; queued once READY passes)
@@ -135,14 +136,14 @@ sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE)
 import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 
 def _root():
     if os.environ.get("STORY_GATE_ROOT"):
         return Path(os.environ["STORY_GATE_ROOT"])
-    if RUNTIME:  # the trusted runtime works on whichever repository the client is in
+    if RUNTIME or HERE.name == "_payload":  # the runtime, or the installed package: work on the repository we're in
         top, _ = T.repo_identity(os.getcwd())
         return Path(top) if top else Path.cwd()
     return HERE.parent
@@ -1386,7 +1387,7 @@ def shell_writes(cmd):
 
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
-                  "judge-calibrate", "lockdown", "filter", "hook-trust"}
+                  "judge-calibrate", "lockdown", "filter", "hook-trust", "init"}
 # Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
 # Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
 # itself on every call (sg_guard.tampered), because text matching can't see every spelling.
@@ -2855,6 +2856,16 @@ def main(argv):
         return cmd_install(kv.get("python", "python" if os.name == "nt" else "python3")) or 0
     if cmd == "uninstall" and "--user" in rest:
         return cmd_user("uninstall", kv, rest)
+    if cmd == "init":
+        top = T.repo_identity(os.getcwd())[0]
+        if not top:
+            print("story-gate init: run this inside your project folder (a git repository connected to GitHub).")
+            return 1
+        import sg_setup
+        return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest)
+    if cmd == "runtime-path":
+        print(HERE if RUNTIME else "not-runtime")
+        return 0
     if cmd == "hook-selftest":
         return cmd_hook_selftest()
     if cmd in ("enroll", "unenroll", "upgrade", "rollback", "release-sign"):

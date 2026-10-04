@@ -286,9 +286,19 @@ def shim_problems(py=None):
         if not f.is_file() or f.read_bytes() != body.encode("utf-8"):
             probs.append("%s was changed or is missing (gate.py install --user rewrites it)" % f)
     found = shutil.which("story-gate")
-    if found and Path(found).resolve().parent != shim_dir().resolve():
+    if found and Path(found).resolve().parent != shim_dir().resolve() and not leads_to_runtime(found):
         probs.append("`story-gate` on PATH is %s, not story-gate's own command in %s" % (found, shim_dir()))
     return probs
+
+
+def leads_to_runtime(exe):
+    """True when this `story-gate` (e.g. the one `uv tool install` puts on PATH) hands every command to the active runtime."""
+    try:
+        r = subprocess.run([exe, "runtime-path"], capture_output=True, text=True, timeout=20)
+        act = read_json(active_path()).get("dir")
+        return bool(act) and r.returncode == 0 and Path(r.stdout.strip()).resolve() == Path(act).resolve()
+    except Exception:
+        return False
 
 
 def launcher_ok():
