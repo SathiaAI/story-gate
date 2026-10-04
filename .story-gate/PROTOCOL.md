@@ -115,20 +115,39 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - In Claude clients, that's `/engineering:code-review`.
    - This is a self-check. The proof comes from the independent reviewers on the PR (`config.json` → `reviewers`, e.g. CodeRabbit or Codex), whose threads must all be resolved.
 
-2. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md` in plain English (see **Writing**):
+2. **Show it working (scenarios).** Run the feature the way a user would, once or more for every acceptance criterion, and record each run:
+   ```
+   gate.py scenario <ID> --name "wrong password is refused" --ac AC-2 --exit 1 --expect "wrong password" -- python app.py login --user ann --password nope
+   ```
+   - Use the real program: the command line, an HTTP call (`curl`), a script that drives the page (Playwright), or an end-to-end test. Don't use a unit test alone: the judge and the reviewers see what each scenario runs.
+   - `--expect` is text (a regular expression) the output must contain. `--exit` is the exit code you expect (default 0). One run can cover several criteria (`--ac AC-1,AC-3`).
+   - story-gate runs the command without a shell, with a time limit (`--timeout`, default 120 seconds), and keeps the last 4,000 characters of output with known secret shapes removed. Use test data, never real accounts.
+   - Write output files to a temporary folder or an ignored path. A run that creates or changes files in the repository does not count.
+   - Every recorded scenario must pass on the current code. Remove one that no longer applies with `gate.py scenario <ID> --name ... --remove`.
+   - **CI runs every scenario again** on the PR's code, in the job with no secrets. For the PR, only CI's runs count.
+   - If a scenario can't run in CI (it needs a desktop app, a device or a paid service), add `--local-only "<reason>"`. Your run then counts, but DONE in CI is CONCERNS, which blocks the merge unless the owner turned on `accept_concerns`. Prefer a scenario CI can run (headless browser, test double).
+   - After any code change, run `gate.py scenarios <ID>` to run them all again.
+   - When a scenario finds a bug: fix it, run the scenario again, and list the bug in validation.md.
+
+3. ∥ **Validation writer** (model: `handoff`). Fill in `stories/<ID>/validation.md` (`start` creates the template). The owner reads it to decide if the story is done:
+   - Sections: Result · Acceptance criteria · Scenarios run · Bugs found and fixed · Lessons learnt · Known limits · Demo.
+   - **Demo:** steps the owner can follow to try it (what to open, what to type or click, what they should see). For an internal change with nothing to see, write `Not demo-able: <reason>`.
+   - Write plain English (see **Writing**). Report only what happened. The CI check shows the scenario results next to it.
+
+4. ∥ **Handoff writer** (model: `handoff`). Write `stories/<ID>/handoff.md` in plain English (see **Writing**):
    - Sections: What changed · Interfaces and contracts · How to verify · Known limits · Downstream consumers · Release and rollback (or "Not applicable: reason") · Drift decisions.
    - Downstream stories read this. Write it for a stranger.
 
-3. ∥ **Learnings recorder** (model: `learnings`). Record every error hit, wrong turn and reusable insight:
+5. ∥ **Learnings recorder** (model: `learnings`). Record every error hit, wrong turn and reusable insight:
    - `gate.py learn <ID> --type error|learning|pattern --summary "…" --root-cause "…" --rule "<what future agents must do>" --tags a,b --client <your client>`
    - If nothing was learned: `--type none --summary "no new learnings"`.
    - Rules repeated 3+ times are flagged by `gate.py learnings`. Promote those into AGENTS.md / CLAUDE.md, with the owner's OK.
 
-4. `gate.py score <ID> done`. This checks the diff against the story and TRD, the tests against the plan, traceability, deferrals, handoff quality and learnings. Act on it as in READY.
+6. `gate.py score <ID> done`. This checks the diff against the story and TRD, the tests against the plan, traceability, scenarios for every acceptance criterion, validation.md, deferrals, handoff quality and learnings. Act on it as in READY.
 
-5. `gate.py publish` sends events to the configured sinks (control-hub, webhook, custom command).
+7. `gate.py publish` sends events to the configured sinks (control-hub, webhook, custom command).
 
-6. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
+8. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
 
 ## ACCEPTANCE (the human's part)
 
@@ -143,7 +162,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 ## Writing (plain English for a non-coder)
 
 The person who accepts the work may not be a coder. Write so that they can read it once and understand it.
-This applies to your chat replies, PR descriptions, the story's `## Plain summary`, `handoff.md` and learnings.
+This applies to your chat replies, PR descriptions, the story's `## Plain summary`, `validation.md`, `handoff.md` and learnings.
 
 **Rules** (STE-style: based on the ideas of ASD-STE100, not certified to it):
 1. Keep each sentence short. An instruction has 20 words or fewer. Any other sentence has 25 words or fewer.

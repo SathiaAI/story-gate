@@ -1,6 +1,6 @@
 ---
 name: story-gate
-description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
+description: "Per-story quality gate for any coding work, in any AI client: READY before code (story complete, drift vs PRD/TRD, acceptance criteria with positive/negative/edge/regression tests), CHECKPOINTS while coding (progress %, on course?, drift), DONE after (code matches spec, every AC traced to tests that ran and passed and shown working by a scenario run that CI repeats, a plain-English validation summary for the owner, handoff, learnings), then human acceptance on GitHub. Use before starting, during, or finishing any story or coding task, or when the repo has a .story-gate/ folder."
 ---
 
 # Story Gate
@@ -36,6 +36,8 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
    - Run `record-tests`.
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
+   - For every AC, run the feature for real and record it: `scenario <ID> --name ... --ac AC-1 --expect <text> -- <command>`. CI runs these again.
+   - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason').
    - Write `handoff.md` (all seven sections), then run `learn` (`--type error|pattern` also needs `--root-cause` and `--rule`), then run `score <ID> done`.
    - Any later change to code, tests, `tests.json` or the specs makes the verdict out of date: re-run `record-tests` and re-score.
 4. **ACCEPTANCE:** open the PR as the agent. CI re-checks everything, and a code owner approves the latest commit and merges. You never approve or merge.

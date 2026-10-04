@@ -582,6 +582,9 @@ def tighten(policy, local):
             pass
     if w:
         out["writing"] = w
+    lv = local.get("validation") or {}
+    if isinstance(lv, dict) and lv.get("required") is True:
+        out["validation"] = dict(out.get("validation") or {}, required=True)
     return out
 
 
@@ -621,6 +624,8 @@ def weaker(old, new):
             out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
+    if (o.get("validation") or {}).get("required", True) and not (n.get("validation") or {}).get("required", True):
+        out.append("validation (validation.md and scenario runs for every acceptance criterion) no longer required")
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
     if more:
         out.append("more files exempt from the gate: %s" % ", ".join(more[:5]))

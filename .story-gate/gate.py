@@ -30,6 +30,9 @@ Commands (run from the repo root):
   dashboard [--open] [--out DIR] [--offline]   build the progress dashboard from every branch (HTML + summary)
   source <ID>                        run 'command' sources from config, print their output
   record-tests <ID> -- <cmd...>      run the test command, store exit code + output tail (evidence)
+  scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
+                                     run the feature end to end and record it as proof for those ACs (CI runs it again)
+  scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
   decide <ID> --drift story|spec|none --by WHO --note TEXT [--phase ready|build|done]  record the drift decision
   waive <ID> <check> --by WHO --reason TEXT                     record a waiver
@@ -195,6 +198,9 @@ DEFAULT_CONFIG = {
     "dashboard_issue": None,
     # Plain writing (PROTOCOL.md > Writing): an STE-style proxy score, not ASD-STE100 compliance. Advisory unless enforce.
     "writing": {"standard": "ste-style", "target": 0.8, "enforce": False, "diagram_min_files": 5},
+    # DONE needs validation.md (the owner's summary) and, for every acceptance criterion, a scenario run that passed
+    # on the current code; in CI, CI's own run of it (sg_validation.py).
+    "validation": {"required": True},
 }
 
 # ------------------------------------------------------------------ checks
@@ -488,7 +494,7 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
-                       "w": c.get("writing")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
+                       "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
 
 
 def ready_hash_from(story, context, tests, spec_pairs, c):
@@ -512,6 +518,11 @@ def inputs_hash(sd, phase, c=None):
     if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
         tr = load_json(sd / "test_results.json")
         blob += json.dumps({k: tr.get(k) for k in ("command", "exit_code", "fingerprint")}, sort_keys=True)
+        blob += rd(sd / "validation.md") + rd(sd / "scenarios.json")
+        import sg_validation as V
+        sr = V.results_of(load_json(sd / "scenario_results.json"))
+        blob += json.dumps({n: [r.get(k) for k in ("spec", "passed", "fingerprint")] for n, r in sr.items()
+                            if isinstance(r, dict)}, sort_keys=True)  # not who ran it: CI's run of the same code is the same evidence
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
@@ -705,11 +716,16 @@ def trace(sd, c, tr, results=None):
     return missing
 
 
+def cut(text, n):
+    """Text for the judge, with a visible marker when it was shortened (never a silent cut)."""
+    return text if len(text) <= n else text[:n] + "\n[... cut: %d more characters not shown]" % (len(text) - n)
+
+
 def wj_text(p, text):
     Path(p).write_text(text, encoding="utf-8")
 
 
-def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False):
+def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False):
     out = {}
     rj = load_json(sd / "ready.json")
     out["ready_gate_passed"] = (passed(rj, c, sd), "READY gate not passed or out of date (overall=%s; the story, test plan or PRD/TRD changed since) - re-run READY" % rj.get("overall", "never run"))
@@ -732,6 +748,30 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
     out["code_changed"] = (bool(code), "no code changes found against base")
     miss = trace(sd, c, tr, results)
     out["traceability"] = (not miss, "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
+    if (c.get("validation") or {}).get("required", True):
+        import sg_validation as V
+        vm = V.sections_missing(rd(sd / "validation.md"))
+        out["validation_written"] = (not vm, ("validation.md is missing (run `%s` to add the template)" % gate_cmd("start " + sid))
+                                     if not (sd / "validation.md").exists() else "validation.md sections empty or TODO: " + ", ".join(vm))
+        ids = [a for a, _, _ in acs(sd)]
+        doc, res = load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json"))
+        cov = V.coverage(doc, res, ids, work_fingerprint(), in_ci)
+        gone, local = [a for a, s in cov.items() if s == "missing"], [a for a, s in cov.items() if s == "local"]
+        broken = V.failing(doc, res, work_fingerprint(), in_ci)
+        why = []
+        if not ids:
+            why.append("no acceptance criteria in tests.json")
+        if gone:
+            why.append("ACs with no passing scenario on the current code%s: %s. Record one with `%s`" % (
+                " in CI's own run" if in_ci else "", ", ".join(gone),
+                gate_cmd("scenario %s --name ... --ac %s --expect ... -- <command>" % (sid, gone[0]))))
+        if broken:
+            why.append("recorded scenarios that did not pass on the current code: %s. Fix the work (or the scenario), then run `%s`"
+                       % ("; ".join(broken[:5]), gate_cmd("scenarios " + sid)))
+        if local and not why:
+            why.append("ACs proved only on the agent's computer (local-only scenarios; CI did not run them): %s. This blocks "
+                       "unless accept_concerns is on; better, make the scenario runnable in CI" % ", ".join(local))
+        out["scenarios_prove_acs"] = ("FAIL" if gone or not ids or broken else "CONCERNS" if local else "PASS", " | ".join(why))
     if truncated:
         out["evidence_complete"] = ("CONCERNS", "the change is too large for one judge pass; split the story or get a human review of the whole diff")
     return out
@@ -881,6 +921,9 @@ def cmd_start(sid, client=None, model=None):
         p = sd / name
         if not p.exists() and name != "handoff.md":
             p.write_text(body.replace("{id}", sid), encoding="utf-8")
+    if not (sd / "validation.md").exists():  # also how a story started before validation existed gets its template
+        import sg_validation as V
+        (sd / "validation.md").write_text(V.TEMPLATE.replace("{id}", sid), encoding="utf-8")
     # scoped to this branch; the start commit is the story's baseline if work is committed straight onto the base branch
     prev, branch = (rd(ACTIVE).splitlines() if ACTIVE.exists() else []), current_branch()
     baseline = prev[2].strip() if len(prev) >= 3 and prev[0].strip() == sid and prev[1].strip() == branch else git("rev-parse", "HEAD").strip()
@@ -942,13 +985,21 @@ def cmd_source(sid):
 def work_fingerprint():
     """Hash of the changed files' current content vs the base branch, ignoring .story-gate/.
     Content-based, so git add / commit do not invalidate a green test run; any edit does."""
+    h = hashlib.sha256()
+    for n, body in sorted(work_state().items()):
+        h.update(n.encode("utf-8", "replace") + b"\0" + body)
+    return h.hexdigest()[:16]
+
+
+def work_state():
+    """{path: mode + content digest} for every file that differs from the base branch or is new (the work's evidence)."""
     try:
         mb = resolve_base(cfg()["base_branch"])
     except Exception:
         mb = "HEAD"
     names = sorted(set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only"))
                    | set(zlist("ls-files", "--others", "--exclude-standard")))
-    h = hashlib.sha256()
+    state = {}
     for n in names:
         if is_record(n):
             continue
@@ -966,8 +1017,8 @@ def work_fingerprint():
             body = b"GITLINK:" + hashlib.sha256(sub.encode("utf-8", "replace")).digest()  # commit plus any uncommitted edits
         else:
             body = b"DELETED"
-        h.update(n.encode("utf-8", "replace") + b"\0" + mode + body)
-    return h.hexdigest()[:16]
+        state[n] = mode + body
+    return state
 
 
 def is_record(path):
@@ -1010,6 +1061,63 @@ def cmd_record_tests(sid, argv):
     wj(sdir(sid) / "test_results.json", rec)
     print("story-gate: tests %s (exit %s)" % ("GREEN" if code == 0 else "RED", code))
     return 0 if code == 0 else 1
+
+
+def cmd_scenario(sid, kv, remove, argv):
+    """Record (or replace) one scenario, run it now on this computer, and store the result."""
+    import sg_validation as V
+    sd = sdir(sid)
+    if not sd.exists():
+        sys.exit("no story folder; run: start %s" % sid)
+    specs = [s for s in V.specs_of(load_json(sd / "scenarios.json")) if s.get("name") != kv["name"]]
+    res = V.results_of(load_json(sd / "scenario_results.json"))
+    res.pop(kv["name"], None)
+    if remove:
+        wj(sd / "scenarios.json", {"story": sid, "scenarios": specs})
+        wj(sd / "scenario_results.json", {"story": sid, "results": res})
+        print("story-gate: scenario '%s' removed" % kv["name"])
+        return 0
+    try:
+        s = {"name": kv["name"], "acs": [a.strip() for a in kv.get("ac", "").split(",") if a.strip()], "argv": argv,
+             "expect_exit": int(kv.get("exit", 0)), "expect_output": kv.get("expect", ""),
+             "timeout": int(kv.get("timeout", V.DEFAULT_TIMEOUT)), "local_only": kv.get("local-only", "")}
+    except ValueError:
+        sys.exit("story-gate: --exit and --timeout must be whole numbers")
+    bad = V.problems(s, [a for a, _, _ in acs(sd)])
+    if bad:
+        sys.exit("story-gate: scenario not recorded: " + "; ".join(bad))
+    if len(specs) >= V.MAX_SCENARIOS:
+        sys.exit("story-gate: a story can have at most %d scenarios" % V.MAX_SCENARIOS)
+    specs.append(s)
+    wj(sd / "scenarios.json", {"story": sid, "scenarios": specs})
+    r = V.run(s, str(ROOT), work_state, "local")
+    res[s["name"]] = r
+    wj(sd / "scenario_results.json", {"story": sid, "results": res})
+    print_scenario(s, r)
+    return 0 if r["passed"] else 1
+
+
+def print_scenario(s, r):
+    print("story-gate: scenario '%s' (%s) %s - exit %s (expected %s), output %s%s" % (
+        s.get("name"), ", ".join(map(str, s.get("acs") or [])), "PASSED" if r.get("passed") else "FAILED", r.get("exit_code"), s.get("expect_exit"),
+        "matched" if r.get("output_matched") else "did NOT match --expect", ("; " + r["note"]) if r.get("note") else ""))
+    if not r.get("passed"):
+        print("--- last output ---\n" + (r.get("output_tail") or "")[-1500:])
+
+
+def cmd_scenarios(sid):
+    """Run every recorded scenario again on the current code (after a fix, before score done)."""
+    import sg_validation as V
+    sd = sdir(sid)
+    specs = V.specs_of(load_json(sd / "scenarios.json"))
+    if not specs:
+        sys.exit("story-gate: no scenarios recorded for %s; add one with: scenario %s --name ... -- <command>" % (sid, sid))
+    res = V.run_all(specs, str(ROOT), work_state, "local", [a for a, _, _ in acs(sd)], budget=10 ** 6)
+    wj(sd / "scenario_results.json", {"story": sid, "results": res})
+    for s in specs:
+        if s.get("name") in res:
+            print_scenario(s, res[s["name"]])
+    return 0 if all(r.get("passed") for r in res.values()) else 1
 
 
 def resolve_base(base):
@@ -1069,7 +1177,7 @@ def writing_report(sd, sid, phase, c, files=()):
     else:
         learn = "\n".join(str(r.get("summary", "")) + ". " + str(r.get("rule", "")) for r in jsonl(LEARNINGS) if r.get("story") == sid)
         handoff = rd(sd / "handoff.md")
-        rep_ = W.report({"handoff.md": handoff, "learnings": learn}, target)
+        rep_ = W.report({"validation.md": rd(sd / "validation.md"), "handoff.md": handoff, "learnings": learn}, target)
         code = [f for f in files if not exempt(f, c) and not f.lower().endswith(NOT_CODE)]
         if len(code) >= int(w.get("diagram_min_files", 5)) and not W.has_diagram(handoff):
             advice.append("this change touches %d code files: add a ```mermaid diagram to handoff.md that shows how the parts connect" % len(code))
@@ -1102,13 +1210,14 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         budget = mx // 2
         if results is None:
             results = (load_json(sd / "test_results.json").get("junit") or None)
-        structural = struct_done(sd, sid, files, c, diff, results, truncated=len(diff) > budget)
+        structural = struct_done(sd, sid, files, c, diff, results, truncated=len(diff) > budget, in_ci=ci_trust is not None)
         wr = writing_report(sd, sid, "done", c, files)
         skip = set()
         learn = [l for l in rd(LEARNINGS).splitlines() if '"%s"' % sid in l]
         state = {"story": rd(sd / "story.md")[:mx // 6], "context": rd(sd / "context.md")[:mx // 6],
                  "test_plan": rd(sd / "tests.json")[:mx // 8], "handoff": rd(sd / "handoff.md")[:mx // 8],
                  "learnings": "\n".join(learn)[:mx // 16], "changed_files": files[:300],
+                 "validation": cut(rd(sd / "validation.md"), mx // 16), "scenarios": cut(rd(sd / "scenarios.json"), mx // 32),
                  "diff": diff[:budget], "diff_truncated": len(diff) > budget}
     else:
         sys.exit("phase must be ready or done")
@@ -1811,7 +1920,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -1830,7 +1939,7 @@ def cmd_ci_tests(out_dir):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cmd = c.get("test_command")
-    rec = {"command": cmd, "at": now()}
+    rec, junit = {"command": cmd, "at": now()}, None
     if not cmd:
         rec.update({"exit_code": None, "error": "no test_command configured"})
     else:
@@ -1843,9 +1952,22 @@ def cmd_ci_tests(out_dir):
         rec["seconds"] = round(time.time() - t0, 1)
         jp = c.get("junit_path")
         if jp and (ROOT / jp).is_file():
-            (out / "junit.xml").write_bytes((ROOT / jp).read_bytes()[:5_000_000])
-    wj(out / "results.json", rec)
+            junit = (ROOT / jp).read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
     print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
+    scen = None
+    sid = story_id(c)  # the story's scenarios run here too: PR code, no secrets
+    if sid and (STORIES / sid / "scenarios.json").is_file():
+        import sg_validation as V
+        res = V.run_all(V.specs_of(load_json(STORIES / sid / "scenarios.json")), str(ROOT), work_state, "ci",
+                        [a for a, _, _ in acs(STORIES / sid)], skip_local_only=True)
+        scen = {"story": sid, "results": res}
+        print("story-gate scenarios: %d of %d passed" % (len([r for r in res.values() if r.get("passed")]), len(res)))
+    # Written last, after all PR code ran, so neither the tests nor a scenario can replace these files.
+    wj(out / "results.json", rec)
+    if junit is not None:
+        (out / "junit.xml").write_bytes(junit)
+    if scen is not None:
+        wj(out / "scenarios.json", scen)
     return 0
 
 
@@ -1919,6 +2041,19 @@ def cmd_ci(tests_dir=None):
                     wj(sd / "test_results.json", dict(tr, fingerprint=work_fingerprint(), head=git("rev-parse", "HEAD").strip(), source="ci"))
                 if tr.get("exit_code") != 0:
                     problems.append("tests failed or did not run in CI (%s)" % (tr.get("error") or "exit %s" % tr.get("exit_code")))
+            if sd.exists():  # scenario results: CI's own runs only; the agent's runs count only for local-only scenarios
+                import sg_validation as V
+                ci_runs = V.results_of(load_json(Path(tests_dir) / "scenarios.json")) if tests_dir else {}
+                specs = V.specs_of(load_json(sd / "scenarios.json"))
+                local_only = {s.get("name") for s in specs if s.get("local_only")}
+                if tests_dir and any(not s.get("local_only") for s in specs) and not (Path(tests_dir) / "scenarios.json").is_file():
+                    notes.append("The tests job ran no scenarios. If this repository's story-gate workflow is older than "
+                                 "the scenarios feature, ask a code owner to run `story-gate install` to update it.")
+                mine = V.results_of(load_json(sd / "scenario_results.json"))
+                merged = {n: r for n, r in mine.items() if n in local_only and isinstance(r, dict) and r.get("source") == "local"}
+                fp = work_fingerprint()  # same commit as the tests job; its run may leave build files that a clean checkout lacks
+                merged.update({n: dict(r, source="ci", fingerprint=fp) for n, r in ci_runs.items() if isinstance(r, dict) and n not in local_only})
+                wj(sd / "scenario_results.json", {"story": sid, "results": merged})
             accepted = {"accepted": False, "why": "not running on a pull request"}
             if ctx and token:
                 # Owners come only from the base branch: a PR can never name its own approvers.
@@ -1971,6 +2106,10 @@ def cmd_ci(tests_dir=None):
         lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
     if sid and (STORIES / sid / "trace.md").exists():
         lines += ["", rd(STORIES / sid / "trace.md")]
+    if sid and (STORIES / sid / "scenarios.json").exists():
+        import sg_validation as V
+        lines += V.summary_lines(load_json(STORIES / sid / "scenarios.json"), V.results_of(load_json(STORIES / sid / "scenario_results.json")),
+                                 [a for a, _, _ in acs(STORIES / sid)], work_fingerprint(), True)
     lines += writing_summary(sid)
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
@@ -1990,7 +2129,7 @@ def writing_summary(sid):
     for ph in ("ready", "done"):
         w = load_json(STORIES / sid / ("%s.json" % ph)).get("writing") if sid else None
         if w and w.get("score") is not None:
-            rows.append("| %s (%s) | %.2f | %s |" % ("story summary" if ph == "ready" else "handoff + learnings", ph.upper(), w["score"],
+            rows.append("| %s (%s) | %.2f | %s |" % ("story summary" if ph == "ready" else "validation + handoff + learnings", ph.upper(), w["score"],
                                                    "; ".join(w.get("advice") or []) or "-"))
     try:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
@@ -2101,9 +2240,9 @@ found, use the full command a story-gate message prints. Only where story-gate i
 don't run) use `{py} .story-gate/gate.py <command>`.
 1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
-3. Before saying you are done: run tests via `story-gate record-tests`, write `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`.
+3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
-5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, handoffs and learnings.
+5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, validation.md, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
 """ + BLOCK_END
 
@@ -2217,6 +2356,7 @@ jobs:
           SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
           SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           STORY_GATE_ROOT: ${{ github.workspace }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci-tests "$RUNNER_TEMP/sg-tests"
@@ -2957,7 +3097,7 @@ def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
-                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy"):
+                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
             k = argv[i][2:]
@@ -2982,6 +3122,17 @@ def main(argv):
         if not args:
             sys.exit("usage: record-tests <ID> [-- <cmd...>]")
         return cmd_record_tests(args[0], args[args.index("--") + 1:] if "--" in args else [])
+    if cmd == "scenario":
+        head, argv_ = (args[:args.index("--")], args[args.index("--") + 1:]) if "--" in args else (args, [])
+        kv_, rest_ = flags(head)
+        if not rest_ or not kv_.get("name"):
+            sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
+                     "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
+        return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "scenarios":
+        if not args:
+            sys.exit("usage: scenarios <ID>   (runs every recorded scenario again on the current code)")
+        return cmd_scenarios(args[0])
     kv, rest = flags(args)
     if cmd == "install" and "--user" in rest:
         return cmd_user("install", kv, rest)

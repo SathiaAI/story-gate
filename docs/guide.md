@@ -241,11 +241,40 @@ The result is one of three: **ON_TRACK**; **AT_RISK** (fix the named cause); or 
 | `ready_gate_passed` | Structural | READY passed, and neither the story nor the PRD/TRD has changed since |
 | `tests_ran_green` | Structural | The pinned test command passed on **this exact code**. CI uses its own run |
 | `traceability` | Structural | Every AC's `test_refs` exist in the current test files and ran and passed (writes `trace.md`) |
+| `scenarios_prove_acs` | Structural | Every AC has a scenario (the feature run end to end) that passed on **this exact code**. In CI only CI's own runs count; a `--local-only` scenario gives CONCERNS |
+| `validation_written` | Structural | All seven `validation.md` sections are filled in: result, ACs, scenarios, bugs, lessons, limits, demo |
 | `handoff_written` | Structural | All seven handoff sections, including release/rollback and drift decisions |
 | `learnings_recorded`, `code_changed`, `evidence_complete` | Structural | Learnings logged, real code in the diff, and the diff small enough for one judge pass |
 | `impl_matches_acs`, `impl_no_unplanned_scope`, `drift_trd_after` | Judge | The code does what the ACs say, nothing more, and follows the TRD |
 | `tests_implemented`, `no_deferrals` | Judge | The tests written match the plan, with no deferred work |
 | `handoff_out`, `learnings_specific` | Judge | The handoff is usable by a stranger, and the learnings are specific |
+
+### Proof it works: scenarios and validation.md
+
+Tests check the code. A **scenario** checks the feature: your AI runs the program the way a user would and records what happened.
+
+```mermaid
+flowchart LR
+    A[AI runs the feature<br/>story-gate scenario] --> B[scenarios.json<br/>+ result]
+    B --> C[PR check runs it again<br/>no secrets]
+    C --> D{Passed on<br/>this code?}
+    D -- yes --> E[AC proved]
+    D -- no --> F[DONE fails]
+```
+
+- **Record one:** `story-gate scenario SAT-1 --name "wrong password is refused" --ac AC-2 --exit 1 --expect "wrong password" -- python app.py login --password nope`
+  - `--expect` is text (a regular expression) the output must contain. `--exit` is the exit code you expect.
+  - The command runs without a shell, with a time limit (default 120 s, at most 600 s). story-gate keeps the last 4,000 characters of output and removes known secret shapes first. On Linux and macOS it also stops the processes the command started (a process that detaches itself can escape).
+  - A run that creates or changes files in the repository doesn't count, and story-gate names the files. Write output files to a temporary folder or an ignored path.
+  - Every recorded scenario must pass on the current code, not just one per AC. A failing scenario means something is broken: fix the work or the scenario.
+- **Run them all again** after a fix: `story-gate scenarios SAT-1`.
+- **In CI** the tests job runs every scenario again on the PR's code. That job has no secrets. CI allows 20 minutes for all scenarios together.
+- **Can't run in CI?** A scenario that needs a desktop app, a device or a paid service gets `--local-only "<reason>"`. The AI's own run then counts, but DONE in CI is CONCERNS. CONCERNS blocks the merge unless `accept_concerns` is on. Better: make the scenario runnable in CI (a headless browser, a test double for the paid service).
+- **Agents can't edit the records by hand.** Only story-gate writes `scenarios.json` and `scenario_results.json`, and only CI's own runs count for the PR. The AI still chooses what each scenario runs, so the judge and your reviewers see every command.
+
+**`validation.md`** is the owner's one-page summary. `start` creates the template. Your AI fills in seven sections: Result, Acceptance criteria, Scenarios run, Bugs found and fixed, Lessons learnt, Known limits, Demo. **Demo** gives the steps to try the change yourself, or `Not demo-able: <reason>` for internal work. The PR check shows the scenario results next to it, marked **CI (checked)** or **agent's computer (reported)**.
+
+**Stories started before this existed:** run `story-gate start <ID>` again. It adds the template and keeps everything else.
 
 ### ACCEPTANCE: in CI, on GitHub
 | Check | Question |
@@ -269,7 +298,7 @@ story-gate asks every AI to write for a non-coder. The rules are in `.story-gate
 | What | Where it is scored | When |
 |---|---|---|
 | The story's plain summary | `## Plain summary` in `story.md` | READY |
-| Handoff and learnings | `handoff.md`, `learn` entries | DONE |
+| Validation, handoff and learnings | `validation.md`, `handoff.md`, `learn` entries | DONE |
 | PR description | the PR check's summary | CI |
 | Chat replies | not scored (story-gate can't see them); the rules still apply | always |
 
@@ -294,6 +323,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `test_command`, `junit_path` | empty | Pin the real test suite (e.g. `pytest --junitxml=reports/junit.xml`). **Strongly recommended:** CI runs exactly this |
 | `spec_files` | empty | PRD/TRD files to fingerprint at READY (also taken from a `repo` source) |
 | `test_globs` | common patterns | Where tests live, so `test_refs` resolve only to real test files |
+| `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
@@ -349,6 +379,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 - **Pilot status for some clients:**
   - Grok Build's and Muse's hook formats are partly unverified.
   - Cursor and Grok also read Claude's hook file, so a warning can show twice.
+- **Scenarios are not a sandbox:** a scenario runs with your rights on your computer, and with the CI job's rights in CI. story-gate limits time and output and removes known secret shapes, but redaction can miss things. Use test data. In CI, scenarios run in the same job as the PR's tests, so they're as trustworthy as that job, which has no secrets.
 - **Shell writes:** detection is best-effort. Opaque scripts can still write files, and the CI check is what catches them.
 - **Judge output:** the judge returns scores, not reasons, and % complete is an estimate.
 - **Teams in CODEOWNERS:** team entries (`@org/team`) aren't resolved yet. List people, or use `approvers`.
