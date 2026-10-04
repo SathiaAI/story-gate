@@ -3074,5 +3074,31 @@ class TestInstallFromPackage(unittest.TestCase):
             self.assertTrue((repo / f).is_file(), f)
 
 
+class TestCIWorkflowRuns(Base):
+    """The PR check copies story-gate from the base branch into $RUNNER_TEMP and runs it there. It once copied a fixed
+    list of three modules, so `import sg_trust` failed and every pull request's check crashed. Run the real step."""
+
+    def test_trusted_copy_has_every_module_gate_needs(self):
+        if os.name == "nt" or not shutil.which("bash"):
+            self.skipTest("the workflow step is bash on Ubuntu")
+        load = lambda: __import__("importlib.util").util
+        g = subprocess.run(["git", "add", "-A"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "sg", "--allow-empty"], cwd=self.repo)
+        sys.path.insert(0, str(SRC))
+        try:
+            spec = load().spec_from_file_location("g_ci", self.repo / ".story-gate/gate.py"); gm = load().module_from_spec(spec)
+            os.environ["STORY_GATE_ROOT"] = str(self.repo); spec.loader.exec_module(gm)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None); sys.path.remove(str(SRC))
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
+        step = gm.TRUSTED_COPY.replace("\\\n", "\n")
+        e = dict(os.environ, RUNNER_TEMP=str(tmp), BASE="HEAD")
+        r = subprocess.run(["bash", "-e", "-c", step + "\n" + 'python3 "$RUNNER_TEMP/sg/gate.py" status'], cwd=self.repo, env=e,
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("ModuleNotFoundError", r.stderr)
+        copied = {p.name for p in (tmp / "sg").iterdir()}
+        self.assertTrue({"gate.py", "sg_trust.py", "sg_judges.py", "sg_github.py", "config.json"} <= copied, copied)
+
+
 if __name__ == "__main__":
     unittest.main()

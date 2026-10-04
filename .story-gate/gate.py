@@ -2099,9 +2099,10 @@ TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=stor
             echo "::warning title=story-gate::story-gate is not on the base branch yet, so this PR is checked by human review only. It never runs code from the PR itself."
             exit 0
           fi
-          for f in gate.py sg_judges.py sg_github.py config.json judge-calibration.json; do
+          # Every module gate.py imports, from the base branch (a fixed list missed sg_trust.py and broke this job).
+          for f in $(git ls-tree --name-only "$BASE" .story-gate/ | sed -n 's#^\\.story-gate/##p' | grep -E '^[A-Za-z0-9_]+\\.py$|^config\\.json$|^judge-calibration\\.json$'); do
             rm -f "$RUNNER_TEMP/sg/$f"
-            if git cat-file -e "$BASE:.story-gate/$f" 2>/dev/null; then git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"; fi
+            git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"
           done
           # Settings and judge calibration are read from the base branch's copies; the PR's own files stay as evidence.
           export STORY_GATE_TRUSTED_DIR="$RUNNER_TEMP/sg\""""
