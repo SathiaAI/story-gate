@@ -1,0 +1,38 @@
+/* story-gate identity (Viaknox brand v1.6.5): Graphite base, Signal Yellow accent, Paper surface.
+   Signal Yellow is never text on light; small accent text on light uses #8A6A00 (AA). */
+@font-face{font-family:Clash;src:url(../../../.story-gate/vendor/ClashDisplay-600.woff2);font-weight:600}
+@font-face{font-family:Switzer;src:url(../../../.story-gate/vendor/Switzer-400.woff2);font-weight:400}
+@font-face{font-family:Switzer;src:url(../../../.story-gate/vendor/Switzer-600.woff2);font-weight:600}
+:root{--paper:#FFF8F2;--ink:#1F2327;--muted:#5B6168;--line:#E4E1DB;--card:#FFFFFF;
+--yellow:#FFD84D;--yellow-text:#8A6A00;--tint:#FFF1B8;--offwhite:#F1F5F2;--dark-muted:#B9C0C6;--dark-line:#3A4046}
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:2000px;background:var(--paper);color:var(--ink);font-family:Switzer;padding:90px 107px 40px}
+.top{display:flex;align-items:center;gap:20px}
+.top img{width:56px;height:56px}
+.eyebrow{color:var(--yellow-text);font-weight:600;letter-spacing:.18em;font-size:22px}
+h1{font-family:Clash;font-weight:600;font-size:78px;letter-spacing:-.02em;margin:26px 0 22px;line-height:1.05}
+.lede{font-size:31px;color:var(--muted);line-height:1.5;max-width:1500px}
+.lede code,code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#F1EEE8;border-radius:7px;padding:3px 10px;font-size:.85em}
+.card{background:var(--card);border:1.5px solid var(--line);border-radius:22px;padding:42px 36px 30px}
+.card.dark{background:var(--ink);border-color:var(--ink);color:var(--offwhite)}
+.dark code{background:#2E343A;color:var(--offwhite)}
+.tag{display:inline-block;padding:7px 14px;border-radius:7px;font-weight:600;letter-spacing:.14em;font-size:17px;background:var(--tint);color:var(--ink)}
+.tag.solid{background:var(--yellow)}
+.tag.line{background:transparent;box-shadow:inset 0 0 0 2px var(--ink)}
+h3{font-family:Clash;font-weight:600;font-size:31px;margin:30px 0 6px}
+.sub{color:var(--muted);font-size:21px}.dark .sub{color:var(--dark-muted)}
+.big{font-family:Clash;font-weight:600;font-size:64px;line-height:1;color:var(--yellow-text)}
+.dark .big{color:var(--yellow)}
+ul{list-style:none;margin-top:34px}
+li{display:flex;gap:30px;font-size:23px;line-height:1.55;padding:16px 0;border-top:1px solid var(--line)}
+li:first-child{border-top:none}.dark li{border-color:var(--dark-line)}
+.num{color:var(--muted);font-size:17px;letter-spacing:.06em;padding-top:5px;min-width:22px}.dark .num{color:var(--yellow)}
+.band{margin-top:38px;background:var(--yellow);color:var(--ink);border-radius:22px;padding:38px 42px;display:flex;align-items:center;gap:44px;box-shadow:inset 0 0 0 4px var(--ink)}
+.band h2{font-family:Clash;font-weight:600;font-size:40px;white-space:nowrap}
+.band p{font-size:23px;line-height:1.6}
+.pills{display:flex;gap:14px;margin-left:auto}
+.pills span{background:var(--ink);color:var(--offwhite);font-weight:600;letter-spacing:.1em;font-size:17px;padding:14px 20px;border-radius:9px}
+footer{margin-top:50px;border-top:1.5px solid var(--line);padding-top:30px;display:flex;justify-content:space-between;align-items:center;font-size:21px;color:var(--muted)}
+footer .l,footer .by{display:flex;align-items:center;gap:14px}
+footer .l img{width:34px;height:34px}
+footer .by img{height:30px;width:auto}

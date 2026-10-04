@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="theme.css"><style>
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:31px;margin-top:60px}
+.grid h3{margin:26px 0 6px}
+li .num{min-width:30px}
+</style></head><body>
+<div class="top"><img src="../story-gate-mark-small.svg" alt=""><div class="eyebrow">FALLBACKS</div></div>
+<h1>Trust depends on who answers, not on the route.</h1>
+<p class="lede">If you don't have Jev, paid GitHub or OpenRouter, story-gate still works. It just tells you plainly how much it can promise.</p>
+<div class="grid">
+<div class="card dark"><span class="tag solid">FULL TRUST</span><h3>Jev, any route</h3><div class="sub">Can award PASS</div><ul><li><span class="num">A</span><span>OpenRouter (default)</span></li><li><span class="num">B</span><span>TypeSafe direct API</span></li><li><span class="num">C</span><span>LiteLLM or any proxy that passes Jev through</span></li><li><span class="num">D</span><span>Verified: the answer must come from a Jev model</span></li></ul></div>
+<div class="card"><span class="tag">CAPPED</span><h3>Any other model</h3><div class="sub">Up to CONCERNS</div><ul><li><span class="num">A</span><span>OpenAI-compatible APIs and gateways</span></li><li><span class="num">B</span><span>LiteLLM routing to a chat model</span></li><li><span class="num">C</span><span>Local LM Studio or Ollama, 7B and up</span></li><li><span class="num">D</span><span>Can pass only after a calibration test and your opt-in</span></li></ul></div>
+<div class="card"><span class="tag line">HUMAN ONLY</span><h3>No judge at all</h3><div class="sub">Never PASS</div><ul><li><span class="num">A</span><span>Structural checks still run</span></li><li><span class="num">B</span><span>Tests, traceability, handoff, learnings</span></li><li><span class="num">C</span><span>A human reviews the semantic checks</span></li><li><span class="num">D</span><span>Judge down or out of credit: blocks, never passes</span></li></ul></div>
+</div>
+<footer><span class="l"><img src="../story-gate-mark-small.svg" alt="">story-gate · MIT · github.com/SathiaAI/story-gate</span><span class="by">by <img src="../../../.story-gate/vendor/viaknox-wordmark.svg" alt="Viaknox"></span></footer>
+</body></html>

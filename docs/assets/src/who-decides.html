@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="theme.css"><style>
+.row{display:flex;align-items:stretch;margin-top:60px;gap:0}
+.row .card{flex:1;padding:42px 38px 34px}
+.arrow{width:118px;display:flex;align-items:center;justify-content:center;font-size:34px;color:var(--yellow-text)}
+.row h3{margin:26px 0 12px}
+.row p{font-size:23px;line-height:1.52;color:var(--muted)}.dark p{color:var(--offwhite)}
+</style></head><body>
+<div class="top"><img src="../story-gate-mark-small.svg" alt=""><div class="eyebrow">WHO DECIDES</div></div>
+<h1>Agents collect. The judge scores. Rules decide. A human accepts.</h1>
+<p class="lede">Nobody grades their own work. The coding model never judges, and nothing an agent writes can approve, waive or merge.</p>
+<div class="row">
+<div class="card"><div class="big">01</div><h3>Agents</h3><p>Cheap models fetch the story and specs, plan tests, write the handoff. Small and medium tiers only.</p></div><div class="arrow">→</div>
+<div class="card"><div class="big">02</div><h3>Evidence</h3><p>Story, specs, test plan, the diff, real test results, handoff. Locked by fingerprint: any edit means re-check.</p></div><div class="arrow">→</div>
+<div class="card"><div class="big">03</div><h3>Judge</h3><p>Jev scores each check as a probability in under a second. Same judge in every client.</p></div><div class="arrow">→</div>
+<div class="card"><div class="big">04</div><h3>Rules</h3><p>gate.py turns scores into a verdict: 0.7 and up passes, 0.4 and up is a concern, lower fails.</p></div><div class="arrow">→</div>
+<div class="card dark"><div class="big">05</div><h3>Human</h3><p>A code owner approves the latest commit on GitHub, then merges. Waivers count only after that.</p></div>
+</div>
+<footer><span class="l"><img src="../story-gate-mark-small.svg" alt="">story-gate · MIT · github.com/SathiaAI/story-gate</span><span class="by">by <img src="../../../.story-gate/vendor/viaknox-wordmark.svg" alt="Viaknox"></span></footer>
+</body></html>
