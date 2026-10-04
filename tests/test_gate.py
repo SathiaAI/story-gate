@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, unittest
+import json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / ".story-gate"
@@ -384,7 +384,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.4.0")
+        self.assertEqual(g.VERSION, "0.5.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -1204,7 +1204,7 @@ class TestTrustedRuntime(RuntimeFixture):
                   "python3 %s/gate.py unenroll" % rt, "python3 .story-gate/gate.py install --user --unsigned",
                   "python3 %s/gate.py upgrade --from /tmp/evil" % rt,
                   "git update-ref refs/remotes/origin/main HEAD", "git fetch . HEAD:refs/remotes/origin/main",
-                  "git -c remote.origin.url=/tmp/evil fetch origin"):
+                  "git -c remote.origin.url=/tmp/evil fetch origin", "story-gate init", "python3 .story-gate/gate.py init"):
             self.assertEqual(self.sh(c).returncode, 2, c)
 
     def test_git_that_hangs_fails_closed(self):
@@ -2393,6 +2393,367 @@ class TestInstallV03(Base):
         own = self.repo / ".github/workflows/story-gate.yml"; own.write_text("name: mine\n")
         out = run(self.repo, "install").stdout
         self.assertIn("not managed", out); self.assertEqual(own.read_text(), "name: mine\n")
+
+
+class TestGitHubSetupHelpers(unittest.TestCase):
+    def setUp(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); self.G = importlib.import_module("sg_github")
+        keep_github_fakes_local(self, self.G)
+        old = self.G._form_post
+        self.addCleanup(lambda: setattr(self.G, "_form_post", old))
+        self.calls = []
+
+    def fake_api(self, routes):
+        """routes: {(method, path-prefix): (status, json)}; records every call as (method, path, body)."""
+        def fake(m, p, t=None, b=None, accept=None):
+            self.calls.append((m, p, b))
+            for (rm, rp), resp in routes.items():
+                if rm == m and p.startswith(rp):
+                    return resp[0], resp[1], {}
+            return 404, {"message": "no route"}, {}
+        self.G.call = fake
+
+    # ---- device flow
+    def run_flow(self, replies):
+        slept, shown, it = [], [], iter(replies)
+        def post(url, fields):
+            return next(it)
+        self.G._form_post = post
+        t = [0]
+        def sleep(n):
+            slept.append(n); t[0] += n
+        return slept, shown, lambda: self.G.device_flow("cid", on_code=lambda c, u: shown.append((c, u)), sleep=sleep, now=lambda: t[0])
+
+    START = {"device_code": "dc", "user_code": "ABCD-1234", "verification_uri": "https://github.com/login/device", "expires_in": 900, "interval": 5}
+
+    def test_device_flow_happy_path(self):
+        slept, shown, run = self.run_flow([self.START, {"error": "authorization_pending"}, {"error": "slow_down", "interval": 10}, {"access_token": "gho_x"}])
+        self.assertEqual(run(), "gho_x")
+        self.assertEqual(shown, [("ABCD-1234", "https://github.com/login/device")])
+        self.assertEqual(slept, [5, 5, 10])
+
+    def test_device_flow_slow_down_without_interval_adds_five(self):
+        slept, _, run = self.run_flow([self.START, {"error": "slow_down"}, {"access_token": "t"}])
+        run(); self.assertEqual(slept, [5, 10])
+
+    def test_device_flow_denied_and_expired(self):
+        _, _, run = self.run_flow([self.START, {"error": "access_denied"}])
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            run()
+        _, _, run = self.run_flow([self.START, {"error": "expired_token"}])
+        with self.assertRaisesRegex(RuntimeError, "expired"):
+            run()
+        _, _, run = self.run_flow([{"error": "incorrect_client_credentials"}])
+        with self.assertRaisesRegex(RuntimeError, "did not start"):
+            run()
+
+    def test_device_flow_times_out(self):
+        _, _, run = self.run_flow([dict(self.START, expires_in=12)] + [{"error": "authorization_pending"}] * 10)
+        with self.assertRaisesRegex(RuntimeError, "expired"):
+            run()
+
+    # ---- setup PR
+    def pr_routes(self, extra=None):
+        r = {("GET", "/repos/o/r/pulls?"): (200, []), ("GET", "/repos/o/r/git/ref/heads/main"): (200, {"object": {"sha": "tip1"}}),
+             ("GET", "/repos/o/r/git/commits/tip1"): (200, {"tree": {"sha": "tree0"}}), ("GET", "/repos/o/r"): (200, {"default_branch": "main"}),
+             ("POST", "/repos/o/r/git/blobs"): (201, {"sha": "blob1"}), ("POST", "/repos/o/r/git/trees"): (201, {"sha": "tree1"}),
+             ("POST", "/repos/o/r/git/commits"): (201, {"sha": "c1"}), ("POST", "/repos/o/r/git/refs"): (201, {}),
+             ("POST", "/repos/o/r/pulls"): (201, {"number": 7, "html_url": "https://github.com/o/r/pull/7"})}
+        r.update(extra or {}); return r
+
+    def test_open_setup_pr_sequence(self):
+        self.fake_api(self.pr_routes())
+        out = self.G.open_setup_pr("t", "o/r", {"a/b.txt": b"hi", ".github/CODEOWNERS": b"* @p\n"})
+        self.assertEqual(out, {"number": 7, "url": "https://github.com/o/r/pull/7", "branch": "story-gate-setup"})
+        kinds = [(m, p.split("?")[0]) for m, p, _ in self.calls]
+        self.assertEqual(kinds, [("GET", "/repos/o/r/pulls"), ("GET", "/repos/o/r"), ("GET", "/repos/o/r/git/ref/heads/main"),
+                                 ("GET", "/repos/o/r/git/commits/tip1")] + [("POST", "/repos/o/r/git/blobs")] * 2 +
+                         [("POST", "/repos/o/r/git/trees"), ("POST", "/repos/o/r/git/commits"), ("POST", "/repos/o/r/git/refs"), ("POST", "/repos/o/r/pulls")])
+        body = {p: b for m, p, b in self.calls if m == "POST"}
+        self.assertEqual(body["/repos/o/r/git/trees"]["base_tree"], "tree0")
+        self.assertEqual({e["path"] for e in body["/repos/o/r/git/trees"]["tree"]}, {"a/b.txt", ".github/CODEOWNERS"})
+        self.assertEqual(body["/repos/o/r/git/commits"]["parents"], ["tip1"])
+        self.assertEqual(body["/repos/o/r/git/refs"], {"ref": "refs/heads/story-gate-setup", "sha": "c1"})
+        self.assertEqual(body["/repos/o/r/pulls"]["base"], "main")
+        blob = next(b for m, p, b in self.calls if p.endswith("/git/blobs"))
+        self.assertEqual(blob["encoding"], "base64")
+
+    def test_open_setup_pr_existing_pr_short_circuits(self):
+        self.fake_api(self.pr_routes({("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3"}])}))
+        out = self.G.open_setup_pr("t", "o/r", {"x": b"1"})
+        self.assertEqual(out["number"], 3)
+        self.assertFalse(any(m == "POST" for m, _, _ in self.calls))
+
+    def test_open_setup_pr_existing_branch_and_empty(self):
+        self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
+        with self.assertRaisesRegex(RuntimeError, "already exists.*Merge or delete"):
+            self.G.open_setup_pr("t", "o/r", {"x": b"1"})
+        with self.assertRaises(RuntimeError):
+            self.G.open_setup_pr("t", "o/r", {})
+
+    def test_pr_merged(self):
+        self.fake_api({("GET", "/repos/o/r/pulls/7"): (200, {"merged": True})})
+        self.assertTrue(self.G.pr_merged("t", "o/r", 7))
+        self.fake_api({("GET", "/repos/o/r/pulls/7"): (200, {"merged": False})})
+        self.assertFalse(self.G.pr_merged("t", "o/r", 7))
+        self.fake_api({})
+        with self.assertRaises(RuntimeError):
+            self.G.pr_merged("t", "o/r", 7)
+
+    # ---- secrets
+    def test_x25519_rfc7748_vectors(self):
+        h = bytes.fromhex
+        a_sk = h("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+        b_sk = h("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+        a_pk = h("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+        b_pk = h("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+        shared = h("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        base = (9).to_bytes(32, "little")
+        self.assertEqual(self.G.x25519(a_sk, base), a_pk)
+        self.assertEqual(self.G.x25519(b_sk, base), b_pk)
+        self.assertEqual(self.G.x25519(a_sk, b_pk), shared)
+        self.assertEqual(self.G.x25519(b_sk, a_pk), shared)
+        # RFC 7748 section 5.2 first vector
+        k = h("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+        u = h("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c")
+        self.assertEqual(self.G.x25519(k, u), h("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"))
+
+    def test_poly1305_rfc8439_vector(self):
+        key = bytes.fromhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+        self.assertEqual(self.G._poly1305(key, b"Cryptographic Forum Research Group").hex(), "a8061dc1305136c6c22b8baf0c0127a9")
+
+    def make_key(self):
+        import base64
+        sk = os.urandom(32)
+        return sk, self.G.x25519(sk, (9).to_bytes(32, "little")), base64.b64encode
+
+    def test_seal_box_decrypts_with_nacl(self):
+        try:
+            from nacl.public import PrivateKey, SealedBox
+        except ImportError:
+            self.skipTest("PyNaCl not installed")
+        for msg in (b"", b"s3cret-value", b"x" * 1000):
+            sk = PrivateKey.generate()
+            sealed = self.G.seal_box(msg, bytes(sk.public_key))
+            self.assertEqual(SealedBox(sk).decrypt(sealed), msg)
+
+    def test_set_repo_secret_body(self):
+        import base64
+        sk, pk, _ = self.make_key()
+        self.fake_api({("GET", "/repos/o/r/actions/secrets/public-key"): (200, {"key": base64.b64encode(pk).decode(), "key_id": "kid9"}),
+                       ("PUT", "/repos/o/r/actions/secrets/MY_KEY"): (201, {})})
+        self.G.set_repo_secret("t", "o/r", "MY_KEY", "plain-secret-123")
+        m, p, body = self.calls[-1]
+        self.assertEqual((m, p), ("PUT", "/repos/o/r/actions/secrets/MY_KEY"))
+        self.assertEqual(body["key_id"], "kid9")
+        raw = base64.b64decode(body["encrypted_value"])
+        self.assertEqual(len(raw), 32 + 16 + len(b"plain-secret-123"))
+        self.assertNotIn("plain-secret-123", json.dumps(body))
+        self.assertNotIn(b"plain-secret-123", raw)
+        try:
+            from nacl.public import PrivateKey, SealedBox
+            self.assertEqual(SealedBox(PrivateKey(sk)).decrypt(raw), b"plain-secret-123")
+        except ImportError:
+            pass
+
+    def test_set_repo_secret_errors(self):
+        import base64
+        _, pk, _ = self.make_key()
+        self.fake_api({("GET", "/repos/o/r/actions/secrets/public-key"): (403, {})})
+        with self.assertRaisesRegex(RuntimeError, "encryption key"):
+            self.G.set_repo_secret("t", "o/r", "K", "v")
+        self.fake_api({("GET", "/repos/o/r/actions/secrets/public-key"): (200, {"key": base64.b64encode(pk).decode(), "key_id": "k"}),
+                       ("PUT", "/repos/o/r/actions/secrets/K"): (403, {"message": "nope"})})
+        with self.assertRaises(RuntimeError) as cm:
+            self.G.set_repo_secret("t", "o/r", "K", "topsecret")
+        self.assertNotIn("topsecret", str(cm.exception))
+
+
+
+class TestGuidedSetup(unittest.TestCase):
+    """story-gate init: the browser page and the setup pull request (GitHub calls are faked; no network)."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_github as G, sg_setup as S
+        self.G, self.S = G, importlib.reload(S)
+        keep_github_fakes_local(self, G)
+        saved = {n: getattr(G, n) for n in ("set_repo_secret", "open_setup_pr", "pr_merged", "setup_repo", "whoami", "human_token", "device_flow")}
+        self.addCleanup(lambda: [setattr(G, n, f) for n, f in saved.items()])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.home = self.tmp / "home"; self.home.mkdir()
+        self.old_env = dict(os.environ)
+        os.environ.update(STORY_GATE_HOME=str(self.home), STORY_GATE_USER_HOME=str(self.tmp / "user"))
+        os.environ.pop("GITHUB_TOKEN", None); os.environ.pop("GH_TOKEN", None)
+        remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        self.top = self.tmp / "proj"
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.top, capture_output=True, check=True)
+        self.top.mkdir(); g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        (self.top / "app.py").write_text("print(1)\n"); g("add", "-A"); g("commit", "-qm", "app")
+        g("remote", "add", "origin", str(remote)); g("push", "-q", "origin", "main")
+        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/me/proj.git"], cwd=self.top, check=True)
+        subprocess.run(["git", "config", "url.%s.insteadOf" % remote, "https://github.com/me/proj.git"], cwd=self.top, check=True)
+
+    def tearDown(self):
+        os.environ.clear(); os.environ.update(self.old_env)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_repo_name_from_origin(self):
+        self.assertEqual(self.S.github_repo(self.top), "me/proj")
+        subprocess.run(["git", "remote", "set-url", "origin", "git@github.com:me/x.git"], cwd=self.top, check=True)
+        self.assertEqual(self.S.github_repo(self.top), "me/x")
+        subprocess.run(["git", "remote", "set-url", "origin", "https://gitlab.com/me/x.git"], cwd=self.top, check=True)
+        self.assertIsNone(self.S.github_repo(self.top))
+
+    def test_setup_files_come_from_a_clean_copy_of_the_default_branch(self):
+        (self.top / "local-only.txt").write_text("not committed")
+        files = self.S.setup_files(self.top, "main", sys.executable)
+        for f in (".story-gate/gate.py", ".story-gate/config.json", ".github/workflows/story-gate.yml", "CLAUDE.md", "AGENTS.md"):
+            self.assertIn(f, files)
+        self.assertNotIn("local-only.txt", files); self.assertNotIn("app.py", files)
+        self.assertFalse(any("__pycache__" in f for f in files))
+        self.assertEqual(subprocess.run(["git", "worktree", "list"], cwd=self.top, capture_output=True, text=True).stdout.count("\n"), 1)
+
+    def serve(self, wz):
+        import http.server, threading
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self.S.make_handler(wz))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
+    def req(self, port, path, data=None, host=None, origin=None):
+        import urllib.request, urllib.error
+        r = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data, method="POST" if data is not None else "GET")
+        if host: r.add_header("Host", host)
+        if origin: r.add_header("Origin", origin)
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def test_page_needs_its_secret_and_its_own_host(self):
+        wz = self.S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+        port = self.serve(wz)
+        self.assertEqual(self.req(port, "/state")[0], 403)
+        self.assertEqual(self.req(port, "/?t=" + wz.secret, host="evil.example:%d" % port)[0], 403)  # DNS rebinding
+        self.assertEqual(self.req(port, "/signin?t=" + wz.secret, b"", origin="https://evil.example")[0], 403)
+        st, body = self.req(port, "/?t=" + wz.secret)
+        self.assertEqual(st, 200); self.assertIn("Give your AI its own GitHub login", body); self.assertIn("me/proj", body)
+        # the 2-second refresh must not rebuild the links: a link swapped out mid-click silently does nothing
+        self.assertIn("p.dataset.url!==s.pr.url", body); self.assertIn("d.dataset.code!==s.device.code", body)
+        self.assertIn("Opens GitHub in a new tab", body)
+
+    def test_judge_key_goes_to_a_secret_and_never_back_to_the_page(self):
+        G, S = self.G, self.S
+        sent = {}
+        G.set_repo_secret = lambda tok, repo, name, value: sent.update(tok=tok, repo=repo, name=name, value=value)
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        port = self.serve(wz)
+        key = "sk-or-v1-" + "a" * 40
+        self.req(port, "/key?t=" + wz.secret, ("key=" + key).encode())
+        for _ in range(50):
+            if wz.st["key"]["status"] == "ok": break
+            time.sleep(0.1)
+        self.assertEqual(sent, {"tok": "human", "repo": "me/proj", "name": "OPENROUTER_API_KEY", "value": key})
+        self.assertIn(key, (self.home / "judge.env").read_text())
+        self.assertNotIn(key, self.req(port, "/state?t=" + wz.secret)[1])
+        wz.save_key("not a key")
+        self.assertEqual(wz.st["key"]["status"], "error")
+
+    def test_signin_checks_admin_rights(self):
+        G, S = self.G, self.S
+        G.whoami = lambda tok: "me"
+        G.call = lambda m, p, tok=None, body=None, accept=None: (404, {}, {}) if "/contents/" in p else (200, {"permissions": {"admin": False}, "private": False, "owner": {"type": "User"}}, {})
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.start_signin()
+        self.assertEqual(wz.st["signin"]["status"], "error"); self.assertIn("isn't an admin", wz.st["signin"]["msg"])
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": True}, "private": True, "owner": {"type": "User"}, "plan": {"name": "free"}}, {})
+        wz.start_signin()
+        self.assertEqual(wz.st["signin"]["status"], "ok"); self.assertTrue(wz.private_free)
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": True}, "private": True, "owner": {"type": "User"}}, {})
+        wz.start_signin()  # the sign-in token can't see the plan: unknown is not "free", so no false warning
+        self.assertEqual(wz.st["signin"]["status"], "ok"); self.assertFalse(wz.private_free)
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"permissions": {"admin": False}, "default_branch": "main"}, {})
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.start_signin()  # a teammate: story-gate is already on GitHub, so no admin rights, key or pull request needed
+        self.assertEqual(wz.st["signin"]["status"], "ok"); self.assertTrue(wz.already)
+        self.assertEqual((wz.st["key"]["status"], wz.st["merge"]["status"]), ("ok", "ok"))
+
+    def test_setup_pr_then_rules_after_the_merge(self):
+        G, S = self.G, self.S
+        calls = []
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: calls.append(("pr", sorted(files))) or {"number": 7, "url": "https://github.com/me/proj/pull/7", "branch": "story-gate-setup"}
+        G.pr_merged = lambda tok, repo, n: True
+        G.setup_repo = lambda root, repo, owners, tok, dry_run=False: calls.append(("rules", owners)) or ["Ruleset: created", "Actions: ok"]
+        S.Wizard.finish = lambda self, base: self.set("done", "ok", "fake finish")
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        wz.open_pr()
+        for _ in range(100):
+            if wz.st["done"]["status"] == "ok": break
+            time.sleep(0.1)
+        self.assertEqual([c[0] for c in calls], ["pr", "rules"])
+        self.assertIn(".github/CODEOWNERS", calls[0][1]); self.assertIn(".story-gate/gate.py", calls[0][1])
+        self.assertEqual(calls[1][1], ["me"])
+        self.assertEqual(wz.st["merge"]["status"], "ok")
+        self.assertFalse(wz.private_free)
+        G.setup_repo = lambda root, repo, owners, tok, dry_run=False: ["Ruleset: NOT created (HTTP 403 Upgrade to GitHub Pro)", "Actions: ok"]
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login, wz.private = "me", True
+        wz.open_pr()
+        for _ in range(100):
+            if wz.st["done"]["status"] == "ok": break
+            time.sleep(0.1)
+        self.assertTrue(wz.private_free)  # GitHub refused the rules: free plan, private repository -> the page warns
+
+    def test_doctor_checks_the_path_command_without_running_it(self):
+        import sg_trust as T
+        marker = self.tmp / "ran"
+        good = self.tmp / "story-gate"  # what uv/pip write for a console script
+        good.write_text("#!/usr/bin/python3\n# -*- coding: utf-8 -*-\nimport sys\nfrom story_gate.cli import main\n"
+                        "if __name__ == \"__main__\":\n    sys.exit(main())\n")
+        bad = self.tmp / "other"; bad.write_text("#!/bin/sh\ntouch %s\n" % marker); bad.chmod(0o755)
+        sneaky = self.tmp / "sneaky"; sneaky.write_text("#!/bin/sh\ntouch %s\n# from story_gate.cli import main\nx=story_gate.cli\n" % marker)
+        self.assertTrue(T.leads_to_runtime(str(good)))
+        self.assertFalse(T.leads_to_runtime(str(bad))); self.assertFalse(T.leads_to_runtime(str(sneaky)))
+        self.assertFalse(T.leads_to_runtime(str(self.tmp / "missing")))
+        self.assertFalse(marker.exists())  # inspected, never executed
+
+    def test_setup_pr_stops_when_the_repo_lookup_fails(self):
+        self.G.call = lambda m, p, tok=None, body=None, accept=None: (404, {"message": "Not Found"}, {})
+        wz = self.S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        with self.assertRaises(RuntimeError) as e:
+            wz.open_pr()
+        self.assertIn("HTTP 404", str(e.exception))
+
+    def test_signin_uses_storygate_device_flow_when_not_signed_in(self):
+        G, S = self.G, self.S
+        self.assertTrue(S.OAUTH_CLIENT_ID.startswith("Ov23"))
+        G.human_token = lambda: None
+        got = {}
+        G.device_flow = lambda cid, on_code=None, **kw: got.setdefault("cid", cid) and None
+        S.Wizard._signed_in = lambda self, tok: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+        wz.start_signin()
+        for _ in range(50):
+            if got: break
+            time.sleep(0.05)
+        self.assertEqual(got.get("cid"), S.OAUTH_CLIENT_ID)
+
+    def test_cli_hands_commands_to_the_runtime_once_installed(self):
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root))
+        import importlib, story_gate.cli as C
+        C = importlib.reload(C)
+        self.assertIsNone(C.runtime_launcher())
+        rt = self.home / "runtime"; rt.mkdir(parents=True)
+        (rt / "launch.py").write_text("")
+        (rt / "active.json").write_text(json.dumps({"dir": str(rt / "0.4.0")}))
+        self.assertEqual(C.runtime_launcher(), rt / "launch.py")
 
 
 if __name__ == "__main__":

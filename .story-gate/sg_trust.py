@@ -286,9 +286,20 @@ def shim_problems(py=None):
         if not f.is_file() or f.read_bytes() != body.encode("utf-8"):
             probs.append("%s was changed or is missing (gate.py install --user rewrites it)" % f)
     found = shutil.which("story-gate")
-    if found and Path(found).resolve().parent != shim_dir().resolve():
+    if found and Path(found).resolve().parent != shim_dir().resolve() and not leads_to_runtime(found):
         probs.append("`story-gate` on PATH is %s, not story-gate's own command in %s" % (found, shim_dir()))
     return probs
+
+
+def leads_to_runtime(exe):
+    """True when this `story-gate` (e.g. the one `uv tool install` puts on PATH) is story-gate's own console script,
+    which hands every command to the active runtime. Read-only: the file is inspected, never run."""
+    try:
+        with open(exe, "rb") as f:
+            head = f.read(1 << 20)  # uv's Windows launcher embeds the script; on macOS/Linux it is a short Python file
+        return bool(re.search(rb"(?m)^from story_gate\.cli import main\r?$", head))  # the console-script import, not a comment
+    except OSError:
+        return False
 
 
 def launcher_ok():

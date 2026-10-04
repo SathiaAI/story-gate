@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "story-gate"
+# Must equal VERSION in .story-gate/gate.py (enforced by tests/test_packaging.py)
+version = "0.5.0"
+description = "Per-story quality gate for AI coding sessions. Stdlib only."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+story-gate = "story_gate.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+packages = ["story_gate", "story_gate._payload"]
+
+[tool.setuptools.package-dir]
+story_gate = "story_gate"
+"story_gate._payload" = ".story-gate"
+
+# Mirrors RUNTIME_GLOBS in .story-gate/sg_trust.py ("*.py" is picked up as package modules)
+[tool.setuptools.package-data]
+"story_gate._payload" = ["PROTOCOL.md", "SKILL.md", "vendor/*"]

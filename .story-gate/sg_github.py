@@ -8,7 +8,7 @@ Design rules (decided by the frontier panel, Oct 2026):
   `workflows` or `administration` permission, so it cannot edit CI or branch rules.
 - Nothing here runs code from the pull request.
 """
-import base64, csv, http.server, json, os, re, secrets, shutil, subprocess, tempfile, time, urllib.error, urllib.parse, urllib.request, webbrowser
+import base64, csv, hashlib, http.server, json, os, re, secrets, shutil, subprocess, tempfile, time, urllib.error, urllib.parse, urllib.request, webbrowser
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -491,3 +491,206 @@ def bot_identity(rec):
     st, u, _ = call("GET", "/users/%s%%5Bbot%%5D" % rec["slug"])
     uid = (u or {}).get("id", rec["id"])
     return "%s[bot]" % rec["slug"], "%s+%s[bot]@users.noreply.github.com" % (uid, rec["slug"])
+
+
+# ------------------------------------------------------------------ device flow (human sign-in without pasting a token)
+def _form_post(url, fields):
+    """POST form-encoded fields, ask for JSON back. -> parsed dict. Tests replace this."""
+    req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode(), method="POST",
+                                 headers={"Accept": "application/json", "User-Agent": "story-gate",
+                                          "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        raw = urllib.request.urlopen(req, timeout=30).read().decode()
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode() or "{}"
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise RuntimeError("GitHub sent a reply we could not read. Try again in a minute.")
+
+
+def device_flow(client_id, scope="repo workflow", on_code=None, sleep=time.sleep, now=time.time):
+    """GitHub OAuth device flow. Shows the user a code to type at github.com/login/device. -> access token."""
+    d = _form_post(WEB + "/login/device/code", {"client_id": client_id, "scope": scope})
+    if not d.get("device_code"):
+        raise RuntimeError("GitHub did not start sign-in (%s). Check the OAuth app's client id and that device flow is enabled."
+                           % (d.get("error_description") or d.get("error") or "no reason given"))
+    if on_code:
+        on_code(d["user_code"], d.get("verification_uri") or WEB + "/login/device")
+    interval = int(d.get("interval") or 5)
+    deadline = now() + int(d.get("expires_in") or 900)
+    while now() < deadline:
+        sleep(interval)
+        r = _form_post(WEB + "/login/oauth/access_token", {"client_id": client_id, "device_code": d["device_code"],
+                                                          "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        if r.get("access_token"):
+            return r["access_token"]
+        err = r.get("error")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval = int(r.get("interval") or interval + 5)
+            continue
+        if err == "access_denied":
+            raise RuntimeError("Sign-in was cancelled on GitHub. Run it again and choose Authorize.")
+        if err == "expired_token":
+            break
+        raise RuntimeError("GitHub sign-in failed (%s)." % (r.get("error_description") or err or "unknown reason"))
+    raise RuntimeError("The sign-in code expired before it was used. Run it again and enter the code sooner.")
+
+
+# ------------------------------------------------------------------ setup pull request (Git Data API)
+def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up story-gate",
+                  body="Adds story-gate files. Review and merge to turn the gate on.", base=None):
+    """One commit with every file in `files` ({posix path: bytes}) on a new branch, then a PR. -> {number, url, branch}."""
+    if not files:
+        raise RuntimeError("nothing to commit: no files were given")
+
+    def ok(method, path, payload=None, want=(200, 201)):
+        st, data, _ = call(method, path, token, payload)
+        if st not in want or not isinstance(data, (dict, list)):
+            raise RuntimeError("GitHub refused %s %s (HTTP %s %s)" % (method, path, st, (data or {}).get("message", "") if isinstance(data, dict) else ""))
+        return data
+
+    r = "/repos/%s" % repo
+    owner = repo.split("/", 1)[0]
+    st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), token)
+    if st == 200 and isinstance(open_prs, list) and open_prs:
+        return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch}
+    base = base or ok("GET", r)["default_branch"]
+    tip = ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
+    base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]
+    entries = []
+    for path, content in sorted(files.items()):
+        blob = ok("POST", r + "/git/blobs", {"content": base64.b64encode(content).decode(), "encoding": "base64"})
+        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+    tree = ok("POST", r + "/git/trees", {"base_tree": base_tree, "tree": entries})
+    commit = ok("POST", r + "/git/commits", {"message": title, "tree": tree["sha"], "parents": [tip]})
+    st, ref, _ = call("POST", r + "/git/refs", token, {"ref": "refs/heads/" + branch, "sha": commit["sha"]})
+    if st == 422:
+        raise RuntimeError("the branch '%s' already exists on %s. Merge or delete it on GitHub, then run this again." % (branch, repo))
+    if st not in (200, 201):
+        raise RuntimeError("GitHub refused to create the branch (HTTP %s %s)" % (st, (ref or {}).get("message", "")))
+    pr = ok("POST", r + "/pulls", {"title": title, "head": branch, "base": base, "body": body})
+    return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
+
+
+def pr_merged(token, repo, number):
+    st, pr, _ = call("GET", "/repos/%s/pulls/%s" % (repo, number), token)
+    if st != 200 or not isinstance(pr, dict):
+        raise RuntimeError("could not read pull request #%s (HTTP %s)" % (number, st))
+    return bool(pr.get("merged"))
+
+
+# ------------------------------------------------------------------ Actions secret (libsodium sealed box, pure Python)
+# crypto_box_seal(m, recipient_pk) = ephemeral_pk || crypto_box(m, nonce, recipient_pk, ephemeral_sk)
+#   nonce = BLAKE2b-24(ephemeral_pk || recipient_pk)
+#   crypto_box = XSalsa20-Poly1305 keyed with HSalsa20(X25519(sk, pk), 16 zero bytes)
+# Encryption only: nothing here needs to be constant-time, and it is only used on a secret the caller already holds.
+_M32 = 0xFFFFFFFF
+_P255 = 2 ** 255 - 19
+
+
+def x25519(k, u):
+    """RFC 7748 X25519. k: 32-byte scalar, u: 32-byte point -> 32 bytes."""
+    k = bytearray(k); k[0] &= 248; k[31] &= 127; k[31] |= 64
+    k = int.from_bytes(k, "little")
+    x1 = int.from_bytes(u, "little") & ((1 << 255) - 1)
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for t in range(254, -1, -1):
+        bit = (k >> t) & 1
+        if swap ^ bit:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a, b = (x2 + z2) % _P255, (x2 - z2) % _P255
+        c, d = (x3 + z3) % _P255, (x3 - z3) % _P255
+        aa, bb, da, cb = a * a % _P255, b * b % _P255, d * a % _P255, c * b % _P255
+        e = (aa - bb) % _P255
+        x3, z3 = (da + cb) ** 2 % _P255, x1 * (da - cb) ** 2 % _P255
+        x2, z2 = aa * bb % _P255, e * (aa + 121665 * e) % _P255
+    if swap:
+        x2, x3, z2, z3 = x3, x2, z3, z2
+    return (x2 * pow(z2, _P255 - 2, _P255) % _P255).to_bytes(32, "little")
+
+
+def _rotl(v, n):
+    return ((v << n) & _M32) | (v >> (32 - n))
+
+
+def _salsa_rounds(x):
+    """20 Salsa20 rounds on a list of 16 words (in place); returns the list."""
+    for _ in range(10):
+        for a, b, c, d in ((0, 4, 8, 12), (5, 9, 13, 1), (10, 14, 2, 6), (15, 3, 7, 11),   # columns
+                           (0, 1, 2, 3), (5, 6, 7, 4), (10, 11, 8, 9), (15, 12, 13, 14)):  # rows
+            x[b] ^= _rotl((x[a] + x[d]) & _M32, 7)
+            x[c] ^= _rotl((x[b] + x[a]) & _M32, 9)
+            x[d] ^= _rotl((x[c] + x[b]) & _M32, 13)
+            x[a] ^= _rotl((x[d] + x[c]) & _M32, 18)
+    return x
+
+
+_SIGMA = (0x61707865, 0x3320646E, 0x79622D32, 0x6B206574)  # "expand 32-byte k"
+
+
+def _hsalsa20(key, n16):
+    """HSalsa20: 32-byte key + 16-byte input -> 32-byte subkey."""
+    import struct
+    k, n = struct.unpack("<8I", key), struct.unpack("<4I", n16)
+    x = _salsa_rounds([_SIGMA[0], k[0], k[1], k[2], k[3], _SIGMA[1], n[0], n[1], n[2], n[3], _SIGMA[2], k[4], k[5], k[6], k[7], _SIGMA[3]])
+    return struct.pack("<8I", x[0], x[5], x[10], x[15], x[6], x[7], x[8], x[9])
+
+
+def _salsa20_block(key, n8, counter):
+    import struct
+    k, n = struct.unpack("<8I", key), struct.unpack("<2I", n8)
+    init = [_SIGMA[0], k[0], k[1], k[2], k[3], _SIGMA[1], n[0], n[1], counter & _M32, counter >> 32, _SIGMA[2], k[4], k[5], k[6], k[7], _SIGMA[3]]
+    x = _salsa_rounds(list(init))
+    return struct.pack("<16I", *[(a + b) & _M32 for a, b in zip(x, init)])
+
+
+def _xsalsa20_stream(key, nonce24, length):
+    sub, out, ctr = _hsalsa20(key, nonce24[:16]), b"", 0
+    while len(out) < length:
+        out += _salsa20_block(sub, nonce24[16:], ctr)
+        ctr += 1
+    return out[:length]
+
+
+def _poly1305(key, msg):
+    r = int.from_bytes(key[:16], "little") & 0x0ffffffc0ffffffc0ffffffc0fffffff
+    s, p, acc = int.from_bytes(key[16:32], "little"), (1 << 130) - 5, 0
+    for i in range(0, len(msg), 16):
+        chunk = msg[i:i + 16]
+        acc = (acc + int.from_bytes(chunk + b"\x01", "little")) * r % p
+    return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+
+def _crypto_box(msg, nonce24, their_pk, my_sk):
+    """NaCl crypto_box: tag(16) || ciphertext."""
+    key = _hsalsa20(x25519(my_sk, their_pk), b"\0" * 16)
+    stream = _xsalsa20_stream(key, nonce24, 32 + len(msg))
+    ct = bytes(a ^ b for a, b in zip(msg, stream[32:]))
+    return _poly1305(stream[:32], ct) + ct
+
+
+def seal_box(msg, recipient_pk, eph_sk=None):
+    """libsodium crypto_box_seal. eph_sk is only for tests; real use draws a fresh random one."""
+    eph_sk = eph_sk or os.urandom(32)
+    eph_pk = x25519(eph_sk, (9).to_bytes(32, "little"))
+    nonce = hashlib.blake2b(eph_pk + recipient_pk, digest_size=24).digest()
+    return eph_pk + _crypto_box(msg, nonce, recipient_pk, eph_sk)
+
+
+def set_repo_secret(token, repo, name, value):
+    """Create or replace a GitHub Actions secret. The value is encrypted here; it is never printed or logged."""
+    st, key, _ = call("GET", "/repos/%s/actions/secrets/public-key" % repo, token)
+    if st != 200 or not key.get("key") or not key.get("key_id"):
+        raise RuntimeError("could not read the repository's secret-encryption key (HTTP %s). The token needs permission to manage Actions secrets." % st)
+    pk = base64.b64decode(key["key"])
+    if len(pk) != 32:
+        raise RuntimeError("GitHub sent an unexpected encryption key")
+    enc = base64.b64encode(seal_box(value.encode("utf-8"), pk)).decode()
+    st, resp, _ = call("PUT", "/repos/%s/actions/secrets/%s" % (repo, urllib.parse.quote(name, safe="")), token,
+                       {"encrypted_value": enc, "key_id": key["key_id"]})
+    if st not in (201, 204):
+        raise RuntimeError("GitHub did not save secret %s (HTTP %s %s)" % (name, st, (resp or {}).get("message", "") if isinstance(resp, dict) else ""))
