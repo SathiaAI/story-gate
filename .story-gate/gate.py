@@ -1451,6 +1451,7 @@ def touches_gate(cmd):
 
 
 def edited_paths(payload):
+    """Extract edited file paths from client tool inputs and patch headers."""
     ti = payload.get("tool_input") or payload.get("toolInput") or payload.get("tool_info") or {}
     paths = []
     if isinstance(ti, dict):
@@ -1509,6 +1510,7 @@ def hook_out(client, event, msg, block, notice=None):
 
 
 def cmd_hook(client, event):
+    """Read a client hook event, apply gate policy, and return its exit status."""
     try:
         raw = HOOK_STDIN if HOOK_STDIN is not None else (sys.stdin.read() if not sys.stdin.isatty() else "")
         payload = json.loads(raw) if raw.strip() else {}
@@ -2002,7 +2004,7 @@ def policy_weakened(e):
     if seen is None:  # enrolled before this check existed: doctor records the current rules as the starting point
         return [], sha
     need = ("mode", "enforce_points", "accept_concerns", "thresholds", "judge", "require_independent_review", "exempt_globs",
-            "project_hooks_allowed", "test_command", "approvers")
+            "project_hooks_allowed", "test_command", "test_globs", "approvers")
     if not isinstance(seen, dict) or not isinstance(seen.get("config"), dict) or any(k not in seen["config"] for k in need):
         return ["this computer's record of the accepted rules is unreadable"], sha  # never silently re-accept
     now_cfg = full_config(T.policy_text(e["toplevel"], e["policy_ref"], "config.json"))
@@ -2024,6 +2026,7 @@ def session_context(c):
 
 
 def put_block(path, py):
+    """Insert or refresh the managed instruction block in a repository file."""
     p = ROOT / path
     text = rd(p)
     block = INSTRUCTION_BLOCK.replace("{py}", py)

@@ -418,6 +418,7 @@ def policy_source_problem(e):
 
 
 def enroll(cwd, policy_ref=None, allow_local=False):
+    """Persist repository enrollment with a remote policy ref unless local policy is explicitly allowed."""
     top, ident = repo_identity(cwd)
     if not ident:
         raise TrustError("not inside a git repository")
@@ -446,6 +447,7 @@ def record_policy_seen(cwd, sha, config):
 
 
 def unenroll(cwd):
+    """Remove repository enrollment and return whether a record was deleted."""
     _, ident = repo_identity(cwd)
     data = read_json(enrolled_path())
     if ident in data:
@@ -552,6 +554,9 @@ def weaker(old, new):
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
     if more:
         out.append("more files exempt from the gate: %s" % ", ".join(more[:5]))
+    removed = sorted(set(o.get("test_globs") or []) - set(n.get("test_globs") or []))
+    if removed:  # treat replacements conservatively, even when patterns overlap
+        out.append("test file patterns removed: %s" % ", ".join(removed[:5]))
     if (o.get("test_command") or "") != (n.get("test_command") or ""):  # can't tell if a new command is as strict: a human decides
         out.append("test command changed from %r to %r" % (o.get("test_command") or "", n.get("test_command") or ""))
     who = sorted(set(n.get("approvers") or []) - set(o.get("approvers") or []))
@@ -566,6 +571,7 @@ def weaker(old, new):
 
 # ------------------------------------------------------------------ user-level client hooks
 def user_hook_files():
+    """Return the user-level hook configuration path for each supported client."""
     h = user_home()
     return {"claude": h / ".claude" / "settings.json", "codex": h / ".codex" / "hooks.json",
             "cursor": h / ".cursor" / "hooks.json", "gemini": h / ".gemini" / "settings.json",
@@ -578,6 +584,7 @@ def user_protected_paths():
 
 
 def hook_entries(py, gate):
+    """Build client hook registrations that invoke the isolated trusted launcher."""
     cmd = lambda cl, ev: '"%s" -I "%s" hook --client %s --event %s' % (py, gate, cl, ev)
     return {
         "claude": {"hooks": {
