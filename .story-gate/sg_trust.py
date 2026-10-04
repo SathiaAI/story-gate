@@ -575,6 +575,11 @@ def tighten(policy, local):
                 w["target"] = max(float(w.get("target", 0)), float(lw["target"]))
         except (TypeError, ValueError):
             pass
+        try:
+            if "diagram_min_files" in lw and int(lw["diagram_min_files"]) >= 1:
+                w["diagram_min_files"] = min(int(w.get("diagram_min_files", 5)), int(lw["diagram_min_files"]))
+        except (TypeError, ValueError):
+            pass
     if w:
         out["writing"] = w
     return out
@@ -609,6 +614,11 @@ def weaker(old, new):
     try:
         if ow.get("enforce") and float(nw.get("target", 0)) < float(ow.get("target", 0)):
             out.append("plain-writing target lowered from %s to %s" % (ow.get("target"), nw.get("target")))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if ow.get("enforce") and int(nw.get("diagram_min_files", 5)) > int(ow.get("diagram_min_files", 5)):
+            out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))

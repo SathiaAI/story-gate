@@ -3220,6 +3220,45 @@ class TestPlainWriting(Base):
         top = [n for n in tree.body if isinstance(n, ast.Import) and any(a.name == "sg_writing" for a in n.names)]
         self.assertEqual(top, [])
 
+    def test_review_round_1_edge_cases(self):
+        W = self.W()
+        # a fence closes only on the same character and length: the inner ``` stays inside the code block
+        text = "````md\n```\nThis " + "very " * 30 + "long line is code.\n```\n````\nShort text here.\n"
+        self.assertEqual(W.score_text(text)["checked"], 1)
+        self.assertFalse(W.has_diagram("````md\n```mermaid\nflowchart LR\n  A-->B\n```\n````\n"))  # an example inside code
+        self.assertTrue(W.has_diagram("~~~mermaid\nflowchart LR\n  A-->B\n~~~\n"))
+        # tables without leading pipes are not prose
+        table = "Name | Value\n--- | ---\n" + "word " * 40 + "| x\n\nShort text here.\n"
+        self.assertEqual(W.score_text(table)["checked"], 1)
+        # the exact share is compared: 1600/2001 rounds to 0.8 but is below it
+        orig = W.score_text
+        W.score_text = lambda t: {"checked": 2001, "passed": 1600, "score": 0.8, "long_sentences": [], "long_paragraphs": 0, "passive": 0}
+        try:
+            self.assertEqual(W.report({"x": "y"}, 0.8)["status"], "below_target")
+        finally:
+            W.score_text = orig
+
+    def test_diagram_advice_counts_code_files_only(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            g = load_gate(self.repo)
+        finally:
+            sys.path.remove(str(SRC))
+        sd = self.repo / ".story-gate/stories/SAT-1"; sd.mkdir(parents=True, exist_ok=True)
+        (sd / "handoff.md").write_text("## What changed\nWe added icons.\n")
+        files = ["app.py", "a.png", "b.png", "c.svg", "d.woff2"]
+        self.assertFalse(g.writing_report(sd, "SAT-1", "done", g.cfg(), files).get("diagram_missing"))
+
+    def test_turning_on_the_writing_check_re_scores(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            g = load_gate(self.repo)
+        finally:
+            sys.path.remove(str(SRC))
+        c = g.cfg(); a = g.policy_fingerprint(c)
+        c["writing"] = dict(c["writing"], enforce=True)
+        self.assertNotEqual(a, g.policy_fingerprint(c))
+
     def test_branch_can_only_tighten_writing_policy(self):
         sys.path.insert(0, str(SRC))
         try:
@@ -3231,6 +3270,10 @@ class TestPlainWriting(Base):
         self.assertEqual(T.tighten(base, {"writing": {"enforce": True, "target": 0.9}})["writing"], {"target": 0.9, "enforce": True})
         self.assertEqual(T.tighten(base, {"writing": {"target": 0.1}})["writing"]["target"], 0.8)
         self.assertIn("plain-writing check no longer enforced", T.weaker({"writing": {"enforce": True}}, {"writing": {"enforce": False}}))
+        self.assertEqual(T.tighten(base, {"writing": {"diagram_min_files": 3}})["writing"]["diagram_min_files"], 3)
+        self.assertEqual(T.tighten({"writing": {"diagram_min_files": 5}}, {"writing": {"diagram_min_files": 9}})["writing"]["diagram_min_files"], 5)
+        self.assertIn("diagram minimum raised from 3 to 5 files",
+                      T.weaker({"writing": {"enforce": True, "diagram_min_files": 3}}, {"writing": {"enforce": True, "diagram_min_files": 5}}))
 
     def test_ci_summary_scores_the_pr_description(self):
         ev = self.repo.parent / (self.repo.name + "-event.json")

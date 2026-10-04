@@ -487,7 +487,8 @@ def spec_files(c):
 def policy_fingerprint(c):
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
-                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")]}, sort_keys=True)
+                       "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
+                       "w": c.get("writing")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
 
 
 def ready_hash_from(story, context, tests, spec_pairs, c):
@@ -1049,6 +1050,10 @@ def diff_against(base):
     return mb, sorted(names), diff
 
 
+NOT_CODE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp", ".pdf", ".woff", ".woff2", ".ttf", ".otf",
+            ".mp3", ".mp4", ".wav", ".mov", ".zip", ".md", ".txt", ".csv", ".lock")  # assets and docs: not code for diagram advice
+
+
 def writing_report(sd, sid, phase, c, files=()):
     """Advisory plain-writing report for text the agent wrote: the story's plain summary (READY), the handoff and this
     story's learnings (DONE). The word-for-word story, quotes and code are never scored."""
@@ -1065,7 +1070,7 @@ def writing_report(sd, sid, phase, c, files=()):
         learn = "\n".join(str(r.get("summary", "")) + ". " + str(r.get("rule", "")) for r in jsonl(LEARNINGS) if r.get("story") == sid)
         handoff = rd(sd / "handoff.md")
         rep_ = W.report({"handoff.md": handoff, "learnings": learn}, target)
-        code = [f for f in files if not exempt(f, c)]
+        code = [f for f in files if not exempt(f, c) and not f.lower().endswith(NOT_CODE)]
         if len(code) >= int(w.get("diagram_min_files", 5)) and not W.has_diagram(handoff):
             advice.append("this change touches %d code files: add a ```mermaid diagram to handoff.md that shows how the parts connect" % len(code))
             rep_["diagram_missing"] = True
@@ -1988,7 +1993,8 @@ def writing_summary(sid):
             rows.append("| %s (%s) | %.2f | %s |" % ("story summary" if ph == "ready" else "handoff + learnings", ph.upper(), w["score"],
                                                    "; ".join(w.get("advice") or []) or "-"))
     try:
-        body = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))["pull_request"].get("body") or ""
+        with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
+            body = json.load(f)["pull_request"].get("body") or ""
     except Exception:
         body = None
     if body is not None:

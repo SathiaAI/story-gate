@@ -25,6 +25,36 @@ PASSIVE = re.compile(r"\b(?:is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?\w+(?:
 WORD = re.compile(r"[A-Za-zÀ-ɏ0-9][\w'’-]*")
 
 
+FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)")
+TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def blocks(text):
+    """Split Markdown lines into (kind, lines): 'text' outside fences, or ('fence', info, lines) for a fenced block.
+    A fence closes only on the same character, at least as long, with nothing but spaces after it (CommonMark)."""
+    out, cur, fence = [], [], None
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        if fence is None:
+            m = FENCE_OPEN.match(line)
+            if m:
+                if cur:
+                    out.append(("text", None, cur)); cur = []
+                fence = (m.group(1)[0], len(m.group(1)), m.group(2).lower())
+                continue
+            cur.append(line)
+        else:
+            m = re.match(r"^ {0,3}(%s{%d,})\s*$" % (re.escape(fence[0]), fence[1]), line)
+            if m:
+                out.append(("fence", fence[2], cur)); cur, fence = [], None
+                continue
+            cur.append(line)
+    if fence is not None:
+        out.append(("open_fence", fence[2], cur))  # never closed: not prose, and not a diagram
+    elif cur:
+        out.append(("text", None, cur))
+    return out
+
+
 def prose(text):
     """Paragraphs of prose (a list item is its own paragraph), with everything that isn't prose removed."""
     text = (text or "").replace("\r\n", "\n")
@@ -32,10 +62,21 @@ def prose(text):
         end = text.find("\n---", 4)
         text = text[end + 4:] if end != -1 else ""
     text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
-    text = re.sub(r"(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*$", "\n", text)  # fenced blocks, Mermaid included
+    lines = []
+    for kind, _, ls in blocks(text):  # fenced blocks (Mermaid included) are not prose
+        lines += ls if kind == "text" else [""]
+    skip = set()
+    for i, line in enumerate(lines):  # tables, with or without leading pipes: the rule row, its header and its rows
+        if TABLE_RULE.match(line) and "|" in line:
+            skip.add(i)
+            if i and "|" in lines[i - 1]:
+                skip.add(i - 1)
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and "|" in lines[j]:
+                skip.add(j); j += 1
     paras, cur = [], []
-    for line in text.split("\n"):
-        s = line.strip()
+    for i, line in enumerate(lines):
+        s = "" if i in skip else line.strip()
         bullet = re.match(r"^(?:[-*+]|\d+[.)])\s+", s)
         if not s or s.startswith(("#", ">", "|")) or re.match(r"^[-=*_]{3,}$", s):
             if cur:
@@ -110,10 +151,11 @@ def score_text(text):
 
 def has_diagram(text):
     """A fenced ```mermaid block that is closed and starts with a known diagram type."""
-    for m in re.finditer(r"(?ms)^\s*```mermaid[ \t]*\n(.*?)^\s*```[ \t]*$", (text or "").replace("\r\n", "\n")):
-        first = next((l.strip() for l in m.group(1).splitlines() if l.strip() and not l.strip().startswith("%%")), "")
-        if first.split(" ")[0] in MERMAID_KINDS:
-            return True
+    for kind, info, ls in blocks(text):
+        if kind == "fence" and info == "mermaid":
+            first = next((l.strip() for l in ls if l.strip() and not l.strip().startswith("%%")), "")
+            if first.split(" ")[0] in MERMAID_KINDS:
+                return True
     return False
 
 
@@ -128,9 +170,9 @@ def report(parts, target):
     per = {k: score_text(v) for k, v in parts.items()}
     checked = sum(r["checked"] for r in per.values())
     passed_ = sum(r["passed"] for r in per.values())
-    score = round(passed_ / checked, 3) if checked else None
-    return {"score": score, "target": target, "checked": checked, "passed": passed_,
-            "status": "not_applicable" if score is None else ("ok" if score >= target else "below_target"),
+    exact = passed_ / checked if checked else None  # compare the exact share; round only for display
+    return {"score": round(exact, 3) if exact is not None else None, "target": target, "checked": checked, "passed": passed_,
+            "status": "not_applicable" if exact is None else ("ok" if exact >= target else "below_target"),
             "parts": {k: {"score": r["score"], "checked": r["checked"], "long_paragraphs": r["long_paragraphs"],
                           "passive": r["passive"],
                           "examples": ["%d words (max %d): %s" % (n, lim, s[:160]) for n, lim, s in r["long_sentences"][:3]]}
