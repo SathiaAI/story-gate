@@ -289,6 +289,7 @@ def filter_conflicts(top):
 
 
 def enable_filter(top, py, launcher, dry_run=False):
+    """Turn on the checkout filter for hook files, refusing if something else already claims them."""
     top = str(top)
     out = []
     conflicts = filter_conflicts(top)

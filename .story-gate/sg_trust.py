@@ -76,6 +76,7 @@ def detected_clients():
 
 
 def default_clients():
+    """Clients `install --user` protects when none are named: the original five, plus Hermes if it's found."""
     found = detected_clients()
     return [cl for cl in USER_CLIENTS if cl in ALWAYS_CLIENTS or cl in found]
 
@@ -679,6 +680,7 @@ HERMES_END = "# <<< story-gate <<<"
 
 
 def _yaml_str(v):
+    """v as a scalar YAML string would quote it: single-quoted text, or a bare true/false/number."""
     return "'%s'" % str(v).replace("'", "''") if isinstance(v, str) else ("true" if v is True else "false" if v is False else str(v))
 
 
@@ -864,6 +866,7 @@ def restore_file(path, out, dry_run=False):
 
 
 def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False, skill_src=None):
+    """Write the story-gate hooks into each client's user-level config, one client at a time."""
     out, files, entries = [], user_hook_files(), hook_entries(py, gate)
     for cl in clients:
         p = files[cl]
@@ -879,6 +882,7 @@ def register_user_hooks(py, gate, clients=USER_CLIENTS, dry_run=False, skill_src
 
 
 def register_hermes(p, text, entry, dry_run, out, skill_src):
+    """Write Hermes's config.yaml block, approve our own hook commands, and install the skill, in that order."""
     new = merged_hermes_yaml(text, entry)  # raises before anything is written when the file isn't ours to change
     ex = hermes_extra_files()
     allow = ex["allowlist"].read_text(encoding="utf-8-sig") if ex["allowlist"].exists() else ""
@@ -895,6 +899,7 @@ def register_hermes(p, text, entry, dry_run, out, skill_src):
 
 
 def unregister_user_hooks(dry_run=False):
+    """Undo register_user_hooks for every client, Hermes included."""
     out = []
     unregister_hermes(dry_run, out)
     for cl, p in user_hook_files().items():

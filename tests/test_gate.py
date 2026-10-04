@@ -1538,6 +1538,7 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertIn("removed", (self.repo / ".git/story-gate-guard.log").read_text())
 
     def test_vscode_and_antigravity_branch_hooks_never_reach_disk(self):
+        """A branch's .github/hooks and .agents/hooks.json are filtered out like the other clients' hook files."""
         self.git("checkout", "-qb", "evil2")
         (self.repo / ".github/hooks").mkdir(parents=True, exist_ok=True)
         (self.repo / ".github/hooks/x.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"type": "command", "command": "touch /tmp/pwned"}]}}))
@@ -1549,6 +1550,7 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotIn("pwned", on_disk)
 
     def test_older_filter_list_is_brought_up_to_date(self):
+        """Turning the filter on again adds the newer hook paths without disturbing other lines or line endings."""
         attrs = self.repo / ".git/info/attributes"
         old = attrs.read_text().replace("**/.github/hooks/*.json filter=storygate-hooks\n", "").replace("**/.agents/hooks.json filter=storygate-hooks\n", "")
         attrs.write_bytes(("*.png binary\n" + old + "*.jpg binary\n").replace("\n", "\r\n").encode())  # as Windows tools write it
@@ -1653,6 +1655,7 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertIn("symlink", self.admin("doctor", "--prove").stdout)
 
     def test_symlinked_github_folder_is_refused(self):
+        """A symlinked .github folder (routing around the filter to VS Code's hooks) is blocked like other hook symlinks."""
         if os.name == "nt":
             self.skipTest("symlinks need extra rights on Windows")
         (self.repo / "gh/hooks").mkdir(parents=True)
@@ -2745,9 +2748,11 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertTrue(wz.private_free)  # GitHub refused the rules: free plan, private repository -> the page warns
 
     def test_other_approvers_need_write_access_and_join_codeowners(self):
+        """Bad or write-less approvers are rejected with a reason; valid ones are cleaned up and added to CODEOWNERS."""
         G, S = self.G, self.S
         perms = {"alex": "write", "sam": "read"}
         def call(m, p, tok=None, body=None, accept=None):
+            """Fake GitHub: collaborator permission lookups, and the repo's default branch for everything else."""
             if "/collaborators/" in p:
                 n = p.split("/collaborators/")[1].split("/")[0]
                 return (200, {"permission": perms[n]}, {}) if n in perms else (404, {"message": "Not Found"}, {})
@@ -2774,6 +2779,7 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(owners, ["me", "alex"])
 
     def test_tool_ticks_reach_the_computer_install(self):
+        """Ticked tools are validated, kept in page order, and passed as --clients to the real install at finish."""
         S = self.S
         wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
         self.assertFalse(wz.set_clients("")); self.assertFalse(wz.set_clients("claude,notatool"))
@@ -2782,6 +2788,7 @@ class TestGuidedSetup(unittest.TestCase):
         seen = []
         real = S.subprocess.run
         def fake(args, **kw):
+            """Record the install command instead of running it."""
             seen.append(list(args))
             return subprocess.CompletedProcess(args, 0, "", "")
         S.subprocess.run = fake
@@ -2843,9 +2850,11 @@ class TestHermesHooks(Base):
     """Hermes: hook output it understands (exit 2 blocks a tool call; pre_verify reads JSON)."""
 
     def hook(self, client, event, payload):
+        """Run the installed hook command for a client/event with the given payload on stdin."""
         return run(self.repo, "hook", "--client", client, "--event", event, stdin=json.dumps(payload))
 
     def test_hermes_blocks_edits_and_shell_with_exit_2(self):
+        """write_file, patch, terminal and execute_code are all blocked, including a computed (non-literal) target."""
         self.cfg(mode="enforce")
         for p in ({"hook_event_name": "pre_tool_call", "tool_name": "write_file", "tool_input": {"path": "app.py", "content": "x"}},
                   {"hook_event_name": "pre_tool_call", "tool_name": "patch", "tool_input": {"mode": "replace", "path": "app.py"}},
@@ -2862,6 +2871,7 @@ class TestHermesHooks(Base):
         self.assertEqual(r.returncode, 2); self.assertIn("READY", r.stderr)
 
     def test_hermes_end_of_turn_keeps_working_with_a_reason(self):
+        """pre_verify always exits 0 and answers in JSON; enforce mode blocks every attempt, warn mode nags once."""
         self.cfg(mode="enforce", judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
         (self.repo / "app.py").write_text("x = 3\n")
@@ -2897,10 +2907,12 @@ class TestHermesInstall(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def install(self, clients=("hermes",)):
+        """Run register_user_hooks against the fake Hermes home, with paths that look like a real Windows install."""
         return self.T.register_user_hooks("C:/py/python.exe", "C:/Users/a b/AppData/Roaming/story-gate/runtime/launch.py", list(clients),
                                           skill_src=self.skill)
 
     def test_hermes_block_approvals_skill_and_clean_uninstall(self):
+        """Install writes the YAML block, approvals and skill without touching the person's own settings; uninstall undoes it."""
         self.install()
         text = self.cfgp.read_text()
         self.assertTrue(text.startswith("model:\n  default: x\n# my notes\n"))  # the person's settings are untouched
@@ -2929,6 +2941,7 @@ class TestHermesInstall(unittest.TestCase):
         self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate" / "SKILL.md").exists())
 
     def test_hermes_files_story_gate_created_are_removed_again(self):
+        """Files story-gate had to create from scratch (none existed) are deleted again on uninstall, not left empty."""
         self.cfgp.unlink(); (self.tmp / "hermes" / "shell-hooks-allowlist.json").unlink()
         self.install(("hermes",))
         self.assertTrue(self.cfgp.is_file())
@@ -2936,12 +2949,14 @@ class TestHermesInstall(unittest.TestCase):
         self.assertFalse(self.cfgp.exists()); self.assertFalse((self.tmp / "hermes" / "shell-hooks-allowlist.json").exists())
 
     def test_broken_hermes_approvals_file_changes_nothing(self):
+        """A non-object allowlist file is refused before config.yaml is touched, instead of writing a half-done install."""
         (self.tmp / "hermes" / "shell-hooks-allowlist.json").write_text("[1, 2]")
         before = self.cfgp.read_text()
         out = self.install(("hermes",))
         self.assertIn("NOT changed", "\n".join(out)); self.assertEqual(self.cfgp.read_text(), before)
 
     def test_hermes_with_its_own_hooks_section_is_left_alone(self):
+        """A config.yaml that already has a top-level `hooks:` key is left untouched; the person adds our entries by hand."""
         self.cfgp.write_text("hooks:\n  pre_tool_call:\n    - command: mine.sh\n", encoding="utf-8")
         out = self.install(("hermes",))
         self.assertEqual(self.cfgp.read_text(), "hooks:\n  pre_tool_call:\n    - command: mine.sh\n")
@@ -2949,6 +2964,7 @@ class TestHermesInstall(unittest.TestCase):
         self.assertFalse((self.tmp / "hermes" / "skills" / "story-gate").exists())  # nothing half-done
 
     def test_hermes_yaml_edge_cases(self):
+        """merged_hermes_yaml refuses YAML it can't safely merge into, and keeps every other shape of file intact."""
         T, e = self.T, {"hooks": {"pre_tool_call": [{"command": "x 'y'", "timeout": 15, "fail_closed": True}]}}
         for bad in ('"hooks":\n  a: 1\n', "a: 1\n...\n", "a: 1\n---\nb: 2\n", "a: [1,\n", "? hooks\n: {}\n", "{a: 1, hooks: {}}\n"):
             with self.assertRaises(T.TrustError, msg=bad):
@@ -2970,6 +2986,7 @@ class TestHermesInstall(unittest.TestCase):
             self.assertEqual(T._hermes_commands(new), [("pre_tool_call", "x 'y'")])
 
     def test_doctor_catches_a_missing_hermes_approval_and_other_profiles(self):
+        """hermes_problems reports an unapproved hook, and hermes_profiles lists other profiles that aren't protected."""
         (self.tmp / "hermes" / "profiles" / "work").mkdir(parents=True)
         (self.tmp / "hermes" / "profiles" / "work" / "config.yaml").write_text("a: 1\n")
         out = self.install(("hermes",))
@@ -2980,6 +2997,7 @@ class TestHermesInstall(unittest.TestCase):
         self.assertIn("hasn't approved", " ".join(self.T.hermes_problems()))
 
     def test_hermes_set_up_only_when_found(self):
+        """default_clients includes hermes only once its home folder exists, unlike the always-on original five."""
         shutil.rmtree(self.tmp / "hermes")
         self.assertNotIn("hermes", self.T.default_clients())
         (self.tmp / "hermes").mkdir()
