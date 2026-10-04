@@ -23,10 +23,10 @@ import sg_github as G  # noqa: E402
 OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "Ov23liAhA19MDXrS9a4S")
 STEPS = ("signin", "agent", "key", "merge", "done")
 # AI tools story-gate can check live on this computer (user-level hooks), in the order the page lists them.
-HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("hermes", "Hermes"), ("gemini", "Gemini CLI"),
-                ("windsurf", "Windsurf"))
+HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("vscode", "VS Code (Copilot agent)"),
+                ("hermes", "Hermes"), ("gemini", "Gemini CLI"), ("windsurf", "Windsurf"))
 # Tools with no verified live checks yet: they follow the rules in AGENTS.md / the skill, and GitHub checks their pull requests.
-OTHER_TOOLS = (("VS Code (Copilot agent)", "rules + skill; live checks coming next"), ("Antigravity", "rules + skill; live checks once we've verified its hooks"), ("pi", "rules + skill"),
+OTHER_TOOLS = (("Antigravity", "rules + skill; live checks once we've verified its hooks"), ("pi", "rules + skill"),
                ("Roo Code", "rules + skill"), ("ChatGPT", "GitHub checks its pull requests"),
                ("Google AI Studio", "GitHub checks its pull requests"))
 GH_USER = __import__("re").compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")

@@ -1326,7 +1326,8 @@ def detect_client(payload, hint):
 
 
 STOP_LIMIT = 3  # blocked stops in a row before an enforce-mode session is allowed to end (CI still blocks)
-SHELL_TOOLS = ("bash", "shell", "run_shell_command", "terminal", "exec_command", "local_shell", "execute_code")
+SHELL_TOOLS = ("bash", "shell", "run_shell_command", "terminal", "exec_command", "local_shell", "execute_code", "run_in_terminal")
+EDIT_TOOL = re.compile(r"edit|write|create|replace|insert|patch|delete|remove|rename|move", re.I)  # VS Code tools that change files
 
 
 def shell_command(payload):
@@ -1474,6 +1475,9 @@ def edited_paths(payload):
         for k in ("file_path", "path", "filePath", "target_file", "notebook_path"):
             if isinstance(ti.get(k), str):
                 paths.append(ti[k])
+        for r in ti.get("replacements") if isinstance(ti.get("replacements"), list) else []:  # VS Code multi_replace_string_in_file
+            if isinstance(r, dict) and isinstance(r.get("filePath"), str):
+                paths.append(r["filePath"])
         patch = ti.get("command") if isinstance(ti.get("command"), str) else ti.get("patch") or ti.get("input")
         if isinstance(patch, str):
             paths += re.findall(r"^\*\*\* (?:Update File|Add File|Delete File|Move to): (.+)$", patch, re.M)
@@ -1485,9 +1489,16 @@ def hook_out(client, event, msg, block, notice=None):
     if client == "hermes" and event == "stop":  # pre_verify: exit 2 isn't read here; "block" + reason means keep working
         print(json.dumps({"decision": "block", "reason": msg}) if msg else "{}")
         return 0
+    if block and client == "vscode" and event == "pre":
+        # VS Code shows an exit-2 block as "hook errored", and the agent then tried to debug the hook instead of following
+        # story-gate. A "deny" decision with the reason reads as a policy answer (hooks reference: permissionDecision).
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": msg}}))
+        return 0
     if block:
         sys.stderr.write(msg + "\n")
         return 2
+    client = "claude" if client == "vscode" else client  # VS Code reads Claude Code's output format (hooks reference)
     if not msg:
         print("{}"); return 0
     if event == "session":  # instructions for the agent at session start, from the verified copy (not repository files)
@@ -1590,6 +1601,9 @@ def cmd_hook(client, event):
                                 "story-gate can't vouch for them: %s. If they're wanted, a code owner lists the exact commands in "
                                 "project_hooks_allowed in .story-gate/config.json on the default branch."
                                 % ("BLOCKED" if enforce else "warning only", "; ".join("%s: %s" % (f, cmd[:80]) for f, cmd in unknown[:5])), enforce)
+        if (event == "pre" and client == "vscode" and shell_command(payload) is None
+                and not EDIT_TOOL.search(str(payload.get("tool_name") or ""))):
+            return hook_out(client, event, "", False)  # VS Code runs the hook for every tool (no matchers): reads pass
         if event == "post":
             return hook_out(client, "post", post_edit(payload, c), False)  # checkpoints inform; containment happens at the next pre-edit
         msg, bad = gate_check(event, payload, c)
@@ -2340,6 +2354,8 @@ def cmd_user(cmd, kv, rest):
         print("Notes:\n  - Codex asks you to trust new hooks once: run /hooks in Codex and trust the story-gate entries."
               "\n  - Hermes: story-gate approved its own hook commands for you; restart Hermes so it loads them. Live checks cover"
               " edits and commands, and the end of each turn that edited code; warnings in warn mode arrive at the end of that turn."
+              "\n  - VS Code: agent hooks are a Preview feature; keep chat.useHooks on (the default). Codex or Claude running"
+              " inside VS Code use their own hooks (set up above), not VS Code's."
               "\n  - Grok: reduced protection (its hook merging isn't documented); run gate.py status yourself. See docs/client-security.md."
               "\n  - Cowork, Cursor Cloud and Codex cloud have no hooks: run gate.py status yourself; CI is the backstop."
               "\n  - In each other repository with story-gate, run: gate.py enroll")
@@ -2617,7 +2633,7 @@ def cmd_hook_selftest():
         print("No trusted runtime installed. Run: gate.py install --user"); return 1
     gate = T.launcher_path()
     payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(ROOT / "story_gate_selftest.py")}, "cwd": str(ROOT)})
-    limits = {"claude": 15, "codex": 15, "cursor": 15, "gemini": 15, "windsurf": 15, "hermes": 15}
+    limits = {"claude": 15, "codex": 15, "cursor": 15, "gemini": 15, "windsurf": 15, "vscode": 15, "hermes": 15}
     rc = 0
     for cl in T.registered_clients(gate):
         e = dict(os.environ); e.pop("STORY_GATE_ROOT", None)
