@@ -1,0 +1,21 @@
+{
+  "name": "story-gate",
+  "version": "0.6.0",
+  "description": "Make your AI prove its work before it ships: it plans before it builds, checks its course while it builds, shows every goal working, and waits for a person to approve on GitHub. Works in Claude Code, Codex, Cursor, VS Code, Gemini CLI and Hermes.",
+  "author": {
+    "name": "Viaknox",
+    "url": "https://github.com/SathiaAI/story-gate"
+  },
+  "homepage": "https://github.com/SathiaAI/story-gate",
+  "repository": "https://github.com/SathiaAI/story-gate",
+  "license": "MIT",
+  "keywords": [
+    "quality-gate",
+    "ai-coding",
+    "code-review",
+    "testing",
+    "acceptance-criteria",
+    "agent-skills",
+    "vibe-coding"
+  ]
+}
