@@ -24,7 +24,7 @@ story-gate fixes this with four checks on every piece of work (a **story**):
 |---|---|---|
 | **Before** any code | The plan is clear and every goal has a test (READY) | A short plain-English summary |
 | **While** it builds | It's still on course, with no scope creep (CHECKPOINTS) | % done on the dashboard |
-| **When** it says done | The tests pass, and the AI ran the feature for real for every goal (DONE). The pull request check runs it all again | A one-page validation report |
+| **When** it says done | The tests pass, and the AI ran the feature for real for every goal (DONE). The pull request check runs the tests and those runs again. A run that can't work there (it needs a device, say) is marked "reported", and the check flags it for you | A one-page validation report |
 | **Before** it merges | You approve it on GitHub | Nothing merges without you, where GitHub enforces branch rules |
 
 An independent AI judge scores each check. Your coding AI never grades its own work.
@@ -134,7 +134,7 @@ story-gate works with your tests and your review bot. It runs your tests itself 
 
 **What if the judge is wrong?** Tell story-gate (`story-gate label`). A person can also record a decision or a waiver, but it counts only after a code owner approves.
 
-**Is my code sent anywhere?** Only to the judge, and only the evidence for one check: the story, the plan, the test results and the changed code. Your AI's own tool sends far more to its model.
+**Is my code sent anywhere?** Yes, to the judge you chose (OpenRouter by default). For each check it gets that story's evidence: the story and its context, the test plan, the scenarios (what each one runs and expects), `validation.md`, the handoff, the learnings, and the code changes. If you connect a webhook or control-hub, they get story-gate's events: verdicts, progress and learnings. Your AI coding tool already sends far more to its own model.
 
 **I'm on a free GitHub plan with a private repository.** GitHub doesn't enforce "must be approved" there. story-gate still checks every pull request and marks it **ADVISORY**.
 
