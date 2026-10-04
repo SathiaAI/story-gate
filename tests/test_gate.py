@@ -1,5 +1,6 @@
 import json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SRC = Path(__file__).resolve().parents[1] / ".story-gate"
 PY = sys.executable
@@ -3861,6 +3862,83 @@ class TestReadmeMessaging(unittest.TestCase):
         self.assertFalse(decoder.unused_data, "unexpected data after compressed image")
 
 
+class TestLockdownOffCommand(unittest.TestCase):
+    """Removal instructions must work without loading or executing the guard."""
+
+    def setUp(self):
+        self.enter_patch(patch.dict(os.environ))
+        self.enter_patch(patch.object(sys, "path", sys.path[:]))
+        self.enter_patch(patch.dict(sys.modules))
+        self.gate = load_gate(SRC.parent)
+
+    def enter_patch(self, patcher):
+        value = patcher.start()
+        self.addCleanup(patcher.stop)
+        return value
+
+    def test_platform_instructions_quote_paths_and_never_execute_commands(self):
+        from pathlib import PurePosixPath, PureWindowsPath
+        from types import SimpleNamespace
+        cases = (
+            ("posix", PurePosixPath("/home/Test User/config"), "/etc/Claude Code/managed-settings.json",
+             'sudo sh "/home/Test User/config/lockdown/uninstall.sh"',
+             'sudo rm "/etc/Claude Code/managed-settings.json"'),
+            ("nt", PureWindowsPath("C:/Users/Test User/config"),
+             r"C:\Program Files\Claude Code\managed-settings.json",
+             r'PowerShell as Administrator: powershell -ExecutionPolicy Bypass -File "C:\Users\Test User\config\lockdown\uninstall.ps1"',
+             r"delete C:\Program Files\Claude Code\managed-settings.json"),
+        )
+        for platform, home, managed, command, fallback in cases:
+            with self.subTest(platform=platform), \
+                    patch.object(self.gate, "os", SimpleNamespace(name=platform)), \
+                    patch.object(self.gate, "G_config_dir", return_value=home), \
+                    patch.object(subprocess, "Popen") as popen, patch.object(os, "system") as system:
+                status = {"file": managed, "enabled": True}
+                result = self.gate.lockdown_off_command(status)
+                self.assertTrue(result.startswith(command), result)
+                self.assertIn(fallback, result)
+                self.assertEqual(status, {"file": managed, "enabled": True})
+                popen.assert_not_called()
+                system.assert_not_called()
+
+    def test_instructions_do_not_require_guard_module(self):
+        with patch.dict(sys.modules, {"sg_guard": None}), \
+                patch.object(self.gate, "G_config_dir", return_value=Path("config")):
+            self.assertIn("managed-settings.json", self.gate.lockdown_off_command({"file": "managed-settings.json"}))
+
+    def test_missing_managed_file_key_is_reported_on_each_platform(self):
+        from types import SimpleNamespace
+        home = Path("config")
+        for platform in ("posix", "nt"):
+            with self.subTest(platform=platform), \
+                    patch.object(self.gate, "os", SimpleNamespace(name=platform)), \
+                    patch.object(self.gate, "G_config_dir", return_value=home):
+                with self.assertRaises(KeyError) as raised:
+                    self.gate.lockdown_off_command({})
+                self.assertEqual(raised.exception.args, ("file",))
+
+    def test_config_directory_errors_propagate(self):
+        error = PermissionError("config directory is not writable")
+        with patch.object(self.gate, "G_config_dir", side_effect=error):
+            with self.assertRaises(PermissionError) as raised:
+                self.gate.lockdown_off_command({"file": "managed-settings.json"})
+        self.assertIs(raised.exception, error)
+
+    def test_creates_config_directory_without_removing_managed_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "new config" / "story-gate"
+            managed = root / "managed-settings.json"
+            original = b'{"allowManagedHooksOnly": true}\n'
+            managed.write_bytes(original)
+            with patch.dict(os.environ, {"STORY_GATE_HOME": str(home)}):
+                result = self.gate.lockdown_off_command({"file": str(managed)})
+            self.assertTrue(home.is_dir())
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(managed.read_bytes(), original)
+            self.assertIn(str(managed), result)
+
+
 class TestMarketplacePackaging(unittest.TestCase):
     """The repository is a plugin for skill marketplaces: one skill, no hooks, manifests in step with the release."""
     ROOT = SRC.parent
@@ -3917,6 +3995,38 @@ class TestMarketplacePackaging(unittest.TestCase):
         self.assertIn("story-gate init", skill)
         self.assertIn("wait for a clear yes", skill)  # the agent asks before installing anything
         self.assertNotIn("copy it from github.com", skill)  # never hand-copy story-gate files
+
+    def test_every_install_pin_matches_the_release(self):
+        import re
+        # Finding one current pin must not hide a stale pin elsewhere in a document.
+        for rel in ("README.md", "skills/story-gate/SKILL.md"):
+            with self.subTest(path=rel):
+                text = (self.ROOT / rel).read_text(encoding="utf-8")
+                pins = re.findall(r"git\+https://github\.com/SathiaAI/story-gate@([^\s`]+)", text)
+                self.assertTrue(pins, "no pinned installation command")
+                self.assertEqual(set(pins), {"v" + self.version()})
+
+    def test_marketplace_source_resolves_to_the_single_discoverable_skill(self):
+        entry, = self.j(".claude-plugin/marketplace.json")["plugins"]
+        source = (self.ROOT / entry["source"]).resolve()
+        self.assertEqual(source, self.ROOT.resolve())
+        manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], entry["name"])
+        # Recursive discovery also catches accidentally nested copies of the skill.
+        skills = sorted(p.relative_to(source).as_posix() for p in (source / "skills").rglob("SKILL.md"))
+        self.assertEqual(skills, ["skills/story-gate/SKILL.md"])
+
+    def test_client_manifests_remain_metadata_only(self):
+        metadata = {"name", "version", "description", "author", "homepage", "repository", "license", "keywords"}
+        for rel, allowed in (("plugin.json", metadata | {"$schema"}),
+                             (".claude-plugin/plugin.json", metadata),
+                             ("gemini-extension.json", {"name", "version", "description"})):
+            with self.subTest(path=rel):
+                manifest = self.j(rel)
+                self.assertLessEqual(set(manifest), allowed, "marketplace installs must supply guidance only")
+                for field in ("name", "version", "description"):
+                    self.assertIsInstance(manifest[field], str)
+                    self.assertTrue(manifest[field].strip(), field)
 
 
 if __name__ == "__main__":
