@@ -7,7 +7,7 @@
 </style></head><body>
 <div class="top"><img src="../story-gate-mark-small.svg" alt=""><div class="eyebrow">TURNING IT ON</div></div>
 <h1>Start by warning. Then block one point at a time.</h1>
-<p class="lede">Everything lives in <code>.story-gate/config.json</code>. CI always reads the copy from your main branch, so a pull request cannot loosen its own rules.</p>
+<p class="lede">Everything lives in <code>.story-gate/config.json</code>. CI always reads the copy from the pull request's target branch, so a pull request cannot loosen its own rules.</p>
 <div class="grid">
 <div class="card"><span class="tag">STEP 0</span><h3>Warn</h3><p>Everything reports, nothing blocks. Tune for a few weeks.</p><code>"mode": "warn"</code></div>
 <div class="card"><span class="tag">STEP 1</span><h3>CI</h3><p>Pull requests can't merge until the gates pass and a human approves.</p><code>"ci"</code></div>
