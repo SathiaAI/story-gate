@@ -3046,6 +3046,12 @@ class TestVSCodeHooks(Base):
 
 
 class TestInstallFromPackage(unittest.TestCase):
+    def test_skill_sends_agents_to_the_verified_command(self):
+        # live VS Code test: the skill said `python3 .story-gate/gate.py`, the hooks refused it, and the agent got stuck
+        skill = (SRC / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("`gate.py` means **`story-gate`**", skill)
+        self.assertNotIn("`gate.py` = `python3 .story-gate/gate.py`", skill)
+
     """`story-gate install` from the installed package (uv tool) gives the repository its own copy: CI runs it, and
     AGENTS.md sends agents to .story-gate/PROTOCOL.md (found missing in a live VS Code test)."""
 
