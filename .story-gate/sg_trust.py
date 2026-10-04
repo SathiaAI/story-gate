@@ -720,10 +720,13 @@ def merged_hermes_yaml(text, entry):
     """config.yaml with our block replaced or appended. Refuses (TrustError) when the file already has its own top-level
     `hooks:` key: merging into someone's YAML without a YAML parser could break their config, so that is done by hand."""
     rest = _strip_block(text)
-    if re.search(r"(?m)^([\"']?)hooks\1[ \t]*:", rest):
+    # Any spelling of a top-level `hooks` key (plain, quoted, or YAML's explicit `? hooks`): a second one would replace it.
+    if re.search(r"(?m)^(?:\?[ \t]+)?([\"']?)hooks\1[ \t]*(?::|$)", rest):
         raise TrustError("it already has a `hooks:` section; add the story-gate entries to it by hand")
     # A block appended after a document marker would land in a second YAML document, which Hermes never reads.
     content = [l for l in rest.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    if content and content[0].lstrip().startswith(("{", "[")):
+        raise TrustError("it's written as one { } block; add the story-gate entries to it by hand")
     if any(re.match(r"\.\.\.\s*(#.*)?$", l) for l in content) or any(re.match(r"---(\s|$)", l) for l in content[1:]):
         raise TrustError("it uses YAML document markers (--- or ...); add the story-gate entries to it by hand")
     if content and re.match(r"[^#\s][^:]*:\s*[\[{][^\]}]*$", content[-1]):

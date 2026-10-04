@@ -428,7 +428,7 @@ def default_hook_commands(top):
     return cmds
 
 
-HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks", ".github/hooks", ".agents")
+HOOK_DIRS = (".claude", ".cursor", ".codex", ".gemini", ".windsurf", ".devin", ".grok", ".grok/hooks", ".github", ".github/hooks", ".agents")
 
 
 def symlinked_hook_paths(top):

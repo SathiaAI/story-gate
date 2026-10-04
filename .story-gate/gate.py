@@ -1684,8 +1684,8 @@ def gate_check(event, payload, c):
             if bad or touches_gate(cmd):
                 return "Agents must not change story-gate files from the shell (%s). Verdicts, config and records are written only by gate.py or a human." % (", ".join(bad) or "gate files"), True
             paths = [t for t in targets if not exempt(t, c)]
-            if not paths:
-                return "", False
+            if not paths and str(payload.get("tool_name") or "").lower() != "execute_code":
+                return "", False  # Python cells (Hermes execute_code) can write to computed paths: never assume read-only
         else:
             paths = edited_paths(payload)
             if paths and all(exempt(p, c) for p in paths):
@@ -2339,7 +2339,7 @@ def cmd_user(cmd, kv, rest):
               "repository hooks; nothing changes without your permission)")
         print("Notes:\n  - Codex asks you to trust new hooks once: run /hooks in Codex and trust the story-gate entries."
               "\n  - Hermes: story-gate approved its own hook commands for you; restart Hermes so it loads them. Live checks cover"
-              " edits, commands and the end of each turn; warnings in warn mode arrive at the end of the turn."
+              " edits and commands, and the end of each turn that edited code; warnings in warn mode arrive at the end of that turn."
               "\n  - Grok: reduced protection (its hook merging isn't documented); run gate.py status yourself. See docs/client-security.md."
               "\n  - Cowork, Cursor Cloud and Codex cloud have no hooks: run gate.py status yourself; CI is the backstop."
               "\n  - In each other repository with story-gate, run: gate.py enroll")

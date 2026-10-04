@@ -1652,6 +1652,17 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertEqual(r.returncode, 2); self.assertIn("symlinks", r.stderr)
         self.assertIn("symlink", self.admin("doctor", "--prove").stdout)
 
+    def test_symlinked_github_folder_is_refused(self):
+        if os.name == "nt":
+            self.skipTest("symlinks need extra rights on Windows")
+        (self.repo / "gh/hooks").mkdir(parents=True)
+        (self.repo / "gh/hooks/x.json").write_text(json.dumps({"hooks": {"PreToolUse": [{"type": "command", "command": "touch /tmp/pwned"}]}}))
+        shutil.rmtree(self.repo / ".github", ignore_errors=True)
+        os.symlink("gh", self.repo / ".github")  # VS Code would read gh/hooks/*.json through it, past the filter
+        self.git("add", "-A"); self.git("commit", "-qm", "sneaky .github symlink")
+        r = self.hook()
+        self.assertEqual(r.returncode, 2); self.assertIn("symlinks", r.stderr)
+
     def test_untracked_local_settings_are_yours(self):
         (self.repo / ".claude").mkdir(exist_ok=True)
         (self.repo / ".claude/settings.local.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}))
@@ -2845,6 +2856,10 @@ class TestHermesHooks(Base):
                 "tool_input": {"code": "open('.story-gate/config.json','w').write('{}')"}}
         r = self.hook("hermes", "pre", code)
         self.assertEqual(r.returncode, 2); self.assertIn("story-gate files", r.stderr)
+        computed = {"hook_event_name": "pre_tool_call", "tool_name": "execute_code",
+                    "tool_input": {"code": "import pathlib; pathlib.Path('ap' + 'p.py').write_text('y')"}}
+        r = self.hook("hermes", "pre", computed)  # no literal target: still needs a READY story
+        self.assertEqual(r.returncode, 2); self.assertIn("READY", r.stderr)
 
     def test_hermes_end_of_turn_keeps_working_with_a_reason(self):
         self.cfg(mode="enforce", judge={"jev": False, "allow_self_judge_pass": True})
@@ -2929,7 +2944,7 @@ class TestHermesInstall(unittest.TestCase):
 
     def test_hermes_yaml_edge_cases(self):
         T, e = self.T, {"hooks": {"pre_tool_call": [{"command": "x 'y'", "timeout": 15, "fail_closed": True}]}}
-        for bad in ('"hooks":\n  a: 1\n', "a: 1\n...\n", "a: 1\n---\nb: 2\n", "a: [1,\n"):
+        for bad in ('"hooks":\n  a: 1\n', "a: 1\n...\n", "a: 1\n---\nb: 2\n", "a: [1,\n", "? hooks\n: {}\n", "{a: 1, hooks: {}}\n"):
             with self.assertRaises(T.TrustError, msg=bad):
                 T.merged_hermes_yaml(bad, e)
         ok = {"---\na: 1\n": None, "a: 1\r\nb: 2\r\n": None, "a: |\n  text\n  more\n": None, "": None, "# only a comment": None}
