@@ -344,6 +344,6 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 ```bash
 python -m unittest tests/test_gate.py
 ```
-The suite runs on Linux and Windows, with Python 3.9 and 3.12.
+CI runs the suite on Linux, Windows and macOS, with Python 3.9 and 3.12.
 
 <sub>story-gate is MIT licensed. by Viaknox.</sub>
