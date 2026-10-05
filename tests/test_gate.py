@@ -715,7 +715,11 @@ class TestStoryGateOnlyPullRequests(Base):
         G.protection = lambda repo, branch, token: (True, [])
         import io, contextlib
         out = io.StringIO()
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), contextlib.redirect_stdout(out):
+        # like run(): never read the CI runner's own pull request (GitHub sets GITHUB_BASE_REF on pull_request runs)
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF",
+                                                                "GITHUB_EVENT_PATH", "GITHUB_STEP_SUMMARY", "STORY_GATE_TRUSTED_DIR", "PR_TITLE")}
+        env["GITHUB_TOKEN"] = "t"
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
             rc = g.cmd_ci()
         return rc, out.getvalue(), seen
 
