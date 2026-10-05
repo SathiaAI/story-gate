@@ -1711,10 +1711,15 @@ def next_step(sid, c):
     if not [f for f in files if not exempt(f, c) and not is_record(f) and f not in GATE_FILES]:  # story-gate's own files aren't the story's code
         return done, "Build it: write the code and the tests for each AC. Then run `%s` again." % gate_cmd("next")
     done.append("code")
-    facts = struct_done(sd, sid, files, c, write=False)  # read-only: next never writes trace.md
+    results = load_json(sd / "test_results.json").get("junit") or None  # the same per-test outcomes `score done` uses
+    facts = struct_done(sd, sid, files, c, results=results, write=False)  # read-only: next never writes trace.md
+    import sg_validation as V
     acs_ = [a for a, _, _ in acs(sd)]
-    fill = {"cmd": gate_cmd("record-tests %s -- %s" % (sid, c.get("test_command") or "<your test command>")),
-            "scenario": gate_cmd("scenario %s --name \"...\" --ac %s --expect <text> -- <command>" % (sid, acs_[0] if acs_ else "AC-1")),
+    cov = V.coverage(load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json")), acs_, work_fingerprint(), False)
+    need = [a for a in acs_ if cov.get(a) == "missing"] or acs_ or ["AC-1"]  # an AC that still has no passing scenario
+    fill = {"cmd": gate_cmd("record-tests %s" % sid) if c.get("test_command") else  # a pinned command is used as is
+            gate_cmd("record-tests %s -- <your test command>" % sid),
+            "scenario": gate_cmd("scenario %s --name \"...\" --ac %s --expect <text> -- <command>" % (sid, need[0])),
             "learn": gate_cmd("learn %s --type none --summary \"...\"" % sid) + " (or --type error|pattern with --root-cause and --rule)"}
     for key, label, todo in NEXT_DONE:
         if key not in facts:

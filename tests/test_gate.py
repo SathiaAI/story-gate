@@ -492,6 +492,22 @@ class TestNext(Base):
         step = self.nxt()
         self.assertIn("READY is FAIL on:", step); self.assertIn("score SAT-1 ready", step)
 
+    def test_suggestions_point_at_the_work_still_missing(self):
+        """The scenario step names an AC without a passing scenario; a pinned test command isn't repeated on the command line."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, test_command="echo a && echo b")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        tj = self.repo / ".story-gate/stories/SAT-1/tests.json"
+        t = json.loads(tj.read_text()); t["acceptance_criteria"].append(dict(t["acceptance_criteria"][0], id="AC-2", text="y")); tj.write_text(json.dumps(t))
+        run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        step = self.nxt()
+        self.assertIn("record-tests SAT-1`", step); self.assertNotIn("echo a && echo b", step)
+        run(self.repo, "record-tests", "SAT-1")
+        self.fill_validation()  # a passing scenario for AC-1 only
+        step = self.nxt()
+        self.assertIn("--ac AC-2", step, step)
+
     def test_next_changes_nothing(self):
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
