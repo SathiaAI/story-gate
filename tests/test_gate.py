@@ -690,13 +690,16 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None):
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None):
         """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
         subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
         (self.repo / ".github").mkdir(exist_ok=True)
-        self.cfg(mode="enforce", thresholds={"pass": 0.8, "concerns": 0.5})
+        self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
+        for f in touch or []:  # a story-gate file other than config.json
+            with open(self.repo / f, "a", encoding="utf-8") as fh:
+                fh.write("\n# changed\n")
         g = load_gate(self.repo)
         import sg_github as G
         keep_github_fakes_local(self, G)
@@ -729,6 +732,19 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertEqual(rc, 1, out)
         self.assertIn("A code owner confirms it by approving the latest commit", out)
         self.assertIn("waiting for a code owner", out)
+        self.assertIn("if that's you, ask your AI to open it", out)  # the solo owner's way out
+        self.assertNotIn("read the diff", out)                      # config.json alone is judged by weaker()
+
+    def test_weaker_rules_are_a_warning_on_the_pull_request(self):
+        rc, out, _ = self.ci(accepted=True, thresholds={"pass": 0.5, "concerns": 0.2})
+        self.assertIn("::warning title=story-gate: rules made weaker::", out)
+        self.assertEqual(out.count("This PR makes story-gate's rules weaker"), 1, out)  # once, not also as a notice
+
+    def test_gate_code_changes_ask_the_owner_to_read_the_diff(self):
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("can't judge whether that loosens the gate: read the diff", out)
+        self.assertIn(".story-gate/sg_report.py", out)
 
     def test_mixed_pull_request_still_needs_a_split_or_the_label(self):
         rc, out, _ = self.ci(accepted=True, extra=["feature.py"])
