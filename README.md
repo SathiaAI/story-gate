@@ -59,6 +59,15 @@ In our public [demo repository](https://github.com/SathiaAI/story-gate-demo), an
 
 story-gate ran every goal again on GitHub. An order of exactly 10 items paid full price (40.00, not 36.00). The check is red and the merge is blocked. Open the **story-gate** check on that pull request to see the evidence.
 
+Then the AI fixed it in [this pull request](https://github.com/SathiaAI/story-gate-demo/pull/6): `qty > 10` became `qty >= 10`, and it added the missing test for exactly 10 items. Every goal passes, the judge agrees, and the check turns green once a person approves.
+
+| | Red: [#5](https://github.com/SathiaAI/story-gate-demo/pull/5) | Green: [#6](https://github.com/SathiaAI/story-gate-demo/pull/6) |
+|---|---|---|
+| The AI says | "Done" | "Done" |
+| Its own unit tests | Pass | Pass |
+| story-gate runs "exactly 10 items" | 40.00, expected 36.00 | 36.00 |
+| Merge | Blocked | Allowed after a person approves |
+
 ## Try it first (one line to install, nothing to set up)
 
 See story-gate catch a real bug before you change anything. Install it with one line:
@@ -94,6 +103,8 @@ story-gate try
 ```text
 Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.
 ```
+
+Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate skill to Claude Code, Codex, Cursor and 20+ other AI tools. Then paste the same sentence.
 
 **Steps 2 to 5** happen on a page that opens in your browser. It tells you exactly what to click, and ticks each step off when it's done.
 
