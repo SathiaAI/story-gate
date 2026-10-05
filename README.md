@@ -71,7 +71,7 @@ story-gate try
 **Step 1.** Open your project in your AI tool and paste this:
 
 ```text
-Set up story-gate in this repo: https://github.com/SathiaAI/story-gate
+Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.
 ```
 
 **Steps 2 to 5** happen on a page that opens in your browser. It tells you exactly what to click, and ticks each step off when it's done.

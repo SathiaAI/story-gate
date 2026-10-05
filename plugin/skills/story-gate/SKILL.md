@@ -17,6 +17,8 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
 
+Set story-gate up in the human's own project: the folder they have open. https://github.com/SathiaAI/story-gate is only where story-gate comes from. Never clone it to set up, and never open issues or pull requests there.
+
 1. Tell the human what you will run, and wait for a clear yes:
    - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init`, in the project folder
