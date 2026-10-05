@@ -88,6 +88,8 @@ This step:
 
 Commit and merge the CODEOWNERS file. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
 
+**If GitHub blocks the merge with "rule violation" but every check is green:** GitHub may have switched on **Require an additional approval for unattributed Copilot pull requests** in the ruleset. It asks for a second approval on every pull request the AI opens, which a solo owner can't give. Setup turns it off; to fix an older repository, run `story-gate setup-repo` again, or untick it in **Settings › Rules › Rulesets › story-gate: human acceptance**.
+
 **Manual C · Add the judge key** (step 4)
 1. Create a key at openrouter.ai. The default judge is Jev, a scoring model from TypeSafe, used through OpenRouter. OpenRouter charges per check; its activity page shows the exact cost.
 2. In your repository, open **Settings › Secrets and variables › Actions › New repository secret**.
