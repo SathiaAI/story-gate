@@ -2190,13 +2190,27 @@ def cmd_ci(tests_dir=None):
             who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
             owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base) or "")
             allowed = {u.lower() for u in G.codeowners(owners_txt)[0]} | {a.lower().lstrip("@") for a in (c.get("approvers") or [])}
+            others = [f for f in code if f not in touched]  # anything besides story-gate's own files
             if who and who.lower() in allowed:
                 notes.append("This PR changes story-gate code, hook or workflow files (%s); %s confirmed with the '%s' label."
                              % (", ".join(touched), who, CHANGE_LABEL))
+            elif not others:
+                # A pull request that changes only story-gate's files: a code owner's approval of its latest commit is the
+                # confirmation (no separate label). Owners come from the base branch, as for any other acceptance.
+                acc = G.acceptance(ctx, token, owners_txt, c.get("approvers") or []) if ctx and token else \
+                    {"accepted": False, "why": "not running on a pull request"}
+                if acc["accepted"]:
+                    notes.append("This PR changes only story-gate files (%s); %s confirmed by approving the latest commit."
+                                 % (", ".join(touched), acc.get("approver")))
+                else:
+                    problems.append("This PR changes only story-gate files (%s). A code owner confirms it by approving the latest "
+                                    "commit (%s)." % (", ".join(touched), acc["why"]))
             else:
-                problems.append("This PR changes story-gate code, hook or workflow files (%s). A code owner must review them and add "
-                                "the label '%s' to confirm%s." % (", ".join(touched), CHANGE_LABEL,
-                                                                  " (it was added by %s, who is not a code owner)" % who if who else ""))
+                problems.append("This PR changes story-gate code, hook or workflow files (%s) together with other files. Put the "
+                                "story-gate changes in their own pull request (a code owner's approval then confirms them), or a "
+                                "code owner adds the label '%s'%s." % (", ".join(touched), CHANGE_LABEL,
+                                                                     " (it was added by %s, who is not a code owner)" % who if who else ""))
+            code = others  # story-gate's own files never need a story; the confirmation above covers them
         if ".story-gate/config.json" in files:  # say in plain words when this PR makes the rules weaker
             w = T.weaker(full_config(git("show", "%s:.story-gate/config.json" % base) or None),
                          full_config(rd(GATE / "config.json") or None))

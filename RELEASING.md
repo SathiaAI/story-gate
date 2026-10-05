@@ -14,7 +14,7 @@ People install story-gate on their computers with `gate.py install --user`. That
    python3 .story-gate/gate.py release-sign --key /path/to/release_ed25519
    ```
    This writes `.story-gate/release.json` (sha256 of every runtime file) and `.story-gate/release.json.sig`.
-3. Commit both files in a PR, labelled `story-gate-change` by a code owner. After merge, tag the commit `vX.Y.Z` and paste the fingerprint into the release notes.
+3. Commit both files in a PR of their own; a code owner's approval confirms it. After merge, tag the commit `vX.Y.Z` and paste the fingerprint into the release notes.
 4. Check it: `python3 .story-gate/gate.py install --user --dry-run` must say `Signature: valid`.
 
 **People already on an older version** run the upgrade with their installed copy, so the new release is checked with the key they already trust:

@@ -632,7 +632,8 @@ def weaker(old, new):
     removed = sorted(set(o.get("test_globs") or []) - set(n.get("test_globs") or []))
     if removed:  # treat replacements conservatively, even when patterns overlap
         out.append("test file patterns removed: %s" % ", ".join(removed[:5]))
-    if (o.get("test_command") or "") != (n.get("test_command") or ""):  # can't tell if a new command is as strict: a human decides
+    if o.get("test_command") and o.get("test_command") != (n.get("test_command") or ""):  # can't tell if a new command is as strict: a human decides
+        # (setting a test command where there was none adds a check, so it isn't weaker)
         out.append("test command changed from %r to %r" % (o.get("test_command") or "", n.get("test_command") or ""))
     who = sorted(set(n.get("approvers") or []) - set(o.get("approvers") or []))
     if who:

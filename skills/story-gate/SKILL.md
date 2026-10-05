@@ -35,6 +35,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 - Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.
 - Never use the human's GitHub login.
 - If `gate.py doctor --repo owner/name` warns that this shell holds a code owner's login, stop and tell the human.
+- To change story-gate's own files (`.story-gate/config.json` and the other story-gate files), open a pull request with only those files. The code owner's approval confirms it, and no story is needed.
 
 ## Sub-agents: tiers, not model names
 

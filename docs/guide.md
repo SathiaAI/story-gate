@@ -313,6 +313,8 @@ flowchart LR
 
 Waivers and drift decisions written by an agent are **proposals**. They count only after a code owner approves the commit that contains them.
 
+**Changing story-gate itself** (`config.json`, its workflows, hooks or code): put those files in a pull request of their own. A code owner's approval of the latest commit confirms the change, and no story is needed. If they come mixed with other changes, split them out, or a code owner adds the label `story-gate-change`. When a change makes the rules weaker, the check says so in plain words. Working alone? Ask your AI to open the pull request, because GitHub doesn't let you approve your own.
+
 ### Plain writing
 
 story-gate asks every AI to write for a non-coder. The rules are in `.story-gate/PROTOCOL.md` > Writing: short sentences, one idea per sentence, active voice, plain words, short paragraphs, and a Mermaid diagram where a picture is clearer.
