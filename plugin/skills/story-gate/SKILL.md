@@ -20,7 +20,7 @@ This skill is guidance only. Nothing is protected until setup finishes and `stor
 Set story-gate up in the human's own project: the folder they have open. https://github.com/SathiaAI/story-gate is only where story-gate comes from. Never clone it to set up, and never open issues or pull requests there.
 
 1. Tell the human what you will run, and wait for a clear yes:
-   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init`, in the project folder
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
 2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."

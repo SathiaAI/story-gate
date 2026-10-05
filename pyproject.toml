@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "story-gate"
 # Must equal VERSION in .story-gate/gate.py (enforced by tests/test_packaging.py)
-version = "0.6.2"
+version = "0.7.0"
 description = "Per-story quality gate for AI coding sessions. Stdlib only."
 readme = "README.md"
 license = { text = "MIT" }
