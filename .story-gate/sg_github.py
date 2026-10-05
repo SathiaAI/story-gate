@@ -277,12 +277,19 @@ def allow_ai_prs(repo, ruleset_id, token):
     if not pr:
         return ("Ruleset: '%s' has no pull request rule, so approvals aren't required. Delete it in Settings > Rules and run "
                 "setup-repo again, or import docs/story-gate-ruleset.json." % RULESET_NAME)
-    if (pr[0].get("parameters") or {}).get(UNATTRIBUTED) is False:
-        return "Ruleset: pull requests the AI opens need one code owner approval"
+    p = pr[0].get("parameters") or {}
+    try:
+        complete = bool(p.get("require_code_owner_review")) and int(p.get("required_approving_review_count") or 0) >= 1
+    except (TypeError, ValueError):
+        complete = False
+    gap = ("" if complete else " Note: this ruleset doesn't require a code owner's approval, so it isn't story-gate's full rule. "
+           "Delete it in Settings > Rules and run setup-repo again, or import docs/story-gate-ruleset.json.")
+    if p.get(UNATTRIBUTED) is False:
+        return ("Ruleset: pull requests the AI opens need one code owner approval" if complete else "Ruleset:" + gap)
     pr[0].setdefault("parameters", {})[UNATTRIBUTED] = False
     st, r, _ = call("PUT", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token, {"rules": rules})
     if st in (200, 201):
-        return "Ruleset: turned off GitHub's extra approval for AI pull requests (one code owner approval is enough)"
+        return "Ruleset: turned off GitHub's extra approval for AI pull requests" + (" (one code owner approval is enough)" if complete else "." + gap)
     return ("Ruleset: could not turn off GitHub's extra approval for AI pull requests (HTTP %s %s). In Settings > Rules, open '%s' "
             "and untick 'Require an additional approval for unattributed Copilot pull requests'." % (st, (r or {}).get("message", ""), RULESET_NAME))
 

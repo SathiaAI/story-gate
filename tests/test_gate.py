@@ -814,11 +814,11 @@ class TestGitHubLogic(unittest.TestCase):
         doc = json.loads((SRC.parent / "docs" / "story-gate-ruleset.json").read_text(encoding="utf-8"))
         self.assertEqual(doc, json.loads(json.dumps(r)))
 
-    def _ruleset_api(self, unattributed, put_status=200, pr_rule=True):
+    def _ruleset_api(self, unattributed, put_status=200, pr_rule=True, owners_required=True):
         """Run setup against a fake ruleset API and return its messages and ruleset PUT requests."""
         G, calls = self.G, []
         rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}] + ([{"type": "pull_request", "parameters": {
-            "required_approving_review_count": 1, "require_code_owner_review": True, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
+            "required_approving_review_count": 1, "require_code_owner_review": owners_required, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
 
         def call(m, path, t=None, b=None, accept=None):
             """Record API requests and return fixtures with the configured ruleset update status."""
@@ -855,6 +855,13 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertEqual(puts, [])
         self.assertTrue(any("has no pull request rule" in line for line in out))
         self.assertFalse(any("need one code owner approval" in line for line in out))
+
+    def test_ruleset_without_code_owner_review_is_called_incomplete(self):
+        """Never call a ruleset complete when it doesn't require a code owner's approval."""
+        for unattributed in (True, False):
+            out, puts = self._ruleset_api(unattributed, owners_required=False)
+            self.assertTrue(any("isn't story-gate's full rule" in line for line in out))
+            self.assertFalse(any("need one code owner approval" in line or "is enough" in line for line in out))
 
     def test_existing_ruleset_already_right_is_left_alone(self):
         """Avoid updating a ruleset whose extra AI approval requirement is already disabled."""
