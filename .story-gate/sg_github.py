@@ -247,18 +247,59 @@ def whoami(token):
 
 
 RULESET_NAME = "story-gate: human acceptance"
+UNATTRIBUTED = "require_extra_approval_for_unattributed_changes"
 
 
 def ruleset_json():
+    """Return the default branch ruleset requiring human acceptance without extra AI approval."""
     return {"name": RULESET_NAME, "target": "branch", "enforcement": "active",
             "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
             "bypass_actors": [],
             "rules": [{"type": "deletion"}, {"type": "non_fast_forward"},
                       {"type": "pull_request", "parameters": {"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": True,
                                                               "require_code_owner_review": True, "require_last_push_approval": True,
-                                                              "required_review_thread_resolution": True}},
+                                                              "required_review_thread_resolution": True,
+                                                              # GitHub turns this on when a payload leaves it out. It then asks for a
+                                                              # second approval on every pull request the AI's login opens, which a solo
+                                                              # owner can never give. A code owner's approval of the latest push is the gate.
+                                                              UNATTRIBUTED: False}},
                       {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": False,
                                                                         "required_status_checks": [{"context": "story-gate"}]}}]}
+
+
+def allow_ai_prs(repo, ruleset_id, token):
+    """Turn off GitHub's extra approval for AI-opened pull requests in story-gate's own ruleset (only that setting)."""
+    st, rs, _ = call("GET", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token)
+    if st != 200 or not isinstance(rs, dict):
+        return "Ruleset: could not read it (HTTP %s) to check the extra approval for AI pull requests" % st
+    rules = rs.get("rules") or []
+    pr = [r for r in rules if r.get("type") == "pull_request"]
+    if not pr:
+        return ("Ruleset: '%s' has no pull request rule, so approvals aren't required. Delete it in Settings > Rules and run "
+                "setup-repo again, or import docs/story-gate-ruleset.json." % RULESET_NAME)
+    p = pr[0].get("parameters") or {}
+    try:
+        count = int(p.get("required_approving_review_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    missing = [what for ok, what in (
+        (rs.get("enforcement") == "active", "it isn't active (enforcement: %s)" % rs.get("enforcement")),
+        (bool(p.get("require_code_owner_review")), "it doesn't require a code owner's review"),
+        (count >= 1, "it doesn't require an approval"),
+        (bool(p.get("require_last_push_approval")), "it doesn't require approval of the latest push"),
+        (bool(p.get("dismiss_stale_reviews_on_push")), "it doesn't cancel old approvals when new commits arrive")) if not ok]
+    need = ("one code owner approval of the latest push" if count == 1 else
+            "%d approvals, including a code owner's, of the latest push" % count)
+    gap = ("" if not missing else " Note: this isn't story-gate's full rule: %s. Delete it in Settings > Rules and run setup-repo "
+           "again, or import docs/story-gate-ruleset.json." % "; ".join(missing))
+    if p.get(UNATTRIBUTED) is False:
+        return ("Ruleset: pull requests the AI opens need %s" % need) if not missing else "Ruleset:" + gap
+    pr[0].setdefault("parameters", {})[UNATTRIBUTED] = False
+    st, r, _ = call("PUT", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token, {"rules": rules})
+    if st in (200, 201):
+        return "Ruleset: turned off GitHub's extra approval for AI pull requests" + (" (they need %s)" % need if not missing else "." + gap)
+    return ("Ruleset: could not turn off GitHub's extra approval for AI pull requests (HTTP %s %s). In Settings > Rules, open '%s' "
+            "and untick 'Require an additional approval for unattributed Copilot pull requests'." % (st, (r or {}).get("message", ""), RULESET_NAME))
 
 
 def setup_repo(root, repo, owners, token, dry_run=False):
@@ -278,8 +319,12 @@ def setup_repo(root, repo, owners, token, dry_run=False):
     if dry_run:
         return out + ["(dry run: no GitHub changes)"]
     st, existing, _ = call("GET", "/repos/%s/rulesets" % repo, token)
-    if st == 200 and any(r.get("name") == RULESET_NAME for r in existing):
+    # only this repository's own ruleset: an organization's ruleset with the same name is listed too, but can't be changed here
+    mine = [r for r in existing if r.get("name") == RULESET_NAME and r.get("source_type", "Repository") == "Repository"] \
+        if st == 200 and isinstance(existing, list) else []
+    if mine:
         out.append("Ruleset: '%s' already exists" % RULESET_NAME)
+        out.append(allow_ai_prs(repo, mine[0].get("id"), token))
     else:
         st, r, _ = call("POST", "/repos/%s/rulesets" % repo, token, ruleset_json())
         out.append("Ruleset: %s" % ("created" if st in (200, 201) else "NOT created (HTTP %s %s). Import docs/story-gate-ruleset.json in Settings > Rules instead." % (st, (r or {}).get("message", ""))))

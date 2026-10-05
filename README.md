@@ -53,6 +53,12 @@ Each fact is marked **checked** (the pull request check ran it) or **reported** 
 
 **Skip it** for a weekend prototype or a throwaway script. The checks add a few minutes per story.
 
+## See it block a real pull request
+
+In our public [demo repository](https://github.com/SathiaAI/story-gate-demo), an AI opened [this pull request](https://github.com/SathiaAI/story-gate-demo/pull/5) for one small feature: 10% off orders of 10 or more items. Its own unit tests pass, and its write-up says "Done".
+
+story-gate ran every goal again on GitHub. An order of exactly 10 items paid full price (40.00, not 36.00). The check is red and the merge is blocked. Open the **story-gate** check on that pull request to see the evidence.
+
 ## Try it first (one line to install, nothing to set up)
 
 See story-gate catch a real bug before you change anything. Install it with one line:
@@ -97,7 +103,7 @@ Set up story-gate in my project (the folder I have open). Install it from https:
 
 **The judge key (step 4):** make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add some credit. Each check is one small judge call; OpenRouter shows what each one costs. The key goes straight into a GitHub secret, and your AI never sees it.
 
-**Who approves:** you, plus anyone you add in step 5 (they need write access to the repository). Any one of you can approve.
+**Who approves:** you, plus anyone you add in step 5 (they need write access to the repository). Any one of you can approve. Working alone is fine: the AI opens the pull requests under its own login, so your approval counts.
 
 **Teammates:** each person pastes the same sentence once on their own computer. Their setup skips steps 4 and 5.
 
