@@ -18,7 +18,7 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
 
 1. Tell the human what you will run, and wait for a clear yes:
-   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.1` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init`, in the project folder
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
 2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."

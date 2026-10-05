@@ -404,7 +404,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.6.0")
+        self.assertEqual(g.VERSION, "0.6.1")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -2297,7 +2297,7 @@ class TestDashboard(Base):
         page = self.D.to_html(self.data)
         self.assertNotIn("<script>alert", page); self.assertIn("default-src 'none'", page)
         self.assertNotIn("http", page.split("</style>")[-1].replace('xmlns="http://www.w3.org/2000/svg"', "")); self.assertNotRegex(page, r"<(script|link|img|iframe)[\s>]")
-        self.assertIn("Tabler", page); self.assertIn("#FF4B20", page); self.assertIn('aria-label="Viaknox"', page)
+        self.assertIn("Tabler", page); self.assertIn("#FFD84D", page); self.assertIn('aria-label="Viaknox"', page)
 
     def test_record_folders_with_bad_names_and_huge_files_are_skipped(self):
         self.g("checkout", "-q", "-b", "feat/evil", "main")
