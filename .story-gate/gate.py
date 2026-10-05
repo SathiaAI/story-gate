@@ -1266,7 +1266,8 @@ def cmd_try(open_=True):
         "proposed_missing_acs": []})
     import sg_validation as V
     (sd / "validation.md").write_text(V.TEMPLATE.replace("{id}", "TRY-1"), encoding="utf-8")
-    run("git", "add", "-A"); run("git", "commit", "-q", "-m", "story-gate try: example project")
+    # your own git settings must not break a throwaway commit: no signing, no global commit hooks
+    run("git", "add", "-A"); run("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "-q", "-m", "story-gate try: example project")
     me = [sys.executable, str(HERE / "gate.py")]
     print("story-gate try: a throwaway project with one story (TRY-1: bulk discount) and a real bug, in %s\n" % box)
     checks = (("AC-1", "3 items cost 6.00", r"^6\.00$", "3", "The total is quantity times price"),

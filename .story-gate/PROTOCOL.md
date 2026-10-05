@@ -113,7 +113,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
    **Self-review before the PR:** run your client's code reviewer on the diff and fix what it finds.
    - In Claude clients, that's `/engineering:code-review`.
-   - This is a self-check. The proof comes from the independent reviewers on the PR (a code owner, plus anyone listed in `config.json` → `reviewers`), whose threads must all be resolved.
+   - This is a self-check. The proof comes from independent review on the PR: a code owner's approval of the latest commit, or a review of it from anyone listed in `config.json` → `reviewers`. Threads opened by those listed reviewers must all be resolved.
 
 2. **Show it working (scenarios).** Run the feature the way a user would, once or more for every acceptance criterion, and record each run:
    ```
