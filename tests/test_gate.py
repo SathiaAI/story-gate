@@ -814,11 +814,12 @@ class TestGitHubLogic(unittest.TestCase):
         doc = json.loads((SRC.parent / "docs" / "story-gate-ruleset.json").read_text(encoding="utf-8"))
         self.assertEqual(doc, json.loads(json.dumps(r)))
 
-    def _ruleset_api(self, unattributed, put_status=200, pr_rule=True, owners_required=True):
+    def _ruleset_api(self, unattributed, put_status=200, pr_rule=True, owners_required=True, count=1, last_push=True, enforcement="active"):
         """Run setup against a fake ruleset API and return its messages and ruleset PUT requests."""
         G, calls = self.G, []
-        rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}] + ([{"type": "pull_request", "parameters": {
-            "required_approving_review_count": 1, "require_code_owner_review": owners_required, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
+        rs = {"id": 7, "name": G.RULESET_NAME, "enforcement": enforcement, "rules": [{"type": "deletion"}] + ([{"type": "pull_request", "parameters": {
+            "required_approving_review_count": count, "require_code_owner_review": owners_required, "require_last_push_approval": last_push,
+            "dismiss_stale_reviews_on_push": True, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
 
         def call(m, path, t=None, b=None, accept=None):
             """Record API requests and return fixtures with the configured ruleset update status."""
@@ -862,6 +863,15 @@ class TestGitHubLogic(unittest.TestCase):
             out, puts = self._ruleset_api(unattributed, owners_required=False)
             self.assertTrue(any("isn't story-gate's full rule" in line for line in out))
             self.assertFalse(any("need one code owner approval" in line or "is enough" in line for line in out))
+
+    def test_ruleset_messages_match_what_github_will_enforce(self):
+        """Say exactly what the ruleset requires: stricter counts are kept, and inactive or loose rules are called incomplete."""
+        out, _ = self._ruleset_api(True, count=2)
+        self.assertTrue(any("need 2 approvals, including a code owner's" in line for line in out), out)
+        for kw, why in (({"last_push": False}, "approval of the latest push"), ({"enforcement": "evaluate"}, "isn't active")):
+            out, _ = self._ruleset_api(True, **kw)
+            self.assertTrue(any(why in line for line in out), out)
+            self.assertFalse(any("they need" in line for line in out), out)
 
     def test_existing_ruleset_already_right_is_left_alone(self):
         """Avoid updating a ruleset whose extra AI approval requirement is already disabled."""

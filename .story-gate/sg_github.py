@@ -279,17 +279,25 @@ def allow_ai_prs(repo, ruleset_id, token):
                 "setup-repo again, or import docs/story-gate-ruleset.json." % RULESET_NAME)
     p = pr[0].get("parameters") or {}
     try:
-        complete = bool(p.get("require_code_owner_review")) and int(p.get("required_approving_review_count") or 0) >= 1
+        count = int(p.get("required_approving_review_count") or 0)
     except (TypeError, ValueError):
-        complete = False
-    gap = ("" if complete else " Note: this ruleset doesn't require a code owner's approval, so it isn't story-gate's full rule. "
-           "Delete it in Settings > Rules and run setup-repo again, or import docs/story-gate-ruleset.json.")
+        count = 0
+    missing = [what for ok, what in (
+        (rs.get("enforcement") == "active", "it isn't active (enforcement: %s)" % rs.get("enforcement")),
+        (bool(p.get("require_code_owner_review")), "it doesn't require a code owner's review"),
+        (count >= 1, "it doesn't require an approval"),
+        (bool(p.get("require_last_push_approval")), "it doesn't require approval of the latest push"),
+        (bool(p.get("dismiss_stale_reviews_on_push")), "it doesn't cancel old approvals when new commits arrive")) if not ok]
+    need = ("one code owner approval of the latest push" if count == 1 else
+            "%d approvals, including a code owner's, of the latest push" % count)
+    gap = ("" if not missing else " Note: this isn't story-gate's full rule: %s. Delete it in Settings > Rules and run setup-repo "
+           "again, or import docs/story-gate-ruleset.json." % "; ".join(missing))
     if p.get(UNATTRIBUTED) is False:
-        return ("Ruleset: pull requests the AI opens need one code owner approval" if complete else "Ruleset:" + gap)
+        return ("Ruleset: pull requests the AI opens need %s" % need) if not missing else "Ruleset:" + gap
     pr[0].setdefault("parameters", {})[UNATTRIBUTED] = False
     st, r, _ = call("PUT", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token, {"rules": rules})
     if st in (200, 201):
-        return "Ruleset: turned off GitHub's extra approval for AI pull requests" + (" (one code owner approval is enough)" if complete else "." + gap)
+        return "Ruleset: turned off GitHub's extra approval for AI pull requests" + (" (they need %s)" % need if not missing else "." + gap)
     return ("Ruleset: could not turn off GitHub's extra approval for AI pull requests (HTTP %s %s). In Settings > Rules, open '%s' "
             "and untick 'Require an additional approval for unattributed Copilot pull requests'." % (st, (r or {}).get("message", ""), RULESET_NAME))
 
