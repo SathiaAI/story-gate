@@ -10,6 +10,8 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 
 Works in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf and cloud agents. [What each tool gets](docs/client-security.md).
 
+<p align="center"><img src="docs/assets/story-gate-try.gif" alt="A terminal runs story-gate try. Goal AC-1, the total is quantity times price, passes. Goal AC-2, 10 or more items get 10% off, fails: 10 items at 2.00 printed 20.00, expected 18.00. story-gate caught the bug before anyone said done. End card: Your AI said done. story-gate checked." width="100%"></p>
+
 <p align="center"><img src="docs/assets/clients.png" alt="Works with. Live checks: Claude Code, Codex, Cursor, VS Code (Copilot agent), Gemini CLI, Hermes, Windsurf (partly verified). Rules and skill: Antigravity, pi, Roo Code. Pull request checks: Grok Build, ChatGPT, Google AI Studio, cloud agents. Install from: Claude Code plugin, Gemini CLI extension, Hermes skills tap, skills.sh, uv." width="100%"></p>
 
 ## Sound familiar?
