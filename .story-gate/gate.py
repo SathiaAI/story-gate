@@ -43,6 +43,7 @@ Commands (run from the repo root):
   checkpoint <ID>                    mid-story Jev check: % complete (estimate), on course?, drift, TODOs, tests keeping pace
   learnings [words...]               search past learnings (read these before planning)
   status [<ID>]                      one plain-English line
+  next [<ID>]                        what's done and the single next step for the story (no judge call, no cost)
   hook --client C --event pre|post|stop|session   called by AI-client hooks (reads JSON on stdin)
   ci [--tests DIR] | ci-tests DIR | audit       called by the CI workflows (see .github/workflows/story-gate*.yml)
   label <ID> ready|done correct|wrong [--note ..]  tell story-gate whether a verdict was right (tunes thresholds)
@@ -692,7 +693,7 @@ def defined(ref, corpus):
     return any(re.search(p, corpus, re.M) for p in pats)
 
 
-def trace(sd, c, tr, results=None):
+def trace(sd, c, tr, results=None, write=True):
     """AC -> planned cases -> automated tests -> exists in current test files -> executed outcome. Writes trace.md."""
     t = load_json(sd / "tests.json")
     plan = {str(a.get("id")): a for a in (t.get("acceptance_criteria") or []) if isinstance(a, dict)}
@@ -717,7 +718,8 @@ def trace(sd, c, tr, results=None):
                                                      "%d/%d" % (len(found), len(refs)), res))
     md = ("# Traceability: %s\n\n| AC | Criterion | Planned cases | Automated tests (test_refs) | In current test files | Result |\n"
           "|---|---|---|---|---|---|\n" % sd.name)
-    wj_text(sd / "trace.md", md + "\n".join(rows) + "\n")
+    if write:
+        wj_text(sd / "trace.md", md + "\n".join(rows) + "\n")
     return missing
 
 
@@ -730,7 +732,7 @@ def wj_text(p, text):
     Path(p).write_text(text, encoding="utf-8")
 
 
-def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False):
+def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False, write=True):
     """Structural (non-judge) DONE checks: the ready gate, tests, handoff, learnings and now validation evidence."""
     out = {}
     rj = load_json(sd / "ready.json")
@@ -752,7 +754,7 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
                               "code changed after the last green test run — run record-tests again")
     code = [f for f in diff_files if not exempt(f, c)]
     out["code_changed"] = (bool(code), "no code changes found against base")
-    miss = trace(sd, c, tr, results)
+    miss = trace(sd, c, tr, results, write)
     out["traceability"] = (not miss, "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
     if (c.get("validation") or {}).get("required", True):
         import sg_validation as V
@@ -936,7 +938,8 @@ def cmd_start(sid, client=None, model=None):
     baseline = prev[2].strip() if len(prev) >= 3 and prev[0].strip() == sid and prev[1].strip() == branch else git("rev-parse", "HEAD").strip()
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, branch, baseline), encoding="utf-8")  # restarting a story keeps its baseline
     emit("started", sid, load_json(sd / "coder.json"))
-    print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready" % (sid, sd.relative_to(ROOT), sid))
+    print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready. "
+          "Not sure what's next? Run: %s" % (sid, sd.relative_to(ROOT), sid, gate_cmd("next")))
 
 
 FEATURE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
@@ -1667,6 +1670,99 @@ def cmd_status(sid=None):
     return 0
 
 
+NEXT_READY = (("story_present", "story.md", "Paste the full story into story.md, with a plain summary and the acceptance criteria (AC-1, AC-2, ...)"),
+              ("story_source", "story.md", "Say where the story came from in story.md's front matter ('source: linear:ID', 'repo:path', ...)"),
+              ("context_present", "context.md", "Fill every section of context.md"),
+              ("test_matrix", "tests.json", "Plan a positive, negative, edge and regression case for every AC in tests.json (or give an N/A reason)"),
+              ("upstream_handoffs", "context.md", "Add a handoff for each story this one depends on"))
+NEXT_DONE = (("tests_ran_green", "tests", "Run the tests and record them: `{cmd}`"),
+             ("traceability", "test links", "Point each AC to its automated tests in tests.json (`test_refs`: the test function names), and make them pass"),
+             ("scenarios_prove_acs", "scenarios", "{scenario}"),
+             ("validation_written", "validation.md", "Fill in validation.md for the owner"),
+             ("handoff_written", "handoff.md", "Write handoff.md with these sections: " + ", ".join(s.lstrip("# ") for s in HANDOFF_SECTIONS)),
+             ("learnings_recorded", "learnings", "Record what you learnt: `{learn}`"))
+
+
+def _ok(x):
+    return x is True or x == "PASS" or x == "CONCERNS"
+
+
+def next_step(sid, c):
+    """-> (done list, next step) for a story, from the same structural facts the gates use. No judge call, no cost."""
+    sd = STORIES / sid
+    if not sd.exists():
+        return [], "Start the story: `%s`" % gate_cmd("start %s --model <your model id>" % sid)
+    done, ready = [], struct_ready(sd)[0]
+    for key, label, todo in NEXT_READY:
+        ok, why = ready[key]
+        if not ok:
+            return done, "%s (%s)." % (todo, why)
+        if label not in done:
+            done.append(label)
+    rv = load_v(sid, "ready")
+    if not passed(rv, c, sd):
+        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED")]
+        if rv and not stale(rv, c, sd) and bad:
+            return done, "READY is %s on: %s. Fix those (see `%s`), then run `%s`." % (
+                rv.get("overall"), ", ".join(bad), gate_cmd("status " + sid), gate_cmd("score %s ready" % sid))
+        return done, "Check the story is ready to build: `%s`." % gate_cmd("score %s ready" % sid)
+    done.append("READY passed")
+    _, files, _ = diff_against(c["base_branch"])
+    if not [f for f in files if not exempt(f, c) and not is_record(f) and f not in GATE_FILES]:  # story-gate's own files aren't the story's code
+        return done, "Build it: write the code and the tests for each AC. Then run `%s` again." % gate_cmd("next " + sid)
+    done.append("code")
+    results = load_json(sd / "test_results.json").get("junit") or None  # the same per-test outcomes `score done` uses
+    facts = struct_done(sd, sid, files, c, results=results, write=False)  # read-only: next never writes trace.md
+    import sg_validation as V
+    acs_ = [a for a, _, _ in acs(sd)]
+    sdoc, sres, fp = load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json")), work_fingerprint()
+    cov = V.coverage(sdoc, sres, acs_, fp, False)
+    recorded = {a for sp in V.specs_of(sdoc) if isinstance(sp.get("acs"), list) for a in sp["acs"]}
+    need = [a for a in acs_ if cov.get(a) == "missing" and a not in recorded]  # ACs with no scenario recorded at all
+    if need or not V.failing(sdoc, sres, fp, False):
+        scenario = "Run the feature for every AC and record it: `%s`" % gate_cmd(
+            "scenario %s --name \"...\" --ac %s --expect <text> -- <command>" % (sid, (need or acs_ or ["AC-1"])[0]))
+    else:  # every AC is covered, but a recorded scenario failed or ran on older code: run them again, don't add another
+        scenario = "Run the recorded scenarios again on the current code: `%s`. If one still fails, fix the work" % gate_cmd("scenarios " + sid)
+    fill = {"cmd": gate_cmd("record-tests %s" % sid) if c.get("test_command") else  # a pinned command is used as is
+            gate_cmd("record-tests %s -- <your test command>" % sid),
+            "scenario": scenario,
+            "learn": gate_cmd("learn %s --type none --summary \"...\"" % sid) + " (or --type error|pattern with --root-cause and --rule)"}
+    for key, label, todo in NEXT_DONE:
+        if key not in facts:
+            continue  # e.g. validation turned off in config
+        ok, why = facts[key]
+        if not _ok(ok):
+            return done, "%s (%s)." % (todo.format(**fill), why)
+        done.append(label)
+    dv = load_v(sid, "done")
+    if not passed(dv, c, sd):
+        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED")]
+        if dv and not stale(dv, c, sd) and bad:
+            return done, "DONE is %s on: %s. Fix the cause (don't skip the check), then run `%s`." % (
+                dv.get("overall"), ", ".join(bad), gate_cmd("score %s done" % sid))
+        return done, "Check the work is done: `%s`." % gate_cmd("score %s done" % sid)
+    done.append("DONE passed")
+    return done, ("Open the pull request (the branch name or title must include %s), then show the owner the validation "
+                  "page: `%s`." % (sid, gate_cmd("report %s --open" % sid)))
+
+
+def cmd_next(sid=None):
+    """Print the single next step for the active story: what's done, and exactly what to do now."""
+    c = cfg()
+    sid = sid or story_id(c)
+    if not sid:
+        print("story-gate next: no active story. Start one on a story branch (e.g. feat/SHOP-12-refunds): `%s`"
+              % gate_cmd("start <ID> --model <your model id>"))
+        return 0
+    done, step = next_step(sid, c)
+    print("story-gate next %s" % sid)
+    if done:
+        print("  done: %s" % ", ".join(done))
+    print("  next: %s" % step)
+    return 0
+
+
 # ------------------------------------------------------------------ hooks (one entry point for every client)
 def detect_client(payload, hint):
     if "hookEventName" in payload or "toolName" in payload:
@@ -2107,7 +2203,7 @@ def gate_check(event, payload, c):
         return "Code changed (%d files) with no active story. Link the work to a story and run the gate." % len(code), True
     d = load_v(sid, "done")
     if not passed(d, c, STORIES / sid):
-        return "Story %s has code changes but the DONE gate is %s. Run the DONE steps (handoff, tests, learnings) in .story-gate/PROTOCOL.md." % (sid, (d or {}).get("overall", "not run")), True
+        return "Story %s has code changes but the DONE gate is %s. Run the DONE steps (handoff, tests, learnings) in .story-gate/PROTOCOL.md; `%s` names the next one." % (sid, (d or {}).get("overall", "not run"), gate_cmd("next")), True
     return "", False
 
 
@@ -3457,6 +3553,8 @@ def main(argv):
         return cmd_learnings(rest) or 0
     if cmd == "status":
         return cmd_status(rest[0] if rest else None)
+    if cmd == "next":
+        return cmd_next(rest[0] if rest else None)
     if cmd == "hook":
         return cmd_hook(kv.get("client", ""), kv.get("event", "pre"))
     if cmd == "ci":

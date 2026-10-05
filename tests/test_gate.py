@@ -448,6 +448,94 @@ class TestRound2Fixes(Base):
         self.assertEqual(r.returncode, 0); self.assertIn("followup_message", r.stdout)
 
 
+class TestNext(Base):
+    """`next` names the single next step, in order, through a whole story."""
+
+    def nxt(self):
+        r = run(self.repo, "next")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.split("next:", 1)[-1]
+
+    def test_walks_a_story_from_start_to_pull_request(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        self.assertIn("Start the story", self.nxt())
+        run(self.repo, "start", "SAT-1")
+        self.assertIn("Paste the full story into story.md", self.nxt())
+        self.fill_ready()
+        self.assertIn("score SAT-1 ready", self.nxt())
+        self.assertEqual(run(self.repo, "score", "SAT-1", "ready").returncode, 0)
+        self.assertIn("Build it", self.nxt())
+        self.assertIn("next SAT-1` again", self.nxt())  # the follow-up stays on this story
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        self.assertIn("record-tests SAT-1", self.nxt())
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        self.assertIn("Run the feature for every AC", self.nxt())
+        self.fill_validation()
+        step = self.nxt()
+        self.assertIn("Write handoff.md", step); self.assertIn("Drift decisions", step)
+        h = "# H\n" + "".join("## %s\nreal\n" % x for x in ("What changed", "Interfaces and contracts", "How to verify", "Known limits",
+                                                             "Downstream consumers", "Release and rollback", "Drift decisions"))
+        (self.repo / ".story-gate/stories/SAT-1/handoff.md").write_text(h)
+        self.assertIn("learn SAT-1 --type none", self.nxt())
+        run(self.repo, "learn", "SAT-1", "--type", "none", "--summary", "none")
+        self.assertIn("score SAT-1 done", self.nxt())
+        self.assertEqual(run(self.repo, "score", "SAT-1", "done").returncode, 0, run(self.repo, "status").stdout)
+        out = run(self.repo, "next").stdout
+        self.assertIn("Open the pull request", out)
+        self.assertIn("done: story.md, context.md, tests.json, READY passed, code, tests, test links, scenarios, validation.md, "
+                      "handoff.md, learnings, DONE passed", out)
+
+    def test_a_failed_gate_names_the_failing_checks(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(self_score=0.1)
+        run(self.repo, "score", "SAT-1", "ready")
+        step = self.nxt()
+        self.assertIn("READY is FAIL on:", step); self.assertIn("score SAT-1 ready", step)
+
+    def test_suggestions_point_at_the_work_still_missing(self):
+        """The scenario step names an AC without a passing scenario; a pinned test command isn't repeated on the command line."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}, test_command="echo a && echo b")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        tj = self.repo / ".story-gate/stories/SAT-1/tests.json"
+        t = json.loads(tj.read_text()); t["acceptance_criteria"].append(dict(t["acceptance_criteria"][0], id="AC-2", text="y")); tj.write_text(json.dumps(t))
+        run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        step = self.nxt()
+        self.assertIn("record-tests SAT-1`", step); self.assertNotIn("echo a && echo b", step)
+        run(self.repo, "record-tests", "SAT-1")
+        self.fill_validation()  # a passing scenario for AC-1 only
+        step = self.nxt()
+        self.assertIn("--ac AC-2", step, step)
+
+    def test_a_stale_scenario_is_run_again_not_added(self):
+        """Every AC has a scenario, but the code changed after it ran: next says run them again, not record a new one."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        self.fill_validation()
+        (self.repo / "app.py").write_text("x = 3\n")  # the scenario ran on older code
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        step = self.nxt()
+        self.assertIn("Run the recorded scenarios again", step, step); self.assertIn("scenarios SAT-1", step)
+        self.assertTrue(step.strip().startswith("Run the recorded scenarios again"), step)  # the instruction itself, not a new scenario
+
+    def test_next_changes_nothing(self):
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        (self.repo / ".story-gate/stories/SAT-1/trace.md").unlink(missing_ok=True)
+        before = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=self.repo, capture_output=True, text=True).stdout
+        self.nxt()
+        after = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=self.repo, capture_output=True, text=True).stdout
+        self.assertEqual(before, after)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-1/trace.md").exists())
+
+
 def load_gate(repo):
     import importlib.util
     os.environ["STORY_GATE_ROOT"] = str(repo)
