@@ -12,7 +12,7 @@
 3. Fixed rules decide.
 4. A human accepts.
 
-**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup in about 10 minutes](#setup-in-about-10-minutes) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-how-its-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
+**Contents:** [The problem](#a-the-problem-were-solving) · [Expected outcome](#b-expected-outcome) · [Setup](#setup) · [Using it in each client](#c-using-it-in-each-client) · [What we evaluate](#d-what-we-evaluate-today) · [Settings and their impact](#e-turning-things-on-and-off) · [Dashboard](#f-the-dashboard-how-its-going) · [Fallbacks](#fallbacks) · [Known limits](#known-limits)
 
 ---
 
@@ -48,21 +48,35 @@ Every client has different hooks and models, so until now there has been no sing
 
 ---
 
-## Setup in about 10 minutes
+## Setup
 
 <p align="center"><img src="assets/setup.png" alt="Five setup steps: 1 ask your AI, 2 sign in to GitHub, 3 give your AI its own login, 4 add the judge key, 5 approve the setup" width="100%"></p>
 
-You do this once per repository. If you don't want to type commands, open your AI tool in the repository and say **"set up story-gate using the README"**. It runs each step and stops whenever a click has to be yours.
+**Want to see it first?** Run `story-gate try` (after the install line below). It builds a throwaway example with one story and a real bug, runs each goal, shows one failing and opens the validation page. Nothing to set up.
 
-**Step 1 · Add story-gate** (2 minutes)
+You do this once per repository. The steps are the same as in the README:
+
+1. **Ask your AI:** `Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.`. It asks before installing, then installs the pinned release (`uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2`) and runs `story-gate init`, which opens the setup page.
+2. **Sign in to GitHub** on that page (click Authorize).
+3. **Give your AI its own login:** click Create, then Install. Your AI never uses your account.
+4. **Add the judge key:** paste an OpenRouter key once. It goes into a GitHub secret and your user folder, never the repository.
+5. **Approve the setup:** merge the pull request the page opens. The page then says **protected**.
+
+Then check it works: [Prove it works](#prove-it-works) below.
+
+### The same steps by hand (no AI tool)
+
+Use these commands if you'd rather not let an AI run setup, or `story-gate init` can't run where you are. Manual A to D do what steps 1 to 5 do.
+
+**Manual A · Add story-gate to the repository** (steps 1 and 5)
 ```bash
 cp -r story-gate/.story-gate your-repo/      # or download this repo and copy the .story-gate folder
 cd your-repo
 python3 .story-gate/gate.py install           # Windows: python .story-gate\gate.py install --python python
 ```
-Commit what it adds (the settings, the skill, agent instructions and three workflows: the PR check, the audit and the dashboard) and merge it. Hooks are **not** written into the repository: each person turns them on for their own computer in Step 4.
+Commit what it adds (the settings, the skill, agent instructions and three workflows: the PR check, the audit and the dashboard) and merge it. Hooks are **not** written into the repository: each person turns them on for their own computer in Manual D (or the setup page does it).
 
-**Step 2 · Name the humans** (2 minutes, run it as yourself)
+**Manual B · Name the humans** (step 5's branch rules; run it as yourself)
 ```bash
 gh auth login                                 # once, if you haven't
 python3 .story-gate/gate.py setup-repo        # add teammates with --owners you,teammate
@@ -74,8 +88,8 @@ This step:
 
 Commit and merge the CODEOWNERS file. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
 
-**Step 3 · Add the judge key** (2 minutes)
-1. Create a key at openrouter.ai. The default judge is Jev, a scoring model from TypeSafe, used through OpenRouter. It costs a fraction of a cent per check.
+**Manual C · Add the judge key** (step 4)
+1. Create a key at openrouter.ai. The default judge is Jev, a scoring model from TypeSafe, used through OpenRouter. OpenRouter charges per check; its activity page shows the exact cost.
 2. In your repository, open **Settings › Secrets and variables › Actions › New repository secret**.
 3. Name it `OPENROUTER_API_KEY` and paste the key.
 
@@ -83,7 +97,7 @@ For verdicts on your own computer, put the same line (`OPENROUTER_API_KEY=...`) 
 
 Using a different judge? See [Fallbacks](#fallbacks).
 
-**Step 4 · Set up your computer for AI tools** (4 minutes; only if AI tools run on your computer)
+**Manual D · Set up your computer for AI tools** (steps 2 and 3; only if AI tools run on your computer)
 ```bash
 python3 .story-gate/gate.py install --user --unsigned   # once per computer; drop --unsigned once a signed release exists
 python3 .story-gate/gate.py setup-agent       # opens GitHub: click Create, then Install on your repos
@@ -102,7 +116,7 @@ python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output 
 
 Cloud agents need no setup here, because they already have their own GitHub identity: Codex cloud, Cursor Cloud and Copilot.
 
-**Step 5 · Prove it works** (1 minute)
+### Prove it works
 1. Ask your AI to open a small test PR. The `story-gate` check should stay red until **you** approve the latest commit.
 2. Run `story-gate doctor --repo you/your-repo --strict`. It must finish without failures.
 3. Run `story-gate hook-selftest`. In enforce mode every tool should say **blocks**.
@@ -205,7 +219,7 @@ Then the agent opens the PR. CI repeats everything, and **you approve and merge*
 
 **Code review fits in two places:**
 - **Self-check, before the PR:** the agent runs its client's reviewer. In Claude clients, that's `/engineering:code-review`.
-- **Proof, on the PR:** the independent reviewers in `config.json` → `reviewers` (CodeRabbit and Codex by default). The check fails while any of their threads are unresolved.
+- **Proof, on the PR:** a code owner's approval of the latest commit, plus any review bots or people you list in `config.json` → `reviewers` (empty by default). The check fails while any of their threads are unresolved.
 
 ## D. What we evaluate today
 
@@ -339,7 +353,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `judge.temperature` | not sent | Sent to an `openai-compatible` judge only if you set it. Some reasoning models reject it |
 | `project_hooks_allowed` | none | Exact commands of your own project-level AI-tool hooks that may run. Read only from the default branch; any other project hook is blocked in enforce mode |
 | `min_runtime_version` | not set | Computers running an older trusted runtime are told to upgrade (blocked in enforce mode) |
-| `reviewers`, `require_independent_review` | CodeRabbit, Codex · on | Whose reviews count as independent, and whether one is required on the latest commit |
+| `reviewers`, `require_independent_review` | empty · on | Whose reviews count as independent, and whether one is required on the latest commit |
 | `approvers` | `[]` | Extra human approvers on top of CODEOWNERS |
 | `sources`, `sinks` | Linear, repo, control-hub, custom | Where specs come from, and where verdicts, checkpoints, drift alerts and learnings are sent |
 

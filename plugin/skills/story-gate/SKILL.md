@@ -17,13 +17,17 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
 
+Set story-gate up in the human's own project: the folder they have open. https://github.com/SathiaAI/story-gate is only where story-gate comes from. Never clone it to set up, and never open issues or pull requests there.
+
 1. Tell the human what you will run, and wait for a clear yes:
-   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.1` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init`, in the project folder
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
 2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
 3. The human signs in to GitHub, creates the AI's own login, adds the judge key and merges the setup pull request. Never do these steps for them, and never see or type the key.
 4. When `init` prints that story-gate is protecting the repository, run `story-gate doctor` and report its summary in plain words.
+
+If the human only wants to see what story-gate does, run `story-gate try` after the install instead of `init`. It needs no setup and touches nothing in their projects; tell them it opened a validation page with one passing and one failing goal.
 
 If a step fails, read the error to the human and stop. Never copy story-gate files by hand, and never write hook files yourself.
 
@@ -62,6 +66,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
+- Write for a non-coder: short sentences, active voice, plain words, a Mermaid diagram where a picture is clearer (PROTOCOL.md > Writing). This covers chat replies, PR descriptions, the story's plain summary, validation.md, handoffs and learnings.
 - Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
 - Never run `install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown` or `hook-trust`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.

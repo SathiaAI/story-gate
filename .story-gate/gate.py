@@ -22,6 +22,7 @@ Commands (run from the repo root):
                                      repository hooks. Explains first; --on needs your explicit YES; --bundle writes files for IT
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
+  try [--no-browser]                 see story-gate catch a bug in two minutes: a throwaway example, no setup, no network
   init                               guided setup in your browser: sign in, the AI's own login, judge key, one pull request
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
   feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
@@ -141,7 +142,7 @@ sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE)
 import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 
@@ -189,7 +190,7 @@ DEFAULT_CONFIG = {
     "judge": {"provider": "openrouter", "emulated_allow_pass": False,
               "allow_self_judge_pass": False, "max_chars": 90000},
     "approvers": [],
-    "reviewers": ["coderabbitai[bot]", "chatgpt-codex-connector[bot]"],
+    "reviewers": [],  # empty until the owner names review bots or people; a code owner's approval always counts
     "require_independent_review": True,
     "sources": [],
     "sinks": [{"type": "repo"}],
@@ -1177,6 +1178,125 @@ def cmd_report(sid, out=None, open_=False, in_ci=False):
     return 0
 
 
+TRY_APP = '''import sys
+
+
+def total(qty, unit):
+    """Order total. Orders of 10 or more items get 10% off."""
+    t = qty * unit
+    if qty > 10:  # the bug story-gate catches: 10 items should already get the discount
+        t = t * 0.9
+    return t
+
+
+if __name__ == "__main__":
+    print("%.2f" % total(int(sys.argv[1]), float(sys.argv[2])))
+'''
+TRY_VALIDATION = """# Validation: TRY-1
+This is what your AI writes for you at the end of each story. In this example story-gate wrote it.
+
+## Result
+Not done. The total is right for small orders, but an order of exactly 10 items doesn't get the 10% discount.
+
+## Acceptance criteria
+- AC-1: met. Shown by the scenario "3 items cost 6.00".
+- AC-2: not met. The scenario "10 items get the discount" printed 20.00 instead of 18.00.
+
+## Scenarios run
+Two real runs of `price.py`, one per goal. The second one failed, so DONE can't pass.
+
+## Bugs found and fixed
+Found: `price.py` checks `qty > 10`, so 10 items miss the discount. Not fixed yet; the fix is `qty >= 10`, then run `story-gate scenarios TRY-1` again.
+
+## Lessons learnt
+Test the exact boundary a story names ("10 or more").
+
+## Known limits
+This is a throwaway example. No judge and no GitHub checks ran.
+
+## Demo
+Run `python price.py 10 2.00`. It should print 18.00.
+"""
+TRY_STORY = '''---
+id: TRY-1
+title: Bulk discount on orders
+feature: none
+source: story-gate try (a built-in example)
+depends_on: []
+consumers: []
+---
+## Plain summary
+Shoppers who buy 10 or more items get 10% off. The order total shows the discount. This example story has a real bug, so you can see story-gate catch it.
+
+## Story (word for word from the source)
+As a shopper, I get 10% off when I buy 10 or more items.
+AC-1: The total is the quantity times the unit price.
+AC-2: Orders of 10 or more items get 10% off.
+'''
+
+
+def cmd_try(open_=True):
+    """A two-minute look at story-gate with nothing to set up: a throwaway project with a tiny story and a real bug.
+    Two goals are run as real scenarios on this computer; one fails, and the validation page shows why. No judge, no
+    GitHub, no network. The throwaway folder is in your temp folder; your own repositories are never touched."""
+    import tempfile
+    box = Path(tempfile.mkdtemp(prefix="story-gate-try-"))
+    env = dict(os.environ, STORY_GATE_ROOT=str(box), GIT_TERMINAL_PROMPT="0")
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(k, None)
+
+    def run(*a, check=True):
+        r = subprocess.run(list(a), cwd=str(box), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        if check and r.returncode != 0:
+            sys.exit("story-gate try: %s failed: %s" % (" ".join(map(str, a[:3])), (r.stderr or r.stdout).strip()[-400:]))
+        return r
+    # an empty folder for git's template and hooks, so the user's init.templateDir and global hooks can't run here
+    empty = Path(tempfile.mkdtemp(prefix="story-gate-nohooks-"))
+    run("git", "init", "-q", "-b", "main", "--template=%s" % empty)
+    run("git", "config", "user.name", "story-gate try"); run("git", "config", "user.email", "try@story-gate.invalid")
+    (box / "price.py").write_text(TRY_APP, encoding="utf-8")
+    (box / ".story-gate").mkdir()
+    wj(box / ".story-gate" / "config.json", DEFAULT_CONFIG)
+    sd = box / ".story-gate" / "stories" / "TRY-1"
+    sd.mkdir(parents=True)
+    (sd / "story.md").write_text(TRY_STORY, encoding="utf-8")
+    wj(sd / "tests.json", {"story": "TRY-1", "acceptance_criteria": [
+        {"id": "AC-1", "text": "The total is the quantity times the unit price.", "positive": ["3 items at 2.00 cost 6.00"],
+         "negative": [], "edge": [], "regression": [], "not_applicable": {}, "test_refs": []},
+        {"id": "AC-2", "text": "Orders of 10 or more items get 10% off.", "positive": ["10 items at 2.00 cost 18.00"],
+         "negative": ["9 items get no discount"], "edge": ["exactly 10 items"], "regression": [], "not_applicable": {}, "test_refs": []}],
+        "proposed_missing_acs": []})
+    import sg_validation as V
+    (sd / "validation.md").write_text(V.TEMPLATE.replace("{id}", "TRY-1"), encoding="utf-8")
+    # your own git settings must not break a throwaway commit: no signing, no hooks
+    run("git", "add", "-A"); run("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=%s" % empty, "commit", "-q", "-m", "story-gate try: example project")
+    me = [sys.executable, str(HERE / "gate.py")]
+    print("story-gate try: a throwaway project with one story (TRY-1: bulk discount) and a real bug, in %s\n" % box)
+    checks = (("AC-1", "3 items cost 6.00", r"^6\.00$", "3", "The total is quantity times price"),
+              ("AC-2", "10 items get the discount", r"^18\.00$", "10", "10 or more items get 10% off"))
+    for ac, name, expect, qty, _ in checks:
+        run(*me, "scenario", "TRY-1", "--name", name, "--ac", ac, "--expect", expect, "--", sys.executable, "price.py", qty, "2.00", check=False)
+    (sd / "validation.md").write_text(TRY_VALIDATION, encoding="utf-8")
+    out = box / "TRY-1-validation.html"
+    run(*me, "report", "TRY-1", "--out", str(out))
+    res = V.results_of(load_json(sd / "scenario_results.json"))
+    for ac, name, expect, qty, label in checks:
+        r = res.get(name)
+        if not r:
+            sys.exit("story-gate try: the scenario for %s didn't run; please report this" % ac)
+        got = (r.get("output_tail") or "").strip().splitlines()[-1:] or ["nothing"]
+        print("  %s %s %s %s" % (ac, label, "." * max(3, 44 - len(label)),
+                                 "PASSED" if r.get("passed") else "FAILED (%s x 2.00 printed %s, expected %s)" % (qty, got[0], expect.strip("^$").replace("\\", ""))))
+    print("\nstory-gate ran each goal for real%s" % (" and caught the bug before anyone said 'done'."
+                                                     if not all(r.get("passed") for r in res.values()) else "."))
+    print("The validation page shows the evidence: %s" % out)
+    print("This is what happens on every story in your own project. To set it up there: story-gate init")
+    if open_:
+        import webbrowser
+        webbrowser.open(out.resolve().as_uri())
+    return 0
+
+
 def cmd_evidence(sid, src, kv):
     """Record a screenshot for the named scenario, exiting with an error if it cannot be added."""
     import sg_report as R, sg_validation as V
@@ -2149,8 +2269,8 @@ def cmd_ci(tests_dir=None):
                 try:
                     who = G.reviewed_by(ctx, token, c.get("reviewers") or [])
                     open_threads = G.unresolved_threads(ctx, token, c.get("reviewers") or [])
-                    if not who and not accepted["accepted"]:
-                        problems.append("no independent review yet (expected one of: %s, or a code owner)" % ", ".join(c.get("reviewers") or []))
+                    if not who and not accepted["accepted"] and c.get("reviewers"):  # with no reviewers listed, acceptance below covers it
+                        problems.append("no independent review yet (expected one of: %s, or a code owner)" % ", ".join(c["reviewers"]))
                     if open_threads:
                         problems.append("%d unresolved review thread(s) from the independent reviewers" % open_threads)
                 except Exception as e:
@@ -3252,6 +3372,8 @@ def main(argv):
             return 1
         import sg_setup
         return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest)
+    if cmd == "try":
+        return cmd_try(open_="--no-browser" not in rest)
     if cmd == "runtime-path":
         print(HERE if RUNTIME else "not-runtime")
         return 0

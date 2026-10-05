@@ -10,12 +10,13 @@ Free and open source (MIT), by Viaknox. Pilot release (pre-1.0). Full documentat
 
 ## Example use cases
 
-1. **Set it up in a repository.** "Set up story-gate in this repo." Claude asks before installing anything, then opens a setup page: sign in to GitHub, give the AI its own login, add the judge key, approve the setup pull request. About 10 minutes, no coding.
-2. **Build a feature to spec.** "Build story PAY-12: refunds." Before any code, story-gate checks that the story is complete and that every acceptance criterion has positive, negative, edge and regression tests planned.
-3. **Catch drift while building.** Every 10 code edits, Claude reports how far along each goal is and checks for scope creep, placeholder code and tests falling behind. If the work drifts from the spec, it stops and asks a person.
-4. **Prove it works before "done".** "Is PAY-12 done?" Claude runs each acceptance criterion as a real scenario and builds a validation page with the evidence and screenshots. No evidence, no pass.
-5. **Review an AI-written pull request.** CI re-runs the tests and scenarios, the independent judge re-scores the work, and a code owner approves on GitHub. Any new push cancels the approval.
-6. **See where the project stands.** "Show me the story-gate dashboard." One page shows stories that are ready, in progress and done, which agent is working on what, and who is drifting.
+1. **See it catch a bug first.** "Install story-gate and run `story-gate try`." It builds a throwaway example with one story and a real bug, runs each goal, shows one failing, and opens the validation page. Nothing to set up, no network.
+2. **Set it up in a repository.** "Set up story-gate in my project." Claude asks before installing anything, then opens a setup page: sign in to GitHub, give the AI its own login, add the judge key, approve the setup pull request. No coding.
+3. **Build a feature to spec.** "Build story PAY-12: refunds." Before any code, story-gate checks that the story is complete and that every acceptance criterion has positive, negative, edge and regression tests planned.
+4. **Catch drift while building.** Every 10 code edits, Claude reports how far along each goal is and checks for scope creep, placeholder code and tests falling behind. If the work drifts from the spec, it stops and asks a person.
+5. **Prove it works before "done".** "Is PAY-12 done?" Claude runs each acceptance criterion as a real scenario and builds a validation page with the evidence and screenshots. No evidence, no pass.
+6. **Review an AI-written pull request.** CI re-runs the tests and scenarios, the independent judge re-scores the work, and a code owner approves on GitHub. Any new push cancels the approval.
+7. **See where the project stands.** "Show me the story-gate dashboard." One page shows stories that are ready, in progress and done, which agent is working on what, and who is drifting.
 
 ## What this plugin contains
 
@@ -31,4 +32,4 @@ One skill (`story-gate`). No hooks, no MCP servers, no commands and no agents. T
 
 ## Requirements
 
-A GitHub repository, `uv` (it fetches Python 3.12 for story-gate), and a judge key (OpenRouter by default; each check costs a fraction of a cent).
+A GitHub repository, `uv` (it fetches Python 3.12 for story-gate), and a judge key (OpenRouter by default; it charges per check).
