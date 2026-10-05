@@ -88,6 +88,7 @@ class Wizard:
     """State machine behind the page. Each step records ok / error / waiting; the page polls /state."""
 
     def __init__(self, top, repo, py, token=None, open_browser=True):
+        """Fresh wizard for one setup run: every step starts "todo" until the page drives it forward."""
         self.top, self.repo, self.py, self.open_browser = Path(top), repo, py, open_browser
         self.secret = secrets.token_urlsafe(24)
         self.agent_state = secrets.token_urlsafe(16)
@@ -156,6 +157,7 @@ class Wizard:
             webbrowser.open(uri)
 
     def _signed_in(self, tok):
+        """Loads the repo once sign-in succeeds, and records the owning organization (if any) and its plan."""
         self.token = tok
         self.login = G.whoami(tok)
         st, info, _ = G.call("GET", "/repos/%s" % self.repo, tok)
@@ -430,6 +432,7 @@ def tools_html(wz):
 
 
 def page(wz):
+    """The setup page's HTML: one card per step, each posting back to this wizard."""
     t = wz.secret
     steps = [
         ("signin", "Sign in to GitHub", "So story-gate can set up this repository for you.",

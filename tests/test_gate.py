@@ -2701,8 +2701,8 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertIn("Opens GitHub in a new tab", body)
 
     def test_agent_app_is_created_in_the_organization_that_owns_the_repo(self):
-        # live test: a personal app can only be installed on the person's own account, so GitHub skipped the
-        # account picker and the AI never reached the organization's repository
+        """A personal app can only be installed on the person's own account, so GitHub skipped the
+        account picker and the AI never reached the organization's repository."""
         S, G = self.S, self.G
         self.addCleanup(setattr, G, "call", G.call)
         self.addCleanup(setattr, G, "whoami", G.whoami)
