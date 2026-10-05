@@ -2700,6 +2700,22 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertIn("p.dataset.url!==s.pr.url", body); self.assertIn("d.dataset.code!==s.device.code", body)
         self.assertIn("Opens GitHub in a new tab", body)
 
+    def test_agent_app_is_created_in_the_organization_that_owns_the_repo(self):
+        # live test: a personal app can only be installed on the person's own account, so GitHub skipped the
+        # account picker and the AI never reached the organization's repository
+        S, G = self.S, self.G
+        self.addCleanup(setattr, G, "call", G.call)
+        self.addCleanup(setattr, G, "whoami", G.whoami)
+        for owner, expect in (({"login": "AcmeOrg", "type": "Organization"}, "/organizations/AcmeOrg/settings/apps/new?state="),
+                              ({"login": "me", "type": "User"}, G.WEB + "/settings/apps/new?state=")):
+            with self.subTest(owner=owner["type"]):
+                info = {"default_branch": "main", "private": False, "permissions": {"admin": True}, "owner": owner}
+                G.call = lambda m, path, tok, body=None, info=info: (200, info, {}) if path.endswith("/proj") else (404, {}, {})
+                G.whoami = lambda tok: "me"
+                wz = S.Wizard(self.top, "%s/proj" % owner["login"], sys.executable, open_browser=False)
+                wz._signed_in("human")
+                self.assertIn(expect, wz.agent_form(1234))
+
     def test_judge_key_goes_to_a_secret_and_never_back_to_the_page(self):
         G, S = self.G, self.S
         sent = {}

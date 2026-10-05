@@ -98,6 +98,7 @@ class Wizard:
         self.pr = None
         self.private_free = False
         self.private = False
+        self.org = None  # the repository's owner when it is an organization: the AI's login must belong to it
         import sg_trust as T
         self.found = T.detected_clients()
         self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
@@ -171,7 +172,9 @@ class Wizard:
             self.set("signin", "error", "%s isn't an admin of %s, so story-gate can't set its rules. Ask the owner to run setup." % (self.login, self.repo))
             return
         self.private = bool(info.get("private"))
-        self.private_free = self.private and self._paid(tok, info.get("owner") or {}) is False
+        owner = info.get("owner") or {}
+        self.org = owner.get("login") if owner.get("type") == "Organization" else None
+        self.private_free = self.private and self._paid(tok, owner) is False
         self.set("signin", "ok", "Signed in as %s" % self.login)
 
     def _paid(self, tok, owner):
@@ -191,10 +194,13 @@ class Wizard:
             return False
 
     def agent_form(self, port):
-        name = ("story-gate-agent-%s-%s" % ((self.login or "me").lower(), secrets.token_hex(2)))[:34]
+        """GitHub's create-app form. For a repository owned by an organization the app is created in that organization:
+        a private app can only be installed on the account that owns it, so a personal app could never reach the repo."""
+        name = ("story-gate-agent-%s-%s" % ((self.org or self.login or "me").lower(), secrets.token_hex(2)))[:34]
         mf = json.dumps(G.manifest(name, "http://127.0.0.1:%d/agent/callback" % port))
-        return ('<form id="f" method="post" action="%s/settings/apps/new?state=%s"><input type="hidden" name="manifest" value="%s">'
-                '</form><script>document.getElementById("f").submit()</script>' % (G.WEB, self.agent_state, html.escape(mf, quote=True)))
+        where = "/organizations/%s/settings/apps/new" % urllib.parse.quote(self.org, safe="") if self.org else "/settings/apps/new"
+        return ('<form id="f" method="post" action="%s%s?state=%s"><input type="hidden" name="manifest" value="%s">'
+                '</form><script>document.getElementById("f").submit()</script>' % (G.WEB, where, self.agent_state, html.escape(mf, quote=True)))
 
     def agent_callback(self, state, code):
         if state != self.agent_state or not code:
