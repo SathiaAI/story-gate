@@ -48,6 +48,8 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 - **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/SathiaAI/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
 
 ## The moments
+Not sure what to do next? Run `next`. It lists what's done and names the one next step, with the exact command. It costs nothing and changes nothing.
+
 1. **READY:** on a story branch (e.g. `feat/<ID>-short-name`), run `start <ID> --model <your model id>`, fill `story.md`, `context.md` and `tests.json`, then run `score <ID> ready`.
 2. **CHECKPOINT:** runs automatically in clients with after-edit hooks. Otherwise run `gate.py checkpoint <ID>` after each AC. If it says OFF_COURSE, stop and correct the work, or escalate.
 3. **DONE:**

@@ -98,6 +98,7 @@ Set up story-gate in my project (the folder I have open). Install it from https:
 
 - **Keep stories small.** One feature a person can see or try. Big stories are hard to check.
 - **Read the report before you approve.** If a goal isn't shown working, ask why.
+- **Lost track of where a story is?** Ask your AI to run `story-gate next`. It says what's done and what comes next.
 - **When a check fails, ask your AI to fix the cause.** Don't ask it to skip the check. It can't approve its own work anyway.
 - **Look at the dashboard once a day.** `AT_RISK` means look now.
 

@@ -28,6 +28,8 @@ Every code change belongs to a story. A story starts on defined specs, is built 
 
 If your client can't spawn sub-agents, or can't pick their model, do the steps yourself in order. Judging is always done by Jev through `gate.py`, so your client's model choice doesn't change the verdict.
 
+**Not sure what's next?** Run `gate.py next`. It lists what's done for the active story and names the one next step, with the exact command. It calls no judge and changes no files.
+
 ---
 
 ## READY (before any code)
