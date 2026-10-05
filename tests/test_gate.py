@@ -808,6 +808,49 @@ class TestGitHubLogic(unittest.TestCase):
         pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
         self.assertTrue(pr["require_code_owner_review"] and pr["dismiss_stale_reviews_on_push"] and pr["require_last_push_approval"])
         self.assertEqual(r["bypass_actors"], [])
+        # GitHub turns this on when it is left out, and a solo owner can then never merge what the AI opens
+        self.assertIs(pr["require_extra_approval_for_unattributed_changes"], False)
+        doc = json.loads((SRC.parent / "docs" / "story-gate-ruleset.json").read_text(encoding="utf-8"))
+        self.assertEqual(doc, json.loads(json.dumps(r)))
+
+    def _ruleset_api(self, unattributed, put_status=200):
+        G, calls = self.G, []
+        rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}, {"type": "pull_request", "parameters": {
+            "required_approving_review_count": 1, "require_code_owner_review": True, G.UNATTRIBUTED: unattributed}}]}
+
+        def call(m, path, t=None, b=None, accept=None):
+            calls.append((m, path, b))
+            if m == "GET" and path.endswith("/rulesets"):
+                return 200, [{"id": 7, "name": G.RULESET_NAME}], {}
+            if m == "GET" and path.endswith("/rulesets/7"):
+                return 200, rs, {}
+            if m == "PUT" and path.endswith("/rulesets/7"):
+                return put_status, {"message": "nope"} if put_status >= 400 else {}, {}
+            if m == "GET" and path == "/repos/o/r":
+                return 200, {"private": False, "owner": {"type": "User"}}, {}
+            return 204, {}, {}
+        G.call = call
+        out = G.setup_repo(tempfile.mkdtemp(), "o/r", ["Paul"], "t")
+        return out, [c for c in calls if c[0] == "PUT" and "rulesets" in c[1]]
+
+    def test_existing_ruleset_gets_the_ai_pr_extra_approval_turned_off(self):
+        out, puts = self._ruleset_api(True)
+        self.assertEqual(len(puts), 1)
+        rules = puts[0][2]["rules"]
+        self.assertEqual([r["type"] for r in rules], ["deletion", "pull_request"])  # nothing else changes
+        pr = rules[1]["parameters"]
+        self.assertIs(pr[self.G.UNATTRIBUTED], False)
+        self.assertTrue(pr["require_code_owner_review"]); self.assertEqual(pr["required_approving_review_count"], 1)
+        self.assertTrue(any("turned off GitHub's extra approval" in line for line in out))
+
+    def test_existing_ruleset_already_right_is_left_alone(self):
+        out, puts = self._ruleset_api(False)
+        self.assertEqual(puts, [])
+
+    def test_failed_update_says_what_to_untick(self):
+        out, puts = self._ruleset_api(None, put_status=403)
+        self.assertEqual(len(puts), 1)
+        self.assertTrue(any("untick 'Require an additional approval for unattributed Copilot pull requests'" in line for line in out))
 
     def test_manifest_has_no_dangerous_permissions(self):
         m = self.G.manifest("x", "http://127.0.0.1:1/callback")
