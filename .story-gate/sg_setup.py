@@ -98,6 +98,7 @@ class Wizard:
         self.pr = None
         self.private_free = False
         self.private = False
+        self.org = None  # the repository's owner when it is an organization: the AI's login must belong to it
         import sg_trust as T
         self.found = T.detected_clients()
         self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
@@ -171,7 +172,9 @@ class Wizard:
             self.set("signin", "error", "%s isn't an admin of %s, so story-gate can't set its rules. Ask the owner to run setup." % (self.login, self.repo))
             return
         self.private = bool(info.get("private"))
-        self.private_free = self.private and self._paid(tok, info.get("owner") or {}) is False
+        owner = info.get("owner") or {}
+        self.org = owner.get("login") if owner.get("type") == "Organization" else None
+        self.private_free = self.private and self._paid(tok, owner) is False
         self.set("signin", "ok", "Signed in as %s" % self.login)
 
     def _paid(self, tok, owner):
@@ -191,10 +194,13 @@ class Wizard:
             return False
 
     def agent_form(self, port):
-        name = ("story-gate-agent-%s-%s" % ((self.login or "me").lower(), secrets.token_hex(2)))[:34]
+        """GitHub's create-app form. For a repository owned by an organization the app is created in that organization:
+        a private app can only be installed on the account that owns it, so a personal app could never reach the repo."""
+        name = ("story-gate-agent-%s-%s" % ((self.org or self.login or "me").lower(), secrets.token_hex(2)))[:34]
         mf = json.dumps(G.manifest(name, "http://127.0.0.1:%d/agent/callback" % port))
-        return ('<form id="f" method="post" action="%s/settings/apps/new?state=%s"><input type="hidden" name="manifest" value="%s">'
-                '</form><script>document.getElementById("f").submit()</script>' % (G.WEB, self.agent_state, html.escape(mf, quote=True)))
+        where = "/organizations/%s/settings/apps/new" % urllib.parse.quote(self.org, safe="") if self.org else "/settings/apps/new"
+        return ('<form id="f" method="post" action="%s%s?state=%s"><input type="hidden" name="manifest" value="%s">'
+                '</form><script>document.getElementById("f").submit()</script>' % (G.WEB, where, self.agent_state, html.escape(mf, quote=True)))
 
     def agent_callback(self, state, code):
         if state != self.agent_state or not code:
@@ -405,7 +411,7 @@ main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash 
 .step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--graphite)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--error)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
 button,.btn{background:var(--yellow);color:var(--graphite);border:2px solid var(--graphite);border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
 button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
-.lbl{display:block;margin-top:10px;font-weight:600}.lbl span{font-weight:400;color:var(--muted);font-size:14px}.lbl input{display:block;margin-top:6px}
+.lbl{display:block;margin-top:10px;font-weight:600}.lbl span{display:block;font-weight:400;color:var(--muted);font-size:14px}.opt{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:6px;vertical-align:1px}.lbl input{display:block;margin-top:6px}
 .tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.tool em{color:var(--muted);font-size:13px;font-style:normal;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
 .by svg{height:14px;width:auto;vertical-align:-2px}.note{background:var(--yellow);color:var(--graphite);border:2px solid var(--graphite);border-radius:14px;padding:14px 18px;margin-top:18px}.foot{margin-top:28px;color:var(--muted);font-size:13px}
@@ -436,9 +442,9 @@ def page(wz):
          "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
          "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
-         "<label class=lbl>Who else can approve work? <span>(optional: GitHub usernames with write access to this repository. "
-         "Any one of you can approve.)</span>"
-         "<input name=approvers autocomplete=off placeholder='e.g. alex, sam'></label>"
+         "<label class=lbl>Who else can approve work? <b class=opt>Optional</b><span>GitHub usernames with write access to this repository. "
+         "Any one of you can approve. Leave it empty if it's just you.</span>"
+         "<input name=approvers autocomplete=off placeholder='Optional, e.g. alex, sam'></label>"
          "<button>Open the pull request</button></form><div id=pr></div>"),
         ("done", "Protect your AI tools", "Live checks turn on for the tools ticked below, then story-gate checks itself. "
          "Change the ticks before you merge.", tools_html(wz)),
