@@ -867,6 +867,18 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertNotIn("Put the story-gate changes in their own pull request", out)
 
 
+class TestSignedSetup(unittest.TestCase):
+    def test_setup_installs_a_signed_release_without_unsigned(self):
+        """init installs a signed release with its signature checked, and falls back to --unsigned only for a development copy."""
+        sys.path.insert(0, str(SRC))
+        import importlib
+        S = importlib.import_module("sg_setup")
+        d = Path(tempfile.mkdtemp())
+        self.assertEqual(S.signed_or_not(d), ["--unsigned"])
+        (d / "release.json").write_text("{}"); self.assertEqual(S.signed_or_not(d), ["--unsigned"])  # no signature: not signed
+        (d / "release.json.sig").write_text("sig"); self.assertEqual(S.signed_or_not(d), [])
+
+
 def keep_github_fakes_local(test, G):
     """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
     saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
@@ -1683,8 +1695,19 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertNotIn("lint.sh", self.hook().stderr)
 
     def test_unsigned_install_requires_the_flag(self):
+        for f in ("release.json", "release.json.sig"):  # a development copy: no signed release
+            (self.repo / ".story-gate" / f).unlink(missing_ok=True)
         r = run(self.repo, "install", "--user", env=self.env)
         self.assertNotEqual(r.returncode, 0); self.assertIn("NOT installed", r.stdout)
+
+    def test_the_signed_release_installs_after_its_signature_checks_out(self):
+        """This checkout's own release.json and signature: install --user verifies them, with no --unsigned."""
+        if not (SRC / "release.json.sig").is_file():
+            self.skipTest("this checkout is not a signed release")
+        if not shutil.which("ssh-keygen"):
+            self.skipTest("ssh-keygen not available")
+        r = run(self.repo, "install", "--user", "--dry-run", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("Signature: valid", r.stdout)
 
 
 class TestRepoHookGuard(RuntimeFixture):
