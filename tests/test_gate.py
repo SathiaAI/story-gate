@@ -2013,7 +2013,7 @@ class TestRepoHookGuard(RuntimeFixture):
         r = rb()
         self.assertEqual(r.returncode, 1); self.assertIn("integrity", r.stdout)
         self.assertEqual(json.loads(act_p.read_text())["dir"], act["dir"])
-        (old / "gate.py").write_text((Path(act["dir"]) / "gate.py").read_text())
+        (old / "gate.py").write_bytes((Path(act["dir"]) / "gate.py").read_bytes())  # bytes: text mode would turn LF into CRLF on Windows
         r = rb()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # before the fix this always refused: two installs never share a manifest hash
         self.assertEqual(Path(json.loads(act_p.read_text())["dir"]).resolve(), old.resolve())
