@@ -12,6 +12,8 @@ node docs/assets/src/render.js docs/assets/src/header.html header.png && convert
 Set `CHROMIUM=/path/to/chromium` if Playwright's own browser is not installed.
 
 - `theme.css` holds the colours and fonts (Clash Display and Switzer from `.story-gate/vendor/`).
+- `social.html` is the 1280 x 640 GitHub social preview (render with width 1280, then crop to 640 px high).
+- `clients.html` is the "works with" strip in the README. Keep it in step with `docs/client-security.md`.
 - `dashboard.html` frames two screenshots: `dashboard-issue.png` (the pinned GitHub issue) and `dashboard-report.png` (the HTML report from `sg_dashboard.to_html` on a demo repository). Retake the report screenshot after changing the dashboard's look.
 - `setup-page.png` and `validation-page.png` are screenshots of the real setup page and validation page at 1200 px wide.
 - `header-city.png` is the station illustration recoloured to Graphite ink with a Signal Yellow buffer stop.

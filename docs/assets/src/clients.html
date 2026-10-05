@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="theme.css"><style>
+body{padding:56px 80px 36px}
+.top{margin-bottom:30px}
+.row{display:grid;grid-template-columns:330px 1fr;gap:28px;align-items:center;padding:22px 0;border-top:1.5px solid var(--line)}
+.row:first-of-type{border-top:none}
+.lbl b{font-family:Clash;font-weight:600;font-size:28px;display:block}.lbl span{color:var(--muted);font-size:19px}
+.chips{display:flex;flex-wrap:wrap;gap:12px}
+.chip{background:var(--card);border:1.5px solid var(--line);border-radius:999px;padding:12px 22px;font-size:22px;font-weight:600}
+.chip.live{background:var(--ink);border-color:var(--ink);color:var(--offwhite)}
+.chip.live::before{content:"";display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--yellow);margin-right:11px;vertical-align:2px}
+.note{color:var(--muted);font-size:18px;margin-top:6px}
+footer{margin-top:26px}
+</style></head><body>
+<div class="top"><img src="../story-gate-mark-small.svg" alt=""><div class="eyebrow">WORKS WITH</div></div>
+<div class="row"><div class="lbl"><b>Live checks</b><span>story-gate checks every edit as your AI works</span></div>
+<div class="chips"><span class="chip live">Claude Code</span><span class="chip live">Codex</span><span class="chip live">Cursor</span><span class="chip live">VS Code (Copilot agent)</span><span class="chip live">Gemini CLI</span><span class="chip live">Hermes</span><span class="chip live">Windsurf *</span></div></div>
+<div class="row"><div class="lbl"><b>Rules + skill</b><span>guidance in the tool, checks on every pull request</span></div>
+<div class="chips"><span class="chip">Antigravity</span><span class="chip">pi</span><span class="chip">Roo Code</span></div></div>
+<div class="row"><div class="lbl"><b>Pull request checks</b><span>for tools without hooks, and cloud agents</span></div>
+<div class="chips"><span class="chip">Grok Build</span><span class="chip">ChatGPT</span><span class="chip">Google AI Studio</span><span class="chip">Cloud agents</span></div></div>
+<div class="row"><div class="lbl"><b>Install from</b><span>one skill, no hooks in the package</span></div>
+<div class="chips"><span class="chip">Claude Code plugin</span><span class="chip">Gemini CLI extension</span><span class="chip">Hermes skills tap</span><span class="chip">skills.sh</span><span class="chip">uv</span></div></div>
+<p class="note">* Windsurf: hooks are registered and blocking is documented; trust and timeout behavior are not yet verified.</p>
+<footer><span class="l"><img src="../story-gate-mark-small.svg" alt="">story-gate · MIT · github.com/SathiaAI/story-gate</span><span class="by">by <img src="../../../.story-gate/vendor/viaknox-wordmark.svg" alt="Viaknox"></span></footer>
+</body></html>
