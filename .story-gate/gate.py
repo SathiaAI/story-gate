@@ -1250,7 +1250,9 @@ def cmd_try(open_=True):
         if check and r.returncode != 0:
             sys.exit("story-gate try: %s failed: %s" % (" ".join(map(str, a[:3])), (r.stderr or r.stdout).strip()[-400:]))
         return r
-    run("git", "init", "-q", "-b", "main")
+    # an empty folder for git's template and hooks, so the user's init.templateDir and global hooks can't run here
+    empty = Path(tempfile.mkdtemp(prefix="story-gate-nohooks-"))
+    run("git", "init", "-q", "-b", "main", "--template=%s" % empty)
     run("git", "config", "user.name", "story-gate try"); run("git", "config", "user.email", "try@story-gate.invalid")
     (box / "price.py").write_text(TRY_APP, encoding="utf-8")
     (box / ".story-gate").mkdir()
@@ -1266,8 +1268,8 @@ def cmd_try(open_=True):
         "proposed_missing_acs": []})
     import sg_validation as V
     (sd / "validation.md").write_text(V.TEMPLATE.replace("{id}", "TRY-1"), encoding="utf-8")
-    # your own git settings must not break a throwaway commit: no signing, no global commit hooks
-    run("git", "add", "-A"); run("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "-q", "-m", "story-gate try: example project")
+    # your own git settings must not break a throwaway commit: no signing, no hooks
+    run("git", "add", "-A"); run("git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=%s" % empty, "commit", "-q", "-m", "story-gate try: example project")
     me = [sys.executable, str(HERE / "gate.py")]
     print("story-gate try: a throwaway project with one story (TRY-1: bulk discount) and a real bug, in %s\n" % box)
     checks = (("AC-1", "3 items cost 6.00", r"^6\.00$", "3", "The total is quantity times price"),
