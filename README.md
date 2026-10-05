@@ -66,7 +66,7 @@ See story-gate catch a real bug before you change anything. Install it with one 
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):

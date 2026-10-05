@@ -14,6 +14,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Say "installing uv from https://astral.sh/uv (the official installer)"
     powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    if ($LASTEXITCODE -ne 0) { Say "the uv installer failed; see the messages above, then run this again"; exit 1 }
     $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 }
 Say "installing story-gate $ref"
