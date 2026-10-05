@@ -804,6 +804,7 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "agent-bot[bot]")
 
     def test_ruleset_shape(self):
+        """Require human approval without extra AI approval and keep the importable ruleset in sync."""
         r = self.G.ruleset_json()
         pr = [x for x in r["rules"] if x["type"] == "pull_request"][0]["parameters"]
         self.assertTrue(pr["require_code_owner_review"] and pr["dismiss_stale_reviews_on_push"] and pr["require_last_push_approval"])
@@ -814,11 +815,13 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertEqual(doc, json.loads(json.dumps(r)))
 
     def _ruleset_api(self, unattributed, put_status=200, pr_rule=True):
+        """Run setup against a fake ruleset API and return its messages and ruleset PUT requests."""
         G, calls = self.G, []
         rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}] + ([{"type": "pull_request", "parameters": {
             "required_approving_review_count": 1, "require_code_owner_review": True, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
 
         def call(m, path, t=None, b=None, accept=None):
+            """Record API requests and return fixtures with the configured ruleset update status."""
             calls.append((m, path, b))
             if m == "GET" and path.endswith("/rulesets"):  # an organization's same-named ruleset is listed first
                 return 200, [{"id": 3, "name": G.RULESET_NAME, "source_type": "Organization"},
@@ -835,6 +838,7 @@ class TestGitHubLogic(unittest.TestCase):
         return out, [c for c in calls if c[0] == "PUT" and "rulesets" in c[1]]
 
     def test_existing_ruleset_gets_the_ai_pr_extra_approval_turned_off(self):
+        """Disable extra AI approval only in the repository ruleset, preserving its other rules."""
         out, puts = self._ruleset_api(True)
         self.assertEqual(len(puts), 1)
         self.assertTrue(puts[0][1].endswith("/rulesets/7"))  # the repository's own ruleset, not the organization's
@@ -846,16 +850,19 @@ class TestGitHubLogic(unittest.TestCase):
         self.assertTrue(any("turned off GitHub's extra approval" in line for line in out))
 
     def test_ruleset_without_a_pull_request_rule_is_reported_not_called_fine(self):
+        """Warn about a missing pull request rule without updating the ruleset or claiming success."""
         out, puts = self._ruleset_api(True, pr_rule=False)
         self.assertEqual(puts, [])
         self.assertTrue(any("has no pull request rule" in line for line in out))
         self.assertFalse(any("need one code owner approval" in line for line in out))
 
     def test_existing_ruleset_already_right_is_left_alone(self):
+        """Avoid updating a ruleset whose extra AI approval requirement is already disabled."""
         out, puts = self._ruleset_api(False)
         self.assertEqual(puts, [])
 
     def test_failed_update_says_what_to_untick(self):
+        """Explain the manual setting change when GitHub rejects the ruleset update."""
         out, puts = self._ruleset_api(None, put_status=403)
         self.assertEqual(len(puts), 1)
         self.assertTrue(any("untick 'Require an additional approval for unattributed Copilot pull requests'" in line for line in out))

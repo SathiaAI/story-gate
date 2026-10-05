@@ -251,6 +251,7 @@ UNATTRIBUTED = "require_extra_approval_for_unattributed_changes"
 
 
 def ruleset_json():
+    """Return the default branch ruleset requiring human acceptance without extra AI approval."""
     return {"name": RULESET_NAME, "target": "branch", "enforcement": "active",
             "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
             "bypass_actors": [],
