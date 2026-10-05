@@ -404,7 +404,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.6.1")
+        self.assertEqual(g.VERSION, "0.6.2")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -4035,6 +4035,8 @@ class TestMarketplacePackaging(unittest.TestCase):
     def test_directory_plugin_folder_carries_the_same_skill(self):
         same = (self.ROOT / "skills/story-gate/SKILL.md").read_bytes()
         self.assertEqual((self.ROOT / "plugin/skills/story-gate/SKILL.md").read_bytes(), same, "copy skills/story-gate/SKILL.md into plugin/")
+        # the copy `install` puts into every repository must not fall behind the marketplace copy
+        self.assertEqual((self.ROOT / ".story-gate/SKILL.md").read_bytes(), same, "copy skills/story-gate/SKILL.md into .story-gate/")
         self.assertEqual((self.ROOT / "plugin/LICENSE").read_bytes(), (self.ROOT / "LICENSE").read_bytes())
 
     def test_directory_plugin_folder_passes_the_directory_file_rules(self):
@@ -4052,6 +4054,27 @@ class TestMarketplacePackaging(unittest.TestCase):
                 self.assertIn(p.suffix.lower(), {".md", ".json", ".svg", ".png", ""})
                 self.assertLess(p.stat().st_size, 256 * 1024)
                 self.assertNotIn(p.name, {".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+class TestTryAndDefaults(unittest.TestCase):
+    def test_default_config_names_no_review_bots(self):
+        src = (SRC / "gate.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r'\n    "reviewers": \[\],', "leave reviewers empty until the owner names them")
+        self.assertIn('\n    "require_independent_review": True,', src)
+
+    def test_try_shows_one_passing_and_one_failing_goal_without_touching_the_cwd(self):
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
+        cwd = tmp / "my-project"; cwd.mkdir()
+        e = dict(os.environ, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp)); e.pop("STORY_GATE_ROOT", None)
+        r = subprocess.run([PY, str(SRC / "gate.py"), "try", "--no-browser"], cwd=cwd, capture_output=True, text=True, env=e, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"AC-1 .* PASSED")
+        self.assertRegex(r.stdout, r"AC-2 .* FAILED \(10 x 2.00 printed 20.00, expected 18.00\)")
+        self.assertEqual(list(cwd.iterdir()), [], "try must not write into the folder it runs from")
+        page, = tmp.glob("story-gate-try-*/TRY-1-validation.html")
+        html = page.read_text(encoding="utf-8")
+        self.assertIn("TRY-1: Bulk discount on orders", html)
+        self.assertIn("10 items get the discount", html)
 
 
 if __name__ == "__main__":

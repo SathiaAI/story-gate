@@ -6,7 +6,7 @@
 
 story-gate makes your AI coding tool plan before it builds, check its course while it builds, and show you the feature working when it's done. Then it waits for your OK. Your work is much safer to ship. No coding needed (a little GitHub is).
 
-**About 10 minutes to set up · each check costs a fraction of a cent · free and open source (MIT) · pilot release (pre-1.0)**
+**Free and open source (MIT) · pilot release (pre-1.0)**
 
 Works in Claude Code, Codex, Cursor, VS Code, Gemini CLI, Hermes, Windsurf and cloud agents. [What each tool gets](docs/client-security.md).
 
@@ -53,6 +53,17 @@ Each fact is marked **checked** (the pull request check ran it) or **reported** 
 
 **Skip it** for a weekend prototype or a throwaway script. The checks add a few minutes per story.
 
+## Try it first (one command, nothing to set up)
+
+See story-gate catch a real bug before you change anything. Paste this into your AI tool, or run it yourself:
+
+```bash
+uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2
+story-gate try
+```
+
+`story-gate try` makes a throwaway example project in your temp folder with one small story and a real bug. It runs each goal for real, shows one passing and one failing, and opens the validation page. No GitHub, no judge key, no network, and your own projects aren't touched. (If `story-gate` isn't found, run `uv tool update-shell` and open a new terminal.)
+
 ## Set it up in 5 steps
 
 <p align="center"><img src="docs/assets/setup.png" alt="Five setup steps: 1 ask your AI, 2 sign in to GitHub, 3 give your AI its own login, 4 add the judge key, 5 approve the setup. Your AI does everything else." width="100%"></p>
@@ -69,7 +80,7 @@ Set up story-gate in this repo: https://github.com/SathiaAI/story-gate
 
 **What you need:** a GitHub account, your project on GitHub, and an AI coding tool. Nothing else; your AI installs the rest.
 
-**The judge key (step 4):** make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add a few dollars of credit. Each check costs a fraction of a cent. The key goes straight into a GitHub secret, and your AI never sees it.
+**The judge key (step 4):** make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add some credit. Each check is one small judge call; OpenRouter shows what each one costs. The key goes straight into a GitHub secret, and your AI never sees it.
 
 **Who approves:** you, plus anyone you add in step 5 (they need write access to the repository). Any one of you can approve.
 
@@ -130,9 +141,9 @@ story-gate works with your tests and your review bot. It runs your tests itself 
 
 **Do I need to code?** No. You need a GitHub account, and you click Approve and Merge on GitHub. Your AI does the rest.
 
-**What does it cost?** story-gate is free. The judge runs on [OpenRouter](https://openrouter.ai/keys): each check costs a fraction of a cent. A few dollars of credit lasts a long time.
+**What does it cost?** story-gate is free. The judge runs on [OpenRouter](https://openrouter.ai/keys), which charges per call. Each check is one small call, and your OpenRouter activity page shows the exact cost.
 
-**Will it slow my AI down?** A little. Each story gets a few extra minutes for the plan, the checks and the report. You get that back in less rework.
+**Will it slow my AI down?** A little. Each story takes extra time for the plan, the checks and the report. You get that back in less rework.
 
 **What if the judge is wrong?** Tell story-gate (`story-gate label`). A person can also record a decision or a waiver, but it counts only after a code owner approves.
 
@@ -170,7 +181,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.1`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.6.2`, then `uv tool update-shell` if `story-gate` isn't found.
 3. In the project folder, run `story-gate init` **in the background**. It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words.
