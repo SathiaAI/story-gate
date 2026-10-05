@@ -25,4 +25,4 @@ story_gate = "story_gate"
 
 # Mirrors RUNTIME_GLOBS in .story-gate/sg_trust.py ("*.py" is picked up as package modules)
 [tool.setuptools.package-data]
-"story_gate._payload" = ["PROTOCOL.md", "SKILL.md", "vendor/*"]
+"story_gate._payload" = ["PROTOCOL.md", "SKILL.md", "vendor/*", "release.json", "release.json.sig"]

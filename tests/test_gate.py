@@ -867,6 +867,23 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertNotIn("Put the story-gate changes in their own pull request", out)
 
 
+class TestSignedSetup(unittest.TestCase):
+    def test_setup_installs_a_signed_release_without_unsigned(self):
+        """init installs a signed release with its signature checked, and falls back to --unsigned only for a development copy."""
+        sys.path.insert(0, str(SRC))
+        import importlib
+        S = importlib.import_module("sg_setup")
+        d = Path(tempfile.mkdtemp())
+        self.assertEqual(S.signed_or_not(d), ["--unsigned"])          # neither file: a development copy
+        (d / "release.json").write_text("{}")
+        with self.assertRaises(RuntimeError):                          # one file only: refused, never installed unchecked
+            S.signed_or_not(d)
+        (d / "release.json.sig").write_text("sig"); self.assertEqual(S.signed_or_not(d), [])
+        (d / "release.json").unlink()
+        with self.assertRaises(RuntimeError):                          # the signature alone: refused too
+            S.signed_or_not(d)
+
+
 def keep_github_fakes_local(test, G):
     """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
     saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
@@ -1683,8 +1700,19 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertNotIn("lint.sh", self.hook().stderr)
 
     def test_unsigned_install_requires_the_flag(self):
+        for f in ("release.json", "release.json.sig"):  # a development copy: no signed release
+            (self.repo / ".story-gate" / f).unlink(missing_ok=True)
         r = run(self.repo, "install", "--user", env=self.env)
         self.assertNotEqual(r.returncode, 0); self.assertIn("NOT installed", r.stdout)
+
+    def test_the_signed_release_installs_after_its_signature_checks_out(self):
+        """This checkout's own release.json and signature: install --user verifies them, with no --unsigned."""
+        if not (SRC / "release.json.sig").is_file():
+            self.skipTest("this checkout is not a signed release")
+        if not shutil.which("ssh-keygen"):
+            self.skipTest("ssh-keygen not available")
+        r = run(self.repo, "install", "--user", "--dry-run", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("Signature: valid", r.stdout)
 
 
 class TestRepoHookGuard(RuntimeFixture):
@@ -1985,7 +2013,7 @@ class TestRepoHookGuard(RuntimeFixture):
         r = rb()
         self.assertEqual(r.returncode, 1); self.assertIn("integrity", r.stdout)
         self.assertEqual(json.loads(act_p.read_text())["dir"], act["dir"])
-        (old / "gate.py").write_text((Path(act["dir"]) / "gate.py").read_text())
+        (old / "gate.py").write_bytes((Path(act["dir"]) / "gate.py").read_bytes())  # bytes: text mode would turn LF into CRLF on Windows
         r = rb()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # before the fix this always refused: two installs never share a manifest hash
         self.assertEqual(Path(json.loads(act_p.read_text())["dir"]).resolve(), old.resolve())
