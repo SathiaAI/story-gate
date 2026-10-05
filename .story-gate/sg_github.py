@@ -273,7 +273,10 @@ def allow_ai_prs(repo, ruleset_id, token):
         return "Ruleset: could not read it (HTTP %s) to check the extra approval for AI pull requests" % st
     rules = rs.get("rules") or []
     pr = [r for r in rules if r.get("type") == "pull_request"]
-    if not pr or (pr[0].get("parameters") or {}).get(UNATTRIBUTED) is False:
+    if not pr:
+        return ("Ruleset: '%s' has no pull request rule, so approvals aren't required. Delete it in Settings > Rules and run "
+                "setup-repo again, or import docs/story-gate-ruleset.json." % RULESET_NAME)
+    if (pr[0].get("parameters") or {}).get(UNATTRIBUTED) is False:
         return "Ruleset: pull requests the AI opens need one code owner approval"
     pr[0].setdefault("parameters", {})[UNATTRIBUTED] = False
     st, r, _ = call("PUT", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token, {"rules": rules})
@@ -300,7 +303,9 @@ def setup_repo(root, repo, owners, token, dry_run=False):
     if dry_run:
         return out + ["(dry run: no GitHub changes)"]
     st, existing, _ = call("GET", "/repos/%s/rulesets" % repo, token)
-    mine = [r for r in existing if r.get("name") == RULESET_NAME] if st == 200 and isinstance(existing, list) else []
+    # only this repository's own ruleset: an organization's ruleset with the same name is listed too, but can't be changed here
+    mine = [r for r in existing if r.get("name") == RULESET_NAME and r.get("source_type", "Repository") == "Repository"] \
+        if st == 200 and isinstance(existing, list) else []
     if mine:
         out.append("Ruleset: '%s' already exists" % RULESET_NAME)
         out.append(allow_ai_prs(repo, mine[0].get("id"), token))

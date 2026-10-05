@@ -813,15 +813,16 @@ class TestGitHubLogic(unittest.TestCase):
         doc = json.loads((SRC.parent / "docs" / "story-gate-ruleset.json").read_text(encoding="utf-8"))
         self.assertEqual(doc, json.loads(json.dumps(r)))
 
-    def _ruleset_api(self, unattributed, put_status=200):
+    def _ruleset_api(self, unattributed, put_status=200, pr_rule=True):
         G, calls = self.G, []
-        rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}, {"type": "pull_request", "parameters": {
-            "required_approving_review_count": 1, "require_code_owner_review": True, G.UNATTRIBUTED: unattributed}}]}
+        rs = {"id": 7, "name": G.RULESET_NAME, "rules": [{"type": "deletion"}] + ([{"type": "pull_request", "parameters": {
+            "required_approving_review_count": 1, "require_code_owner_review": True, G.UNATTRIBUTED: unattributed}}] if pr_rule else [])}
 
         def call(m, path, t=None, b=None, accept=None):
             calls.append((m, path, b))
-            if m == "GET" and path.endswith("/rulesets"):
-                return 200, [{"id": 7, "name": G.RULESET_NAME}], {}
+            if m == "GET" and path.endswith("/rulesets"):  # an organization's same-named ruleset is listed first
+                return 200, [{"id": 3, "name": G.RULESET_NAME, "source_type": "Organization"},
+                             {"id": 7, "name": G.RULESET_NAME, "source_type": "Repository"}], {}
             if m == "GET" and path.endswith("/rulesets/7"):
                 return 200, rs, {}
             if m == "PUT" and path.endswith("/rulesets/7"):
@@ -836,12 +837,19 @@ class TestGitHubLogic(unittest.TestCase):
     def test_existing_ruleset_gets_the_ai_pr_extra_approval_turned_off(self):
         out, puts = self._ruleset_api(True)
         self.assertEqual(len(puts), 1)
+        self.assertTrue(puts[0][1].endswith("/rulesets/7"))  # the repository's own ruleset, not the organization's
         rules = puts[0][2]["rules"]
         self.assertEqual([r["type"] for r in rules], ["deletion", "pull_request"])  # nothing else changes
         pr = rules[1]["parameters"]
         self.assertIs(pr[self.G.UNATTRIBUTED], False)
         self.assertTrue(pr["require_code_owner_review"]); self.assertEqual(pr["required_approving_review_count"], 1)
         self.assertTrue(any("turned off GitHub's extra approval" in line for line in out))
+
+    def test_ruleset_without_a_pull_request_rule_is_reported_not_called_fine(self):
+        out, puts = self._ruleset_api(True, pr_rule=False)
+        self.assertEqual(puts, [])
+        self.assertTrue(any("has no pull request rule" in line for line in out))
+        self.assertFalse(any("need one code owner approval" in line for line in out))
 
     def test_existing_ruleset_already_right_is_left_alone(self):
         out, puts = self._ruleset_api(False)
