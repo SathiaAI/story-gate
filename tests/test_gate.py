@@ -401,6 +401,7 @@ class TestRound1Fixes(Base):
         self.assertIn("DONE gate", run(self.repo, "hook", "--client", "claude", "--event", "stop", stdin="{}").stdout)
 
     def test_handoff_requires_drift_section_and_version(self):
+        """Check the handoff drift section, release version, and CI checkout safeguards."""
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
@@ -4033,6 +4034,7 @@ class TestMarketplacePackaging(unittest.TestCase):
                     self.assertTrue(manifest[field].strip(), field)
 
     def test_directory_plugin_folder_carries_the_same_skill(self):
+        """Keep the marketplace, plugin, and installed skills identical, with the shared license."""
         same = (self.ROOT / "skills/story-gate/SKILL.md").read_bytes()
         self.assertEqual((self.ROOT / "plugin/skills/story-gate/SKILL.md").read_bytes(), same, "copy skills/story-gate/SKILL.md into plugin/")
         # the copy `install` puts into every repository must not fall behind the marketplace copy
@@ -4058,11 +4060,13 @@ class TestMarketplacePackaging(unittest.TestCase):
 
 class TestTryAndDefaults(unittest.TestCase):
     def test_default_config_names_no_review_bots(self):
+        """Default to no named reviewers while keeping independent review required."""
         src = (SRC / "gate.py").read_text(encoding="utf-8")
         self.assertRegex(src, r'\n    "reviewers": \[\],', "leave reviewers empty until the owner names them")
         self.assertIn('\n    "require_independent_review": True,', src)
 
     def test_try_shows_one_passing_and_one_failing_goal_without_touching_the_cwd(self):
+        """Verify the demo's pass/fail output and report without changing the caller's directory."""
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
         cwd = tmp / "my-project"; cwd.mkdir()
         e = dict(os.environ, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp)); e.pop("STORY_GATE_ROOT", None)

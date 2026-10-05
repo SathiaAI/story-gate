@@ -1246,6 +1246,11 @@ def cmd_try(open_=True):
         env.pop(k, None)
 
     def run(*a, check=True):
+        """Run a command in the demo project and return its captured result.
+
+        Exit with a diagnostic on nonzero status unless check is False.
+        Process startup errors and the 120-second timeout propagate.
+        """
         r = subprocess.run(list(a), cwd=str(box), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if check and r.returncode != 0:
             sys.exit("story-gate try: %s failed: %s" % (" ".join(map(str, a[:3])), (r.stderr or r.stdout).strip()[-400:]))
