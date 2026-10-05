@@ -301,7 +301,12 @@ class Wizard:
         git(self.top, "fetch", "--quiet", "origin", base)
         if git(self.top, "rev-parse", "--abbrev-ref", "HEAD") == base and not git(self.top, "status", "--porcelain"):
             git(self.top, "merge", "--ff-only", "--quiet", "origin/" + base)
-        r = subprocess.run([sys.executable, str(HERE / "gate.py"), "install", "--user", *signed_or_not(HERE), "--python", self.py,
+        try:
+            signed = signed_or_not(HERE)
+        except RuntimeError as e:
+            self.set("done", "error", "Couldn't turn on protection on this computer: %s" % e)
+            return
+        r = subprocess.run([sys.executable, str(HERE / "gate.py"), "install", "--user", *signed, "--python", self.py,
                             "--clients", ",".join(self.clients)],
                            cwd=str(self.top), capture_output=True, text=True, env=dict(os.environ, STORY_GATE_ROOT=str(self.top)))
         if r.returncode:
@@ -313,9 +318,16 @@ class Wizard:
 
 
 def signed_or_not(here):
-    """A signed release is installed only after its signature checks out; a copy without one (a development copy) is
-    installed with --unsigned, which install and doctor both report."""
-    return [] if (Path(here) / "release.json").is_file() and (Path(here) / "release.json.sig").is_file() else ["--unsigned"]
+    """A signed release is installed only after its signature checks out; a copy with neither file (a development copy) is
+    installed with --unsigned, which install and doctor both report. Only one of the two files means a broken or tampered
+    release: refuse it rather than fall back to an unchecked install."""
+    have = [(Path(here) / f).is_file() for f in ("release.json", "release.json.sig")]
+    if all(have):
+        return []
+    if not any(have):
+        return ["--unsigned"]
+    raise RuntimeError("this story-gate copy has only one of release.json and release.json.sig, so it can't be checked. "
+                       "Install it again from the release.")
 
 
 # ------------------------------------------------------------------ the page

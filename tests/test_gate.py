@@ -874,9 +874,14 @@ class TestSignedSetup(unittest.TestCase):
         import importlib
         S = importlib.import_module("sg_setup")
         d = Path(tempfile.mkdtemp())
-        self.assertEqual(S.signed_or_not(d), ["--unsigned"])
-        (d / "release.json").write_text("{}"); self.assertEqual(S.signed_or_not(d), ["--unsigned"])  # no signature: not signed
+        self.assertEqual(S.signed_or_not(d), ["--unsigned"])          # neither file: a development copy
+        (d / "release.json").write_text("{}")
+        with self.assertRaises(RuntimeError):                          # one file only: refused, never installed unchecked
+            S.signed_or_not(d)
         (d / "release.json.sig").write_text("sig"); self.assertEqual(S.signed_or_not(d), [])
+        (d / "release.json").unlink()
+        with self.assertRaises(RuntimeError):                          # the signature alone: refused too
+            S.signed_or_not(d)
 
 
 def keep_github_fakes_local(test, G):
