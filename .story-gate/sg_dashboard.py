@@ -514,23 +514,23 @@ WORDMARK_FILE = Path(__file__).resolve().parent / "vendor" / "viaknox-wordmark.s
 TABLER_FILE = Path(__file__).resolve().parent / "vendor" / "tabler.min.css"
 
 BRAND_CSS = """
-:root{--sg-tangelo:#FF4B20;--sg-aubergine:#29122B;--sg-paper:#FFF8F2;--sg-ink:#29122B;--sg-muted:#6E5C70;--sg-surface:#FFF8F2;--sg-card:#FFFFFF;
---sg-line:#E9DDD4;--sg-critical:#B42318;--tblr-primary:#FF4B20;--tblr-body-bg:#FFF8F2;--tblr-body-color:#29122B}
-@media (prefers-color-scheme: dark){:root{--sg-ink:#FFF8F2;--sg-muted:#CDBFCF;--sg-surface:#1E0D20;--sg-card:#29122B;--sg-line:#4A2F4D;
---sg-critical:#FF8A80;--tblr-body-bg:#1E0D20;--tblr-body-color:#FFF8F2}}
+:root{--sg-accent:#FFD84D;--sg-accent-text:#8A6A00;--sg-graphite:#1F2327;--sg-paper:#FFF8F2;--sg-ink:#1F2327;--sg-muted:#5B6168;--sg-surface:#FFF8F2;--sg-card:#FFFFFF;
+--sg-line:#E4E1DB;--sg-critical:#B42318;--sg-wordmark:#29122B;--tblr-primary:#1F2327;--tblr-body-bg:#FFF8F2;--tblr-body-color:#1F2327}
+@media (prefers-color-scheme: dark){:root{--sg-ink:#F1F5F2;--sg-muted:#B9C0C6;--sg-surface:#16191C;--sg-card:#1F2327;--sg-line:#3A4046;--sg-accent-text:#FFD84D;
+--sg-critical:#FF8A80;--sg-wordmark:#FFF8F2;--tblr-primary:#FFD84D;--tblr-body-bg:#16191C;--tblr-body-color:#F1F5F2}}
 body{background:var(--sg-surface);color:var(--sg-ink)}
 h1,h2,h3,.h1,.card-title,strong{color:var(--sg-ink)} .card-header{border-color:var(--sg-line)}
 .table{--tblr-table-bg:transparent;--tblr-table-color:var(--sg-ink);--tblr-table-border-color:var(--sg-line)}
 .table thead th{background:transparent;color:var(--sg-muted);border-color:var(--sg-line)}
-.alert{background:var(--sg-card);color:var(--sg-ink);border:1px solid var(--sg-line);border-left:4px solid var(--sg-tangelo)}
+.alert{background:var(--sg-card);color:var(--sg-ink);border:1px solid var(--sg-line);border-left:4px solid var(--sg-accent)}
 .card{background:var(--sg-card);border-color:var(--sg-line)} .table{color:var(--sg-ink)} .text-secondary{color:var(--sg-muted)!important}
 .sg-kpi .h1{font-weight:700;letter-spacing:-.01em;margin:0} .sg-kpi .subheader{color:var(--sg-muted)}
-.sg-chart{width:100%;height:auto} .sg-bar{fill:var(--sg-tangelo)} .sg-bar-critical{fill:var(--sg-critical)}
+.sg-chart{width:100%;height:auto} .sg-bar{fill:var(--sg-accent);stroke:var(--sg-graphite);stroke-width:1.5} .sg-bar-critical{fill:var(--sg-critical)}
 .sg-axis,.sg-value{fill:var(--sg-ink);font-size:14px} .sg-value{font-weight:600}
 .sg-pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;border:1px solid var(--sg-line);font-size:.8rem;white-space:nowrap}
 .sg-pill.pass{border-color:#2E7D4F} .sg-pill.fail{border-color:var(--sg-critical)} .sg-est{color:var(--sg-muted);font-size:.8rem}
-.sg-brand{color:var(--sg-ink);display:inline-flex;align-items:center;gap:.4rem} .sg-brand svg{height:14px;width:auto}
-header.sg-head{border-bottom:3px solid var(--sg-tangelo)}
+.sg-brand{color:var(--sg-ink);display:inline-flex;align-items:center;gap:.4rem} .sg-brand svg{height:14px;width:auto;color:var(--sg-wordmark)}
+header.sg-head{border-bottom:3px solid var(--sg-accent)}
 @media (max-width:640px){.container-xl{padding-left:16px;padding-right:16px}}
 """
 
@@ -665,7 +665,7 @@ def publish_issue(G, repo, token, body, generated_at, issue_number=None):
     The issue is found by `dashboard_issue` in config (if a human set it), else by the story-gate-dashboard label."""
     st, _, _ = call(G, "GET", "/repos/%s/labels/%s" % (repo, LABEL), token)
     if st == 404:
-        call(G, "POST", "/repos/%s/labels" % repo, token, {"name": LABEL, "color": "FF4B20", "description": "Managed by story-gate"})
+        call(G, "POST", "/repos/%s/labels" % repo, token, {"name": LABEL, "color": "FFD84D", "description": "Managed by story-gate"})
     st, issues, _ = call(G, "GET", "/repos/%s/issues?labels=%s&state=all&per_page=20&sort=created&direction=asc" % (repo, LABEL), token)
     if st == 410:
         return "Issues are turned off in this repository, so the dashboard is only in the workflow summary and the report artifact."

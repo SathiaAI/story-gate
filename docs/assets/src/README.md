@@ -12,5 +12,7 @@ node docs/assets/src/render.js docs/assets/src/header.html header.png && convert
 Set `CHROMIUM=/path/to/chromium` if Playwright's own browser is not installed.
 
 - `theme.css` holds the colours and fonts (Clash Display and Switzer from `.story-gate/vendor/`).
+- `dashboard.html` frames two screenshots: `dashboard-issue.png` (the pinned GitHub issue) and `dashboard-report.png` (the HTML report from `sg_dashboard.to_html` on a demo repository). Retake the report screenshot after changing the dashboard's look.
+- `setup-page.png` and `validation-page.png` are screenshots of the real setup page and validation page at 1200 px wide.
 - `header-city.png` is the station illustration recoloured to Graphite ink with a Signal Yellow buffer stop.
 - The raven mark (`../story-gate-mark.svg`, `../story-gate-mark-small.svg`) is artwork from the Viaknox brand kit. Do not redraw, recolour or crop it. Use the small mark below 64 px.

@@ -396,19 +396,19 @@ CSS = """
 @font-face{font-family:"Clash Display";font-weight:600;src:url(/font/ClashDisplay-600.woff2) format("woff2")}
 @font-face{font-family:Switzer;font-weight:400;src:url(/font/Switzer-400.woff2) format("woff2")}
 @font-face{font-family:Switzer;font-weight:600;src:url(/font/Switzer-600.woff2) format("woff2")}
-:root{--tangelo:#FF4B20;--aubergine:#29122B;--paper:#FFF8F2;--muted:#6E5C70;--line:#EADBD3;--ok:#1F7A4D}
-*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--aubergine);font:16px/1.5 Switzer,"Segoe UI",system-ui,sans-serif}
+:root{--yellow:#FFD84D;--yellow-text:#8A6A00;--graphite:#1F2327;--paper:#FFF8F2;--muted:#5B6168;--line:#E4E1DB;--ok:#1F7A4D;--error:#B42318}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--graphite);font:16px/1.5 Switzer,"Segoe UI",system-ui,sans-serif}
 main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash Display",Switzer,system-ui,sans-serif;margin:.2em 0 .3em}
-.eyebrow{color:var(--tangelo);letter-spacing:.2em;font-size:13px;font-weight:600;text-transform:uppercase}
+.eyebrow{color:var(--yellow-text);letter-spacing:.2em;font-size:13px;font-weight:600;text-transform:uppercase}
 .lead{color:var(--muted);margin:0 0 28px}.step{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:12px 0;display:flex;gap:16px}
-.n{font:600 28px/1 "Clash Display",system-ui;color:var(--tangelo);min-width:28px}.step h2{font-size:18px;margin:0 0 4px}.step p{margin:0;color:var(--muted)}
-.step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--aubergine)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--tangelo)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
-button,.btn{background:var(--tangelo);color:var(--aubergine);border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
+.n{font:600 28px/1 "Clash Display",system-ui;color:var(--yellow-text);min-width:28px}.step h2{font-size:18px;margin:0 0 4px}.step p{margin:0;color:var(--muted)}
+.step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--graphite)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--error)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
+button,.btn{background:var(--yellow);color:var(--graphite);border:2px solid var(--graphite);border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
 button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
 .lbl{display:block;margin-top:10px;font-weight:600}.lbl span{font-weight:400;color:var(--muted);font-size:14px}.lbl input{display:block;margin-top:6px}
 .tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.tool em{color:var(--muted);font-size:13px;font-style:normal;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
-.by svg{height:14px;width:auto;vertical-align:-2px}.note{background:var(--tangelo);color:var(--aubergine);border-radius:14px;padding:14px 18px;margin-top:18px}.foot{margin-top:28px;color:var(--muted);font-size:13px}
+.by svg{height:14px;width:auto;vertical-align:-2px}.note{background:var(--yellow);color:var(--graphite);border:2px solid var(--graphite);border-radius:14px;padding:14px 18px;margin-top:18px}.foot{margin-top:28px;color:var(--muted);font-size:13px}
 """
 
 
