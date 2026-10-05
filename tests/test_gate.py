@@ -465,6 +465,7 @@ class TestNext(Base):
         self.assertIn("score SAT-1 ready", self.nxt())
         self.assertEqual(run(self.repo, "score", "SAT-1", "ready").returncode, 0)
         self.assertIn("Build it", self.nxt())
+        self.assertIn("next SAT-1` again", self.nxt())  # the follow-up stays on this story
         (self.repo / "app.py").write_text("x = 2\n")
         (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
         self.assertIn("record-tests SAT-1", self.nxt())

@@ -1709,7 +1709,7 @@ def next_step(sid, c):
     done.append("READY passed")
     _, files, _ = diff_against(c["base_branch"])
     if not [f for f in files if not exempt(f, c) and not is_record(f) and f not in GATE_FILES]:  # story-gate's own files aren't the story's code
-        return done, "Build it: write the code and the tests for each AC. Then run `%s` again." % gate_cmd("next")
+        return done, "Build it: write the code and the tests for each AC. Then run `%s` again." % gate_cmd("next " + sid)
     done.append("code")
     results = load_json(sd / "test_results.json").get("junit") or None  # the same per-test outcomes `score done` uses
     facts = struct_done(sd, sid, files, c, results=results, write=False)  # read-only: next never writes trace.md
