@@ -1677,7 +1677,7 @@ NEXT_READY = (("story_present", "story.md", "Paste the full story into story.md,
               ("upstream_handoffs", "context.md", "Add a handoff for each story this one depends on"))
 NEXT_DONE = (("tests_ran_green", "tests", "Run the tests and record them: `{cmd}`"),
              ("traceability", "test links", "Point each AC to its automated tests in tests.json (`test_refs`: the test function names), and make them pass"),
-             ("scenarios_prove_acs", "scenarios", "Run the feature for every AC and record it: `{scenario}`"),
+             ("scenarios_prove_acs", "scenarios", "{scenario}"),
              ("validation_written", "validation.md", "Fill in validation.md for the owner"),
              ("handoff_written", "handoff.md", "Write handoff.md with these sections: " + ", ".join(s.lstrip("# ") for s in HANDOFF_SECTIONS)),
              ("learnings_recorded", "learnings", "Record what you learnt: `{learn}`"))
@@ -1715,11 +1715,18 @@ def next_step(sid, c):
     facts = struct_done(sd, sid, files, c, results=results, write=False)  # read-only: next never writes trace.md
     import sg_validation as V
     acs_ = [a for a, _, _ in acs(sd)]
-    cov = V.coverage(load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json")), acs_, work_fingerprint(), False)
-    need = [a for a in acs_ if cov.get(a) == "missing"] or acs_ or ["AC-1"]  # an AC that still has no passing scenario
+    sdoc, sres, fp = load_json(sd / "scenarios.json"), V.results_of(load_json(sd / "scenario_results.json")), work_fingerprint()
+    cov = V.coverage(sdoc, sres, acs_, fp, False)
+    recorded = {a for sp in V.specs_of(sdoc) if isinstance(sp.get("acs"), list) for a in sp["acs"]}
+    need = [a for a in acs_ if cov.get(a) == "missing" and a not in recorded]  # ACs with no scenario recorded at all
+    if need or not V.failing(sdoc, sres, fp, False):
+        scenario = "Run the feature for every AC and record it: `%s`" % gate_cmd(
+            "scenario %s --name \"...\" --ac %s --expect <text> -- <command>" % (sid, (need or acs_ or ["AC-1"])[0]))
+    else:  # every AC is covered, but a recorded scenario failed or ran on older code: run them again, don't add another
+        scenario = "Run the recorded scenarios again on the current code: `%s`. If one still fails, fix the work" % gate_cmd("scenarios " + sid)
     fill = {"cmd": gate_cmd("record-tests %s" % sid) if c.get("test_command") else  # a pinned command is used as is
             gate_cmd("record-tests %s -- <your test command>" % sid),
-            "scenario": gate_cmd("scenario %s --name \"...\" --ac %s --expect <text> -- <command>" % (sid, need[0])),
+            "scenario": scenario,
             "learn": gate_cmd("learn %s --type none --summary \"...\"" % sid) + " (or --type error|pattern with --root-cause and --rule)"}
     for key, label, todo in NEXT_DONE:
         if key not in facts:

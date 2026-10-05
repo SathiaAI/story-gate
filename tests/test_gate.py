@@ -508,6 +508,19 @@ class TestNext(Base):
         step = self.nxt()
         self.assertIn("--ac AC-2", step, step)
 
+    def test_a_stale_scenario_is_run_again_not_added(self):
+        """Every AC has a scenario, but the code changed after it ran: next says run them again, not record a new one."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        (self.repo / "app.py").write_text("x = 2\n")
+        (self.repo / "test_app.py").write_text("def test_ac1_x():\n    assert True\n")
+        self.fill_validation()
+        (self.repo / "app.py").write_text("x = 3\n")  # the scenario ran on older code
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "print(1)")
+        step = self.nxt()
+        self.assertIn("Run the recorded scenarios again", step, step); self.assertIn("scenarios SAT-1", step)
+        self.assertTrue(step.strip().startswith("Run the recorded scenarios again"), step)  # the instruction itself, not a new scenario
+
     def test_next_changes_nothing(self):
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
         run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
