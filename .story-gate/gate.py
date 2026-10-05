@@ -2188,20 +2188,43 @@ def cmd_ci(tests_dir=None):
                          or (f.startswith(".story-gate/") and (f.endswith(".py") or f.startswith(".story-gate/vendor/"))))
         if touched:
             who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
-            owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base) or "")
+            owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
+                          or git("show", "%s:docs/CODEOWNERS" % base) or "")  # the same lookup as story acceptance below
             allowed = {u.lower() for u in G.codeowners(owners_txt)[0]} | {a.lower().lstrip("@") for a in (c.get("approvers") or [])}
+            others = [f for f in code if f not in touched]  # anything besides story-gate's own files (docs may ride along)
             if who and who.lower() in allowed:
                 notes.append("This PR changes story-gate code, hook or workflow files (%s); %s confirmed with the '%s' label."
                              % (", ".join(touched), who, CHANGE_LABEL))
+            elif not others:
+                # A pull request that changes only story-gate's files: a code owner's approval of its latest commit is the
+                # confirmation (no separate label). Owners come from the base branch, as for any other acceptance.
+                acc = G.acceptance(ctx, token, owners_txt, c.get("approvers") or []) if ctx and token else \
+                    {"accepted": False, "why": "not running on a pull request"}
+                code_like = [f for f in touched if f != ".story-gate/config.json"]
+                if code_like:  # weaker() reads config.json only; it can't tell whether a code, hook or workflow change loosens the gate
+                    notes.append("This PR changes story-gate's code, hooks, workflows or code owners (%s). story-gate can't judge "
+                                 "whether that loosens the gate: read the diff before you approve." % ", ".join(code_like))
+                if acc["accepted"]:
+                    notes.append("This PR changes only story-gate files (%s); %s confirmed by approving the latest commit."
+                                 % (", ".join(touched), acc.get("approver")))
+                else:
+                    problems.append("This PR changes only story-gate files (%s). A code owner confirms it by approving the latest "
+                                    "commit (%s). GitHub doesn't count an approval from whoever opened the pull request or pushed "
+                                    "its latest commit: if that's you, ask your AI to open it, or add the label '%s'."
+                                    % (", ".join(touched), acc["why"], CHANGE_LABEL))
             else:
-                problems.append("This PR changes story-gate code, hook or workflow files (%s). A code owner must review them and add "
-                                "the label '%s' to confirm%s." % (", ".join(touched), CHANGE_LABEL,
-                                                                  " (it was added by %s, who is not a code owner)" % who if who else ""))
+                problems.append("This PR changes story-gate code, hook or workflow files (%s) together with other files. Put the "
+                                "story-gate changes in their own pull request (a code owner's approval then confirms them), or a "
+                                "code owner adds the label '%s'%s." % (", ".join(touched), CHANGE_LABEL,
+                                                                     " (it was added by %s, who is not a code owner)" % who if who else ""))
+            code = others  # story-gate's own files never need a story; the confirmation above covers them
         if ".story-gate/config.json" in files:  # say in plain words when this PR makes the rules weaker
             w = T.weaker(full_config(git("show", "%s:.story-gate/config.json" % base) or None),
                          full_config(rd(GATE / "config.json") or None))
-            if w:
-                notes.append("This PR makes story-gate's rules weaker: %s. Reviewers: make sure that's intended." % "; ".join(w))
+            if w:  # a warning, so GitHub shows it on the pull request, not only in the check's summary
+                weak = "This PR makes story-gate's rules weaker: %s. Reviewers: make sure that's intended." % "; ".join(w)
+                notes.insert(0, weak)
+                print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
         try:  # pinned project hooks (sg_pin): flag scripts that seem to use repository files outside their pins
             import sg_pin as PIN
             head_sha = git("rev-parse", "HEAD").strip()
@@ -2288,7 +2311,8 @@ def cmd_ci(tests_dir=None):
     for p in problems:
         print("::%s title=story-gate::%s" % (level, p.replace("\n", " ")))
     for n in notes:
-        print("::notice title=story-gate::%s" % n)
+        if not n.startswith("This PR makes story-gate's rules weaker"):  # already printed as a warning
+            print("::notice title=story-gate::%s" % n)
     lines = ["## story-gate %s" % ("- %s" % sid if sid else ""), ""]
     lines += ["> **%s**" % n for n in notes] + [""]
     if problems:

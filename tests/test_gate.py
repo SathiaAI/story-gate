@@ -687,6 +687,98 @@ class TestV03Integrity(Base):
         self.assertIn(".claude/settings.json", g.GATE_FILES)
 
 
+class TestStoryGateOnlyPullRequests(Base):
+    """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
+
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None):
+        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
+        subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
+        (self.repo / ".github").mkdir(exist_ok=True)
+        self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
+        for f in extra or []:
+            (self.repo / f).write_text("y = 2\n")
+        for f in touch or []:  # a story-gate file other than config.json
+            with open(self.repo / f, "a", encoding="utf-8") as fh:
+                fh.write("\n# changed\n")
+        g = load_gate(self.repo)
+        import sg_github as G
+        keep_github_fakes_local(self, G)
+        saved = {n: getattr(G, n) for n in ("pr_context", "label_added_by", "acceptance", "protection")}
+        self.addCleanup(lambda: [setattr(G, n, f) for n, f in saved.items()])
+        self.addCleanup(lambda: os.environ.pop("STORY_GATE_ROOT", None))
+        G.pr_context = lambda: {"repo": "o/r", "number": 1, "head_sha": "abc1234", "author": "agent-bot[bot]", "base": "main", "fork": False}
+        G.label_added_by = lambda ctx, token, label: label_by
+        seen = []
+        G.acceptance = lambda ctx, token, owners, approvers=(): seen.append(1) or (
+            {"accepted": True, "approver": "paul", "why": "approved by paul"} if accepted
+            else {"accepted": False, "why": "waiting for a code owner (paul) to approve the latest commit abc1234"})
+        G.protection = lambda repo, branch, token: (True, [])
+        import io, contextlib
+        out = io.StringIO()
+        # like run(): never read the CI runner's own pull request (GitHub sets GITHUB_BASE_REF on pull_request runs)
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF",
+                                                                "GITHUB_EVENT_PATH", "GITHUB_STEP_SUMMARY", "STORY_GATE_TRUSTED_DIR", "PR_TITLE")}
+        env["GITHUB_TOKEN"] = "t"
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+            rc = g.cmd_ci()
+        return rc, out.getvalue(), seen
+
+    def test_owner_approval_confirms_a_config_only_pull_request(self):
+        rc, out, seen = self.ci(accepted=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("confirmed by approving the latest commit", out)
+        self.assertNotIn("no story id", out)          # story-gate's own files never need a story
+        self.assertNotIn("story-gate-change", out)    # and no label is asked for
+        self.assertTrue(seen)
+
+    def test_config_only_pull_request_waits_for_the_owner(self):
+        rc, out, _ = self.ci(accepted=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("A code owner confirms it by approving the latest commit", out)
+        self.assertIn("waiting for a code owner", out)
+        self.assertIn("if that's you, ask your AI to open it", out)  # the solo owner's way out
+        self.assertNotIn("read the diff", out)                      # config.json alone is judged by weaker()
+
+    def test_weaker_rules_are_a_warning_on_the_pull_request(self):
+        rc, out, _ = self.ci(accepted=True, thresholds={"pass": 0.5, "concerns": 0.2})
+        self.assertIn("::warning title=story-gate: rules made weaker::", out)
+        self.assertEqual(out.count("This PR makes story-gate's rules weaker"), 1, out)  # once, not also as a notice
+
+    def test_gate_code_changes_ask_the_owner_to_read_the_diff(self):
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("can't judge whether that loosens the gate: read the diff", out)
+        self.assertIn(".story-gate/sg_report.py", out)
+
+    def test_mixed_pull_request_still_needs_a_split_or_the_label(self):
+        rc, out, _ = self.ci(accepted=True, extra=["feature.py"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Put the story-gate changes in their own pull request", out)
+        self.assertIn("no story id", out)  # the app code still needs a story
+
+    def test_owners_listed_only_in_docs_codeowners_count(self):
+        """A repository whose only CODEOWNERS file is docs/CODEOWNERS: its owners still confirm the change."""
+        (self.repo / "docs").mkdir(exist_ok=True)
+        (self.repo / "docs/CODEOWNERS").write_text("* @paul\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "owners"], cwd=self.repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+        subprocess.run(["git", "merge", "-q", "feature/SAT-1-thing"], cwd=self.repo, check=True)
+        rc, out, _ = self.ci(accepted=True, label_by="paul", extra=["feature.py"])
+        self.assertIn("confirmed with the 'story-gate-change' label", out)
+
+    def test_label_from_a_code_owner_still_works_for_mixed_pull_requests(self):
+        (self.repo / ".github").mkdir(exist_ok=True)
+        (self.repo / ".github/CODEOWNERS").write_text("* @paul\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "owners"], cwd=self.repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+        subprocess.run(["git", "merge", "-q", "feature/SAT-1-thing"], cwd=self.repo, check=True)
+        rc, out, _ = self.ci(accepted=True, label_by="paul", extra=["feature.py"])
+        self.assertIn("confirmed with the 'story-gate-change' label", out)
+        self.assertNotIn("Put the story-gate changes in their own pull request", out)
+
+
 def keep_github_fakes_local(test, G):
     """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
     saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
@@ -769,9 +861,12 @@ class TestGitHubLogic(unittest.TestCase):
                                 judge={"allow_self_judge_pass": True}, require_independent_review=False, exempt_globs=["*.md", "src/**"],
                                 project_hooks_allowed=["echo ok", {"command": "npm run lint", "runs_repo_code": "accepted"}],
                                 test_command="true", approvers=["someone"], reviewers=["Some-Bot[bot]"]))
-        self.assertEqual(len(w), 11, w)
+        self.assertEqual(len(w), 10, w)  # setting a test command where there was none adds a check: not weaker
         self.assertEqual(T.weaker(dict(old, reviewers=["coderabbitai[bot]"]), dict(old, reviewers=["CodeRabbitAI"])), [])  # same identity
-        self.assertIn("test command changed from '' to 'true'", w)
+        self.assertFalse(any("test command" in x for x in w))
+        self.assertEqual(T.weaker(dict(old, test_command="pytest -q"), dict(old, test_command="true")),
+                         ["test command changed from 'pytest -q' to 'true'"])
+        self.assertEqual(len(T.weaker(dict(old, test_command="pytest -q"), dict(old, test_command=""))), 1)  # removed: weaker
 
     def test_weaker_detects_removed_test_globs(self):
         """Removing or replacing test patterns warns; additions and reordering do not."""

@@ -35,6 +35,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 - Work under the **agent identity**: run `gate.py agent-env --repo owner/name` and use its token and git name.
 - Never use the human's GitHub login.
 - If `gate.py doctor --repo owner/name` warns that this shell holds a code owner's login, stop and tell the human.
+- If the human asks you to change story-gate's settings (`.story-gate/config.json`), change only that, in a pull request of its own. The code owner's approval confirms it, and no story is needed. If a hook refuses the edit, tell the human; never work around it.
 
 ## Sub-agents: tiers, not model names
 
@@ -67,7 +68,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 ## Rules
 - Quote the `gate.py` verdict line. Never declare a pass yourself.
 - Write for a non-coder: short sentences, active voice, plain words, a Mermaid diagram where a picture is clearer (PROTOCOL.md > Writing). This covers chat replies, PR descriptions, the story's plain summary, validation.md, handoffs and learnings.
-- Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route.
+- Never edit `.story-gate` code, config or verdicts, CODEOWNERS or the story-gate workflows, by any route, unless the human asks you to change the settings (see "Your identity").
 - Never run `install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown` or `hook-trust`, and never touch the story-gate runtime, your tool's user hook settings or git's filter settings. Those are for the human.
 - The judge gives scores, not reasons. For each failing check, explain the likely cause in one line.
 - If the judge is unavailable, say so. Nothing passes without it.
