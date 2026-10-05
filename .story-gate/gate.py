@@ -2188,9 +2188,10 @@ def cmd_ci(tests_dir=None):
                          or (f.startswith(".story-gate/") and (f.endswith(".py") or f.startswith(".story-gate/vendor/"))))
         if touched:
             who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
-            owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base) or "")
+            owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
+                          or git("show", "%s:docs/CODEOWNERS" % base) or "")  # the same lookup as story acceptance below
             allowed = {u.lower() for u in G.codeowners(owners_txt)[0]} | {a.lower().lstrip("@") for a in (c.get("approvers") or [])}
-            others = [f for f in code if f not in touched]  # anything besides story-gate's own files
+            others = [f for f in code if f not in touched]  # anything besides story-gate's own files (docs may ride along)
             if who and who.lower() in allowed:
                 notes.append("This PR changes story-gate code, hook or workflow files (%s); %s confirmed with the '%s' label."
                              % (", ".join(touched), who, CHANGE_LABEL))

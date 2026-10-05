@@ -752,6 +752,17 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertIn("Put the story-gate changes in their own pull request", out)
         self.assertIn("no story id", out)  # the app code still needs a story
 
+    def test_owners_listed_only_in_docs_codeowners_count(self):
+        """A repository whose only CODEOWNERS file is docs/CODEOWNERS: its owners still confirm the change."""
+        (self.repo / "docs").mkdir(exist_ok=True)
+        (self.repo / "docs/CODEOWNERS").write_text("* @paul\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "owners"], cwd=self.repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+        subprocess.run(["git", "merge", "-q", "feature/SAT-1-thing"], cwd=self.repo, check=True)
+        rc, out, _ = self.ci(accepted=True, label_by="paul", extra=["feature.py"])
+        self.assertIn("confirmed with the 'story-gate-change' label", out)
+
     def test_label_from_a_code_owner_still_works_for_mixed_pull_requests(self):
         (self.repo / ".github").mkdir(exist_ok=True)
         (self.repo / ".github/CODEOWNERS").write_text("* @paul\n")
