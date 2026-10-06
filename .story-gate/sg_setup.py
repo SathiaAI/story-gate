@@ -99,6 +99,20 @@ def run_without_judge(files):
     return True
 
 
+def keep_test_command(files, test_command):
+    """CI runs the project's tests wherever a test command was given, even where GitHub can't block merges (then the
+    check only reports). Never replaces a command someone already set."""
+    raw, tc = files.get(".story-gate/config.json"), (test_command or "").strip()
+    if not raw or not tc:
+        return False
+    c = json.loads(raw.decode("utf-8"))
+    if c.get("test_command"):
+        return False
+    c["test_command"] = tc
+    files[".story-gate/config.json"] = (json.dumps(c, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    return True
+
+
 def block_merges_in_ci(files, test_command):
     """Where GitHub can enforce branch rules, a red story-gate check blocks the merge from day one: enforce at the PR check
     ("ci"), while the live checks on the AI's computer still only warn. Only with a test command: without one CI can't run
@@ -326,6 +340,7 @@ class Wizard:
         git(self.top, "fetch", "--quiet", "origin", base)
         files = setup_files(self.top, base, self.py)
         blocks = block_merges_in_ci(files, self.test_command) if self.can_enforce else False
+        keep_test_command(files, self.test_command)  # after block_merges_in_ci, which only acts on a config nobody tuned
         nojudge = run_without_judge(files) if self.objective else False
         owners = [self.login] + self.approvers
         co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
