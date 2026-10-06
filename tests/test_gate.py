@@ -4597,6 +4597,8 @@ class TestObjectiveMode(Base):
         (td / "config.json").write_text(json.dumps({"mode": "warn"}))  # the base branch keeps the judge on
         r = run(self.repo, "ci", env={"STORY_GATE_TRUSTED_DIR": str(td)})
         self.assertNotIn("objective mode", r.stdout)  # the PR's own config can't switch the judge off
+        self.assertIn("judge unavailable in CI", r.stdout)  # the base branch's full mode still needs the judge
+        self.assertIn("the AI judge no longer checks the work", r.stdout)  # and the PR's attempt is flagged as weaker
 
     def test_dashboard_and_report_label(self):
         sys.path.insert(0, str(SRC))
