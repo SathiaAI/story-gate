@@ -412,8 +412,8 @@ def sections(text):
 
 def junit_file(c):
     """The JUnit report to read, or None: only a file whose real path is inside the repository (no symlink out)."""
-    jp = c.get("junit_path")
-    return ROOT / jp if jp and repo_rel(jp) is not None else None
+    rel = repo_rel(c["junit_path"]) if c.get("junit_path") else None
+    return ROOT / rel if rel else None  # the resolved path, so reports\junit.xml is reports/junit.xml everywhere
 
 
 def repo_rel(path):

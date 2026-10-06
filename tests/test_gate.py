@@ -4641,6 +4641,16 @@ class TestObjectiveMode(Base):
             self.assertTrue((outside / "junit.xml").exists())
             self.assertNotIn("junit", json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text()))
 
+    def test_junit_path_with_backslashes_finds_the_same_file(self):
+        (self.repo / "reports").mkdir(); (self.repo / "reports/junit.xml").write_text("<testsuite/>")
+        g = load_gate(self.repo)
+        try:
+            self.assertEqual(g.junit_file({"junit_path": "reports\\junit.xml"}), g.ROOT / "reports/junit.xml")
+            self.assertTrue(g.junit_file({"junit_path": "reports\\junit.xml"}).is_file())
+            self.assertIsNone(g.junit_file({"junit_path": ""}))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
     def test_parametrized_tests_count_under_their_name(self):
         sys.path.insert(0, str(SRC))
         import importlib; G = importlib.import_module("sg_github")
