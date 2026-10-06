@@ -3138,10 +3138,17 @@ class TestGuidedSetup(unittest.TestCase):
 
     def test_repository_without_issues_points_to_the_run_summaries(self):
         """Issues off: no dead issue link; the page says where the dashboard is instead."""
-        S = self.S
-        wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
-        wz.has_issues = False
-        self.assertIsNone(wz.snapshot()["dashboard"])
+        S, G = self.S, self.G
+        self.addCleanup(setattr, G, "call", G.call)
+        self.addCleanup(setattr, G, "whoami", G.whoami)
+        for has_issues, expect_link in ((False, False), (True, True)):  # through sign-in, as GitHub reports it
+            info = {"default_branch": "main", "private": False, "permissions": {"admin": True}, "has_issues": has_issues,
+                    "owner": {"login": "me", "type": "User"}}
+            G.call = lambda m, path, tok, body=None, info=info: (200, info, {}) if path.endswith("/proj") else (404, {}, {})
+            G.whoami = lambda tok: "me"
+            wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+            wz._signed_in("human")
+            self.assertEqual(bool(wz.snapshot()["dashboard"]), expect_link)
         page = S.page(wz)
         self.assertIn("Issues are turned off in this repository", page); self.assertIn("if(s.dashboard)", page)
 

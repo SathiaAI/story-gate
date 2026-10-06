@@ -3362,6 +3362,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
             st_, info, _ = G.call("GET", "/repos/%s" % repo, tok)
             if st_ == 200 and isinstance(info, dict) and info.get("has_issues") is False:
                 print("  WARNING: Issues are turned off, so the dashboard can't be pinned as an issue. It still appears in each run's summary and report.")
+                dash_shown = True  # no issue link: the warning says where the dashboard is
             elif st_ == 200:
                 dash_shown = True
                 show_dashboard(repo)
