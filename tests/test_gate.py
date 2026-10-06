@@ -3297,6 +3297,20 @@ class TestGuidedSetup(unittest.TestCase):
         c = json.loads(files[".story-gate/config.json"])
         self.assertEqual((c["judge_mode"], c["x"]), ("objective", 1))  # the owner's other settings are kept
 
+    def test_setup_keeps_the_test_command_where_merges_cant_be_blocked(self):
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files) or {"number": 7, "url": "u", "branch": "b"}
+        S.Wizard._wait_merge = lambda self, base: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login, wz.test_command, wz.can_enforce = "me", "make test", False  # private repository on a free plan
+        wz.open_pr()
+        c = json.loads(got["files"][".story-gate/config.json"])
+        self.assertEqual((c["test_command"], c["enforce_points"]), ("make test", []))  # tests run; nothing is blocked
+        files = {".story-gate/config.json": b'{"test_command": "pytest"}'}
+        self.assertFalse(S.keep_test_command(files, "make test"))  # a command someone set is left alone
+
     def test_setup_pr_keeps_the_judge_by_default(self):
         G, S = self.G, self.S
         got = {}
