@@ -83,7 +83,7 @@ curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "iex (irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.ps1)"
 ```
 
 Then run:
