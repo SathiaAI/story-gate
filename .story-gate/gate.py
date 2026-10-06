@@ -3361,6 +3361,10 @@ def cmd_doctor(repo=None, strict=False, prove=False):
             st_, info, _ = G.call("GET", "/repos/%s" % repo, tok)
             if st_ == 200 and isinstance(info, dict) and info.get("has_issues") is False:
                 print("  WARNING: Issues are turned off, so the dashboard can't be pinned as an issue. It still appears in each run's summary and report.")
+            elif st_ == 200:
+                import sg_dashboard as D
+                print("  dashboard: %s  (the pinned 'Story-gate dashboard' issue; on this computer: %s)"
+                      % (D.issue_url(repo, G.WEB), gate_cmd("dashboard --open")))
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)

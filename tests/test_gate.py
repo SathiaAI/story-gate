@@ -3115,6 +3115,18 @@ class TestGuidedSetup(unittest.TestCase):
         page = S.page(wz)
         self.assertIn("value=hermes checked", page); self.assertIn("Google AI Studio", page); self.assertIn("Who else can approve work?", page); self.assertIn("Any one of you can approve", page)
 
+    def test_finishing_setup_shows_where_the_dashboard_is(self):
+        """The last thing setup shows: an Open your dashboard button, linked to the repository's pinned dashboard issue."""
+        S = self.S
+        wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+        url = "https://github.com/me/proj/issues?q=is%3Aissue+label%3Astory-gate-dashboard"
+        self.assertEqual(wz.snapshot()["dashboard"], url)
+        page = S.page(wz)
+        self.assertIn("Open your dashboard", page); self.assertIn("Story-gate dashboard", page)
+        self.assertIn("s.steps.done.status=='ok'", page)  # shown only once setup has finished
+        import sg_dashboard as D
+        self.assertEqual(D.issue_url("me/proj"), url)
+
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T
         marker = self.tmp / "ran"

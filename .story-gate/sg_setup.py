@@ -117,7 +117,11 @@ class Wizard:
         with self.lock:
             return {"steps": json.loads(json.dumps(self.st)), "login": self.login, "repo": self.repo, "device": self.device,
                     "pr": self.pr, "private_free": self.private_free, "clients": list(self.clients),
-                    "approvers": list(self.approvers)}
+                    "approvers": list(self.approvers), "dashboard": self.dashboard_url()}
+
+    def dashboard_url(self):
+        import sg_dashboard as D
+        return D.issue_url(self.repo, G.WEB)
 
     def set_clients(self, text):
         """The AI tools to protect on this computer, as ticked on the page (only tools story-gate can check live)."""
@@ -480,11 +484,18 @@ async function tick(){const s=await (await fetch('/state?t='+T)).json();
 for(const [k,v] of Object.entries(s.steps)){const e=document.getElementById('s-'+k);if(!e)continue;e.className='step '+v.status;e.querySelector('.msg').textContent=v.status=='ok'?'✓ '+v.msg:v.msg}
 const d=document.getElementById('dev');if(s.device&&s.steps.signin.status!='ok'){if(d.dataset.code!==s.device.code){d.dataset.code=s.device.code;d.innerHTML='Enter this code at <a target=_blank rel=noopener></a><br><span class=code></span>';const a=d.querySelector('a');a.href=a.textContent=s.device.uri;d.querySelector('.code').textContent=s.device.code}}else{d.innerHTML='';d.dataset.code=''}
 const p=document.getElementById('pr');if(s.pr&&p.dataset.url!==s.pr.url){p.dataset.url=s.pr.url;p.innerHTML='<a class=btn target=_blank rel=noopener>Review and merge on GitHub</a><p class=hint>Opens GitHub in a new tab. Click the green <b>Merge pull request</b> button there, then come back to this page.</p>';p.querySelector('a').href=s.pr.url;p.previousElementSibling.style.display='none'}
+const n=document.getElementById('next');if(s.steps.done.status=='ok'&&!n.dataset.on){n.dataset.on=1;n.style.display='block';n.querySelector('a').href=s.dashboard}
 document.getElementById('free').style.display=s.private_free?'block':'none'}
 tick();setInterval(tick,2000)</script>""" % json.dumps(t)
     return page_shell(
         "<div class=eyebrow>story-gate setup · %s</div><h1>Four clicks and you're protected.</h1>"
         "<p class=lead>Step 1 is done: you asked your AI to set up story-gate. Do the steps below in order; this page updates by itself.</p>%s"
+        "<div class=note id=next style=display:none><h2>You're set up. What's next</h2>"
+        "<p><a class=btn target=_blank rel=noopener>Open your dashboard</a></p>"
+        "<p>Your dashboard is a pinned issue in your repository on GitHub, called <b>Story-gate dashboard</b>. It shows every "
+        "story: ready, in progress and done. It appears a minute or two after setup and updates every 30 minutes. "
+        "To find it later: your repository on GitHub, then <b>Issues</b>.</p>"
+        "<p>Now ask your AI for one small feature. It writes the story, builds it, shows it working, and opens a pull request for you to approve.</p></div>"
         "<div class=note id=free style=display:none><b>Free GitHub plan, private repository:</b> GitHub won't enforce the "
         "'must be approved' rule here. story-gate still checks every pull request and marks it ADVISORY - NOT ENFORCED.</div>"
         "<div class=foot>Runs only on this computer (127.0.0.1). story-gate · MIT · <span class=by>by %s</span></div>%s"
@@ -512,5 +523,9 @@ def run(top, py, open_browser=True, port=0, serve_seconds=3600):
     for _ in range(5):  # let the page fetch the final state
         srv.handle_request()
     srv.server_close()
-    print("story-gate: %s" % wz.st["done"]["msg"] if wz.st["done"]["status"] == "ok" else "story-gate setup stopped before the end. Run `story-gate init` again to continue.")
+    if wz.st["done"]["status"] == "ok":
+        print("story-gate: %s\nYour dashboard (a pinned issue on GitHub; it appears a minute or two after setup): %s"
+              % (wz.st["done"]["msg"], wz.dashboard_url()))
+    else:
+        print("story-gate setup stopped before the end. Run `story-gate init` again to continue.")
     return 0 if wz.st["done"]["status"] == "ok" else 1
