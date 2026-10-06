@@ -78,6 +78,9 @@ def setup_files(top, base, py):
             p = line[3:].strip().strip('"')
             if p and (wt / p).is_file() and "__pycache__" not in p:
                 out[p] = (wt / p).read_bytes()
+        cfgf = dest / "config.json"  # an unchanged, already-tracked config is still the one setup's choices go into
+        if cfgf.is_file():
+            out.setdefault(".story-gate/config.json", cfgf.read_bytes())
         return out
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(top), capture_output=True)

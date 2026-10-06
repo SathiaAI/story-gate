@@ -3253,6 +3253,19 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(sent, ["OPENROUTER_API_KEY"]); self.assertIn('"judge_mode": "full"', wz.st["key"]["msg"])
         self.assertTrue(wz.objective)
 
+    def test_skip_key_reaches_a_config_already_on_the_default_branch(self):
+        """A tracked, unchanged config.json is still in the setup PR, so "Skip for now" can't be silently lost."""
+        S = self.S
+        (self.top / ".story-gate").mkdir()
+        (self.top / ".story-gate/config.json").write_text(json.dumps({"mode": "warn", "x": 1}))
+        for a in (["add", "-A"], ["commit", "-qm", "cfg"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        files = S.setup_files(self.top, "main", sys.executable)
+        self.assertIn(".story-gate/config.json", files)
+        self.assertTrue(S.run_without_judge(files))
+        c = json.loads(files[".story-gate/config.json"])
+        self.assertEqual((c["judge_mode"], c["x"]), ("objective", 1))  # the owner's other settings are kept
+
     def test_setup_pr_keeps_the_judge_by_default(self):
         G, S = self.G, self.S
         got = {}
