@@ -41,6 +41,14 @@ class Version(unittest.TestCase):
         for f in ("plugin.json", ".claude-plugin/plugin.json", "plugin/.claude-plugin/plugin.json", "gemini-extension.json"):
             self.assertEqual(json.loads((ROOT / f).read_text(encoding="utf-8"))["version"], gate, f)
 
+    def test_windows_one_liner_uses_the_form_that_works_in_powershell_5(self):
+        """In Windows PowerShell 5.1, `powershell -c "irm URL | iex"` hands iex an empty string (seen on a real PC);
+        `iex (irm URL)` works. The README and the installer's own header must use the working form."""
+        for f in ("README.md", "install.ps1"):
+            text = (ROOT / f).read_text(encoding="utf-8")
+            self.assertIn('-c "iex (irm https://raw.githubusercontent.com/SathiaAI/story-gate/', text, f)
+            self.assertNotIn("install.ps1 | iex", text, f)
+
     def test_text_files_check_out_with_lf_everywhere(self):
         """Git for Windows checks text out with CRLF by default; the signed hashes are for LF files, so .gitattributes pins LF."""
         lines = [l.strip() for l in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
