@@ -288,7 +288,8 @@ class Wizard:
             return
         self.objective = True
         self.set("key", "ok", "Skipped: story-gate will run without an AI judge. It still checks the plan, runs your tests and "
-                 "the story's scenarios, and needs your approval. Add a key any time to turn the judge on.")
+                 "the story's scenarios, and needs your approval. To turn the judge on later, add a key and set \"judge_mode\": "
+                 "\"full\" in a pull request.")
 
     # ---- step 4: setup pull request, then branch rules after the merge
     def check_approvers(self, text):
@@ -537,7 +538,7 @@ def page(wz):
          "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"
          "<p class=hint>No key? <button class=link onclick=\"go('nokey')\">Skip for now</button> and story-gate runs without an AI "
          "judge: it still checks the plan, runs your tests and needs your approval, but nothing checks that the code really does "
-         "what the story asks. You can add a key later.</p>"),
+         "what the story asks. To turn the judge on later: add a key, then set <code>\"judge_mode\": \"full\"</code> in a pull request.</p>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
          "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
          "<label class=lbl>Who else can approve work? <b class=opt>Optional</b><span>GitHub usernames with write access to this repository. "

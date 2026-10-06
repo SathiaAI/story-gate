@@ -801,7 +801,7 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
             why.append("ACs proved only on the agent's computer (local-only scenarios; CI did not run them): %s. This blocks "
                        "unless accept_concerns is on; better, make the scenario runnable in CI" % ", ".join(local))
         out["scenarios_prove_acs"] = ("FAIL" if gone or not ids or broken else "CONCERNS" if local else "PASS", " | ".join(why))
-    if truncated:
+    if truncated and not objective(c):  # the size limit is the judge's; without one a person reviews the whole diff anyway
         out["evidence_complete"] = ("CONCERNS", "the change is too large for one judge pass; split the story or get a human review of the whole diff")
     return out
 

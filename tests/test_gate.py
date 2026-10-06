@@ -4561,6 +4561,16 @@ class TestObjectiveMode(Base):
         finally:
             os.environ.pop("STORY_GATE_ROOT")
 
+    def test_large_diff_needs_no_judge_pass_in_objective_mode(self):
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        g = load_gate(self.repo)
+        try:
+            sd, c = g.sdir("SAT-1"), g.cfg()
+            self.assertIn("evidence_complete", g.struct_done(sd, "SAT-1", [], c, truncated=True, write=False))
+            self.assertNotIn("evidence_complete", g.struct_done(sd, "SAT-1", [], dict(c, judge_mode="objective"), truncated=True, write=False))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
     def test_trust_rules(self):
         import importlib
         sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
