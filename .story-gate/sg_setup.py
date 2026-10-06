@@ -99,6 +99,32 @@ def run_without_judge(files):
     return True
 
 
+def safe_junit_path(jp):
+    """A JUnit report path story-gate will read: a file inside the repository, written relative to it."""
+    jp = (jp or "").strip()
+    parts = jp.replace("\\", "/").split("/")
+    return bool(jp) and not jp.startswith(("/", "\\")) and ":" not in jp and ".." not in parts and parts[-1] not in ("", ".")
+
+
+def pin_junit(files, junit_path, top=None):
+    """Where CI finds each test's own result (a JUnit XML file the test command writes). Needed in objective mode.
+    Left alone when someone already set it. With `top`, a path that resolves outside the repository (a symlinked
+    folder) is refused too, since CI would refuse to read it."""
+    raw, jp = files.get(".story-gate/config.json"), (junit_path or "").strip()
+    if not raw or not safe_junit_path(jp):
+        return False
+    if top is not None:
+        root = os.path.realpath(str(top))
+        if os.path.commonpath([root, os.path.realpath(os.path.join(root, jp.replace("\\", "/")))]) != root:
+            return False
+    c = json.loads(raw.decode("utf-8"))
+    if c.get("junit_path"):
+        return False
+    c["junit_path"] = jp
+    files[".story-gate/config.json"] = (json.dumps(c, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    return True
+
+
 def keep_test_command(files, test_command):
     """CI runs the project's tests wherever a test command was given, even where GitHub can't block merges (then the
     check only reports). Never replaces a command someone already set."""
@@ -149,6 +175,7 @@ class Wizard:
         self.can_enforce = False  # known only after sign-in; unknown stays advisory
         self.test_command = ""  # from `init --test-command`: the project's tests as CI runs them
         self.objective = False  # the owner chose "Skip for now" at the key step: no AI judge
+        self.junit_path = ""  # from `init --junit-path`: the JUnit XML report the test command writes
         import sg_trust as T
         self.found = T.detected_clients()
         self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
@@ -342,6 +369,10 @@ class Wizard:
         blocks = block_merges_in_ci(files, self.test_command) if self.can_enforce else False
         keep_test_command(files, self.test_command)  # after block_merges_in_ci, which only acts on a config nobody tuned
         nojudge = run_without_judge(files) if self.objective else False
+        if self.objective:  # full mode keeps working as before; per-test results are what replace the judge's test check
+            pin_junit(files, self.junit_path, self.top)
+        final = json.loads(files[".story-gate/config.json"].decode("utf-8")) if ".story-gate/config.json" in files else {}
+        junit = final.get("junit_path") if final.get("test_command") else ""
         owners = [self.login] + self.approvers
         co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
               % " ".join("@" + o for o in owners))
@@ -362,7 +393,12 @@ class Wizard:
                    "human approval. It does not check whether the code really does what the story asks, whether the tests "
                    "really cover the planned cases, unplanned extra scope, drift from the PRD or TRD, or work left for later. "
                    "To turn the judge on later: add the `OPENROUTER_API_KEY` repository secret, then set `\"judge_mode\": "
-                   "\"full\"` in a pull request." if nojudge else ""))
+                   "\"full\"` in a pull request." if nojudge else "")
+                + ("\n\nWithout a judge, story-gate needs each test's own result, not just a green test run. "
+                   + ("CI runs `%s` and reads each test's result from `%s`." % (final["test_command"], junit) if junit else
+                      "**Before any story can finish**, set `test_command` (how CI runs your tests), make it write a JUnit XML "
+                      "report, and set `junit_path` to that file in `.story-gate/config.json`, in a pull request of its own.")
+                   if nojudge else ""))
         self.pr = G.open_setup_pr(self.token, self.repo, files, body=body, base=base)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base))
@@ -597,7 +633,7 @@ tick();setInterval(tick,2000)</script>""" % json.dumps(t)
         % (html.escape(wz.repo), cards, wordmark(), js))
 
 
-def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command=""):
+def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command="", junit_path=""):
     repo = github_repo(top)
     if not repo:
         print("story-gate init: this folder's 'origin' isn't a GitHub repository. Open your project folder (the one you push "
@@ -605,6 +641,11 @@ def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command="")
         return 1
     wz = Wizard(top, repo, py, open_browser=open_browser)
     wz.test_command = (test_command or "").strip()
+    wz.junit_path = (junit_path or "").strip()
+    if wz.junit_path and not pin_junit({".story-gate/config.json": b"{}"}, wz.junit_path, top):
+        print("story-gate init: --junit-path must be a file inside the repository, written relative to it and not through a link to outside it (e.g. "
+              "reports/junit.xml). Got: %s" % wz.junit_path)
+        return 1
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(wz))
     url = "http://127.0.0.1:%d/?t=%s" % (srv.server_address[1], wz.secret)
     print("story-gate setup for %s\nOpen this page to continue (it should open by itself):\n  %s\n"

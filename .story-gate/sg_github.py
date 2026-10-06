@@ -211,7 +211,9 @@ def junit(path, max_bytes=5_000_000):
             o = "skipped"
         else:
             o = "passed"
-        for key in {name, (cls + "." + name) if cls else name, (cls + "::" + name) if cls else name}:
+        keys = {name, (cls + "." + name) if cls else name, (cls + "::" + name) if cls else name}
+        keys |= {k.rsplit("[", 1)[0] for k in keys if k.endswith("]") and "[" in k}  # test_x[1], test_x[2] also count as test_x
+        for key in keys:
             if key:  # one name shared by several tests: the worst outcome wins, so a skipped twin never hides behind a pass
                 out[key] = max(out.get(key, o), o, key=RANK.get)
     return out

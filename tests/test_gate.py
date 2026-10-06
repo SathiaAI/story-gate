@@ -3211,7 +3211,6 @@ class TestGuidedSetup(unittest.TestCase):
         G.human_token = lambda: None
         got = {}
         G.device_flow = lambda cid, on_code=None, **kw: got.setdefault("cid", cid) and None
-        S.Wizard._signed_in = lambda self, tok: None
         wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
         wz.start_signin()
         for _ in range(50):
@@ -3252,6 +3251,38 @@ class TestGuidedSetup(unittest.TestCase):
         wz.save_key("sk-or-v1-" + "b" * 40)  # a key after the objective PR doesn't silently claim the judge is on
         self.assertEqual(sent, ["OPENROUTER_API_KEY"]); self.assertIn('"judge_mode": "full"', wz.st["key"]["msg"])
         self.assertTrue(wz.objective)
+
+    def test_setup_pins_the_junit_report(self):
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
+        S.Wizard._wait_merge = lambda self, base: None
+        for jp, tc, objective, expect, says in (
+                ("reports/junit.xml", "pytest --junitxml=reports/junit.xml", True, "reports/junit.xml", "reads each test's result from `reports/junit.xml`"),
+                ("reports/junit.xml", "", True, "reports/junit.xml", "Before any story can finish"),   # no test command: nothing writes it
+                ("", "pytest", True, "", "Before any story can finish"),
+                ("reports/junit.xml", "pytest", False, "", "")):                                      # full mode: unchanged
+            wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+            wz.login, wz.junit_path, wz.test_command, wz.can_enforce = "me", jp, tc, True
+            if objective:
+                wz.skip_key()
+            wz.open_pr()
+            self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["junit_path"], expect)
+            self.assertIn(says, got["body"])
+        for bad in ("/etc/passwd", "../x.xml", "C:\\r.xml", "a/../../b.xml"):
+            self.assertFalse(S.pin_junit({".story-gate/config.json": b"{}"}, bad), bad)  # only a file inside the repository
+        for bad in ("reports/", ".", "a/."):
+            self.assertFalse(S.safe_junit_path(bad), bad)  # a folder is never a report
+        files = {".story-gate/config.json": b'{"junit_path": "mine.xml"}'}
+        self.assertFalse(S.pin_junit(files, "reports/junit.xml"))  # a path someone chose is left alone
+        if os.name != "nt":  # a report folder linked outside the repository is refused, as CI would refuse to read it
+            outside = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, outside, True)
+            os.symlink(outside, self.top / "reports")
+            self.assertFalse(S.pin_junit({".story-gate/config.json": b"{}"}, "reports/junit.xml", self.top))
+            self.assertTrue(S.pin_junit({".story-gate/config.json": b"{}"}, "out/junit.xml", self.top))
+            self.assertEqual(S.run(self.top, sys.executable, open_browser=False, junit_path="reports/junit.xml"), 1)
+        self.assertEqual(S.run(self.top, sys.executable, open_browser=False, junit_path="../x.xml"), 1)  # init says no at once
 
     def test_skip_key_reaches_a_config_already_on_the_default_branch(self):
         """A tracked, unchanged config.json is still in the setup PR, so "Skip for now" can't be silently lost."""
@@ -4597,6 +4628,76 @@ class TestObjectiveMode(Base):
             self.assertNotIn("evidence_complete", g.struct_done(sd, "SAT-1", [], dict(c, judge_mode="objective"), truncated=True, write=False))
         finally:
             os.environ.pop("STORY_GATE_ROOT")
+
+    def test_objective_needs_each_tests_own_result(self):
+        """No judge checks the tests, so a green suite alone never proves an AC: its test must show its own pass."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "tests").mkdir(); (self.repo / "tests/test_x.py").write_text("def test_ac1_x():\n    pass\n")
+        g = load_gate(self.repo)
+        try:
+            sd, c = g.sdir("SAT-1"), g.cfg()
+            obj, green = dict(c, judge_mode="objective"), {"exit_code": 0}
+            self.assertEqual(g.trace(sd, c, green, write=False), [])                     # full mode: unchanged
+            self.assertEqual(g.trace(sd, obj, green, write=False), ["AC-1"])             # objective: green suite isn't enough
+            self.assertEqual(g.trace(sd, obj, green, {"test_ac1_x": "passed"}, write=False), [])
+            self.assertEqual(g.trace(sd, obj, green, {"test_ac1_x": "skipped"}, write=False), ["AC-1"])
+            self.assertEqual(g.trace(sd, obj, green, {"test_other": "passed"}, write=False), ["AC-1"])  # never ran
+            ok, why = g.struct_done(sd, "SAT-1", [], obj, write=False)["traceability"]
+            self.assertFalse(ok); self.assertIn("JUnit XML", why); self.assertIn("junit_path", why)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_junit_report_must_come_from_this_test_run(self):
+        """A report left over, or committed in the PR, never counts: only the one the test run itself writes."""
+        rpt = self.repo / "reports/junit.xml"; rpt.parent.mkdir()
+        ok = '<testsuite><testcase classname="t" name="test_ac1_x"/></testsuite>'
+        rpt.write_text(ok)  # written just before the run: still not this run's report
+        self.cfg(junit_path="reports/junit.xml", test_command=None)
+        run(self.repo, "start", "SAT-1")
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertNotIn("junit", rec); self.assertFalse(rpt.exists())  # last run's untracked report is removed first
+        rpt.write_text(ok)
+        subprocess.run(["git", "add", "-f", str(rpt)], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "report"], cwd=self.repo, check=True, capture_output=True)
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertNotIn("junit", rec); self.assertIn("not written by this test run", rec["junit_error"])  # tracked: kept, ignored
+        w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertEqual(rec["junit"].get("test_ac1_x"), "passed")
+        self.cfg(test_command="%s -c pass" % PY)  # CI: a committed report is removed before the tests run
+        out = self.repo.parent / (self.repo.name + "-ci"); self.addCleanup(shutil.rmtree, out, True)
+        run(self.repo, "ci-tests", str(out))
+        self.assertFalse((out / "junit.xml").exists()); self.assertFalse(rpt.exists())
+        if os.name != "nt":  # a report folder linked outside the repository is never read
+            outside = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, outside, True)
+            shutil.rmtree(self.repo / "reports"); os.symlink(outside, self.repo / "reports")
+            w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
+            self.cfg(test_command=None)
+            run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
+            self.assertTrue((outside / "junit.xml").exists())
+            self.assertNotIn("junit", json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text()))
+
+    def test_junit_path_with_backslashes_finds_the_same_file(self):
+        (self.repo / "reports").mkdir(); (self.repo / "reports/junit.xml").write_text("<testsuite/>")
+        g = load_gate(self.repo)
+        try:
+            self.assertEqual(g.junit_file({"junit_path": "reports\\junit.xml"}), g.ROOT / "reports/junit.xml")
+            self.assertTrue(g.junit_file({"junit_path": "reports\\junit.xml"}).is_file())
+            self.assertIsNone(g.junit_file({"junit_path": ""}))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_parametrized_tests_count_under_their_name(self):
+        sys.path.insert(0, str(SRC))
+        import importlib; G = importlib.import_module("sg_github")
+        p = self.repo / "j.xml"
+        p.write_text('<testsuite><testcase classname="t" name="test_x[1]"/><testcase classname="t" name="test_x[2]"/></testsuite>')
+        self.assertEqual(G.ref_outcome("test_x", G.junit(p)), "passed")
+        p.write_text('<testsuite><testcase classname="t" name="test_x[1]"/><testcase classname="t" name="test_x[2]"><failure/></testcase></testsuite>')
+        self.assertEqual(G.ref_outcome("test_x", G.junit(p)), "failed")  # one failing case fails the test
 
     def test_trust_rules(self):
         import importlib
