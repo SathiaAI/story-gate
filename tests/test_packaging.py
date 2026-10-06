@@ -41,6 +41,11 @@ class Version(unittest.TestCase):
         for f in ("plugin.json", ".claude-plugin/plugin.json", "plugin/.claude-plugin/plugin.json", "gemini-extension.json"):
             self.assertEqual(json.loads((ROOT / f).read_text(encoding="utf-8"))["version"], gate, f)
 
+    def test_text_files_check_out_with_lf_everywhere(self):
+        """Git for Windows checks text out with CRLF by default; the signed hashes are for LF files, so .gitattributes pins LF."""
+        lines = [l.strip() for l in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+        self.assertIn("* text=auto eol=lf", lines)
+
     def test_installers_are_safe_by_construction(self):
         """Pinned source, fail on errors, official uv installer only, and no sudo or admin rights."""
         sh, ps = (ROOT / "install.sh").read_text(encoding="utf-8"), (ROOT / "install.ps1").read_text(encoding="utf-8")
@@ -70,6 +75,21 @@ class Build(unittest.TestCase):
         _skip_if_network(self, p)
         return p
 
+    def test_signed_release_verifies_from_the_wheel(self):
+        """What people install (the wheel) carries release.json and its signature, and they check out against the release key."""
+        if not (SRC / "release.json.sig").is_file():
+            self.skipTest("this checkout is not a signed release")
+        out = self.tmp / "dist"
+        p = self.run_uv("build", "--wheel", "-o", str(out))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        wheel = next(out.glob("*.whl"))
+        zipfile.ZipFile(wheel).extractall(self.tmp / "w")
+        import sys
+        sys.path.insert(0, str(SRC))
+        import sg_trust as T
+        man = T.verify_release(self.tmp / "w" / "story_gate" / "_payload")
+        self.assertEqual(man["version"], _ver((SRC / "gate.py").read_text(), r'^VERSION\s*=\s*"([^"]+)"'))
+
     def test_wheel_contents(self):
         out = self.tmp / "dist"
         p = self.run_uv("build", "--wheel", "-o", str(out))
@@ -80,6 +100,7 @@ class Build(unittest.TestCase):
         expect = {"story_gate/cli.py", "story_gate/__init__.py", "story_gate/_payload/PROTOCOL.md", "story_gate/_payload/SKILL.md"}
         expect |= {"story_gate/_payload/" + f.name for f in SRC.glob("*.py")}
         expect |= {"story_gate/_payload/vendor/" + f.name for f in (SRC / "vendor").iterdir() if f.is_file()}
+        expect |= {"story_gate/_payload/" + f for f in ("release.json", "release.json.sig") if (SRC / f).is_file()}
         self.assertIn("story_gate/_payload/gate.py", expect)
         self.assertEqual(sorted(expect - names), [])
         for n in names:

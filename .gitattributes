@@ -1,0 +1,4 @@
+# Every text file is stored and checked out with LF line endings, on every OS.
+# The signed release (.story-gate/release.json) lists each runtime file's exact hash, so a CRLF
+# checkout (Git for Windows' default, core.autocrlf=true) would fail the signature check.
+* text=auto eol=lf
