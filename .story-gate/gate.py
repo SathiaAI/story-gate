@@ -1091,7 +1091,9 @@ def cmd_record_tests(sid, argv):
         sys.exit("story-gate: %s staged differently from the working copy. Tests must run on exactly what you will commit: "
                  "stage everything (git add) or unstage it, then re-run record-tests." % ", ".join(split[:5]))
     jf = junit_file(c)
-    before = jf.stat().st_mtime_ns if jf and jf.is_file() else None  # an existing report counts only if this run rewrites it
+    if jf and jf.is_file() and not zlist("ls-files", "--", repo_rel(jf)):
+        jf.unlink()  # an untracked report is the last run's output: remove it so only this run's report can count
+    before = jf.stat().st_mtime_ns if jf and jf.is_file() else None  # a tracked one counts only if this run rewrites it
     t0 = time.time()
     try:
         r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,

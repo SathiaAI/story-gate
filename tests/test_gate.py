@@ -4623,7 +4623,13 @@ class TestObjectiveMode(Base):
         run(self.repo, "start", "SAT-1")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
         rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
-        self.assertNotIn("junit", rec); self.assertIn("not written by this test run", rec["junit_error"])
+        self.assertNotIn("junit", rec); self.assertFalse(rpt.exists())  # last run's untracked report is removed first
+        rpt.write_text(ok)
+        subprocess.run(["git", "add", "-f", str(rpt)], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "report"], cwd=self.repo, check=True, capture_output=True)
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertNotIn("junit", rec); self.assertIn("not written by this test run", rec["junit_error"])  # tracked: kept, ignored
         w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
         rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
