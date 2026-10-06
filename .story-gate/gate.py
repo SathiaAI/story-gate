@@ -1090,6 +1090,8 @@ def cmd_record_tests(sid, argv):
     if split:
         sys.exit("story-gate: %s staged differently from the working copy. Tests must run on exactly what you will commit: "
                  "stage everything (git add) or unstage it, then re-run record-tests." % ", ".join(split[:5]))
+    jf = junit_file(c)
+    before = jf.stat().st_mtime_ns if jf and jf.is_file() else None  # an existing report counts only if this run rewrites it
     t0 = time.time()
     try:
         r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
@@ -1100,7 +1102,7 @@ def cmd_record_tests(sid, argv):
     rec = {"command": argv if isinstance(argv, str) else " ".join(argv), "exit_code": code, "seconds": round(time.time() - t0, 1),
            "head": git("rev-parse", "HEAD").strip(), "fingerprint": work_fingerprint(), "at": now(), "output_tail": tail}
     jf = junit_file(c)
-    if jf and jf.is_file() and jf.stat().st_mtime < t0 - 1:
+    if jf and jf.is_file() and jf.stat().st_mtime_ns == before:
         rec["junit_error"] = "%s was not written by this test run, so it was ignored" % c["junit_path"]  # an old or committed report
     elif jf and jf.is_file():
         import sg_github as G

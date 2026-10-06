@@ -4618,7 +4618,7 @@ class TestObjectiveMode(Base):
         """A report left over, or committed in the PR, never counts: only the one the test run itself writes."""
         rpt = self.repo / "reports/junit.xml"; rpt.parent.mkdir()
         ok = '<testsuite><testcase classname="t" name="test_ac1_x"/></testsuite>'
-        rpt.write_text(ok); os.utime(rpt, (time.time() - 3600, time.time() - 3600))
+        rpt.write_text(ok)  # written just before the run: still not this run's report
         self.cfg(junit_path="reports/junit.xml", test_command=None)
         run(self.repo, "start", "SAT-1")
         run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
