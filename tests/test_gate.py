@@ -4632,6 +4632,14 @@ class TestObjectiveMode(Base):
         out = self.repo.parent / (self.repo.name + "-ci"); self.addCleanup(shutil.rmtree, out, True)
         run(self.repo, "ci-tests", str(out))
         self.assertFalse((out / "junit.xml").exists()); self.assertFalse(rpt.exists())
+        if os.name != "nt":  # a report folder linked outside the repository is never read
+            outside = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, outside, True)
+            shutil.rmtree(self.repo / "reports"); os.symlink(outside, self.repo / "reports")
+            w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
+            self.cfg(test_command=None)
+            run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
+            self.assertTrue((outside / "junit.xml").exists())
+            self.assertNotIn("junit", json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text()))
 
     def test_parametrized_tests_count_under_their_name(self):
         sys.path.insert(0, str(SRC))

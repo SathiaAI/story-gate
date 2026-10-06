@@ -410,6 +410,12 @@ def sections(text):
     return out
 
 
+def junit_file(c):
+    """The JUnit report to read, or None: only a file whose real path is inside the repository (no symlink out)."""
+    jp = c.get("junit_path")
+    return ROOT / jp if jp and repo_rel(jp) is not None else None
+
+
 def repo_rel(path):
     """Resolve a path the way the filesystem will (symlinks, '..', case on Windows/macOS) -> repo-relative posix or None."""
     p = str(path).replace("\\", "/")
@@ -1093,13 +1099,13 @@ def cmd_record_tests(sid, argv):
         code, tail = -1, repr(e)
     rec = {"command": argv if isinstance(argv, str) else " ".join(argv), "exit_code": code, "seconds": round(time.time() - t0, 1),
            "head": git("rev-parse", "HEAD").strip(), "fingerprint": work_fingerprint(), "at": now(), "output_tail": tail}
-    jp = c.get("junit_path")
-    if jp and (ROOT / jp).is_file() and (ROOT / jp).stat().st_mtime < t0 - 1:
-        rec["junit_error"] = "%s was not written by this test run, so it was ignored" % jp  # an old or committed report
-    elif jp and (ROOT / jp).is_file():
+    jf = junit_file(c)
+    if jf and jf.is_file() and jf.stat().st_mtime < t0 - 1:
+        rec["junit_error"] = "%s was not written by this test run, so it was ignored" % c["junit_path"]  # an old or committed report
+    elif jf and jf.is_file():
         import sg_github as G
         try:
-            rec["junit"] = G.junit(ROOT / c["junit_path"])
+            rec["junit"] = G.junit(jf)
         except Exception as e:
             rec["junit_error"] = str(e)
     wj(sdir(sid) / "test_results.json", rec)
@@ -2274,9 +2280,9 @@ def cmd_ci_tests(out_dir):
     if not cmd:
         rec.update({"exit_code": None, "error": "no test_command configured"})
     else:
-        jp = c.get("junit_path")
-        if jp and (ROOT / jp).is_file() or jp and (ROOT / jp).is_symlink():
-            (ROOT / jp).unlink()  # a report committed in the PR never counts: only the one this test run writes
+        jf = junit_file(c)
+        if jf and jf.is_file():
+            jf.unlink()  # a report committed in the PR never counts: only the one this test run writes
         t0 = time.time()
         try:
             r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3000)
@@ -2284,9 +2290,9 @@ def cmd_ci_tests(out_dir):
         except Exception as e:
             rec.update({"exit_code": -1, "output_tail": repr(e)})
         rec["seconds"] = round(time.time() - t0, 1)
-        jp = c.get("junit_path")
-        if jp and (ROOT / jp).is_file():
-            junit = (ROOT / jp).read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
+        jf = junit_file(c)
+        if jf and jf.is_file():
+            junit = jf.read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
     print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
     scen = None
     sid = story_id(c)  # the story's scenarios run here too: PR code, no secrets
