@@ -3253,6 +3253,24 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(sent, ["OPENROUTER_API_KEY"]); self.assertIn('"judge_mode": "full"', wz.st["key"]["msg"])
         self.assertTrue(wz.objective)
 
+    def test_setup_pins_the_junit_report(self):
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
+        S.Wizard._wait_merge = lambda self, base: None
+        for jp, expect, says in (("reports/junit.xml", "reports/junit.xml", "CI reads them from `reports/junit.xml`"),
+                                 ("", "", "Before any story can finish")):
+            wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+            wz.login, wz.junit_path = "me", jp
+            wz.skip_key(); wz.open_pr()
+            self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["junit_path"], expect)
+            self.assertIn(says, got["body"])
+        for bad in ("/etc/passwd", "../x.xml", "C:\\r.xml", "a/../../b.xml"):
+            self.assertFalse(S.pin_junit({".story-gate/config.json": b"{}"}, bad), bad)  # only a file inside the repository
+        files = {".story-gate/config.json": b'{"junit_path": "mine.xml"}'}
+        self.assertFalse(S.pin_junit(files, "reports/junit.xml"))  # a path someone chose is left alone
+
     def test_setup_pr_keeps_the_judge_by_default(self):
         G, S = self.G, self.S
         got = {}
@@ -4568,6 +4586,24 @@ class TestObjectiveMode(Base):
             sd, c = g.sdir("SAT-1"), g.cfg()
             self.assertIn("evidence_complete", g.struct_done(sd, "SAT-1", [], c, truncated=True, write=False))
             self.assertNotIn("evidence_complete", g.struct_done(sd, "SAT-1", [], dict(c, judge_mode="objective"), truncated=True, write=False))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_objective_needs_each_tests_own_result(self):
+        """No judge checks the tests, so a green suite alone never proves an AC: its test must show its own pass."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "tests").mkdir(); (self.repo / "tests/test_x.py").write_text("def test_ac1_x():\n    pass\n")
+        g = load_gate(self.repo)
+        try:
+            sd, c = g.sdir("SAT-1"), g.cfg()
+            obj, green = dict(c, judge_mode="objective"), {"exit_code": 0}
+            self.assertEqual(g.trace(sd, c, green, write=False), [])                     # full mode: unchanged
+            self.assertEqual(g.trace(sd, obj, green, write=False), ["AC-1"])             # objective: green suite isn't enough
+            self.assertEqual(g.trace(sd, obj, green, {"test_ac1_x": "passed"}, write=False), [])
+            self.assertEqual(g.trace(sd, obj, green, {"test_ac1_x": "skipped"}, write=False), ["AC-1"])
+            self.assertEqual(g.trace(sd, obj, green, {"test_other": "passed"}, write=False), ["AC-1"])  # never ran
+            ok, why = g.struct_done(sd, "SAT-1", [], obj, write=False)["traceability"]
+            self.assertFalse(ok); self.assertIn("JUnit XML", why); self.assertIn("junit_path", why)
         finally:
             os.environ.pop("STORY_GATE_ROOT")
 

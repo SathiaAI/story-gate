@@ -23,7 +23,7 @@ Commands (run from the repo root):
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
   try [--no-browser]                 see story-gate catch a bug in two minutes: a throwaway example, no setup, no network
-  init [--test-command CMD]          guided setup in your browser: sign in, the AI's own login, judge key, one pull request.
+  init [--test-command CMD] [--junit-path FILE]  guided setup in your browser: sign in, the AI's own login, judge key, one pull request.
                                      CMD runs the project's tests on a clean Linux machine (CI); with it, a red check blocks merges
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
   feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
@@ -730,6 +730,8 @@ def trace(sd, c, tr, results=None, write=True):
             outcomes = {r: G.ref_outcome(r, results) for r in refs}
             ok = bool(refs) and len(found) == len(refs) and all(o == "passed" for o in outcomes.values())  # in our test files AND passed
             res = ", ".join("%s=%s" % kv for kv in outcomes.items()) or "—"
+        elif objective(c):  # no judge checks the tests, so "the suite passed" isn't proof each planned test ran
+            ok, res = False, "no per-test results"
         else:
             ok = bool(refs) and len(found) == len(refs) and suite == "GREEN"
             res = suite
@@ -776,7 +778,10 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
     code = [f for f in diff_files if not exempt(f, c)]
     out["code_changed"] = (bool(code), "no code changes found against base")
     miss = trace(sd, c, tr, results, write)
-    out["traceability"] = (not miss, "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
+    out["traceability"] = (not miss, ("objective mode (no AI judge) needs each test's own result, not just a green suite: make the "
+                                      "test command write a JUnit XML report and set junit_path to it (ACs not proven: %s)" % ", ".join(miss))
+                           if objective(c) and results is None else
+                           "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
     if (c.get("validation") or {}).get("required", True):
         import sg_validation as V
         vm = V.sections_missing(rd(sd / "validation.md"))
@@ -3381,6 +3386,9 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     s_ = J.settings(c)
     if objective(c):
         print("  judge: objective mode - no AI judge (the owner chose this). Not checked: " + "; ".join(OBJECTIVE_LIMITS))
+        if not c.get("junit_path"):
+            print("  junit_path: NOT SET - in objective mode no story can finish until the test command writes a JUnit XML "
+                  "report and junit_path points to it")
     else:
         print("  judge: provider=%s model=%s key=%s" % (s_["provider"], s_.get("model"), "set" if J.env_key(s_.get("key_env", "")) else "NOT SET (%s)" % s_.get("key_env")))
     if objective(c):
@@ -3548,7 +3556,7 @@ def main(argv):
             return 1
         import sg_setup
         return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest,
-                            test_command=kv.get("test-command", ""))
+                            test_command=kv.get("test-command", ""), junit_path=kv.get("junit-path", ""))
     if cmd == "try":
         return cmd_try(open_="--no-browser" not in rest)
     if cmd == "runtime-path":
