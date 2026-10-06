@@ -101,14 +101,14 @@ Using a different judge? See [Fallbacks](#fallbacks).
 
 **Manual D · Set up your computer for AI tools** (steps 2 and 3; only if AI tools run on your computer)
 ```bash
-python3 .story-gate/gate.py install --user   # once per computer; checks the release signature first
+story-gate install --user                     # once per computer, from the installed (signed) story-gate; checks the signature first
 python3 .story-gate/gate.py setup-agent       # opens GitHub: click Create, then Install on your repos
 python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output into the AI tool's terminal
 ```
 - `install --user` also adds a **`story-gate` command** (in the runtime's `bin` folder; add that folder to your PATH to type it). It runs the verified copy, so AI tools use `story-gate start`, `story-gate score` and so on instead of the repository's `gate.py`. If it isn't on PATH, story-gate's messages print the full command.
 - At the start of each AI session in an enrolled repository, story-gate tells the agent how to work with it, from the verified copy (Claude Code, Codex, Cursor, Gemini) and asks it to follow them over repository files. It's guidance, not a lock: the hooks and CI do the enforcing. Codex asks you to trust the new hook once (`/hooks`).
 - `story-gate doctor` warns when the rules on your default branch got **weaker** since this computer last accepted them (enforce to warn, lower thresholds, newly allowed project hooks, more exempt files...). If it was intended, run `story-gate enroll` to accept. A pull request that loosens the rules gets the same plain-English list in its story-gate check. The same warning appears to you when an AI session starts (Claude Code, Codex, Gemini; in Cursor the agent is asked to pass it on).
-- **Signed releases:** from v0.7.0, every release is signed, and `install --user` prints "Signature: valid" before it installs anything. A copy that isn't a signed release (a development checkout) stops with "NOT installed: no signed release"; `--unsigned` installs it anyway, and doctor reports it as unsigned.
+- **Signed releases:** from v0.7.0, every release is signed, and `install --user` prints "Signature: valid" before it installs anything. Run it with the `story-gate` command from the one-line installer (or `uv tool install`): that copy carries the signature. The repository's own `.story-gate/gate.py` and a development checkout have none, so they stop with "NOT installed: no signed release"; `--unsigned` installs them anyway, and doctor reports the copy as unsigned.
 - `install --user` copies a signed, fingerprint-checked story-gate into your user folder, turns on the hooks in each tool's **user** settings, and enrolls this repository. It prints every change first with `--dry-run`, keeps backups, and `uninstall --user` undoes it. Codex asks you to trust the new hooks once (`/hooks`).
 - It prints the release key fingerprint. It must match **`SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4`** (also on the release page).
 - It also turns on the **checkout filter** in this repository (and in each repository you `enroll`, nowhere else): when git writes an AI tool's hook file, you get the version your default branch approved, minus any command it didn't. Settings live in the repository's own `.git` folder, never in a commit.

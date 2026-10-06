@@ -3378,15 +3378,17 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     except Exception:
         print("  agent App: none (only needed when AI tools run on this computer: gate.py setup-agent)")
     if not dash_shown and (repo or origin_repo()):  # no --repo or no token: still say where the dashboard is
-        show_dashboard(repo or origin_repo())
+        show_dashboard(repo or origin_repo(), checked=False)
     return 1 if ((strict or prove) and (fails if strict else "prove" in fails)) else 0
 
 
 # ------------------------------------------------------------------ main
-def show_dashboard(repo):
+def show_dashboard(repo, checked=True):
+    """checked=False: no GitHub token, so whether the repository has Issues on wasn't checked; say where else to look."""
     import sg_dashboard as D, sg_github as G
-    print("  dashboard: %s  (the pinned 'Story-gate dashboard' issue; on this computer: %s)"
-          % (D.issue_url(repo, G.WEB), gate_cmd("dashboard --open")))
+    print("  dashboard: %s  (the pinned 'Story-gate dashboard' issue; on this computer: %s)%s"
+          % (D.issue_url(repo, G.WEB), gate_cmd("dashboard --open"),
+             "" if checked else "\n             If Issues are turned off in this repository, it's in each story-gate-dashboard run's summary on GitHub (Actions)."))
 
 
 def origin_repo():

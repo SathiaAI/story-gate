@@ -874,6 +874,7 @@ class TestDoctorDashboard(Base):
         r = run(self.repo, "doctor")
         self.assertIn("dashboard: https://github.com/me/proj/issues?q=is%3Aissue+label%3Astory-gate-dashboard", r.stdout, r.stdout + r.stderr)
         self.assertEqual(r.stdout.count("dashboard: https://"), 1)
+        self.assertIn("If Issues are turned off in this repository", r.stdout)  # not checked without a token: say where else to look
 
 
 class TestSignedSetup(unittest.TestCase):
