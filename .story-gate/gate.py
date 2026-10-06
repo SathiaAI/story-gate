@@ -778,8 +778,11 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
     code = [f for f in diff_files if not exempt(f, c)]
     out["code_changed"] = (bool(code), "no code changes found against base")
     miss = trace(sd, c, tr, results, write)
-    out["traceability"] = (not miss, ("objective mode (no AI judge) needs each test's own result, not just a green suite: make the "
-                                      "test command write a JUnit XML report and set junit_path to it (ACs not proven: %s)" % ", ".join(miss))
+    out["traceability"] = (not miss, ("objective mode (no AI judge) needs each test's own result, not just a green suite: %s "
+                                      "(ACs not proven: %s)" % (
+                                          "the test run didn't leave a readable JUnit XML report at %s; make the test command write it there"
+                                          % c["junit_path"] if c.get("junit_path") else
+                                          "make the test command write a JUnit XML report and set junit_path to it", ", ".join(miss)))
                            if objective(c) and results is None else
                            "ACs whose tests (tests.json test_refs) are missing from the current test files or did not pass: " + ", ".join(miss))
     if (c.get("validation") or {}).get("required", True):
@@ -1090,7 +1093,10 @@ def cmd_record_tests(sid, argv):
         code, tail = -1, repr(e)
     rec = {"command": argv if isinstance(argv, str) else " ".join(argv), "exit_code": code, "seconds": round(time.time() - t0, 1),
            "head": git("rev-parse", "HEAD").strip(), "fingerprint": work_fingerprint(), "at": now(), "output_tail": tail}
-    if c.get("junit_path") and (ROOT / c["junit_path"]).is_file():
+    jp = c.get("junit_path")
+    if jp and (ROOT / jp).is_file() and (ROOT / jp).stat().st_mtime < t0 - 1:
+        rec["junit_error"] = "%s was not written by this test run, so it was ignored" % jp  # an old or committed report
+    elif jp and (ROOT / jp).is_file():
         import sg_github as G
         try:
             rec["junit"] = G.junit(ROOT / c["junit_path"])
@@ -2268,6 +2274,9 @@ def cmd_ci_tests(out_dir):
     if not cmd:
         rec.update({"exit_code": None, "error": "no test_command configured"})
     else:
+        jp = c.get("junit_path")
+        if jp and (ROOT / jp).is_file() or jp and (ROOT / jp).is_symlink():
+            (ROOT / jp).unlink()  # a report committed in the PR never counts: only the one this test run writes
         t0 = time.time()
         try:
             r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3000)

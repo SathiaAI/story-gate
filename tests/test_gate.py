@@ -3211,7 +3211,6 @@ class TestGuidedSetup(unittest.TestCase):
         G.human_token = lambda: None
         got = {}
         G.device_flow = lambda cid, on_code=None, **kw: got.setdefault("cid", cid) and None
-        S.Wizard._signed_in = lambda self, tok: None
         wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
         wz.start_signin()
         for _ in range(50):
@@ -3259,17 +3258,25 @@ class TestGuidedSetup(unittest.TestCase):
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
         G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
         S.Wizard._wait_merge = lambda self, base: None
-        for jp, expect, says in (("reports/junit.xml", "reports/junit.xml", "CI reads them from `reports/junit.xml`"),
-                                 ("", "", "Before any story can finish")):
+        for jp, tc, objective, expect, says in (
+                ("reports/junit.xml", "pytest --junitxml=reports/junit.xml", True, "reports/junit.xml", "reads each test's result from `reports/junit.xml`"),
+                ("reports/junit.xml", "", True, "reports/junit.xml", "Before any story can finish"),   # no test command: nothing writes it
+                ("", "pytest", True, "", "Before any story can finish"),
+                ("reports/junit.xml", "pytest", False, "", "")):                                      # full mode: unchanged
             wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
-            wz.login, wz.junit_path = "me", jp
-            wz.skip_key(); wz.open_pr()
+            wz.login, wz.junit_path, wz.test_command, wz.can_enforce = "me", jp, tc, True
+            if objective:
+                wz.skip_key()
+            wz.open_pr()
             self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["junit_path"], expect)
             self.assertIn(says, got["body"])
         for bad in ("/etc/passwd", "../x.xml", "C:\\r.xml", "a/../../b.xml"):
             self.assertFalse(S.pin_junit({".story-gate/config.json": b"{}"}, bad), bad)  # only a file inside the repository
+        for bad in ("reports/", ".", "a/."):
+            self.assertFalse(S.safe_junit_path(bad), bad)  # a folder is never a report
         files = {".story-gate/config.json": b'{"junit_path": "mine.xml"}'}
         self.assertFalse(S.pin_junit(files, "reports/junit.xml"))  # a path someone chose is left alone
+        self.assertEqual(S.run(self.top, sys.executable, open_browser=False, junit_path="../x.xml"), 1)  # init says no at once
 
     def test_setup_pr_keeps_the_judge_by_default(self):
         G, S = self.G, self.S
@@ -4606,6 +4613,34 @@ class TestObjectiveMode(Base):
             self.assertFalse(ok); self.assertIn("JUnit XML", why); self.assertIn("junit_path", why)
         finally:
             os.environ.pop("STORY_GATE_ROOT")
+
+    def test_junit_report_must_come_from_this_test_run(self):
+        """A report left over, or committed in the PR, never counts: only the one the test run itself writes."""
+        rpt = self.repo / "reports/junit.xml"; rpt.parent.mkdir()
+        ok = '<testsuite><testcase classname="t" name="test_ac1_x"/></testsuite>'
+        rpt.write_text(ok); os.utime(rpt, (time.time() - 3600, time.time() - 3600))
+        self.cfg(junit_path="reports/junit.xml", test_command=None)
+        run(self.repo, "start", "SAT-1")
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertNotIn("junit", rec); self.assertIn("not written by this test run", rec["junit_error"])
+        w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
+        run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
+        rec = json.loads((self.repo / ".story-gate/stories/SAT-1/test_results.json").read_text())
+        self.assertEqual(rec["junit"].get("test_ac1_x"), "passed")
+        self.cfg(test_command="%s -c pass" % PY)  # CI: a committed report is removed before the tests run
+        out = self.repo.parent / (self.repo.name + "-ci"); self.addCleanup(shutil.rmtree, out, True)
+        run(self.repo, "ci-tests", str(out))
+        self.assertFalse((out / "junit.xml").exists()); self.assertFalse(rpt.exists())
+
+    def test_parametrized_tests_count_under_their_name(self):
+        sys.path.insert(0, str(SRC))
+        import importlib; G = importlib.import_module("sg_github")
+        p = self.repo / "j.xml"
+        p.write_text('<testsuite><testcase classname="t" name="test_x[1]"/><testcase classname="t" name="test_x[2]"/></testsuite>')
+        self.assertEqual(G.ref_outcome("test_x", G.junit(p)), "passed")
+        p.write_text('<testsuite><testcase classname="t" name="test_x[1]"/><testcase classname="t" name="test_x[2]"><failure/></testcase></testsuite>')
+        self.assertEqual(G.ref_outcome("test_x", G.junit(p)), "failed")  # one failing case fails the test
 
     def test_trust_rules(self):
         import importlib
