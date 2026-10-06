@@ -3230,6 +3230,49 @@ class TestGuidedSetup(unittest.TestCase):
         (rt / "active.json").write_text(json.dumps({"dir": str(rt / "0.4.0")}))
         self.assertEqual(C.runtime_launcher(), rt / "launch.py")
 
+    def test_skip_key_runs_without_a_judge(self):
+        """"Skip for now": the setup PR's config chooses objective mode and the PR says what that leaves unchecked."""
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
+        G.pr_merged = lambda tok, repo, n: False
+        S.Wizard._wait_merge = lambda self, base: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        wz.skip_key()
+        self.assertEqual(wz.st["key"]["status"], "ok"); self.assertIn("without an AI judge", wz.st["key"]["msg"])
+        wz.open_pr()
+        self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["judge_mode"], "objective")
+        self.assertIn("No AI judge (objective mode)", got["body"]); self.assertIn("does not check whether the code really does", got["body"])
+        wz.skip_key()  # too late once the PR is open: its config is already written
+        self.assertEqual(wz.st["key"]["status"], "error")
+        sent = []
+        G.set_repo_secret = lambda tok, repo, name, value: sent.append(name)
+        wz.save_key("sk-or-v1-" + "b" * 40)  # a key after the objective PR doesn't silently claim the judge is on
+        self.assertEqual(sent, ["OPENROUTER_API_KEY"]); self.assertIn('"judge_mode": "full"', wz.st["key"]["msg"])
+        self.assertTrue(wz.objective)
+
+    def test_setup_pr_keeps_the_judge_by_default(self):
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
+        S.Wizard._wait_merge = lambda self, base: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        wz.open_pr()
+        self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["judge_mode"], "full")
+        self.assertNotIn("objective", got["body"])
+        self.assertFalse(S.run_without_judge({}))
+
+    def test_setup_page_offers_skip(self):
+        wz = self.S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        port = self.serve(wz)
+        self.assertIn("Skip for now", self.S.page(wz))
+        self.req(port, "/nokey?t=" + wz.secret, b"")
+        self.assertTrue(wz.objective); self.assertEqual(wz.st["key"]["status"], "ok")
+
 
 class TestHermesHooks(Base):
     """Hermes: hook output it understands (exit 2 blocks a tool call; pre_verify reads JSON)."""
@@ -4447,6 +4490,110 @@ class TestTryAndDefaults(unittest.TestCase):
         html = page.read_text(encoding="utf-8")
         self.assertIn("TRY-1: Bulk discount on orders", html)
         self.assertIn("10 items get the discount", html)
+
+
+class TestObjectiveMode(Base):
+    """judge_mode "objective": the owner chose to run without an AI judge. Only checks story-gate verifies itself decide."""
+
+    def ready(self):
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())
+
+    def test_objective_passes_on_structure_and_ignores_self_scores(self):
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready(self_score=0.1, drift="spec_should_change")  # self-scores are ignored
+        r = run(self.repo, "score", "SAT-1", "ready")
+        v = self.ready()
+        self.assertEqual((v["judge"], v["overall"]), ("objective", "PASS"), r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        semantic = [k for k in g.READY_Q if k in v["checks"]]
+        self.assertGreater(len(semantic), 3)
+        for k in semantic:
+            self.assertEqual(v["checks"][k]["status"], "NOT_JUDGED", k)
+        self.assertNotIn("judge_available", v["checks"])
+        self.assertIn("NOT JUDGED (objective mode", r.stdout)
+        self.assertIn("whether the code really does what the story asks", v["judge_note"])
+
+    def test_objective_still_fails_on_structure(self):
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1")
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertEqual(self.ready()["overall"], "FAIL"); self.assertNotEqual(r.returncode, 0)
+
+    def test_full_mode_without_a_key_still_blocks(self):
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        for f in ("ready.self.json", "done.self.json"):
+            (self.repo / ".story-gate/stories/SAT-1" / f).unlink()
+        r = run(self.repo, "score", "SAT-1", "ready")
+        v = self.ready()
+        self.assertEqual((v["judge"], v["overall"]), ("none", "FAIL"), r.stdout)
+        self.assertEqual(v["checks"]["judge_available"]["status"], "FAIL")
+
+    def test_unknown_judge_mode_fails_closed(self):
+        self.cfg(judge_mode="off")
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("judge_mode", r.stdout + r.stderr)
+
+    def test_waivers_do_not_touch_unjudged_checks(self):
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        k = sorted(g.READY_Q)[0]
+        run(self.repo, "waive", "SAT-1", k, "--by", "Paul", "--reason", "pilot")
+        run(self.repo, "score", "SAT-1", "ready")
+        v = self.ready()
+        self.assertEqual((v["checks"][k]["status"], v["overall"]), ("NOT_JUDGED", "PASS"))
+
+    def test_switching_mode_rescores_and_only_objective_config_trusts_objective(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        full, obj = dict(g.DEFAULT_CONFIG), dict(g.DEFAULT_CONFIG, judge_mode="objective")
+        self.assertNotEqual(g.policy_fingerprint(full), g.policy_fingerprint(obj))
+        self.assertTrue(g.can_pass("objective", obj)); self.assertFalse(g.can_pass("objective", full))
+        self.assertFalse(g.can_pass("none", obj))
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        run(self.repo, "score", "SAT-1", "ready")
+        self.cfg(judge_mode="full")
+        g = load_gate(self.repo)
+        try:
+            c, sd = g.cfg(), g.sdir("SAT-1")
+            self.assertFalse(g.passed(self.ready(), c, sd))  # an objective verdict never counts once the judge is back on
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_trust_rules(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
+        self.assertIn("the AI judge no longer checks the work (judge_mode: objective)", T.weaker({}, {"judge_mode": "objective"}))
+        self.assertIn("the AI judge no longer checks the work (judge_mode: objective)", T.weaker({"judge_mode": "full"}, {"judge_mode": "objective"}))
+        self.assertEqual(T.weaker({"judge_mode": "objective"}, {"judge_mode": "full"}), [])  # turning the judge on is stricter
+        self.assertEqual(T.tighten({"judge_mode": "objective"}, {"judge_mode": "full"})["judge_mode"], "full")
+        self.assertEqual(T.tighten({"judge_mode": "full"}, {"judge_mode": "objective"})["judge_mode"], "full")  # a branch can't drop it
+        self.assertEqual(T.tighten({"judge_mode": "objective"}, {})["judge_mode"], "objective")
+
+    def test_checkpoint_and_doctor_say_objective(self):
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        r = run(self.repo, "checkpoint", "SAT-1")
+        self.assertIn("skipped (objective mode", r.stdout)
+        self.assertIn("objective mode - no AI judge", run(self.repo, "doctor").stdout)
+
+    def test_ci_labels_objective_and_reads_the_mode_from_the_base_branch(self):
+        (self.repo / "app.py").write_text("x = 9\n")
+        self.cfg(judge_mode="objective")
+        r = run(self.repo, "ci")
+        self.assertIn("objective mode", r.stdout)
+        td = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, td, True)
+        (td / "config.json").write_text(json.dumps({"mode": "warn"}))  # the base branch keeps the judge on
+        r = run(self.repo, "ci", env={"STORY_GATE_TRUSTED_DIR": str(td)})
+        self.assertNotIn("objective mode", r.stdout)  # the PR's own config can't switch the judge off
+
+    def test_dashboard_and_report_label(self):
+        sys.path.insert(0, str(SRC))
+        import importlib; D = importlib.import_module("sg_dashboard")
+        self.assertIn("checked without a judge", D.pill("PASS", {"judge": "objective"}))
+        self.assertNotIn("without a judge", D.pill("PASS", {"judge": "jev"}))
+        self.assertEqual(D.no_judge(None), "")
 
 
 if __name__ == "__main__":

@@ -189,6 +189,9 @@ DEFAULT_CONFIG = {
     "test_globs": ["**/test_*.py", "**/*_test.py", "**/tests/**", "**/test/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/*Test.java", "**/*_test.go"],
     "spec_files": [],
     "thresholds": {"pass": 0.7, "concerns": 0.4},
+    # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
+    # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
+    "judge_mode": "full",
     "judge": {"provider": "openrouter", "emulated_allow_pass": False,
               "allow_self_judge_pass": False, "max_chars": 90000},
     "approvers": [],
@@ -338,6 +341,8 @@ def cfg():
                 c[k] = v
     if c.get("mode") not in ("warn", "enforce"):
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
+    if c.get("judge_mode") not in ("full", "objective"):
+        raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:
         raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)
@@ -500,6 +505,7 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
+                       "jm": c.get("judge_mode", "full"),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
 
 
@@ -574,8 +580,12 @@ def calibrated(c):
 
 
 def judge(phase, state, c, sd, skip=()):
-    """Score semantic checks with the configured judge; else agent self-scores from <phase>.self.json."""
+    """Score semantic checks with the configured judge; else agent self-scores from <phase>.self.json.
+    In objective mode no judge is asked and self-scores are ignored: the semantic checks are reported NOT JUDGED."""
     qs_text = {k: v for k, v in (READY_Q if phase == "ready" else DONE_Q).items() if k not in skip}
+    if objective(c):
+        return {"judge": "objective", "not_judged": sorted(qs_text), "drift": "none", "provider": None, "model": None,
+                "judge_note": "objective mode: no AI judge (the owner chose this). Not checked: " + "; ".join(OBJECTIVE_LIMITS)}
     questions = {k: {"type": "noul", "instructions": v} for k, v in qs_text.items()}
     choices = DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE
     questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and the PRD/TRD point?",
@@ -610,9 +620,19 @@ def judge(phase, state, c, sd, skip=()):
     return {"judge": "none", "scores": {}, "drift": "architect_must_decide", "drift_conf": 0.0, "jev_error": jerr}
 
 
+OBJECTIVE_LIMITS = ("whether the code really does what the story asks", "whether the tests really cover the planned cases",
+                    "unplanned extra scope", "drift from the PRD or TRD", "work left for later")
+
+
+def objective(c):
+    return c.get("judge_mode") == "objective"
+
+
 def can_pass(judge_name, c):
     if judge_name in ("jev", "emulated-calibrated"):
         return True
+    if judge_name == "objective":
+        return objective(c)  # chosen by the owner in config; a missing key in full mode never lands here
     return judge_name == "self" and bool((c.get("judge") or {}).get("allow_self_judge_pass"))  # never widens emulated
 
 
@@ -797,6 +817,8 @@ def verdict(structural, judged, decisions, waivers, c):
     for k, (ok, why) in structural.items():
         st = ok if isinstance(ok, str) else ("PASS" if ok else "FAIL")
         checks[k] = {"status": st, "why": "" if st == "PASS" else why, "kind": "structural"}
+    for k in judged.get("not_judged", []):  # objective mode: shown, never counted as passed or failed
+        checks[k] = {"status": "NOT_JUDGED", "why": "objective mode: no AI judge", "kind": "objective", "group": CHECK_GROUP.get(k, "")}
     for k, p in judged.get("scores", {}).items():
         st = band(p, th)
         if st == "PASS" and not can_pass(judged["judge"], c):
@@ -816,7 +838,7 @@ def verdict(structural, judged, decisions, waivers, c):
         else:
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
     for k, w in waivers.items():
-        if k in checks and checks[k]["status"] != "PASS" and checks[k]["kind"] != "structural":
+        if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED") and checks[k]["kind"] != "structural":
             checks[k]["status"], checks[k]["why"] = "WAIVED", "waived by %s: %s%s" % (w["by"], w["reason"], "" if w.get("_trusted") else " (proposal: needs a code owner's approval in CI)")
     sts = [v["status"] for v in checks.values()]
     overall = ("FAIL" if "FAIL" in sts else "ESCALATED" if "ESCALATED" in sts else
@@ -1427,7 +1449,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
     wj(sd / ("%s.json" % phase), v)
-    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED")]
+    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
     if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
@@ -1470,6 +1492,11 @@ def cmd_checkpoint(sid, quiet=False):
     """Mid-story Jev check: per-AC progress, on course?, drift, deferrals, tests keeping pace. Never blocks by itself."""
     c = cfg()
     sd = sdir(sid)
+    if objective(c):  # no AI judge by the owner's choice: nothing to ask, and saying "judge unavailable" would mislead
+        res = {"story": sid, "at": now(), "status": "UNKNOWN", "error": "objective mode: no AI judge, so no mid-story check"}
+        if not quiet:
+            print("story-gate %s CHECKPOINT: skipped (objective mode: no AI judge)" % sid)
+        return res
     mx = int(c["judge"].get("max_chars", 90000))
     _, files, diff = diff_against(c["base_branch"])
     items = acs(sd)
@@ -1566,8 +1593,11 @@ def print_verdict(v):
     if v.get("judge_note"):
         print("  note: " + v["judge_note"])
     for k, x in sorted(v["checks"].items(), key=lambda kv: (kv[1].get("group", ""), kv[0])):
-        if x["status"] != "PASS":
+        if x["status"] not in ("PASS", "NOT_JUDGED"):
             print("  %-10s %-24s %s" % (x["status"], k, x.get("why") or "score=%s" % x.get("score")))
+    nj = [k for k, x in v["checks"].items() if x["status"] == "NOT_JUDGED"]
+    if nj:
+        print("  NOT JUDGED (objective mode, no AI judge): %s" % ", ".join(sorted(nj)))
     w = v.get("writing") or {}
     if w.get("score") is not None:
         print("  writing    plain-English score %.2f (target %.2f, STE-style proxy)" % (w["score"], w.get("target", 0.8)))
@@ -1702,7 +1732,7 @@ def next_step(sid, c):
             done.append(label)
     rv = load_v(sid, "ready")
     if not passed(rv, c, sd):
-        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED")]
+        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED")]
         if rv and not stale(rv, c, sd) and bad:
             return done, "READY is %s on: %s. Fix those (see `%s`), then run `%s`." % (
                 rv.get("overall"), ", ".join(bad), gate_cmd("status " + sid), gate_cmd("score %s ready" % sid))
@@ -1738,7 +1768,7 @@ def next_step(sid, c):
         done.append(label)
     dv = load_v(sid, "done")
     if not passed(dv, c, sd):
-        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED")]
+        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED")]
         if dv and not stale(dv, c, sd) and bad:
             return done, "DONE is %s on: %s. Fix the cause (don't skip the check), then run `%s`." % (
                 dv.get("overall"), ", ".join(bad), gate_cmd("score %s done" % sid))
@@ -2268,7 +2298,7 @@ def cmd_ci(tests_dir=None):
     """Job 2 (has the judge key, runs no PR code): re-score READY and DONE with CI's own test results,
     verify human acceptance through GitHub, report clearly whether merges are actually blocked."""
     import sg_github as G
-    problems, notes, code, enforce = [], [], [], True
+    problems, notes, code, enforce, c = [], [], [], True, {}
     sid = None
     try:
         c = cfg()
@@ -2373,7 +2403,7 @@ def cmd_ci(tests_dir=None):
                 base_owners = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
                                or git("show", "%s:docs/CODEOWNERS" % base))
                 accepted = G.acceptance(ctx, token, base_owners, c.get("approvers") or [])  # owners from the base branch
-            if not J.available(c):
+            if not objective(c) and not J.available(c):
                 problems.append("judge unavailable in CI (%s). Add the judge key as a repository secret%s." % (
                     J.settings(c).get("key_env"), "; PRs from forks never get secrets, so a maintainer must re-run the check" if (ctx or {}).get("fork") else ""))
             elif not sd.exists():
@@ -2383,7 +2413,7 @@ def cmd_ci(tests_dir=None):
                     cmd_score(sid, ph, base, ci_trust=accepted["accepted"], results=results if ph == "done" else None, quiet=True)
                     v = load_v(sid, ph)
                     if not passed(v, c):
-                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED")]
+                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]
                         problems.append("%s %s gate is %s: %s" % (sid, ph.upper(), (v or {}).get("overall", "missing"), "; ".join(bad)[:900]))
             if ctx and token and c.get("require_independent_review"):
                 try:
@@ -2410,7 +2440,12 @@ def cmd_ci(tests_dir=None):
     for n in notes:
         if not n.startswith("This PR makes story-gate's rules weaker"):  # already printed as a warning
             print("::notice title=story-gate::%s" % n)
-    lines = ["## story-gate %s" % ("- %s" % sid if sid else ""), ""]
+    lines = ["## story-gate %s%s" % ("- %s" % sid if sid else "", " (objective mode: no AI judge)" if objective(c) else ""), ""]
+    if objective(c) and code:
+        lines += ["> **Checked without an AI judge.** story-gate ran your tests and every scenario itself and checked the story's "
+                  "paperwork, but nobody independently checked: %s. Add a judge key to check those too (see the guide: "
+                  "judge_mode)." % "; ".join(OBJECTIVE_LIMITS), ""]
+        print("::notice title=story-gate: objective mode::Checked without an AI judge. Not checked: %s." % "; ".join(OBJECTIVE_LIMITS))
     lines += ["> **%s**" % n for n in notes] + [""]
     if problems:
         lines += ["- [ ] %s" % p for p in problems]
@@ -3344,8 +3379,13 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     if not users:
         fails.append("codeowners")
     s_ = J.settings(c)
-    print("  judge: provider=%s model=%s key=%s" % (s_["provider"], s_.get("model"), "set" if J.env_key(s_.get("key_env", "")) else "NOT SET (%s)" % s_.get("key_env")))
-    if J.available(c):
+    if objective(c):
+        print("  judge: objective mode - no AI judge (the owner chose this). Not checked: " + "; ".join(OBJECTIVE_LIMITS))
+    else:
+        print("  judge: provider=%s model=%s key=%s" % (s_["provider"], s_.get("model"), "set" if J.env_key(s_.get("key_env", "")) else "NOT SET (%s)" % s_.get("key_env")))
+    if objective(c):
+        pass
+    elif J.available(c):
         t0 = time.time()
         r = J.ask(c, {"ping": "story-gate doctor"}, {"ok": {"type": "noul", "instructions": "This is a connectivity test; answer yes."}})
         tier = r.get("tier")

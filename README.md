@@ -189,6 +189,8 @@ story-gate works with your tests and your review bot. It runs your tests itself 
 
 **Is my code sent anywhere?** Yes, to the judge you chose (OpenRouter by default). For each check it gets that story's evidence: the story and its context, the test plan, the scenarios (what each one runs and expects), `validation.md`, the handoff, the learnings, and the code changes. If you set up a webhook, control-hub or a command to receive events, it gets story-gate's events: verdicts, progress and learnings. Your AI coding tool already sends far more to its own model.
 
+**Can I try it without a judge key?** Yes. Click **Skip for now** at the key step. story-gate then runs in objective mode: it still checks the plan, runs your tests and the story's scenarios in CI, and needs your approval, but nothing checks that the code really does what the story asks. Every result says **checked without a judge**. Add a key later to turn the judge on ([how](docs/guide.md#fallbacks)).
+
 **I'm on a free GitHub plan with a private repository.** GitHub doesn't enforce "must be approved" there. story-gate still checks every pull request and marks it **ADVISORY**.
 
 <details>
