@@ -23,7 +23,8 @@ Commands (run from the repo root):
   upgrade [--ref REF | --from DIR | --url https://...] | rollback   (run with the installed runtime) verified upgrade / go back
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
   try [--no-browser]                 see story-gate catch a bug in two minutes: a throwaway example, no setup, no network
-  init                               guided setup in your browser: sign in, the AI's own login, judge key, one pull request
+  init [--test-command CMD]          guided setup in your browser: sign in, the AI's own login, judge key, one pull request.
+                                     CMD runs the project's tests on a clean Linux machine (CI); with it, a red check blocks merges
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
   feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
   plan <ID> --title T [--feature F]  add a story to the backlog (not started; queued once READY passes)
@@ -3506,7 +3507,8 @@ def main(argv):
             print("story-gate init: run this inside your project folder (a git repository connected to GitHub).")
             return 1
         import sg_setup
-        return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest)
+        return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest,
+                            test_command=kv.get("test-command", ""))
     if cmd == "try":
         return cmd_try(open_="--no-browser" not in rest)
     if cmd == "runtime-path":
