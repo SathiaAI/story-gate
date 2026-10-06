@@ -78,10 +78,39 @@ def setup_files(top, base, py):
             p = line[3:].strip().strip('"')
             if p and (wt / p).is_file() and "__pycache__" not in p:
                 out[p] = (wt / p).read_bytes()
+        cfgf = dest / "config.json"  # an unchanged, already-tracked config is still the one setup's choices go into
+        if cfgf.is_file():
+            out.setdefault(".story-gate/config.json", cfgf.read_bytes())
         return out
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(top), capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_without_judge(files):
+    """The owner skipped the judge key: the setup PR turns on objective mode (only the checks story-gate can verify itself
+    decide). Choosing it in the reviewed config, not detecting a missing key, keeps a lost key failing closed."""
+    raw = files.get(".story-gate/config.json")
+    if not raw:
+        return False
+    c = json.loads(raw.decode("utf-8"))
+    c["judge_mode"] = "objective"
+    files[".story-gate/config.json"] = (json.dumps(c, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    return True
+
+
+def keep_test_command(files, test_command):
+    """CI runs the project's tests wherever a test command was given, even where GitHub can't block merges (then the
+    check only reports). Never replaces a command someone already set."""
+    raw, tc = files.get(".story-gate/config.json"), (test_command or "").strip()
+    if not raw or not tc:
+        return False
+    c = json.loads(raw.decode("utf-8"))
+    if c.get("test_command"):
+        return False
+    c["test_command"] = tc
+    files[".story-gate/config.json"] = (json.dumps(c, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    return True
 
 
 def block_merges_in_ci(files, test_command):
@@ -119,6 +148,7 @@ class Wizard:
         self.has_issues = True
         self.can_enforce = False  # known only after sign-in; unknown stays advisory
         self.test_command = ""  # from `init --test-command`: the project's tests as CI runs them
+        self.objective = False  # the owner chose "Skip for now" at the key step: no AI judge
         import sg_trust as T
         self.found = T.detected_clients()
         self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
@@ -260,7 +290,23 @@ class Wizard:
         G.set_repo_secret(self.token, self.repo, "OPENROUTER_API_KEY", key)
         p = G.config_dir() / "judge.env"
         G.write_private(p, "OPENROUTER_API_KEY=%s\n" % key)
+        if self.pr and self.objective:  # the setup PR already says "objective": the key alone doesn't turn the judge on
+            self.set("key", "ok", "Saved. The setup pull request still runs without a judge: after merging it, set "
+                     "\"judge_mode\": \"full\" in .story-gate/config.json in a pull request of its own")
+            return
+        self.objective = False
         self.set("key", "ok", "Saved as a GitHub secret and on this computer (never in the repository)")
+
+    def skip_key(self):
+        """Run without an AI judge (objective mode). Only before the setup PR exists: its config records the choice."""
+        if self.pr:
+            self.set("key", "error", "The setup pull request is already open, so it's too late to skip here. Add a key, or "
+                     "set \"judge_mode\": \"objective\" in .story-gate/config.json in a pull request after merging.")
+            return
+        self.objective = True
+        self.set("key", "ok", "Skipped: story-gate will run without an AI judge. It still checks the plan, runs your tests and "
+                 "the story's scenarios, and needs your approval. To turn the judge on later, add a key and set \"judge_mode\": "
+                 "\"full\" in a pull request.")
 
     # ---- step 4: setup pull request, then branch rules after the merge
     def check_approvers(self, text):
@@ -294,6 +340,8 @@ class Wizard:
         git(self.top, "fetch", "--quiet", "origin", base)
         files = setup_files(self.top, base, self.py)
         blocks = block_merges_in_ci(files, self.test_command) if self.can_enforce else False
+        keep_test_command(files, self.test_command)  # after block_merges_in_ci, which only acts on a config nobody tuned
+        nojudge = run_without_judge(files) if self.objective else False
         owners = [self.login] + self.approvers
         co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
               % " ".join("@" + o for o in owners))
@@ -308,7 +356,13 @@ class Wizard:
                    + ("To block them, set `test_command` (how CI runs your tests) and `\"enforce_points\": [\"ci\"]` in "
                       "`.story-gate/config.json`, in a pull request of their own." if self.can_enforce else
                       "GitHub doesn't enforce branch rules on this repository (a private repository on a free plan), so the "
-                      "check marks problems as ADVISORY.")))
+                      "check marks problems as ADVISORY."))
+                + ("\n\n**No AI judge (objective mode).** You skipped the judge key, so `\"judge_mode\": \"objective\"` is set. "
+                   "story-gate still checks the plan's structure, runs the tests and the story's scenarios in CI, and needs a "
+                   "human approval. It does not check whether the code really does what the story asks, whether the tests "
+                   "really cover the planned cases, unplanned extra scope, drift from the PRD or TRD, or work left for later. "
+                   "To turn the judge on later: add the `OPENROUTER_API_KEY` repository secret, then set `\"judge_mode\": "
+                   "\"full\"` in a pull request." if nojudge else ""))
         self.pr = G.open_setup_pr(self.token, self.repo, files, body=body, base=base)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base))
@@ -430,6 +484,8 @@ def make_handler(wz):
             elif act == "key" and wz.token:
                 wz.set("key", "working", "Saving")
                 wz.background(lambda: wz.save_key(form.get("key", [""])[0]))
+            elif act == "nokey" and wz.token:
+                wz.skip_key()
             elif act == "merge" and wz.token:
                 wz.background(lambda: wz.open_pr(form.get("approvers", [""])[0]))
             elif act == "tools":
@@ -467,7 +523,7 @@ main{max-width:760px;margin:6vh auto;padding:0 20px}h1{font:600 40px/1.1 "Clash 
 .n{font:600 28px/1 "Clash Display",system-ui;color:var(--yellow-text);min-width:28px}.step h2{font-size:18px;margin:0 0 4px}.step p{margin:0;color:var(--muted)}
 .step.ok{border-color:#BFE3CF}.step.ok .act{display:none}a{color:var(--graphite)}.step.ok .n{color:var(--ok)}.step.error{border-color:var(--error)}.msg{margin-top:8px;font-size:14px}.hint{margin:8px 0 0;font-size:14px;color:var(--muted)}
 button,.btn{background:var(--yellow);color:var(--graphite);border:2px solid var(--graphite);border-radius:10px;padding:10px 16px;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;margin-top:10px}
-button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
+button.link{background:none;border:0;padding:0;margin:0;font-size:inherit;text-decoration:underline;color:var(--graphite)}button:disabled{opacity:.4;cursor:default}input{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;width:min(420px,100%)}
 .lbl{display:block;margin-top:10px;font-weight:600}.lbl span{display:block;font-weight:400;color:var(--muted);font-size:14px}.opt{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:6px;vertical-align:1px}.lbl input{display:block;margin-top:6px}
 .tool{display:block;margin:6px 0}.tool input{width:auto;margin-right:6px}.tool span{color:var(--ok);font-size:13px;margin-left:6px}.tool em{color:var(--muted);font-size:13px;font-style:normal;margin-left:6px}.other{margin:4px 0 0;padding-left:20px;color:var(--muted);font-size:14px}
 .code{font:600 28px/1 ui-monospace,monospace;letter-spacing:.15em;background:var(--paper);padding:8px 12px;border-radius:8px;display:inline-block;margin-top:8px}
@@ -497,7 +553,10 @@ def page(wz):
         ("key", "Add the judge key", "Make a key at <a href='https://openrouter.ai/keys' target=_blank>openrouter.ai/keys</a> and paste it here. "
          "It goes straight into a GitHub secret; your AI never sees it.",
          "<form onsubmit=\"event.preventDefault();go('key',new URLSearchParams(new FormData(this)))\"><input name=key type=password "
-         "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"),
+         "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"
+         "<p class=hint>No key? <button class=link onclick=\"go('nokey')\">Skip for now</button> and story-gate runs without an AI "
+         "judge: it still checks the plan, runs your tests and needs your approval, but nothing checks that the code really does "
+         "what the story asks. To turn the judge on later: add a key, then set <code>\"judge_mode\": \"full\"</code> in a pull request.</p>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
          "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
          "<label class=lbl>Who else can approve work? <b class=opt>Optional</b><span>GitHub usernames with write access to this repository. "

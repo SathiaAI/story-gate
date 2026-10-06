@@ -566,6 +566,8 @@ def tighten(policy, local):
     out["judge"] = j
     if local.get("require_independent_review"):
         out["require_independent_review"] = True
+    if local.get("judge_mode") == "full":  # this computer may insist on the judge, never drop it
+        out["judge_mode"] = "full"
     w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
     if isinstance(lw, dict):
         if lw.get("enforce") is True:
@@ -624,6 +626,8 @@ def weaker(old, new):
             out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
+    if (o.get("judge_mode") or "full") == "full" and n.get("judge_mode") == "objective":
+        out.append("the AI judge no longer checks the work (judge_mode: objective)")
     if (o.get("validation") or {}).get("required", True) and not (n.get("validation") or {}).get("required", True):
         out.append("validation (validation.md and scenario runs for every acceptance criterion) no longer required")
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))

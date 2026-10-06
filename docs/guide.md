@@ -344,7 +344,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | Setting | Default | What changing it does |
 |---|---|---|
 | `mode` | `"warn"` | `"enforce"` blocks at every point below. `"warn"` reports everything and blocks nothing |
-| `enforce_points` | `[]` (setup sets `["ci"]`, and `test_command`, when all of these hold: the repository is public or on a paid plan, the AI gave `init --test-command`, and nobody has set `mode`, `enforce_points` or `test_command` already) | Block only at the listed points while still in warn mode: `"ci"`, `"pre_edit"`, `"checkpoint"`, `"stop"`. With `["ci"]`, a red story-gate check blocks the merge, and the AI's live checks only warn |
+| `enforce_points` | `[]` (setup saves `test_command` whenever the AI gave `init --test-command`, and sets `["ci"]` when all of these hold: the repository is public or on a paid plan, the AI gave `init --test-command`, and nobody has set `mode`, `enforce_points` or `test_command` already) | Block only at the listed points while still in warn mode: `"ci"`, `"pre_edit"`, `"checkpoint"`, `"stop"`. With `["ci"]`, a red story-gate check blocks the merge, and the AI's live checks only warn |
 | `accept_concerns` | `false` | `true` lets CONCERNS count as passing. Not recommended |
 | `test_command`, `junit_path` | empty | Pin the real test suite (e.g. `pytest --junitxml=reports/junit.xml`). **Strongly recommended:** CI runs exactly this |
 | `spec_files` | empty | PRD/TRD files to fingerprint at READY (also taken from a `repo` source) |
@@ -352,6 +352,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
+| `judge_mode` | `"full"` | `"objective"` runs without an AI judge (setup's **Skip for now** sets it). See [Fallbacks](#fallbacks). Switching to it is reported as a weaker rule in the PR check |
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
 | `judge.temperature` | not sent | Sent to an `openai-compatible` judge only if you set it. Some reasoning models reject it |
@@ -398,6 +399,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 | **An API key at all** | A ChatGPT, SuperGrok or Claude subscription doesn't include API access, and Cursor has no model API, so none of them can be the judge. Without a key: |
 | **Any judge** | Structural checks, real test runs and traceability still apply. A human reviews the rest. Nothing PASSES on its own |
 | **Judge credit or availability** | The check says "judge unavailable" and blocks. It never quietly passes |
+| **Any judge, and you want it to pass anyway** | Choose **objective mode**: click **Skip for now** at the key step in setup, or set `"judge_mode": "objective"` in a pull request. Then only the checks story-gate verifies itself decide: the plan's structure, CI's own test and scenario runs, and traceability, plus a human approval. The check, the dashboard and the validation page all say **checked without a judge**. It does **not** check whether the code really does what the story asks, whether the tests really cover the planned cases, unplanned extra scope, drift from the PRD or TRD, or work left for later. To turn the judge on: add the `OPENROUTER_API_KEY` repository secret, then set `"judge_mode": "full"` in a pull request. A lost or expired key in full mode still blocks; only the owner's written choice turns the judge off |
 | **A paid GitHub plan** (private repo) | Everything runs, but merges aren't blocked. Every check says **ADVISORY – NOT ENFORCED**, and the audit job flags unapproved merges |
 
 ## Known limits

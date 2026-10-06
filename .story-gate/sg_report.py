@@ -215,7 +215,8 @@ def to_html(f):
         return ('<div class="col-6 col-md-3"><div class="card sg-kpi"><div class="card-body"><div class="subheader">%s</div>'
                 '<div class="h1">%s</div><div class="sg-est">%s</div></div></div></div>' % (
                     esc(label), D.pill(st if not stale else None) if st else D.pill(None),
-                    "out of date: the work changed since" if stale else ("not run yet" if not st else "on this exact code")))
+                    "out of date: the work changed since" if stale else ("not run yet" if not st else "on this exact code" + (
+                        ", checked without a judge" if v.get("judge") == "objective" else ""))))
     tr = f.get("tests") or {}
     tests_line = ("no recorded test run" if not tr else "%s · exit %s%s" % (
         "CI's own run" if tr.get("source") == "ci" else "the agent's run", esc(tr.get("exit_code"), 10),

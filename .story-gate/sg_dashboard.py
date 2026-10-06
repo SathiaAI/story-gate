@@ -164,6 +164,11 @@ def verdict(v):
             "waived": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("status") == "WAIVED")}
 
 
+def no_judge(v):
+    """Label for a verdict reached in objective mode: it passed only the checks story-gate verifies itself."""
+    return " (checked without a judge)" if (v or {}).get("judge") == "objective" else ""
+
+
 def trace_acs(text):
     """[(ac_id, verified_bool or None)] from trace.md rows."""
     out = []
@@ -463,8 +468,8 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     stories = ["", "## All stories", "", "| Story | Feature | Stage | READY | DONE | Branch |", "|---|---|---|---|---|---|"]
     for s in d["stories"]:
         stories.append("| %s %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), dict((k, l) for k, l, _ in STATUSES)[s["status"]],
-                                                         (s.get("ready") or {}).get("overall", "—") + (" (out of date)" if s.get("ready_fresh") is False else ""),
-                                                         (s.get("done") or {}).get("overall", "—"), md(s["ref"], 60)))
+                                                         (s.get("ready") or {}).get("overall", "—") + no_judge(s.get("ready")) + (" (out of date)" if s.get("ready_fresh") is False else ""),
+                                                         (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60)))
     footer = ["", "_Managed by story-gate. Edits to this issue are overwritten._"]
     table_chart = ["", "| Stage | Stories |", "|---|---|"] + ["| %s | %d |" % (lab, n) for lab, n in counts]
     # Fixed order on the page; when space runs out, sections are kept by priority (deterministic):
@@ -540,12 +545,12 @@ header.sg-head{border-bottom:3px solid var(--sg-accent)}
 """
 
 
-def pill(v):
+def pill(v, verdict=None):
     if not v:
         return '<span class="sg-pill">—</span>'
     cls = "pass" if v in ("PASS",) else ("fail" if v in ("FAIL", "ESCALATED") else "")
     icon = {"PASS": "✓ ", "FAIL": "✕ ", "ESCALATED": "! ", "CONCERNS": "~ ", "WAIVED": "w "}.get(v, "")
-    return '<span class="sg-pill %s">%s%s</span>' % (cls, icon, h(v, 12))
+    return '<span class="sg-pill %s">%s%s</span>%s' % (cls, icon, h(v, 12), '<span class="sg-est">%s</span>' % no_judge(verdict) if no_judge(verdict) else "")
 
 
 def pill_level(text):
@@ -580,8 +585,8 @@ def to_html(d, artifact_note=""):
         len([s for s in d["stories"] if s["feature"] == f["id"] and s["status"] == "done"])) for f in d.get("features", [])) \
         or '<tr><td colspan="4" class="text-secondary">No features yet. Add one with gate.py feature &lt;ID&gt; --title "…"</td></tr>'
     rows = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (
-        h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], pill((s.get("ready") or {}).get("overall")),
-        pill((s.get("done") or {}).get("overall")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80)) for s in d["stories"]) \
+        h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], pill((s.get("ready") or {}).get("overall"), s.get("ready")),
+        pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80)) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
     notes = ""
     if d.get("conflicts"):
