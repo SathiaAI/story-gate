@@ -78,6 +78,9 @@ def setup_files(top, base, py):
             p = line[3:].strip().strip('"')
             if p and (wt / p).is_file() and "__pycache__" not in p:
                 out[p] = (wt / p).read_bytes()
+        cfgf = dest / "config.json"  # an unchanged, already-tracked config is still the one setup's choices go into
+        if cfgf.is_file():
+            out.setdefault(".story-gate/config.json", cfgf.read_bytes())
         return out
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(top), capture_output=True)
@@ -103,12 +106,17 @@ def safe_junit_path(jp):
     return bool(jp) and not jp.startswith(("/", "\\")) and ":" not in jp and ".." not in parts and parts[-1] not in ("", ".")
 
 
-def pin_junit(files, junit_path):
-    """Where CI finds each test's own result (a JUnit XML file the test command writes). Needed in objective mode, and it
-    makes traceability stricter in full mode too. Left alone when someone already set it."""
+def pin_junit(files, junit_path, top=None):
+    """Where CI finds each test's own result (a JUnit XML file the test command writes). Needed in objective mode.
+    Left alone when someone already set it. With `top`, a path that resolves outside the repository (a symlinked
+    folder) is refused too, since CI would refuse to read it."""
     raw, jp = files.get(".story-gate/config.json"), (junit_path or "").strip()
     if not raw or not safe_junit_path(jp):
         return False
+    if top is not None:
+        root = os.path.realpath(str(top))
+        if os.path.commonpath([root, os.path.realpath(os.path.join(root, jp.replace("\\", "/")))]) != root:
+            return False
     c = json.loads(raw.decode("utf-8"))
     if c.get("junit_path"):
         return False
@@ -347,7 +355,7 @@ class Wizard:
         blocks = block_merges_in_ci(files, self.test_command) if self.can_enforce else False
         nojudge = run_without_judge(files) if self.objective else False
         if self.objective:  # full mode keeps working as before; per-test results are what replace the judge's test check
-            pin_junit(files, self.junit_path)
+            pin_junit(files, self.junit_path, self.top)
         final = json.loads(files[".story-gate/config.json"].decode("utf-8")) if ".story-gate/config.json" in files else {}
         junit = final.get("junit_path") if final.get("test_command") else ""
         owners = [self.login] + self.approvers
@@ -619,8 +627,8 @@ def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command="",
     wz = Wizard(top, repo, py, open_browser=open_browser)
     wz.test_command = (test_command or "").strip()
     wz.junit_path = (junit_path or "").strip()
-    if wz.junit_path and not safe_junit_path(wz.junit_path):
-        print("story-gate init: --junit-path must be a file inside the repository, written relative to it (e.g. "
+    if wz.junit_path and not pin_junit({".story-gate/config.json": b"{}"}, wz.junit_path, top):
+        print("story-gate init: --junit-path must be a file inside the repository, written relative to it and not through a link to outside it (e.g. "
               "reports/junit.xml). Got: %s" % wz.junit_path)
         return 1
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(wz))

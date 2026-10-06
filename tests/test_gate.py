@@ -3276,7 +3276,26 @@ class TestGuidedSetup(unittest.TestCase):
             self.assertFalse(S.safe_junit_path(bad), bad)  # a folder is never a report
         files = {".story-gate/config.json": b'{"junit_path": "mine.xml"}'}
         self.assertFalse(S.pin_junit(files, "reports/junit.xml"))  # a path someone chose is left alone
+        if os.name != "nt":  # a report folder linked outside the repository is refused, as CI would refuse to read it
+            outside = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, outside, True)
+            os.symlink(outside, self.top / "reports")
+            self.assertFalse(S.pin_junit({".story-gate/config.json": b"{}"}, "reports/junit.xml", self.top))
+            self.assertTrue(S.pin_junit({".story-gate/config.json": b"{}"}, "out/junit.xml", self.top))
+            self.assertEqual(S.run(self.top, sys.executable, open_browser=False, junit_path="reports/junit.xml"), 1)
         self.assertEqual(S.run(self.top, sys.executable, open_browser=False, junit_path="../x.xml"), 1)  # init says no at once
+
+    def test_skip_key_reaches_a_config_already_on_the_default_branch(self):
+        """A tracked, unchanged config.json is still in the setup PR, so "Skip for now" can't be silently lost."""
+        S = self.S
+        (self.top / ".story-gate").mkdir()
+        (self.top / ".story-gate/config.json").write_text(json.dumps({"mode": "warn", "x": 1}))
+        for a in (["add", "-A"], ["commit", "-qm", "cfg"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        files = S.setup_files(self.top, "main", sys.executable)
+        self.assertIn(".story-gate/config.json", files)
+        self.assertTrue(S.run_without_judge(files))
+        c = json.loads(files[".story-gate/config.json"])
+        self.assertEqual((c["judge_mode"], c["x"]), ("objective", 1))  # the owner's other settings are kept
 
     def test_setup_pr_keeps_the_judge_by_default(self):
         G, S = self.G, self.S
