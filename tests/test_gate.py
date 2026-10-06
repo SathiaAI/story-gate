@@ -3137,6 +3137,38 @@ class TestGuidedSetup(unittest.TestCase):
         import sg_dashboard as D
         self.assertEqual(D.issue_url("me/proj"), url)
 
+    def test_merges_are_blocked_from_day_one_where_github_enforces(self):
+        """Public repositories and paid plans: setup turns on enforcement at the PR check only. Free private: stays warn."""
+        S, G = self.S, self.G
+        self.addCleanup(setattr, G, "call", G.call)
+        self.addCleanup(setattr, G, "whoami", G.whoami)
+        for private, plan, expect in ((False, None, True), (True, "pro", True), (True, "free", False), (True, None, False)):
+            info = {"default_branch": "main", "private": private, "permissions": {"admin": True}, "owner": {"login": "me", "type": "User"}}
+            def call(m, path, tok, body=None, info=info, plan=plan):
+                if path.endswith("/proj"):
+                    return 200, info, {}
+                if path == "/user":
+                    return (200, {"plan": {"name": plan}}, {}) if plan else (200, {}, {})
+                return 404, {}, {}
+            G.call, G.whoami = call, (lambda tok: "me")
+            wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+            wz._signed_in("human")
+            self.assertEqual(wz.can_enforce, expect, (private, plan))
+        cfg = {"mode": "warn", "enforce_points": [], "test_command": "", "x": 1}
+        raw = (json.dumps(cfg, indent=1) + "\n").encode()
+        files = {".story-gate/config.json": raw}
+        self.assertFalse(S.block_merges_in_ci(files, ""))   # no test command: CI can't run tests, so nothing would ever merge
+        self.assertEqual(files[".story-gate/config.json"], raw)
+        self.assertTrue(S.block_merges_in_ci(files, "npm ci && npm test"))
+        c = json.loads(files[".story-gate/config.json"])
+        self.assertEqual((c["enforce_points"], c["test_command"], c["mode"]), (["ci"], "npm ci && npm test", "warn"))  # live checks still warn
+        for chosen in ({"mode": "enforce", "enforce_points": []}, {"mode": "warn", "enforce_points": ["stop"]},
+                       {"mode": "warn", "enforce_points": [], "test_command": "pytest"}):
+            files = {".story-gate/config.json": json.dumps(chosen).encode()}
+            self.assertFalse(S.block_merges_in_ci(files, "make test"))  # settings someone chose are left alone
+            self.assertEqual(json.loads(files[".story-gate/config.json"]), chosen)
+        self.assertFalse(S.block_merges_in_ci({}, "make test"))
+
     def test_repository_without_issues_points_to_the_run_summaries(self):
         """Issues off: no dead issue link; the page says where the dashboard is instead."""
         S, G = self.S, self.G

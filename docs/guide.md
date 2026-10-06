@@ -344,7 +344,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | Setting | Default | What changing it does |
 |---|---|---|
 | `mode` | `"warn"` | `"enforce"` blocks at every point below. `"warn"` reports everything and blocks nothing |
-| `enforce_points` | `[]` | Block only at the listed points while still in warn mode: `"ci"`, `"pre_edit"`, `"checkpoint"`, `"stop"` |
+| `enforce_points` | `[]` (setup sets `["ci"]` where GitHub enforces branch rules) | Block only at the listed points while still in warn mode: `"ci"`, `"pre_edit"`, `"checkpoint"`, `"stop"`. With `["ci"]`, a red story-gate check blocks the merge, and the AI's live checks only warn |
 | `accept_concerns` | `false` | `true` lets CONCERNS count as passing. Not recommended |
 | `test_command`, `junit_path` | empty | Pin the real test suite (e.g. `pytest --junitxml=reports/junit.xml`). **Strongly recommended:** CI runs exactly this |
 | `spec_files` | empty | PRD/TRD files to fingerprint at READY (also taken from a `repo` source) |

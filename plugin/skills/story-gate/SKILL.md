@@ -21,9 +21,9 @@ Set story-gate up in the human's own project: the folder they have open. https:/
 
 1. Tell the human what you will run, and wait for a clear yes:
    - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0` (if `uv --version` fails, install uv first with its official installer from astral.sh)
-   - `story-gate init`, in the project folder
+   - `story-gate init --test-command "<command>"`, in the project folder. The command runs the project's tests on a clean Linux machine (GitHub's CI), including installing what they need, e.g. `npm ci && npm test` or `pip install -r requirements.txt && python -m pytest`. Read the project to find it, and show it to the human. With it, a pull request that fails story-gate can't be merged. If the project has no tests yet, leave `--test-command` out: story-gate then only warns.
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
-2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
+2. Run `story-gate init` (with `--test-command` as agreed) in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
 3. The human signs in to GitHub, creates the AI's own login, adds the judge key and merges the setup pull request. Never do these steps for them, and never see or type the key.
 4. When `init` prints that story-gate is protecting the repository, run `story-gate doctor` and report its summary in plain words. Then tell the human where their dashboard is: the link `init` and `doctor` print (the pinned "Story-gate dashboard" issue on GitHub), or `story-gate dashboard --open` on this computer.
 

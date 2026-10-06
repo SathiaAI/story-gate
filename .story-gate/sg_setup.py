@@ -84,6 +84,22 @@ def setup_files(top, base, py):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def block_merges_in_ci(files, test_command):
+    """Where GitHub can enforce branch rules, a red story-gate check blocks the merge from day one: enforce at the PR check
+    ("ci"), while the live checks on the AI's computer still only warn. Only with a test command: without one CI can't run
+    the tests, so every story would fail and nothing could merge. Returns True when the config was changed."""
+    raw = files.get(".story-gate/config.json")
+    if not raw or not (test_command or "").strip():
+        return False
+    c = json.loads(raw.decode("utf-8"))
+    if c.get("mode") != "warn" or c.get("enforce_points") or c.get("test_command"):
+        return False  # someone chose these settings already: leave them
+    c["enforce_points"] = ["ci"]
+    c["test_command"] = test_command.strip()
+    files[".story-gate/config.json"] = (json.dumps(c, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    return True
+
+
 class Wizard:
     """State machine behind the page. Each step records ok / error / waiting; the page polls /state."""
 
@@ -101,6 +117,8 @@ class Wizard:
         self.private = False
         self.org = None  # the repository's owner when it is an organization: the AI's login must belong to it
         self.has_issues = True
+        self.can_enforce = False  # known only after sign-in; unknown stays advisory
+        self.test_command = ""  # from `init --test-command`: the project's tests as CI runs them
         import sg_trust as T
         self.found = T.detected_clients()
         self.clients = [cl for cl, _ in HOOKED_TOOLS if cl in self.found] or ["claude", "codex", "cursor"]
@@ -183,7 +201,9 @@ class Wizard:
         self.has_issues = info.get("has_issues") is not False  # the dashboard is an issue; without Issues it lives in run summaries
         owner = info.get("owner") or {}
         self.org = owner.get("login") if owner.get("type") == "Organization" else None
-        self.private_free = self.private and self._paid(tok, owner) is False
+        paid = self._paid(tok, owner) if self.private else None
+        self.private_free = self.private and paid is False
+        self.can_enforce = not self.private or paid is True  # GitHub enforces branch rules here (public, or a paid plan)
         self.set("signin", "ok", "Signed in as %s" % self.login)
 
     def _paid(self, tok, owner):
@@ -273,12 +293,22 @@ class Wizard:
         base = info["default_branch"]
         git(self.top, "fetch", "--quiet", "origin", base)
         files = setup_files(self.top, base, self.py)
+        blocks = block_merges_in_ci(files, self.test_command) if self.can_enforce else False
         owners = [self.login] + self.approvers
         co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
               % " ".join("@" + o for o in owners))
         files.setdefault(co[0], co[1].encode())
         body = ("This adds story-gate: the settings, the agent instructions and three workflows (the PR check, the audit and the "
-                "dashboard). It was prepared by `story-gate init`. Merge it to finish setup; branch rules are applied right after.")
+                "dashboard). It was prepared by `story-gate init`. Merge it to finish setup; branch rules are applied right after.\n\n"
+                + ("**Merges are blocked until the story-gate check passes**, because GitHub can enforce branch rules on this "
+                   "repository. CI runs the tests with `%s`. Your AI's live checks on your computer warn but don't stop it "
+                   "(`enforce_points: [\"ci\"]` in `.story-gate/config.json`; set `\"mode\": \"enforce\"` to block there too)."
+                   % self.test_command if blocks else
+                   "story-gate starts in **warn** mode: the check reports problems but doesn't block merges. "
+                   + ("To block them, set `test_command` (how CI runs your tests) and `\"enforce_points\": [\"ci\"]` in "
+                      "`.story-gate/config.json`, in a pull request of their own." if self.can_enforce else
+                      "GitHub doesn't enforce branch rules on this repository (a private repository on a free plan), so the "
+                      "check marks problems as ADVISORY.")))
         self.pr = G.open_setup_pr(self.token, self.repo, files, body=body, base=base)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base))
@@ -508,13 +538,14 @@ tick();setInterval(tick,2000)</script>""" % json.dumps(t)
         % (html.escape(wz.repo), cards, wordmark(), js))
 
 
-def run(top, py, open_browser=True, port=0, serve_seconds=3600):
+def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command=""):
     repo = github_repo(top)
     if not repo:
         print("story-gate init: this folder's 'origin' isn't a GitHub repository. Open your project folder (the one you push "
               "to GitHub) and run it there.")
         return 1
     wz = Wizard(top, repo, py, open_browser=open_browser)
+    wz.test_command = (test_command or "").strip()
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(wz))
     url = "http://127.0.0.1:%d/?t=%s" % (srv.server_address[1], wz.secret)
     print("story-gate setup for %s\nOpen this page to continue (it should open by itself):\n  %s\n"
