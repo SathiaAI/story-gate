@@ -3351,6 +3351,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
         print("  judge answered: %s" % ("%s (%d ms)%s" % (tier, (time.time() - t0) * 1000, " - capped at CONCERNS unless calibrated" if tier == "emulated" else "") if tier != "none" else "NO - %s" % r.get("error")))
     else:
         print("  judge: unavailable locally - CI still judges if the repo secret is set; local verdicts can never PASS")
+    dash_shown = False
     if repo:
         tok = G.human_token()
         if tok:
@@ -3361,6 +3362,10 @@ def cmd_doctor(repo=None, strict=False, prove=False):
             st_, info, _ = G.call("GET", "/repos/%s" % repo, tok)
             if st_ == 200 and isinstance(info, dict) and info.get("has_issues") is False:
                 print("  WARNING: Issues are turned off, so the dashboard can't be pinned as an issue. It still appears in each run's summary and report.")
+                dash_shown = True  # no issue link: the warning says where the dashboard is
+            elif st_ == 200:
+                dash_shown = True
+                show_dashboard(repo)
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
@@ -3372,10 +3377,20 @@ def cmd_doctor(repo=None, strict=False, prove=False):
         print("  agent App: %s (key %s)" % (rec["slug"], "private" if G.key_is_private(rec["key"]) else "TOO OPEN - chmod 600"))
     except Exception:
         print("  agent App: none (only needed when AI tools run on this computer: gate.py setup-agent)")
+    if not dash_shown and (repo or origin_repo()):  # no --repo or no token: still say where the dashboard is
+        show_dashboard(repo or origin_repo(), checked=False)
     return 1 if ((strict or prove) and (fails if strict else "prove" in fails)) else 0
 
 
 # ------------------------------------------------------------------ main
+def show_dashboard(repo, checked=True):
+    """checked=False: no GitHub token, so whether the repository has Issues on wasn't checked; say where else to look."""
+    import sg_dashboard as D, sg_github as G
+    print("  dashboard: %s  (the pinned 'Story-gate dashboard' issue; on this computer: %s)%s"
+          % (D.issue_url(repo, G.WEB), gate_cmd("dashboard --open"),
+             "" if checked else "\n             If Issues are turned off in this repository, it's in each story-gate-dashboard run's summary on GitHub (Actions)."))
+
+
 def origin_repo():
     u = git("remote", "get-url", "origin").strip()
     m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", u)

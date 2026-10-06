@@ -112,6 +112,8 @@ Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate ski
 
 <p align="center"><img src="docs/assets/setup-page.png" alt="The setup page in the browser: sign in, give your AI its own login, add the judge key, approve the setup, tick the AI tools to protect. Finished steps show a green tick." width="70%"></p>
 
+**When it's done,** the page shows an **Open your dashboard** button. Your dashboard is a pinned issue in your repository called **Story-gate dashboard** ([see below](#use-the-dashboard)).
+
 **What you need:** a GitHub account, your project on GitHub, and an AI coding tool. Nothing else; your AI installs the rest.
 
 **The judge key (step 4):** make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add some credit. Each check is one small judge call; OpenRouter shows what each one costs. The key goes straight into a GitHub secret, and your AI never sees it.
@@ -127,6 +129,7 @@ Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate ski
 3. Your AI builds it. story-gate checks it stays on course.
 4. Your AI runs the feature for every goal and writes the validation report (DONE).
 5. It opens a pull request. Open the validation page, try the demo steps, then approve on GitHub.
+6. Watch it all on your [dashboard](#use-the-dashboard): GitHub → your repository → **Issues** → **Story-gate dashboard**.
 
 **Habits that pay off:**
 
@@ -219,7 +222,7 @@ When the person asks you to set up story-gate:
 2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0`, then `uv tool update-shell` if `story-gate` isn't found.
 3. In the project folder, run `story-gate init` **in the background**. It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
-5. When it finishes, run `story-gate doctor` and report its summary in plain words.
+5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).
 
 If the setup page reports an error, read it to the person and follow its instructions. Run `story-gate init` again to continue; it skips what is already done on GitHub.
 </details>

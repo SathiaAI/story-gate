@@ -17,6 +17,8 @@ People install story-gate on their computers with `gate.py install --user`. That
 3. Commit both files in a PR of their own; a code owner's approval confirms it. After merge, tag the commit `vX.Y.Z` and paste the fingerprint into the release notes.
 4. Check it: `python3 .story-gate/gate.py install --user --dry-run` must say `Signature: valid`.
 
+**Between releases:** `release.json` lists the exact hash of every runtime file, so it only fits the commit it was signed for. A pull request that changes any runtime file (`.story-gate/*.py`, `PROTOCOL.md`, `SKILL.md`, `vendor/`) deletes `release.json` and `release.json.sig`, which makes `main` a development copy again (installs from it need `--unsigned` and say so). Tagged releases stay signed, and the next release pull request signs again. Two tests fail if a branch keeps a signature that doesn't match its files: `test_the_signed_release_installs_after_its_signature_checks_out` (in `TestTrustedRuntime`, run in CI; it installs this checkout's own signed copy) and `test_signed_release_verifies_from_the_wheel` (in `tests/test_packaging.py`).
+
 **People already on an older version** run the upgrade with their installed copy, so the new release is checked with the key they already trust:
 ```bash
 gate.py upgrade             # from this repository's default branch

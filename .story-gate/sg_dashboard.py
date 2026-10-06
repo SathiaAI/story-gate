@@ -21,6 +21,11 @@ MAX_BLOB = 1_000_000          # bytes per record file
 MAX_STORIES = 2000            # stories per snapshot
 ISSUE_LIMIT = 55_000          # characters (GitHub's issue body limit is about 65,536)
 LABEL = "story-gate-dashboard"
+
+
+def issue_url(repo, web="https://github.com"):
+    """Where people find the dashboard: the repository's pinned issue with story-gate's label (one issue, kept up to date)."""
+    return "%s/%s/issues?q=is%%3Aissue+label%%3A%s" % (web, repo, LABEL)
 STALE_DAYS = 3
 STORY_FILES = ("story.md", "context.md", "tests.json", "ready.json", "done.json", "checkpoints.jsonl", "coder.json", "decisions.jsonl",
                "trace.md", "test_results.json")

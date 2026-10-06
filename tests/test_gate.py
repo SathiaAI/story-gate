@@ -867,6 +867,16 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertNotIn("Put the story-gate changes in their own pull request", out)
 
 
+class TestDoctorDashboard(Base):
+    def test_bare_doctor_says_where_the_dashboard_is(self):
+        """`doctor` with no --repo and no GitHub token still prints the dashboard link, from the origin remote."""
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/me/proj.git"], cwd=self.repo, check=True)
+        r = run(self.repo, "doctor")
+        self.assertIn("dashboard: https://github.com/me/proj/issues?q=is%3Aissue+label%3Astory-gate-dashboard", r.stdout, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("dashboard: https://"), 1)
+        self.assertIn("If Issues are turned off in this repository", r.stdout)  # not checked without a token: say where else to look
+
+
 class TestSignedSetup(unittest.TestCase):
     def test_setup_installs_a_signed_release_without_unsigned(self):
         """init installs a signed release with its signature checked, and falls back to --unsigned only for a development copy."""
@@ -3114,6 +3124,34 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(inst[inst.index("--clients") + 1], "claude,hermes")
         page = S.page(wz)
         self.assertIn("value=hermes checked", page); self.assertIn("Google AI Studio", page); self.assertIn("Who else can approve work?", page); self.assertIn("Any one of you can approve", page)
+
+    def test_finishing_setup_shows_where_the_dashboard_is(self):
+        """The last thing setup shows: an Open your dashboard button, linked to the repository's pinned dashboard issue."""
+        S = self.S
+        wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+        url = "https://github.com/me/proj/issues?q=is%3Aissue+label%3Astory-gate-dashboard"
+        self.assertEqual(wz.snapshot()["dashboard"], url)
+        page = S.page(wz)
+        self.assertIn("Open your dashboard", page); self.assertIn("Story-gate dashboard", page)
+        self.assertIn("s.steps.done.status=='ok'", page)  # shown only once setup has finished
+        import sg_dashboard as D
+        self.assertEqual(D.issue_url("me/proj"), url)
+
+    def test_repository_without_issues_points_to_the_run_summaries(self):
+        """Issues off: no dead issue link; the page says where the dashboard is instead."""
+        S, G = self.S, self.G
+        self.addCleanup(setattr, G, "call", G.call)
+        self.addCleanup(setattr, G, "whoami", G.whoami)
+        for has_issues, expect_link in ((False, False), (True, True)):  # through sign-in, as GitHub reports it
+            info = {"default_branch": "main", "private": False, "permissions": {"admin": True}, "has_issues": has_issues,
+                    "owner": {"login": "me", "type": "User"}}
+            G.call = lambda m, path, tok, body=None, info=info: (200, info, {}) if path.endswith("/proj") else (404, {}, {})
+            G.whoami = lambda tok: "me"
+            wz = S.Wizard(self.top, "me/proj", sys.executable, open_browser=False)
+            wz._signed_in("human")
+            self.assertEqual(bool(wz.snapshot()["dashboard"]), expect_link)
+        page = S.page(wz)
+        self.assertIn("Issues are turned off in this repository", page); self.assertIn("if(s.dashboard)", page)
 
     def test_doctor_checks_the_path_command_without_running_it(self):
         import sg_trust as T

@@ -25,7 +25,7 @@ Set story-gate up in the human's own project: the folder they have open. https:/
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
 2. Run `story-gate init` in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
 3. The human signs in to GitHub, creates the AI's own login, adds the judge key and merges the setup pull request. Never do these steps for them, and never see or type the key.
-4. When `init` prints that story-gate is protecting the repository, run `story-gate doctor` and report its summary in plain words.
+4. When `init` prints that story-gate is protecting the repository, run `story-gate doctor` and report its summary in plain words. Then tell the human where their dashboard is: the link `init` and `doctor` print (the pinned "Story-gate dashboard" issue on GitHub), or `story-gate dashboard --open` on this computer.
 
 If the human only wants to see what story-gate does, run `story-gate try` after the install instead of `init`. It needs no setup and touches nothing in their projects; tell them it opened a validation page with one passing and one failing goal.
 
