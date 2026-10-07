@@ -4880,6 +4880,34 @@ class TestSpecCoverage(Base):
         v, r = self.ready()
         self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", r.stderr); self.assertNotIn("Traceback", r.stderr)
 
+    def test_code_fences_close_only_on_a_matching_marker(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        text = ("### User Story 1 - T\n````\n~~~\n1. **Given** in code, **When** a, **Then** b\n```\n````\n"
+                "1. **Given** real, **When** a, **Then** b\n")
+        self.assertEqual([l for _, l in g.spec_scenarios(text)], ["1. **Given** real, **When** a, **Then** b"])
+
+    def test_template_scenario_names_block(self):
+        (self.repo / "tpl").mkdir()
+        (self.repo / "tpl/spec.md").write_text("#### Scenario: [Scenario Name]\n- **WHEN** x\n")
+        self.link("tpl/spec.md", ["tpl/spec.md#[Scenario Name]"])
+        self.assertIn("template placeholders", self.ready()[0]["checks"]["spec_covered"]["why"])
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "tpl/spec.md").write_text("#### Scenario: <!-- scenario name -->\n- **WHEN** x\n")  # OpenSpec's own template
+        self.link("tpl/spec.md", [])
+        self.assertIn("can't read", self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_done_is_out_of_date_when_the_linked_spec_changes(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "done", g.cfg())
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("with 9 items", "with 8 items"))
+            self.assertNotEqual(before, g.inputs_hash(sd, "done", g.cfg()))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
     def test_missing_scenarios_are_shown_with_their_text(self):
         sk = self.SK
         self.link(sk, [sk + "#US1-1", sk + "#US1-2"])

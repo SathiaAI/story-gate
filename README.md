@@ -182,7 +182,7 @@ story-gate works with your tests and your review bot. It runs your tests itself 
 
 Keep them. They write a good plan. story-gate is the merge gate they don't have: none of them blocks a pull request when the code doesn't do what the spec says.
 
-Link the spec in the story (`spec: specs/001-checkout/spec.md`, or an OpenSpec change folder). story-gate then reads every acceptance scenario in it: Spec Kit's "Given … When … Then" lines and OpenSpec's `#### Scenario:` blocks. The merge is blocked until each scenario is covered by an acceptance criterion with passing tests, a recorded run and your approval. If the AI drops a scenario, or the spec still has template text, the check says which one. [How it works](docs/guide.md#spec-kit-openspec-and-bmad).
+Link the spec in the story (`spec: specs/001-checkout/spec.md`, or an OpenSpec change folder). story-gate then reads every acceptance scenario in it: Spec Kit's "Given … When … Then" lines and OpenSpec's `#### Scenario:` blocks. The merge is blocked until each scenario is assigned to an acceptance criterion, and each acceptance criterion has passing tests, a recorded run and your approval. If the AI drops a scenario, or the spec still has template text, the check says which one. [How it works](docs/guide.md#spec-kit-openspec-and-bmad).
 
 ## FAQ
 

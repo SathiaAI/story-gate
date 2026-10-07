@@ -383,7 +383,7 @@ These tools help your AI write the plan. None of them checks, when a pull reques
    - OpenSpec: each `#### Scenario: <name>` is named by its name.
 3. In `tests.json`, list the scenarios each AC covers: `"covers": ["specs/001-checkout/spec.md#US1-1"]`.
 
-READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). Each AC then needs passing tests and a recorded run as usual, so every scenario reaches the merge with proof. Set `require_spec_link: true` to make every story link a spec.
+READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). Each AC then needs passing tests and a recorded run as usual. story-gate checks that every scenario is assigned to an AC; whether that AC's tests really exercise the scenario is what the AI judge and your review check. Set `require_spec_link: true` to make every story link a spec.
 
 **BMAD:** its file layout is changing (v7), so story-gate doesn't read BMAD files yet. Copy the story's acceptance criteria into `story.md` as usual; everything else applies.
 

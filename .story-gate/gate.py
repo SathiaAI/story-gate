@@ -555,6 +555,8 @@ def inputs_hash(sd, phase, c=None):
         blob += "<config unreadable>"
     if phase == "done":
         blob += "".join(json.dumps(r) for r in jsonl(LEARNINGS) if r.get("story") == sd.name) + work_fingerprint()
+        for e in story_spec_refs(front_matter(rd(sd / "story.md"))):  # the linked spec changed: DONE is out of date
+            blob += e + json.dumps(sorted(linked_scenarios(e)[0].items()))
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
@@ -706,7 +708,7 @@ def struct_ready(sd):
 
 SPECKIT_STORY = re.compile(r"^#{2,4}\s+User Story\s+(\d+)\b", re.I)
 SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
-OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(.+?)\s*$")
+OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(\S.*?)\s*$")
 # lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
 SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
 SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]")
@@ -717,12 +719,15 @@ def spec_scenarios(text, unread=None):
     items under a 'User Story N' heading -> US<N>-<k>. OpenSpec: '#### Scenario: <name>' -> <name>. Code blocks and
     <!-- comments --> are skipped. Lines that look like a scenario but weren't read go into `unread`."""
     text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text.replace("\r\n", "\n"), flags=re.S)
-    out, story, n, fence, in_os = [], None, 0, False, False
+    out, story, n, fence, in_os = [], None, 0, None, False
     for line in text.split("\n"):
-        if line.lstrip().startswith(("```", "~~~")):
-            fence = not fence
+        f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is None and f:
+            fence = f.group(1)  # code block opened: skip until the same marker, at least as long, closes it
             continue
-        if fence:
+        if fence is not None:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
+                fence = None
             continue
         m = OPENSPEC_SCENARIO.match(line)
         if m:
@@ -807,7 +812,9 @@ def spec_coverage(sd, fm, c):
         covers = {x for a in acs_ if isinstance(a, dict) and isinstance(a.get("covers"), list) for x in a["covers"] if isinstance(x, str)}
     except Exception:
         covers = set()
-    holes = [r for r, line in scen.items() if any(ph in line for ph in SPEC_PLACEHOLDERS)]
+    holes = [r for r, line in scen.items() if any(ph in line for ph in SPEC_PLACEHOLDERS)
+             or re.fullmatch(r"[<\[].*[>\]]", r.split("#", 1)[1].strip())]  # '[Scenario Name]', '<name>'
+
     missing = [r for r in scen if r not in covers]
     unknown = sorted(covers - set(scen))
     if holes:
