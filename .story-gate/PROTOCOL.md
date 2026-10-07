@@ -40,6 +40,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
 2. **Intake** (model: `intake`). Fetch the story from the source in `config.json` → `sources`:
    - Linear issue, repo file, control-hub document, or a `command` source (`gate.py source <ID>`).
    - Write it **verbatim** into `story.md`. Fill the front matter: `source`, `depends_on`, `consumers`.
+   - If the story comes from a Spec Kit spec or an OpenSpec change, also add `spec: <path>` (e.g. `specs/001-x/spec.md`, `specs/001-x/spec.md#US1`, or `openspec/changes/<change>`).
    - Don't improve the story here. Gaps are findings, not something to fix silently.
 
 3. ∥ **Context** (model: `context`). Fill `context.md`, quoting only relevant excerpts, each with its source:
@@ -53,6 +54,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
    - Add one entry per acceptance criterion.
    - Each entry needs concrete `positive`, `negative`, `edge` and `regression` cases. For any category that truly doesn't apply, put a reason under `not_applicable.<category>`.
    - Never invent or rewrite acceptance criteria. Put suggestions in `proposed_missing_acs`.
+   - With a linked `spec:`, run `gate.py spec-scenarios <path>` and put each scenario name in the `covers` list of the AC that tests it. Every scenario must be covered.
    - Leave `test_refs` empty for now. They're filled during DONE.
 
 5. `gate.py score <ID> ready`. Jev scores 14 semantic checks plus the drift direction. The structural checks are deterministic.

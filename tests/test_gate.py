@@ -4736,5 +4736,160 @@ class TestObjectiveMode(Base):
         self.assertEqual(D.no_judge(None), "")
 
 
+
+SPECKIT_SPEC = """# Feature Specification: Bulk discount
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Discount on large orders (Priority: P1)
+
+**Acceptance Scenarios**:
+
+1. **Given** a cart with 10 items, **When** the shopper checks out, **Then** the total is 10% lower
+2. **Given** a cart with 9 items, **When** the shopper checks out, **Then** no discount applies
+
+---
+
+### User Story 2 - Show the saving (Priority: P2)
+
+**Acceptance Scenarios**:
+
+1. **Given** a discounted order, **When** the receipt prints, **Then** it shows the saving
+
+```
+1. **Given** an example in a code block, **When** read, **Then** it is ignored
+```
+
+## Requirements *(mandatory)*
+
+1. **Given** text outside a user story, **When** read, **Then** it is ignored
+"""
+
+OPENSPEC_SPEC = """## ADDED Requirements
+### Requirement: Bulk discount
+The checkout SHALL give 10% off orders of 10 or more items.
+
+#### Scenario: Ten items get the discount
+- **WHEN** the cart has 10 items
+- **THEN** the total is reduced by 10%
+
+#### Scenario: Nine items pay full price
+- **WHEN** the cart has 9 items
+- **THEN** no discount is applied
+"""
+
+
+class TestSpecCoverage(Base):
+    """A story that links a Spec Kit or OpenSpec spec must cover every scenario in it with an AC (tests.json `covers`)."""
+
+    SK = "specs/001-bulk-discount/spec.md"
+    OS = "openspec/changes/add-discount"
+
+    def setUp(self):
+        super().setUp()
+        for path, text in ((self.SK, SPECKIT_SPEC), (self.OS + "/specs/checkout/spec.md", OPENSPEC_SPEC),
+                           (self.OS + "/proposal.md", "#### Scenario: not a spec file\n")):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(text)
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+
+    def link(self, spec, covers):
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        st = sd / "story.md"
+        st.write_text(st.read_text().replace("depends_on: []", "spec: %s\ndepends_on: []" % spec, 1))
+        t = json.loads((sd / "tests.json").read_text())
+        t["acceptance_criteria"][0]["covers"] = covers
+        (sd / "tests.json").write_text(json.dumps(t))
+
+    def ready(self):
+        r = run(self.repo, "score", "SAT-1", "ready")
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r
+
+    def test_parser_reads_both_formats_and_skips_noise(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        self.assertEqual([i for i, _ in g.spec_scenarios(SPECKIT_SPEC)], ["US1-1", "US1-2", "US2-1"])  # code blocks, other sections skipped
+        self.assertEqual([i for i, _ in g.spec_scenarios(OPENSPEC_SPEC)], ["Ten items get the discount", "Nine items pay full price"])
+        self.assertEqual(g.spec_scenarios("# nothing here\n"), [])
+
+    def test_speckit_full_coverage_passes_and_a_dropped_scenario_blocks(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        v, r = self.ready()
+        self.assertEqual((v["checks"]["spec_covered"]["status"], v["overall"]), ("PASS", "PASS"), r.stdout)
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2"])  # the second link line is ignored; covers is replaced
+        v, r = self.ready()
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL")
+        self.assertIn(sk + "#US2-1", v["checks"]["spec_covered"]["why"])
+
+    def test_one_user_story_only(self):
+        sk = self.SK
+        self.link(sk + "#US1", [sk + "#US1-1", sk + "#US1-2"])
+        self.assertEqual(self.ready()[0]["checks"]["spec_covered"]["status"], "PASS")
+
+    def test_openspec_change_folder_reads_only_spec_files(self):
+        f = self.OS + "/specs/checkout/spec.md"
+        self.link(self.OS, [f + "#Ten items get the discount", f + "#Nine items pay full price"])
+        self.assertEqual(self.ready()[0]["checks"]["spec_covered"]["status"], "PASS")  # proposal.md's heading isn't required
+        self.link(self.OS, [f + "#Ten items get the discount", f + "#Nine items pay full price", f + "#Typo"])
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("aren't in the linked spec", v["checks"]["spec_covered"]["why"])
+
+    def test_template_placeholders_missing_or_outside_specs_fail(self):
+        (self.repo / "specs/002-x").mkdir(parents=True)
+        (self.repo / "specs/002-x/spec.md").write_text("### User Story 1 - T\n1. **Given** [initial state], **When** [action], **Then** [expected outcome]\n")
+        for spec, why in (("specs/002-x/spec.md", "template placeholders"), ("specs/nope/spec.md", "not found"),
+                          ("../outside/spec.md", "not found"), ("README.md", "no acceptance scenarios")):
+            (self.repo / "README.md").write_text("# readme\n")
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            self.link(spec, [spec + "#US1-1"])
+            v = self.ready()[0]
+            self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", spec); self.assertIn(why, v["checks"]["spec_covered"]["why"], spec)
+
+    def test_duplicate_scenario_names_fail(self):
+        (self.repo / "dup").mkdir()
+        (self.repo / "dup/spec.md").write_text("#### Scenario: Same\n#### Scenario: Same\n")
+        self.link("dup/spec.md", ["dup/spec.md#Same"])
+        self.assertIn("two scenarios are both called", self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_no_link_means_no_check_unless_required(self):
+        v = self.ready()[0]
+        self.assertNotIn("spec_covered", v["checks"])
+        self.cfg(require_spec_link=True)
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("no 'spec:' line", v["checks"]["spec_covered"]["why"])
+        self.cfg(require_spec_link="yes")
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("require_spec_link", r.stdout + r.stderr)
+
+    def test_done_checks_coverage_again(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd, c = g.sdir("SAT-1"), g.cfg()
+            self.assertTrue(g.struct_done(sd, "SAT-1", [], c, write=False)["spec_covered"][0])
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("### User Story 2", "### User Story 3"))  # the spec changed after READY
+            self.assertFalse(g.struct_done(sd, "SAT-1", [], c, write=False)["spec_covered"][0])
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_spec_scenarios_command_lists_names(self):
+        r = run(self.repo, "spec-scenarios", self.OS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(self.OS + "/specs/checkout/spec.md#Nine items pay full price", r.stdout)
+        r = run(self.repo, "spec-scenarios", "nope.md")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not found", r.stdout + r.stderr)
+
+    def test_trust_rules(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
+        self.assertIn("stories no longer have to link the spec they build (require_spec_link)",
+                      T.weaker({"require_spec_link": True}, {"require_spec_link": False}))
+        self.assertEqual(T.weaker({"require_spec_link": False}, {"require_spec_link": True}), [])
+        self.assertTrue(T.tighten({"require_spec_link": False}, {"require_spec_link": True})["require_spec_link"])
+        self.assertTrue(T.tighten({"require_spec_link": True}, {"require_spec_link": False})["require_spec_link"])
+
+
 if __name__ == "__main__":
     unittest.main()
