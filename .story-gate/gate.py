@@ -1614,6 +1614,8 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     v = verdict(structural, judged, dec, wav, c)
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
+              "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
+                                                  [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
     wj(sd / ("%s.json" % phase), v)
     failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]

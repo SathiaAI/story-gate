@@ -160,6 +160,7 @@ def verdict(v):
         return None
     checks = v.get("checks") if isinstance(v.get("checks"), dict) else {}
     return {"overall": v["overall"], "drift": clean(v.get("drift"), 40), "judge": clean(v.get("judge"), 30), "inputs_hash": clean(v.get("inputs_hash"), 20),
+            "inputs_hash_base": clean(v.get("inputs_hash_base"), 20),
             "at": clean(v.get("at"), 30), "cost": v.get("cost") if isinstance(v.get("cost"), (int, float)) and not isinstance(v.get("cost"), bool) else None,
             "waived": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("status") == "WAIVED")}
 
@@ -295,13 +296,16 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
                 omissions.append("more than %d stories: the rest are not shown" % MAX_STORIES); break
             files = {f: blobs.get("%s:.story-gate/stories/%s/%s" % (sha, sid, f)) for f in listing.get(sid, [])}
             s = parse_story(sid, files)
-            if s.get("spec_linked"):
-                s["ready_fresh"] = None  # its hash covers the linked spec, which the dashboard doesn't read: unknown, not stale
-            elif gate is not None and pc is not None and s.get("ready") and s["ready"].get("inputs_hash"):
+            # a story linking a spec: its full hash also covers that spec, which isn't read here, so compare the part that
+            # doesn't (story, context, test plan, PRD/TRD, policy). A spec-only change is caught when CI scores READY again.
+            key = "inputs_hash_base" if s.get("spec_linked") else "inputs_hash"
+            if s.get("spec_linked") and not (s.get("ready") or {}).get(key):
+                s["ready_fresh"] = None  # scored before this field existed: unknown
+            elif gate is not None and pc is not None and s.get("ready") and s["ready"].get(key):
                 txt = lambda b: (b or b"").decode("utf-8", "ignore")  # exactly how gate.py's rd() reads the same files
                 pairs = [(f, txt(blobs.get("%s:%s" % (sha, f)))) for f in spec_names if blobs.get("%s:%s" % (sha, f)) is not None]
                 try:
-                    s["ready_fresh"] = s["ready"].get("inputs_hash") == gate.ready_hash_from(
+                    s["ready_fresh"] = s["ready"].get(key) == gate.ready_hash_from(
                         txt(files.get("story.md")), txt(files.get("context.md")), txt(files.get("tests.json")), pairs, pc)
                 except Exception:
                     s["ready_fresh"] = None

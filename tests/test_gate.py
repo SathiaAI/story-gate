@@ -2663,6 +2663,26 @@ class TestDashboard(Base):
         self.assertIs(s["ready_fresh"], False)
         self.assertEqual({m["key"]: m for m in d["metrics"]}["ready_stale"]["value"], 1)
 
+    def test_ready_freshness_for_a_story_that_links_a_spec(self):
+        """The dashboard doesn't read the linked spec, so it compares the rest of READY's evidence: edits still show as stale."""
+        self.g("checkout", "-q", "-b", "feat/SAT-9")
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
+        run(self.repo, "start", "SAT-9"); self.fill_ready("SAT-9")
+        (self.repo / "specs").mkdir(); (self.repo / "specs/spec.md").write_text("#### Scenario: Only\n- **WHEN** x\n")
+        sd = self.repo / ".story-gate/stories/SAT-9"
+        (sd / "story.md").write_text((sd / "story.md").read_text().replace("depends_on: []", "spec: specs/spec.md\ndepends_on: []", 1))
+        t = json.loads((sd / "tests.json").read_text()); t["acceptance_criteria"][0]["covers"] = ["specs/spec.md#Only"]
+        (sd / "tests.json").write_text(json.dumps(t))
+        self.assertIn("READY: PASS", run(self.repo, "score", "SAT-9", "ready").stdout)
+        self.g("add", "-A"); self.g("commit", "-qm", "scored"); self.g("push", "-q", "origin", "feat/SAT-9")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-9"][0]
+        self.assertIs(s["ready_fresh"], True)
+        (sd / "tests.json").write_text((sd / "tests.json").read_text() + "\n")
+        self.g("commit", "-qam", "test plan changed after READY"); self.g("push", "-q", "origin", "feat/SAT-9")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-9"][0]
+        self.assertIs(s["ready_fresh"], False)
+
     def test_ready_fresh_with_non_utf8_story_text(self):
         self.g("checkout", "-q", "-b", "feat/SAT-8")
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
