@@ -4875,6 +4875,17 @@ class TestSpecCoverage(Base):
             (self.repo / "ln").mkdir(); os.symlink(self.repo / self.SK, self.repo / "ln/spec.md")
             self.link("ln", ["ln/spec.md#US1-1"])
             self.assertIn("is a link", self.ready()[0]["checks"]["spec_covered"]["why"])
+        if os.name != "nt":  # a folder with a valid spec plus a spec.md linked outside the repository: refused, not skipped
+            out = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, out, True); (out / "spec.md").write_text(OPENSPEC_SPEC)
+            (self.repo / "mix/a").mkdir(parents=True); (self.repo / "mix/a/spec.md").write_text("#### Scenario: Only\n")
+            (self.repo / "mix/b").mkdir(); os.symlink(out / "spec.md", self.repo / "mix/b/spec.md")
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            self.link("mix", ["mix/a/spec.md#Only"])
+            self.assertIn("is a link", self.ready()[0]["checks"]["spec_covered"]["why"])
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        unread = []
+        g.spec_scenarios("## Requirements\n- **FR-001**: as noted, **Given** the rules above, nothing changes\n", unread)
+        self.assertEqual(unread, [])  # bold Given inside a sentence is prose, not a scenario
         run(self.repo, "start", "SAT-1"); self.fill_ready()
         self.link("a" * 5000, [])
         v, r = self.ready()

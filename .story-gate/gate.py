@@ -710,7 +710,7 @@ SPECKIT_STORY = re.compile(r"^#{2,4}\s+User Story\s+(\d+)\b", re.I)
 SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
 OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(\S.*?)\s*$")
 # lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
-SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
+SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|^\s*\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
 SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]")
 
 
@@ -766,14 +766,15 @@ def linked_scenarios(entry):
         p = ROOT / rel if rel else None
         if not p or not p.exists():
             return {}, "%s: not found inside the repository" % entry[:200]
-        files = sorted(f for f in p.rglob("spec.md") if repo_rel(f)) if p.is_dir() else [p]
+        files = sorted(p.rglob("spec.md")) if p.is_dir() else [p]
     except (OSError, ValueError):
         return {}, "%s: not a usable path" % entry[:200]
     found = {}
     for f in files:
         r = repo_rel(f)
-        if f.is_symlink():
-            return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % r
+        if f.is_symlink() or not r:
+            return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % (
+                r or f.relative_to(ROOT).as_posix())
         unread = []
         scen = spec_scenarios(rd(f), unread)
         if unread:
