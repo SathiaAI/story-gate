@@ -4922,6 +4922,23 @@ class TestSpecCoverage(Base):
         finally:
             os.environ.pop("STORY_GATE_ROOT")
 
+    def test_ready_is_out_of_date_when_the_linked_spec_changes(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "ready", g.cfg())
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("with 9 items", "with 8 items"))
+            self.assertNotEqual(before, g.inputs_hash(sd, "ready", g.cfg()))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+        sys.path.insert(0, str(SRC))
+        import importlib; D = importlib.import_module("sg_dashboard")
+        st = (self.repo / ".story-gate/stories/SAT-1/story.md").read_bytes()
+        self.assertTrue(D.parse_story("SAT-1", {"story.md": st})["spec_linked"])  # dashboard: freshness unknown, never "stale"
+        self.assertFalse(D.parse_story("SAT-1", {"story.md": b"---\nid: SAT-1\nspec: none\n---\n"})["spec_linked"])
+
     def test_done_is_out_of_date_when_the_linked_spec_changes(self):
         sk = self.SK
         self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])

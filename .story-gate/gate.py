@@ -533,7 +533,7 @@ def inputs_hash(sd, phase, c=None):
         try:
             c = c or cfg()
             return ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
-                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c)
+                                   [(f, rd(ROOT / f)) for f in spec_files(c)] + linked_spec_pairs(sd), c)
         except ConfigError:
             return hashlib.sha256((rd(sd / "story.md") + rd(sd / "context.md") + rd(sd / "tests.json") + "<config unreadable>")
                                   .encode("utf-8", "ignore")).hexdigest()[:16]
@@ -555,8 +555,7 @@ def inputs_hash(sd, phase, c=None):
         blob += "<config unreadable>"
     if phase == "done":
         blob += "".join(json.dumps(r) for r in jsonl(LEARNINGS) if r.get("story") == sd.name) + work_fingerprint()
-        for e in story_spec_refs(front_matter(rd(sd / "story.md"))):  # the linked spec changed: DONE is out of date
-            blob += e + json.dumps(sorted(linked_scenarios(e)[0].items()))
+        blob += "".join(k + v for k, v in linked_spec_pairs(sd))  # the linked spec changed: DONE is out of date
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
@@ -794,6 +793,15 @@ def linked_scenarios(entry):
         return {}, ("%s: no acceptance scenarios found (story-gate reads Spec Kit 'Given ... When ... Then' scenarios under "
                     "'### User Story N', and OpenSpec '#### Scenario:' blocks)" % entry)
     return found, None
+
+
+def linked_spec_pairs(sd):
+    """[(label, text)] of the scenarios in the specs story.md links, for the READY and DONE evidence hashes."""
+    out = []
+    for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
+        found, problem = linked_scenarios(e)
+        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem])))
+    return out
 
 
 def spec_coverage(sd, fm, c):

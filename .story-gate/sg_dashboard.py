@@ -217,6 +217,7 @@ def parse_story(sid, files):
         "drift_decisions": [clean(d.get("drift"), 10) for d in decisions if d.get("kind") == "drift"][-5:],
         "trace": trace_acs((files.get("trace.md") or b"").decode("utf-8", "replace")),
         "tests_green": (tr.get("exit_code") == 0) if isinstance(tr, dict) and "exit_code" in tr else None,
+        "spec_linked": bool(fm.get("spec")) and str(fm.get("spec")).strip().lower() not in ("none", "[]"),
     }
 
 
@@ -294,7 +295,9 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
                 omissions.append("more than %d stories: the rest are not shown" % MAX_STORIES); break
             files = {f: blobs.get("%s:.story-gate/stories/%s/%s" % (sha, sid, f)) for f in listing.get(sid, [])}
             s = parse_story(sid, files)
-            if gate is not None and pc is not None and s.get("ready") and s["ready"].get("inputs_hash"):
+            if s.get("spec_linked"):
+                s["ready_fresh"] = None  # its hash covers the linked spec, which the dashboard doesn't read: unknown, not stale
+            elif gate is not None and pc is not None and s.get("ready") and s["ready"].get("inputs_hash"):
                 txt = lambda b: (b or b"").decode("utf-8", "ignore")  # exactly how gate.py's rd() reads the same files
                 pairs = [(f, txt(blobs.get("%s:%s" % (sha, f)))) for f in spec_names if blobs.get("%s:%s" % (sha, f)) is not None]
                 try:
