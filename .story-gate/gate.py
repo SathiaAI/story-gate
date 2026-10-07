@@ -737,6 +737,8 @@ def spec_scenarios(text, unread=None):
         if re.match(r"^#{1,6}\s", line):
             in_os = False
         if in_os:
+            if line.strip():
+                out[-1] = (out[-1][0], out[-1][1] + "\n" + line.strip())  # the body counts too: placeholders, edits
             continue
         m = SPECKIT_STORY.match(line)
         if m:

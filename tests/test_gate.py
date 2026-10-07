@@ -4907,6 +4907,21 @@ class TestSpecCoverage(Base):
         self.link("tpl/spec.md", [])
         self.assertIn("can't read", self.ready()[0]["checks"]["spec_covered"]["why"])
 
+    def test_openspec_bodies_count_for_placeholders_and_freshness(self):
+        (self.repo / "osb").mkdir()
+        (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **GIVEN** [initial state]\n- **WHEN** x\n")
+        self.link("osb/spec.md", ["osb/spec.md#Checkout"])
+        self.assertIn("template placeholders", self.ready()[0]["checks"]["spec_covered"]["why"])
+        (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **WHEN** 10 items\n- **THEN** 10% off\n")
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "done", g.cfg())
+            (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **WHEN** 10 items\n- **THEN** 5% off\n")
+            self.assertNotEqual(before, g.inputs_hash(sd, "done", g.cfg()))  # only the body changed
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
     def test_done_is_out_of_date_when_the_linked_spec_changes(self):
         sk = self.SK
         self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
