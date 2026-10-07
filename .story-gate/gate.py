@@ -704,17 +704,21 @@ def struct_ready(sd):
     return out, fm
 
 
-SPECKIT_STORY = re.compile(r"^###\s+User Story\s+(\d+)\b", re.I)
-SPECKIT_SCENARIO = re.compile(r"^\s*\d+\.\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
+SPECKIT_STORY = re.compile(r"^#{2,4}\s+User Story\s+(\d+)\b", re.I)
+SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
 OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(.+?)\s*$")
+# lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
+SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
 SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]")
 
 
-def spec_scenarios(text):
-    """[(local id, line)] of the acceptance scenarios in one spec file. Spec Kit: numbered 'Given ... When ... Then' lines
-    under '### User Story N' -> US<N>-<k>. OpenSpec: '#### Scenario: <name>' -> <name>. Code blocks are skipped."""
-    out, story, n, fence = [], None, 0, False
-    for line in text.replace("\r\n", "\n").split("\n"):
+def spec_scenarios(text, unread=None):
+    """[(local id, line)] of the acceptance scenarios in one spec file. Spec Kit: one-line 'Given ... When ... Then' list
+    items under a 'User Story N' heading -> US<N>-<k>. OpenSpec: '#### Scenario: <name>' -> <name>. Code blocks and
+    <!-- comments --> are skipped. Lines that look like a scenario but weren't read go into `unread`."""
+    text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text.replace("\r\n", "\n"), flags=re.S)
+    out, story, n, fence, in_os = [], None, 0, False, False
+    for line in text.split("\n"):
         if line.lstrip().startswith(("```", "~~~")):
             fence = not fence
             continue
@@ -723,15 +727,23 @@ def spec_scenarios(text):
         m = OPENSPEC_SCENARIO.match(line)
         if m:
             out.append((m.group(1), line.strip()))
+            in_os = True  # its GIVEN/WHEN/THEN bullets belong to this scenario
+            continue
+        if re.match(r"^#{1,6}\s", line):
+            in_os = False
+        if in_os:
             continue
         m = SPECKIT_STORY.match(line)
         if m:
             story, n = m.group(1), 0
-        elif re.match(r"^#{1,3}\s", line):
+            continue
+        if re.match(r"^#{1,3}\s", line):
             story = None
-        elif story and SPECKIT_SCENARIO.match(line):
+        if story and SPECKIT_SCENARIO.match(line):
             n += 1
             out.append(("US%s-%d" % (story, n), line.strip()))
+        elif unread is not None and SCENARIO_LIKE.search(line):
+            unread.append(line.strip())
     return out
 
 
@@ -744,15 +756,26 @@ def linked_scenarios(entry):
     """({'path#id': line}, problem or None) for one `spec:` entry: a spec file, a folder (every spec.md under it, e.g. an
     OpenSpec change), optionally narrowed to one Spec Kit user story with '#US1'."""
     path, _, only = entry.strip().partition("#")
-    rel = repo_rel(path) if path and not os.path.isabs(path) and ".." not in path.replace("\\", "/").split("/") else None
-    p = ROOT / rel if rel else None
-    if not p or not p.exists():
-        return {}, "%s: not found inside the repository" % entry
-    files = sorted(f for f in p.rglob("spec.md") if repo_rel(f)) if p.is_dir() else [p]
+    try:
+        rel = repo_rel(path) if path and not os.path.isabs(path) and ".." not in path.replace("\\", "/").split("/") else None
+        p = ROOT / rel if rel else None
+        if not p or not p.exists():
+            return {}, "%s: not found inside the repository" % entry[:200]
+        files = sorted(f for f in p.rglob("spec.md") if repo_rel(f)) if p.is_dir() else [p]
+    except (OSError, ValueError):
+        return {}, "%s: not a usable path" % entry[:200]
     found = {}
     for f in files:
         r = repo_rel(f)
-        for lid, line in spec_scenarios(rd(f)):
+        if f.is_symlink():
+            return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % r
+        unread = []
+        scen = spec_scenarios(rd(f), unread)
+        if unread:
+            return {}, ("%s: story-gate can't read %d scenario line(s), so it can't check them: %s. Write each as one list "
+                        "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), or as '#### Scenario: "
+                        "<name>' (OpenSpec)" % (r, len(unread), "; ".join(u[:80] for u in unread[:3])))
+        for lid, line in scen:
             if only and not lid.startswith(only + "-"):
                 continue
             ref = "%s#%s" % (r, lid)
@@ -790,7 +813,8 @@ def spec_coverage(sd, fm, c):
     if holes:
         why.append("the spec still has template placeholders: " + ", ".join(holes[:5]))
     if missing:
-        why.append("spec scenarios no AC covers (add them to an AC's `covers` in tests.json): " + ", ".join(missing[:8])
+        why.append("spec scenarios no AC covers (add them to an AC's `covers` in tests.json): "
+                   + "; ".join('%s ("%s")' % (r, re.sub(r"[*#]", "", scen[r]).strip()[:70]) for r in missing[:8])
                    + (" and %d more" % (len(missing) - 8) if len(missing) > 8 else ""))
     if unknown:
         why.append("`covers` names scenarios that aren't in the linked spec: " + ", ".join(unknown[:8]))
@@ -2495,6 +2519,16 @@ def cmd_ci(tests_dir=None):
                                  % (hook_cmd, ", ".join(extra[:5])))
         except Exception:
             pass
+        if sid and (STORIES / sid / "story.md").is_file():  # the spec this story is checked against, changed in the same PR
+            linked = set()
+            for e in story_spec_refs(front_matter(rd(STORIES / sid / "story.md"))):
+                linked |= {ref.split("#", 1)[0] for ref in linked_scenarios(e)[0]}
+            changed = sorted(f for f in files if f in linked)
+            if changed:
+                msg = ("This PR also changes the spec its story is checked against (%s). Reviewers: check that no scenario was "
+                       "removed or weakened to make the check pass." % ", ".join(changed))
+                notes.append(msg)
+                print("::warning title=story-gate: spec changed::%s" % msg)
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:

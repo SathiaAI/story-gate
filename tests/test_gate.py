@@ -4760,9 +4760,13 @@ SPECKIT_SPEC = """# Feature Specification: Bulk discount
 1. **Given** an example in a code block, **When** read, **Then** it is ignored
 ```
 
+<!--
+1. **Given** a commented-out scenario, **When** read, **Then** it is ignored
+-->
+
 ## Requirements *(mandatory)*
 
-1. **Given** text outside a user story, **When** read, **Then** it is ignored
+- **FR-001**: System MUST apply the discount. Given the rules above, nothing else changes.
 """
 
 OPENSPEC_SPEC = """## ADDED Requirements
@@ -4774,6 +4778,7 @@ The checkout SHALL give 10% off orders of 10 or more items.
 - **THEN** the total is reduced by 10%
 
 #### Scenario: Nine items pay full price
+- **GIVEN** a cart
 - **WHEN** the cart has 9 items
 - **THEN** no discount is applied
 """
@@ -4845,6 +4850,51 @@ class TestSpecCoverage(Base):
             self.link(spec, [spec + "#US1-1"])
             v = self.ready()[0]
             self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", spec); self.assertIn(why, v["checks"]["spec_covered"]["why"], spec)
+
+    def test_scenario_lines_it_cannot_read_block_instead_of_being_skipped(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        for text in ("### User Story 1 - T\n1. **Given** 9 items, **Then** no discount\n",          # no When
+                     "### User Story 1 - T\n3. **Given** a coupon\n   **When** applied\n   **Then** it stacks\n",  # split lines
+                     "## Requirements\n1. **Given** a scenario outside any user story, **When** x, **Then** y\n",
+                     "##### Scenario: wrong heading level\n"):
+            unread = []
+            g.spec_scenarios(text, unread)
+            self.assertTrue(unread, text)
+        for text, ids in (("#### User Story 3 - T\n1) **Given** a, **When** b, **Then** c\n- **Given** d, **When** e, **Then** f\n",
+                           ["US3-1", "US3-2"]),):
+            unread = []
+            self.assertEqual([i for i, _ in g.spec_scenarios(text, unread)], ids); self.assertEqual(unread, [])
+        (self.repo / "odd").mkdir()
+        (self.repo / "odd/spec.md").write_text("### User Story 1 - T\n1. **Given** a, **When** b, **Then** c\n2. **Given** 9 items, **Then** x\n")
+        self.link("odd/spec.md", ["odd/spec.md#US1-1"])  # only the line it could read: still blocked
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("can't read 1 scenario line", v["checks"]["spec_covered"]["why"])
+
+    def test_bad_paths_and_links_fail_closed(self):
+        if os.name != "nt":
+            (self.repo / "ln").mkdir(); os.symlink(self.repo / self.SK, self.repo / "ln/spec.md")
+            self.link("ln", ["ln/spec.md#US1-1"])
+            self.assertIn("is a link", self.ready()[0]["checks"]["spec_covered"]["why"])
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.link("a" * 5000, [])
+        v, r = self.ready()
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", r.stderr); self.assertNotIn("Traceback", r.stderr)
+
+    def test_missing_scenarios_are_shown_with_their_text(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2"])
+        self.assertIn('US2-1 ("1. Given a discounted order', self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_ci_warns_when_the_pr_changes_the_linked_spec(self):
+        sk = self.SK
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); g("add", "-A"); g("commit", "-qm", "specs"); g("checkout", "-q", "feature/SAT-1-thing")
+        g("merge", "-q", "main")
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        (self.repo / sk).write_text(SPECKIT_SPEC.replace("2. **Given** a cart with 9 items", "2. **Given** a cart with 8 items"))
+        (self.repo / "app.py").write_text("x = 2\n")
+        r = run(self.repo, "ci")
+        self.assertIn("also changes the spec its story is checked against (%s)" % sk, r.stdout)
 
     def test_duplicate_scenario_names_fail(self):
         (self.repo / "dup").mkdir()
