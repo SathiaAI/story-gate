@@ -167,7 +167,7 @@ The dashboard answers one question: **is the work on course, and does anything n
 | **Drift** other than `none`, or `AT_RISK` | The work is moving away from the plan | Ask your AI to run `story-gate next` and explain the drift in plain words |
 | **⚠ stale** | No new record from that agent for 3 days | Check whether the work stopped. Restart it or drop the story |
 | **(out of date)** next to READY | The story or its tests changed after READY passed | Ask your AI to re-check READY before it carries on |
-| **(checked without a judge)** | The story was checked in objective mode | Fine if that's your choice. Only tests and structure were checked |
+| **(checked without a judge)** | The story was checked in objective mode | Fine if that's your choice. Only tests, structure and traceability were checked |
 | **Ownership conflicts** | Two agents claimed the same story | Pick one and stop the other |
 | **Refresh failed** note at the top | The last update didn't run | The numbers shown are from the last good refresh. Open the linked run, or run the workflow again |
 
