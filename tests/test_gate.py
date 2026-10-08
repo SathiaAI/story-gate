@@ -5376,6 +5376,65 @@ class TestSpecPull(Base):
         self.assertNotEqual(before, after)
         self.assertEqual(json.loads(before[0][1])[0], json.loads(after[0][1])[0])  # same requirements, still stale
 
+    def live(self, reply, repo="acme/shop", token="t", exc=None):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP
+        from unittest import mock
+        kw = {"side_effect": exc} if exc else {"return_value": reply}
+        with mock.patch.object(G, "call", **kw) as c:
+            out = SP.live_status(g, "SAT-1", ".story-gate/stories/SAT-1/issue-7.md", 7, repo, token)
+        if reply and not exc and token and repo == "acme/shop":
+            self.assertEqual(c.call_args[0][1], "/repos/acme/shop/issues/7")  # repo from CI, number from the file name
+        return out
+
+    def test_ci_compares_the_copy_with_the_live_issue(self):
+        self.pull()  # pasted text: the title line is 'Issue 7'
+        url = "https://github.com/acme/shop/issues/7"
+        same = (200, {"title": "", "body": MATT_ISSUE, "html_url": url}, {})
+        state, why = self.live(same)
+        self.assertEqual(state, "unchanged"); self.assertIn("pasted copy is now verified", why)
+        more = (200, {"title": "", "body": MATT_ISSUE.replace("need a manager\n", "need a manager\n- [ ] Refunds are logged\n"), "html_url": url}, {})
+        state, why = self.live(more)
+        self.assertEqual(state, "changed"); self.assertIn("1 requirement(s) added", why); self.assertIn("spec-pull SAT-1 #7", why)
+        stray = (200, {"title": "", "body": MATT_ISSUE + "- [ ] Refunds are logged\n", "html_url": url}, {})
+        self.assertIn("1 new line(s) that look like requirements", self.live(stray)[1])
+        state, why = self.live((200, {"title": "", "body": MATT_ISSUE.replace("Refunds.", "Refunds!"), "html_url": url}, {}))
+        self.assertEqual(state, "changed"); self.assertIn("text only, same requirements", why)
+        for args, kw, st, word in (((same,), {"token": None}, "not checked", "no GitHub token"),
+                                   ((same,), {"repo": ""}, "not checked", "which repository"),
+                                   (((403, {}, {}),), {}, "not checked", "issues: read"),
+                                   ((None,), {"exc": OSError("down")}, "not checked", "couldn't be reached"),
+                                   (((200, {"title": "", "body": MATT_ISSUE, "html_url": "https://github.com/x/y/issues/1"}, {}),), {}, "changed", "no longer"),
+                                   (((200, {"pull_request": {}, "html_url": url, "body": "x"}, {}),), {}, "changed", "no longer"),
+                                   ((same,), {"repo": "other/repo"}, "changed", "came from acme/shop")):
+            state, why = self.live(*args, **kw)
+            self.assertEqual(state, st, word); self.assertIn(word, why)
+
+    def test_ci_reports_it_and_block_mode_fails(self):
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main")
+        self.pull()
+        (self.repo / "app.py").write_text("x = 2\n")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
+        self.assertIn("issue-7.md (issue #7): not compared with the live issue: CI has no GitHub token", r.stdout)
+        self.assertIn("::warning title=story-gate: issue not checked::", r.stdout)
+        self.assertNotIn('spec_source_check is \\"block\\"', r.stdout)
+        self.cfg(judge_mode="objective", spec_source_check="block")
+        gitc("add", "-A"); gitc("commit", "-qm", "block"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
+        self.assertIn('(spec_source_check is "block")', r.stdout + r.stderr)
+
+    def test_the_setting_is_checked_and_loosening_it_is_flagged(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_trust as T
+        self.assertIn("spec_source_check", " ".join(T.weaker({"spec_source_check": "block"}, {"spec_source_check": "warn"})))
+        self.assertEqual(T.weaker({"spec_source_check": "warn"}, {"spec_source_check": "block"}), [])
+        self.cfg(spec_source_check="maybe")
+        r = run(self.repo, "status", "SAT-1")
+        self.assertIn('"spec_source_check" must be "warn" or "block"', r.stdout + r.stderr)
+        self.assertIn("issues: read", g.CI_YML)
+
     def test_the_token_is_never_sent_to_another_host_on_a_redirect(self):
         load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         import sg_github as G, urllib.request

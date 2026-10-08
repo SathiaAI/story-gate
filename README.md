@@ -200,11 +200,25 @@ You ask for a feature. Your AI writes the story and the tests, and story-gate ch
 
 story-gate works with your tests and your review bot. It runs your tests itself and waits for the review bot's threads to be resolved.
 
-## Already using Spec Kit, OpenSpec or BMAD?
+## Works with Spec Kit, OpenSpec, BMAD and Matt Pocock's skills
 
-Keep them. They write a good plan. story-gate is the merge gate they don't have: none of them blocks a pull request when the code doesn't do what the spec says.
+Keep the tool you plan with. These tools write a good plan, and Matt Pocock's skills also build it. None of them blocks a pull request when the code doesn't do what the plan says. story-gate is that gate.
 
-Link the spec in the story (`spec: specs/001-checkout/spec.md`, or an OpenSpec change folder). story-gate then reads every acceptance scenario in it: Spec Kit's "Given … When … Then" lines and OpenSpec's `#### Scenario:` blocks. The merge is blocked until each scenario is assigned to an acceptance criterion, and each acceptance criterion has passing tests, a recorded run and your approval. If the AI drops a scenario, or the spec still has template text, the check says which one. [How it works](docs/guide.md#spec-kit-openspec-and-bmad).
+| You plan with | Link it in the story | story-gate reads |
+|---|---|---|
+| [Spec Kit](https://github.com/github/spec-kit) | `spec: specs/001-checkout/spec.md` (add `#US1` for one user story) | Each "Given … When … Then" scenario |
+| [OpenSpec](https://github.com/Fission-AI/OpenSpec) | `spec: openspec/changes/add-discount` | Each `#### Scenario:` |
+| [Matt Pocock's skills](https://github.com/mattpocock/skills) (`to-spec`, `to-tickets`, `implement`) | The ticket file: `spec: .scratch/refunds/issues/03-refund.md`. For a ticket on GitHub Issues: `story-gate spec-pull <story> #42` | Each `- [ ]` acceptance criterion, and each "As a …, I want …" user story |
+| [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) | Not read yet (its file layout is changing). Copy the story's acceptance criteria into `story.md` | Your acceptance criteria, as usual |
+
+**Then, for every one of them:**
+
+- **Every requirement must be covered.** The merge is blocked until each scenario, criterion or user story is assigned to an acceptance criterion with passing tests, a recorded run and your approval.
+- **Nothing can be hidden or skipped.** A dropped scenario, template text, or a requirement tucked into a code block or comment blocks the check and says which one.
+- **A ticked box is not proof.** Only a passing test is.
+- **Issues stay honest.** `spec-pull` copies the issue into the pull request, where it is reviewed. CI then compares the copy with the live issue on every run: unchanged, changed or not checked. Set `"spec_source_check": "block"` to block on a change.
+
+[How it works](docs/guide.md#spec-kit-openspec-and-bmad).
 
 ## FAQ
 

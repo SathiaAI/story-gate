@@ -194,6 +194,9 @@ DEFAULT_CONFIG = {
     "spec_files": [],
     # true: every story must link the spec it builds (`spec:` in story.md) and cover each of its scenarios with an AC
     "require_spec_link": False,
+    # issues copied in with `spec-pull`: CI compares each copy with the live issue. "warn": a change, or a check it couldn't
+    # run, is a warning on the pull request. "block": either one fails the check until the copy is pulled again.
+    "spec_source_check": "warn",
     "thresholds": {"pass": 0.7, "concerns": 0.4},
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
@@ -349,6 +352,8 @@ def cfg():
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
     if not isinstance(c.get("require_spec_link"), bool):
         raise ConfigError('.story-gate/config.json: "require_spec_link" must be true or false - the gate fails closed until fixed')
+    if c.get("spec_source_check") not in ("warn", "block"):
+        raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
@@ -2815,6 +2820,22 @@ def cmd_ci(tests_dir=None):
                        "removed or weakened to make the check pass." % ", ".join(changed))
                 notes.append(msg)
                 print("::warning title=story-gate: spec changed::%s" % msg)
+            import sg_specpull as SP  # issues copied in with spec-pull: compare each copy with the live issue
+            for rel in sorted({e.strip().partition("#")[0] for e in story_spec_refs(front_matter(rd(STORIES / sid / "story.md")))}):
+                m = SNAPSHOT_NAME.match(rel)
+                if not m or not rel.startswith(".story-gate/stories/%s/" % sid):
+                    continue
+                state, detail = SP.live_status(sys.modules[__name__], sid, rel, int(m.group(1)),
+                                               os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_TOKEN"))
+                msg = "%s (issue #%s): %s" % (rel, m.group(1), detail)
+                if state == "unchanged":
+                    notes.append(msg)
+                    continue
+                print("::warning title=story-gate: issue %s::%s" % (state, msg))
+                if c.get("spec_source_check") == "block":
+                    problems.append(msg + " (spec_source_check is \"block\")")
+                else:
+                    notes.append(msg)
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
@@ -3191,6 +3212,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     steps:
       - uses: actions/checkout@v4
         with:

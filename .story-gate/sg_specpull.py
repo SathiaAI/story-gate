@@ -36,11 +36,17 @@ def one_line(s, n=300):
     return re.sub(r"\s+", " ", clean(s)).strip()[:n]
 
 
+def snapshot_content(sid, num, title, body):
+    """The text part of the copy: a do-not-edit note, '# title', then the issue body. CI rebuilds it from the live issue
+    the same way, so 'unchanged' means exactly the same text."""
+    return "%s\n\n# %s\n\n%s\n" % (NOTE % (sid, "#%d" % num), one_line(title) or "Issue %d" % num,
+                                     clean(body).replace("\r\n", "\n").replace("\r", "\n").rstrip())
+
+
 def snapshot_text(gate, sid, ref_arg, meta, title, body):
-    """The file: the source block, a do-not-edit note, '# title', then the issue body. content_sha256 covers the source
-    fields and the text together (gate.snapshot_hash), so neither can be changed without the check failing."""
-    content = "%s\n\n# %s\n\n%s\n" % (NOTE % (sid, ref_arg), one_line(title) or "Issue %s" % meta["issue"],
-                                      clean(body).replace("\r\n", "\n").replace("\r", "\n").rstrip())
+    """The file: the source block, then snapshot_content. content_sha256 covers the source fields and the text together
+    (gate.snapshot_hash), so neither can be changed without the check failing."""
+    content = snapshot_content(sid, int(meta["issue"]), title, body)
     fields = {k: one_line(meta[k]) for k in gate.SNAPSHOT_KEYS}
     fields["content_sha256"] = gate.snapshot_hash(fields, content)
     return "---\n%s\n---\n%s" % ("\n".join("%s: %s" % kv for kv in fields.items()), content)
@@ -158,3 +164,48 @@ def cli(gate, args):
     for ref, line in found.items():
         print("  %s\n      %s" % (ref, line.split("\n")[0][:100]))
     return 0
+
+
+def live_status(gate, sid, rel, num, repo, token):
+    """CI: compare the copy at rel with issue #num as it is now. The repository comes from CI (GITHUB_REPOSITORY) and the
+    number from the file name, never from the copy, which an agent could rewrite. Returns (state, plain-English detail):
+    'unchanged', 'changed' or 'not checked'."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
+        return "not checked", "not compared with the live issue: CI didn't say which repository this is"
+    if not token:
+        return "not checked", "not compared with the live issue: CI has no GitHub token"
+    try:
+        fields, content = gate.parse_snapshot(gate.rd(gate.ROOT / rel))
+    except ValueError as e:
+        return "not checked", "the copy can't be read (%s)" % e
+    if fields["repo"].lower() != repo.lower():
+        return "changed", "the copy says it came from %s, but this repository is %s" % (fields["repo"][:80], repo)
+    import sg_github as G
+    try:
+        st, data, _ = G.call("GET", "/repos/%s/issues/%d" % (repo, num), token)
+    except Exception as e:  # network trouble: say so, never pass silently
+        return "not checked", "GitHub couldn't be reached (%s)" % type(e).__name__
+    if st != 200 or not isinstance(data, dict):
+        return "not checked", "GitHub answered HTTP %s for issue #%d (does the workflow have 'issues: read'?)" % (st, num)
+    if "pull_request" in data or str(data.get("html_url") or "").lower().rstrip("/") != (
+            "https://github.com/%s/issues/%d" % (repo, num)).lower():
+        return "changed", "#%d is no longer this repository's issue (moved, or a pull request)" % num
+    body = data.get("body") or ""
+    if not isinstance(body, str) or len(body) > MAX_BODY:
+        return "not checked", "the live issue is too big to compare"
+    live = snapshot_content(sid, num, data.get("title") or "", body)
+    verified = " (the pasted copy is now verified)" if fields["fetched_by"] == "pasted" else ""
+    if live == content:
+        return "unchanged", "matches the live issue" + verified
+    old_u, new_u = [], []
+    old = {k for k, _ in gate.spec_scenarios(content, old_u)}
+    new = {k for k, _ in gate.spec_scenarios(live, new_u)}
+    diff = []
+    if new - old:
+        diff.append("%d requirement(s) added or reworded" % len(new - old))
+    if old - new:
+        diff.append("%d removed or reworded" % len(old - new))
+    if len(new_u) > len(old_u):
+        diff.append("%d new line(s) that look like requirements but can't be read" % (len(new_u) - len(old_u)))
+    return "changed", ("the live issue differs from the copy (%s). Run `story-gate spec-pull %s #%d` and check the "
+                       "requirements again" % ("; ".join(diff) or "text only, same requirements", sid, num))
