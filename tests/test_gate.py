@@ -5281,12 +5281,12 @@ class TestSpecPull(Base):
 
     def covers(self, names):
         sd = self.repo / ".story-gate/stories/SAT-1"
-        t = json.loads((sd / "tests.json").read_text()); t["acceptance_criteria"][0]["covers"] = names
+        t = json.loads((sd / "tests.json").read_text(encoding="utf-8")); t["acceptance_criteria"][0]["covers"] = names
         (sd / "tests.json").write_text(json.dumps(t))
 
     def covered(self):
         run(self.repo, "score", "SAT-1", "ready")
-        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())["checks"]["spec_covered"]
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text(encoding="utf-8"))["checks"]["spec_covered"]
 
     def test_references(self):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
@@ -5301,9 +5301,9 @@ class TestSpecPull(Base):
         r = self.pull()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("2 requirement(s)", r.stdout); self.assertIn("not verified", r.stdout)
-        self.assertIn("\nfetched_by: pasted\n", self.snap.read_text())
+        self.assertIn("\nfetched_by: pasted\n", self.snap.read_text(encoding="utf-8"))
         rel = ".story-gate/stories/SAT-1/issue-7.md"
-        self.assertIn("spec: " + rel, (self.repo / ".story-gate/stories/SAT-1/story.md").read_text())
+        self.assertIn("spec: " + rel, (self.repo / ".story-gate/stories/SAT-1/story.md").read_text(encoding="utf-8"))
         names = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith(rel + "#")]
         self.assertEqual(len(names), 2)
         self.covers(names[:1])
@@ -5312,17 +5312,17 @@ class TestSpecPull(Base):
         self.assertEqual(self.covered()["status"], "PASS")
         self.pull()  # pulling the same text again keeps the same names, and doesn't add a second link
         self.assertEqual(self.covered()["status"], "PASS")
-        self.assertEqual((self.repo / ".story-gate/stories/SAT-1/story.md").read_text().count(rel), 1)
+        self.assertEqual((self.repo / ".story-gate/stories/SAT-1/story.md").read_text(encoding="utf-8").count(rel), 1)
 
     def test_a_hand_edit_to_the_copy_blocks(self):
         self.pull()
-        self.snap.write_text(self.snap.read_text().replace("- [ ] Refunds over $500 need a manager\n", ""))  # drop one
+        self.snap.write_text(self.snap.read_text(encoding="utf-8").replace("- [ ] Refunds over $500 need a manager\n", ""))  # drop one
         c = self.covered()
         self.assertEqual(c["status"], "FAIL"); self.assertIn("changed after `story-gate spec-pull`", c["why"])
 
     def test_tampering_with_the_copy_or_its_source_fields_blocks(self):
         self.pull()
-        good = self.snap.read_text()
+        good = self.snap.read_text(encoding="utf-8")
         for bad, why in ((lambda s: "\n" + s, "source block"),                                   # leading blank line
                          (lambda s: "\ufeff" + s, "source block"),                               # BOM
                          (lambda s: " " + s, "source block"),
@@ -5332,17 +5332,17 @@ class TestSpecPull(Base):
                          (lambda s: s.replace("fetched_by: pasted", "fetched_by: someone"), "isn't one of"),
                          (lambda s: s.replace("fetched_at:", "fetched_at: x\nfetched_at:"), "twice"),
                          (lambda s: s.replace("source_kind: github-issue\n", ""), "source block")):
-            self.snap.write_text(bad(good))
+            self.snap.write_text(bad(good), encoding="utf-8")
             c = self.covered()
             self.assertEqual(c["status"], "FAIL", why); self.assertIn(why, c["why"])
-        self.snap.write_text(good)
-        (self.repo / ".story-gate/stories/SAT-1/issue-8.md").write_text(good)  # a copy of #7 saved as #8
+        self.snap.write_text(good, encoding="utf-8")
+        (self.repo / ".story-gate/stories/SAT-1/issue-8.md").write_text(good, encoding="utf-8")  # a copy of #7 saved as #8
         st = self.repo / ".story-gate/stories/SAT-1/story.md"
-        st.write_text(st.read_text().replace("issue-7.md", "issue-8.md"))
+        st.write_text(st.read_text(encoding="utf-8").replace("issue-7.md", "issue-8.md"), encoding="utf-8")
         self.assertIn("named for issue 8", self.covered()["why"])
 
     def test_odd_input_never_crashes_or_destroys_the_old_copy(self):
-        self.pull(); before = self.snap.read_text()
+        self.pull(); before = self.snap.read_text(encoding="utf-8")
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         import sg_github as G, sg_specpull as SP
         from unittest import mock
@@ -5350,7 +5350,7 @@ class TestSpecPull(Base):
                        "html_url": "https://github.com/acme/shop/issues/7"}, {})
         with mock.patch.object(G, "call", return_value=reply), mock.patch.object(G, "human_token", return_value=None):
             self.assertEqual(SP.cli(g, ["SAT-1", "#7"]), 0)
-        self.assertIn("- [ ] a ? b", self.snap.read_text()); self.assertNotEqual(self.snap.read_text(), before)
+        self.assertIn("- [ ] a ? b", self.snap.read_text(encoding="utf-8")); self.assertNotEqual(self.snap.read_text(encoding="utf-8"), before)
         self.snap.unlink(); self.snap.mkdir()
         r = self.pull(); self.assertNotEqual(r.returncode, 0); self.assertIn("a link or a folder", r.stderr)
 
@@ -5412,7 +5412,7 @@ class TestSpecPull(Base):
         with mock.patch.object(G, "call", return_value=reply) as c, mock.patch.object(G, "human_token", return_value=None):
             self.assertEqual(SP.cli(g, ["SAT-1", "https://github.com/acme/shop/issues/7"]), 0)
         self.assertEqual(c.call_args[0][1], "/repos/acme/shop/issues/7")
-        text = self.snap.read_text()
+        text = self.snap.read_text(encoding="utf-8")
         self.assertIn("fetched_by: github-api", text); self.assertIn("source_updated_at: 2026-10-08T10:00:00Z", text)
         self.assertNotIn("\r", text)
         found, problem = g.linked_scenarios(".story-gate/stories/SAT-1/issue-7.md")
