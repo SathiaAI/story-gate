@@ -5354,6 +5354,28 @@ class TestSpecPull(Base):
         self.snap.unlink(); self.snap.mkdir()
         r = self.pull(); self.assertNotEqual(r.returncode, 0); self.assertIn("a link or a folder", r.stderr)
 
+    def test_a_linked_story_folder_is_refused(self):
+        if os.name == "nt":
+            return
+        out = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, out, True)
+        (out / "story.md").write_text("---\nid: SAT-2\n---\n")
+        os.symlink(out, self.repo / ".story-gate/stories/SAT-2")
+        r = run(self.repo, "spec-pull", "SAT-2", "#7", "--from-file", "ticket.txt")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("doesn't write through links", r.stderr)
+        self.assertFalse((out / "issue-7.md").exists())
+
+    def test_new_issue_text_reopens_ready_even_if_the_requirements_are_the_same(self):
+        g = load_gate(self.repo)
+        self.pull()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        before = g.linked_spec_pairs(sd)
+        (self.repo / "ticket.txt").write_text(MATT_ISSUE.replace("Refunds.", "Refunds, but only within 30 days."))
+        self.pull()
+        after = g.linked_spec_pairs(sd)
+        os.environ.pop("STORY_GATE_ROOT")
+        self.assertNotEqual(before, after)
+        self.assertEqual(json.loads(before[0][1])[0], json.loads(after[0][1])[0])  # same requirements, still stale
+
     def test_the_token_is_never_sent_to_another_host_on_a_redirect(self):
         load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         import sg_github as G, urllib.request

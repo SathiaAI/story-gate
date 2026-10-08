@@ -1060,7 +1060,11 @@ def linked_spec_pairs(sd):
     out = []
     for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
         found, problem = linked_scenarios(e)
-        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem])))
+        path = e.strip().partition("#")[0]
+        issue_text = ""
+        if SNAPSHOT_NAME.match(path) and not problem:  # a pulled issue: any change to its text re-opens READY and DONE
+            issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / path), path)[0].encode("utf-8", "surrogatepass")).hexdigest()
+        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem] + ([issue_text] if issue_text else []))))
     return out
 
 

@@ -75,7 +75,13 @@ def cli(gate, args):
         sys.exit(usage)
     sid, ref_arg = rest
     sd = gate.sdir(sid)
-    if not (sd / "story.md").exists():
+    root = Path(os.path.realpath(gate.STORIES))
+    for p in (gate.STORIES, sd, sd / "story.md"):  # never write through a link, or outside the repository
+        rp = os.path.realpath(p)
+        if p.is_symlink() or not (rp == str(root) or rp.startswith(str(root) + os.sep)):
+            sys.exit("story-gate: %s is a link (or leads outside the repository); story-gate doesn't write through links."
+                     % p.relative_to(gate.ROOT).as_posix())
+    if not (sd / "story.md").is_file():
         sys.exit("story-gate: story %s has no story.md yet. Run `%s` first." % (sid, gate.gate_cmd("start " + sid)))
     own = gate.origin_repo()
     if not own:
