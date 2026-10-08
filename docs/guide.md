@@ -393,6 +393,25 @@ Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-f
 
 Every repository with story-gate gets a **Story-gate dashboard** issue, pinned and kept current by `.github/workflows/story-gate-dashboard.yml`. It lives in your repository, so only people who can see the repository can see it. That keeps it private on private repos, on any plan.
 
+### Where to find it
+
+- **On GitHub:** your repository → **Issues** → **Story-gate dashboard**, pinned at the top. `story-gate doctor` prints the link.
+- **If Issues are turned off** in the repository: open **Actions** → **story-gate-dashboard** → the latest run. The same dashboard is in the run's summary.
+- **On your own computer:** `story-gate dashboard --open` builds the full report and opens it in your browser.
+
+### When it updates
+
+| Trigger | When |
+|---|---|
+| Schedule | Every 30 minutes (at :11 and :41) |
+| A `story-gate` check finishes | After every check on a pull request |
+| A merge | After every push to the default branch |
+| By hand | **Actions** → **story-gate-dashboard** → **Run workflow** |
+
+The workflow runs only the default branch's copy of story-gate. It reads story records on other branches as data and never runs them. If a refresh fails, the issue keeps the last good snapshot and says so at the top, with a link to the failed run.
+
+### What it shows
+
 | It shows | From |
 |---|---|
 | Features and stories, and how many meet the Definition of Ready | `features.json`, `story.md`, READY verdicts |
@@ -401,10 +420,56 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 | When stories finish, and how many acceptance criteria tests proved | DONE verdicts and `trace.md` |
 | Gate catches before merge, defects recorded, first-try READY rate, DONE attempts, days from claim to merge, false alarms, stale claims, ownership conflicts, judge cost | The verdict log, learnings and labels |
 
-- **The full report** is a branded HTML page (Tabler styles, Viaknox colours) attached to each dashboard run. Repository members can download it from the issue.
-- **On your own computer:** `gate.py dashboard --open` builds the same page from your local branches.
-- **Plan work before anyone starts it:** `gate.py feature PAY --title "Payments"`, then `gate.py plan PAY-12 --title "Refunds" --feature PAY`. A story is **queued** once its READY passes, and **claimed** when an agent runs `gate.py start PAY-12 --model <model>`.
-- **Honest numbers:** every number says how it's calculated, and estimates are labelled. Verdicts are recorded by the agents, and the `story-gate` check in CI re-checks them. Branch records are read as data, never run.
+### How a story moves through it
+
+| Stage | Meaning |
+|---|---|
+| **Draft** | READY hasn't passed yet |
+| **Queued** | READY passed, nobody has started it |
+| **In progress** | An agent claimed it (`story-gate start`), DONE hasn't passed |
+| **Blocked** | Drift was escalated, or the last checkpoint said `OFF_COURSE` |
+| **In review** | DONE passed on a branch, not merged yet |
+| **Done** | DONE passed on the default branch (merged) |
+
+A READY that passed only with a waiver doesn't count as ready. A story finished with a waiver counts as done, is flagged as **Finished with waivers**, and its criteria never count as proven.
+
+### What to act on
+
+| Signal | What it means | What to do |
+|---|---|---|
+| **Blocked** | The agent went off course, or a decision is waiting for a person | Read the last checkpoint on the story's branch. Decide on the drift, or ask the agent what it needs |
+| **Drift** not `none`, or a checkpoint `AT_RISK` | The work is moving away from the story, the PRD or the TRD | Ask the agent to run `story-gate next` and explain the drift. Change the story, or bring the work back |
+| **⚠ stale** | No new record for 3 days on an active story | Find out whether the work stopped. Restart it or drop the claim |
+| **(out of date)** next to READY | The story, test plan, linked spec or policy changed after READY passed | Re-score READY before more work is built on it |
+| **(checked without a judge)** | Objective mode: only tests, structure and traceability were checked | Expected if you chose it. See [objective mode](#fallbacks) for what it doesn't check |
+| **Ownership conflicts** | The same story is claimed on two branches by different agents | Keep one claim and stop the other agent |
+| **Verdicts marked wrong** rising | People keep labelling gate verdicts as wrong | Look at those stories; the policy or thresholds may need tuning |
+
+### The numbers
+
+Every number in the issue and the report says how it's calculated, and estimates are labelled. The main ones:
+
+- **Ready rate:** stories that meet the Definition of Ready / all stories.
+- **Acceptance criteria proven:** criteria whose mapped tests all passed, out of the criteria traced on finished stories. Untraced criteria are counted separately.
+- **Progress on active stories:** the average % complete from the last checkpoints. An estimate, not a measurement.
+- **Gate catches before merge:** re-scores of finished stories that came back FAIL, CONCERNS or ESCALATED before they passed.
+- **Ready on first try** and **DONE attempts per story:** how often the plan or the build passed without rework.
+- **Days from claim to merge:** the median, merged stories only.
+- **Judge cost:** the cost reported on each story's latest READY and DONE verdicts.
+
+### The full report
+
+- **The full report** is a branded HTML page with the pipeline chart, the agents, the features, the quality numbers and every story. Each dashboard run attaches one; repository members can download it from the **download the HTML dashboard** link in the issue. Each copy is kept for 30 days, and every refresh makes a new one.
+- **On your own computer:** `story-gate dashboard --open` builds the same page. It fetches from GitHub first, and it also includes this computer's local branches and anything not pushed, plus how well this computer is protected from hooks shipped inside branches. Add `--offline` to skip the fetch, or `--out <folder>` to choose where it writes `dashboard.html`, `dashboard.md` and `dashboard.json`.
+- **A fixed issue:** to use an existing issue instead of the one setup creates, set `"dashboard_issue": <number>` in `.story-gate/config.json`.
+
+### Plan work before anyone starts it
+
+`story-gate feature PAY --title "Payments"`, then `story-gate plan PAY-12 --title "Refunds" --feature PAY`. A story is **queued** once its READY passes, and **claimed** when an agent runs `story-gate start PAY-12 --model <model>`.
+
+### Good to know
+
+- **Honest numbers:** verdicts are recorded by the agents, and the `story-gate` check in CI re-checks them. Branch records are read as data, never run.
 - **GitHub Projects board:** optional and organisation-owned only (a GitHub App can't write to personal boards). Not built yet.
 
 ## Fallbacks

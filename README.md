@@ -145,13 +145,35 @@ Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate ski
 
 <p align="center"><img src="docs/assets/dashboard.png" alt="The story-gate dashboard: a pinned GitHub issue with the headline numbers, and a full report showing the pipeline, who is working on what, and the quality numbers." width="100%"></p>
 
-- **Find it:** open your repository on GitHub → **Issues** → **Story-gate dashboard**, pinned at the top. It updates by itself every 30 minutes.
-- **Read it in this order:**
-  1. **The top numbers.** How many stories are ready, in progress and done, and how many acceptance criteria are proven by tests.
-  2. **Who is working on what.** Each AI agent, its story and % done. `AT_RISK` or a drift note means: look now.
-  3. **Queued to start.** Stories that passed READY and are waiting for an agent.
-- **The full report:** click **download the HTML dashboard** in the issue. Or ask your AI to run `story-gate dashboard --open`.
-- **Private stays private:** the dashboard lives in your repository, so only people who can see the repository can see it.
+The dashboard answers one question: **is the work on course, and does anything need me?** You don't need to open a terminal or read code to use it.
+
+**Find it.** Open your repository on GitHub → **Issues** → **Story-gate dashboard**, pinned at the top. Setup creates it, and `story-gate doctor` prints its link. Only people who can see the repository can see it.
+
+**It stays current by itself.** It refreshes every 30 minutes, after every `story-gate` check on a pull request, and after every merge to your main branch. To refresh it now: **Actions** → **story-gate-dashboard** → **Run workflow**.
+
+**Read it top to bottom:**
+
+1. **The top numbers.** Stories ready, in progress, blocked and done, and the share of acceptance criteria that tests proved.
+2. **Who is working on what.** Each AI agent, its story, its stage, % done (an estimate), drift, the pull request check and its last report.
+3. **Queued to start.** Stories that passed READY and are waiting for an agent.
+4. **Features.** Each feature's stories, how many are done and how many acceptance criteria are proven.
+5. **All stories.** Every story and where it is: Draft → Queued → In progress → In review → Done, or Blocked.
+
+**What needs you:**
+
+| You see | It means | Do this |
+|---|---|---|
+| **Blocked** | The agent went off course, or a check needs a human decision | Open the story's pull request and read the last checkpoint. Decide, or ask your AI what it needs from you |
+| **Drift** other than `none`, or `AT_RISK` | The work is moving away from the plan | Ask your AI to run `story-gate next` and explain the drift in plain words |
+| **⚠ stale** | No new record from that agent for 3 days | Check whether the work stopped. Restart it or drop the story |
+| **(out of date)** next to READY | The story or its tests changed after READY passed | Ask your AI to re-check READY before it carries on |
+| **(checked without a judge)** | The story was checked in objective mode | Fine if that's your choice. Only tests and structure were checked |
+| **Ownership conflicts** | Two agents claimed the same story | Pick one and stop the other |
+| **Refresh failed** note at the top | The last update didn't run | The numbers shown are from the last good refresh. Open the linked run, or run the workflow again |
+
+**The full report.** Click **download the HTML dashboard** in the issue for charts, the pipeline and every quality number with how it's calculated. Or ask your AI to run `story-gate dashboard --open` to build it from your computer, including branches you haven't pushed yet.
+
+More detail: [the dashboard guide](docs/guide.md#f-the-dashboard-how-its-going).
 
 ## How a change flows
 
@@ -164,7 +186,7 @@ You ask for a feature. Your AI writes the story and the tests, and story-gate ch
 - **Your AI never uses your GitHub login.** It works through its own login (step 3), so it can't approve or merge its own work.
 - **Branches can't switch story-gate off.** The rules come from your main branch, and the checks run from a verified copy on your computer. See [security](docs/client-security.md).
 - **Plain English.** Your AI writes replies, PR descriptions, story summaries and handoffs in short, plain sentences, with diagrams where a picture is clearer. story-gate scores this (an STE-style score, target 80%) and gives advice. See [plain writing](docs/guide.md#plain-writing).
-- **Pilot:** story-gate is pre-1.0. Signed releases are coming; until then, setup installs from a pinned version on GitHub.
+- **Pilot:** story-gate is pre-1.0, so commands and settings may still change between releases. Every release since v0.7.0 is signed, and story-gate checks that signature before it installs itself on your computer ([how](docs/guide.md#setup)).
 
 ## How it compares
 
