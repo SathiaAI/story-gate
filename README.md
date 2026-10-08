@@ -77,13 +77,13 @@ See story-gate catch a real bug before you change anything. Install it with one 
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.ps1 | iex"
 ```
 
 Then run:
@@ -92,7 +92,7 @@ Then run:
 story-gate try
 ```
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. It doesn't change anything else. It's short: read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. It doesn't change anything else. It's short: read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.8.0` instead.
 
 `story-gate try` makes a throwaway example project in your temp folder with one small story and a real bug. It runs each goal for real, shows one passing and one failing, and opens the validation page. No GitHub, no judge key, no network, and your own projects aren't touched.
 
@@ -145,13 +145,35 @@ Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate ski
 
 <p align="center"><img src="docs/assets/dashboard.png" alt="The story-gate dashboard: a pinned GitHub issue with the headline numbers, and a full report showing the pipeline, who is working on what, and the quality numbers." width="100%"></p>
 
-- **Find it:** open your repository on GitHub → **Issues** → **Story-gate dashboard**, pinned at the top. It updates by itself every 30 minutes.
-- **Read it in this order:**
-  1. **The top numbers.** How many stories are ready, in progress and done, and how many acceptance criteria are proven by tests.
-  2. **Who is working on what.** Each AI agent, its story and % done. `AT_RISK` or a drift note means: look now.
-  3. **Queued to start.** Stories that passed READY and are waiting for an agent.
-- **The full report:** click **download the HTML dashboard** in the issue. Or ask your AI to run `story-gate dashboard --open`.
-- **Private stays private:** the dashboard lives in your repository, so only people who can see the repository can see it.
+The dashboard answers one question: **is the work on course, and does anything need me?** You don't need to open a terminal or read code to use it.
+
+**Find it.** Open your repository on GitHub → **Issues** → **Story-gate dashboard**, pinned at the top. Setup creates it, and `story-gate doctor` prints its link. Only people who can see the repository can see it.
+
+**It stays current by itself.** It refreshes every 30 minutes, after every `story-gate` check on a pull request, and after every merge to your main branch. To refresh it now: **Actions** → **story-gate-dashboard** → **Run workflow**.
+
+**Read it top to bottom:**
+
+1. **The top numbers.** Stories ready, in progress, blocked and done, and the share of acceptance criteria that tests proved.
+2. **Who is working on what.** Each AI agent, its story, its stage, % done (an estimate), drift, the pull request check and its last report.
+3. **Queued to start.** Stories that passed READY and are waiting for an agent.
+4. **Features.** Each feature's stories, how many are done and how many acceptance criteria are proven.
+5. **All stories.** Every story and where it is: Draft → Queued → In progress → In review → Done, or Blocked.
+
+**What needs you:**
+
+| You see | It means | Do this |
+|---|---|---|
+| **Blocked** | The agent went off course, or a check needs a human decision | Open the story's pull request and read the last checkpoint. Decide, or ask your AI what it needs from you |
+| **Drift** other than `none`, or `AT_RISK` | The work is moving away from the plan | Ask your AI to run `story-gate next` and explain the drift in plain words |
+| **⚠ stale** | No new record from that agent for 3 days | Check whether the work stopped. Restart it or drop the story |
+| **(out of date)** next to READY | The story or its tests changed after READY passed | Ask your AI to re-check READY before it carries on |
+| **(checked without a judge)** | The story was checked in objective mode | Fine if that's your choice. Only tests, structure and traceability were checked |
+| **Ownership conflicts** | Two agents claimed the same story | Pick one and stop the other |
+| **Refresh failed** note at the top | The last update didn't run | The numbers shown are from the last good refresh. Open the linked run, or run the workflow again |
+
+**The full report.** Click **download the HTML dashboard** in the issue for charts, the pipeline and every quality number with how it's calculated. Or ask your AI to run `story-gate dashboard --open` to build it from your computer, including branches you haven't pushed yet.
+
+More detail: [the dashboard guide](docs/guide.md#f-the-dashboard-how-its-going).
 
 ## How a change flows
 
@@ -164,7 +186,7 @@ You ask for a feature. Your AI writes the story and the tests, and story-gate ch
 - **Your AI never uses your GitHub login.** It works through its own login (step 3), so it can't approve or merge its own work.
 - **Branches can't switch story-gate off.** The rules come from your main branch, and the checks run from a verified copy on your computer. See [security](docs/client-security.md).
 - **Plain English.** Your AI writes replies, PR descriptions, story summaries and handoffs in short, plain sentences, with diagrams where a picture is clearer. story-gate scores this (an STE-style score, target 80%) and gives advice. See [plain writing](docs/guide.md#plain-writing).
-- **Pilot:** story-gate is pre-1.0. Signed releases are coming; until then, setup installs from a pinned version on GitHub.
+- **Pilot:** story-gate is pre-1.0, so commands and settings may still change between releases. Every release since v0.7.0 is signed, and story-gate checks that signature before it installs itself on your computer ([how](docs/guide.md#setup)).
 
 ## How it compares
 
@@ -230,7 +252,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.8.0`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).
