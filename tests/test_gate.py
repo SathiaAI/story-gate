@@ -4888,7 +4888,7 @@ class TestSpecCoverage(Base):
         (self.repo / "odd/spec.md").write_text("### User Story 1 - T\n1. **Given** a, **When** b, **Then** c\n2. **Given** 9 items, **Then** x\n")
         self.link("odd/spec.md", ["odd/spec.md#US1-1"])  # only the line it could read: still blocked
         v = self.ready()[0]
-        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("can't read 1 scenario line", v["checks"]["spec_covered"]["why"])
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("can't read 1 requirement line", v["checks"]["spec_covered"]["why"])
 
     def test_bad_paths_and_links_fail_closed(self):
         if os.name != "nt":
@@ -5030,6 +5030,161 @@ class TestSpecCoverage(Base):
         self.assertEqual(T.weaker({"require_spec_link": False}, {"require_spec_link": True}), [])
         self.assertTrue(T.tighten({"require_spec_link": False}, {"require_spec_link": True})["require_spec_link"])
         self.assertTrue(T.tighten({"require_spec_link": True}, {"require_spec_link": False})["require_spec_link"])
+
+
+MATT_TICKET = """# 03: Refund a single order
+
+**What to build:** A support agent can refund one paid order.
+
+**Blocked by:** 01
+
+**Status:** ready-for-agent
+
+- [ ] Refund button appears on paid orders
+- [x] Refunded orders show the refund date
+  - in the customer's time zone
+- [ ] A second refund of the same order is refused
+"""
+
+MATT_SPEC = """## Problem Statement
+
+Agents can't refund orders.
+
+## User Stories
+
+1. As a support agent, I want to refund an order, so that the customer gets their money back
+2. As a customer, I want an email receipt, so that I have proof
+   of the refund
+
+## Testing Decisions
+
+- Test through the refunds API.
+
+```
+- [ ] fenced, not a requirement
+```
+
+## Further Notes
+
+- [ ] a to-do outside the criteria, not a requirement
+"""
+
+MATT_ISSUE = """## Parent
+
+#12
+
+## What to build
+
+Refunds.
+
+## Acceptance criteria
+
+- [ ] Refund button appears on paid orders
+- [ ] Refunds over $500 need a manager
+
+## Blocked by
+
+None (can start immediately)
+"""
+
+
+class TestMattPocockFormats(Base):
+    """Matt Pocock's skills: ticket checkboxes and spec user stories are requirements each AC must cover."""
+
+    TK = ".scratch/refunds/issues/03-refund-one-order.md"
+    SP = ".scratch/refunds/spec.md"
+
+    def setUp(self):
+        super().setUp()
+        for path, text in ((self.TK, MATT_TICKET), (self.SP, MATT_SPEC), ("issue.md", MATT_ISSUE)):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(text)
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+
+    def link(self, spec, covers):
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        st = sd / "story.md"
+        st.write_text(st.read_text().replace("depends_on: []", "spec: %s\ndepends_on: []" % spec, 1))
+        t = json.loads((sd / "tests.json").read_text())
+        t["acceptance_criteria"][0]["covers"] = covers
+        (sd / "tests.json").write_text(json.dumps(t))
+
+    def covered(self):
+        run(self.repo, "score", "SAT-1", "ready")
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())["checks"]["spec_covered"]
+
+    def ids(self, text):
+        unread = []
+        out = [i for i, _ in self.g.spec_scenarios(text, unread)]
+        return out, unread
+
+    def test_ticket_checkboxes_are_requirements_and_a_ticked_box_is_not_proof(self):
+        ids, unread = self.ids(MATT_TICKET)
+        self.assertEqual([i.split("-")[0] for i in ids], ["ac1", "ac2", "ac3"]); self.assertEqual(unread, [])
+        lines = dict(self.g.spec_scenarios(MATT_TICKET))
+        self.assertIn("time zone", lines[ids[1]])  # the nested condition is part of the criterion
+        refs = [self.TK + "#" + i for i in ids]
+        self.link(self.TK, refs[:2])  # the ticked box still needs covering; the third one is missing
+        c = self.covered()
+        self.assertEqual(c["status"], "FAIL"); self.assertIn(refs[2], c["why"])
+        self.link(self.TK, refs)
+        self.assertEqual(self.covered()["status"], "PASS")
+
+    def test_spec_user_stories_and_issue_criteria(self):
+        ids, unread = self.ids(MATT_SPEC)
+        self.assertEqual([i.split("-")[0] for i in ids], ["story1", "story2"]); self.assertEqual(unread, [])  # fences, notes skipped
+        ids, unread = self.ids(MATT_ISSUE)
+        self.assertEqual([i.split("-")[0] for i in ids], ["ac1", "ac2"]); self.assertEqual(unread, [])
+
+    def test_a_reworded_or_reordered_requirement_gets_a_new_name(self):
+        ids = self.ids(MATT_TICKET)[0]
+        self.link(self.TK, [self.TK + "#" + i for i in ids])
+        (self.repo / self.TK).write_text(MATT_TICKET.replace("is refused", "is allowed"))  # the meaning changed
+        c = self.covered()
+        self.assertEqual(c["status"], "FAIL"); self.assertIn("aren't in the linked spec", c["why"])
+        swapped = MATT_TICKET.replace("- [ ] Refund button appears on paid orders\n", "").replace(
+            "- [ ] A second refund", "- [ ] Refund button appears on paid orders\n- [ ] A second refund")
+        self.assertNotEqual(sorted(self.ids(swapped)[0]), sorted(ids))  # same lines, new order: new names
+
+    def test_lines_it_cannot_read_block(self):
+        for text in ("## Acceptance criteria\n- Refunds are fast\n",                     # a plain bullet, not a checkbox
+                     "## Acceptance criteria\n1. Refunds are fast\n",
+                     "## User Stories\n1. Agents refund orders\n",                       # not 'As a ..., I want ...'
+                     "## Acceptance criteria\n  - [ ] indented with nothing above it\n",
+                     "## Acceptance criteria\nRefunds must be fast.\n- [ ] One\n"):         # a sentence, not a checkbox
+            self.assertTrue(self.ids(text)[1], text)
+        (self.repo / "bad.md").write_text("## Acceptance criteria\n- [ ] Good one\n- Refunds are fast\n")
+        self.link("bad.md", ["bad.md#" + self.ids("## Acceptance criteria\n- [ ] Good one\n")[0][0]])
+        c = self.covered()
+        self.assertEqual(c["status"], "FAIL"); self.assertIn("can't read 1 requirement line", c["why"])
+
+    def test_template_text_and_empty_tickets_fail(self):
+        (self.repo / "tpl.md").write_text("## Acceptance criteria\n\n- [ ] Criterion 1\n- [ ] Criterion 2\n")
+        ids = self.ids((self.repo / "tpl.md").read_text())[0]
+        self.link("tpl.md", ["tpl.md#" + i for i in ids])
+        self.assertIn("template placeholders", self.covered()["why"])
+        (self.repo / "empty.md").write_text("# 04: Nothing\n\n**What to build:** x\n")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.link("empty.md", ["empty.md#ac1-00000"])
+        self.assertIn("no acceptance scenarios or criteria", self.covered()["why"])
+
+    def test_a_gitignored_ticket_is_refused(self):
+        (self.repo / ".gitignore").write_text(".scratch/\n")
+        ids = self.ids(MATT_TICKET)[0]
+        self.link(self.TK, [self.TK + "#" + i for i in ids])
+        c = self.covered()
+        self.assertEqual(c["status"], "FAIL"); self.assertIn("ignored by git", c["why"])
+
+    def test_speckit_checklists_outside_criteria_are_not_requirements(self):
+        text = "## Review & Acceptance Checklist\n- [ ] No [NEEDS CLARIFICATION] markers remain\n"
+        self.assertEqual(self.ids(text), ([], []))
+
+    def test_preview_command_lists_names(self):
+        r = run(self.repo, "spec-scenarios", self.TK)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count(self.TK + "#ac"), 3)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,8 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
-  spec-scenarios <spec>[#US1]        list a Spec Kit / OpenSpec spec's scenarios, as names for an AC's `covers` in tests.json
+  spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
+                                      checkboxes and user stories), as names for an AC's `covers` in tests.json
   evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
   report <ID> [--out FILE] [--open]  build the validation page (one HTML file) for the owner
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
@@ -710,7 +711,22 @@ SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\
 OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(\S.*?)\s*$")
 # lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
 SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|^\s*\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
-SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]")
+SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]", "<actor>", "<feature>", "<benefit>")
+# Matt Pocock's skills: '## Acceptance criteria' checkboxes (tickets), '## User Stories' (specs), and the local ticket file
+AC_HEADING = re.compile(r"^#{1,6}\s+Acceptance criteria\s*$", re.I)
+STORIES_HEADING = re.compile(r"^#{1,6}\s+User Stories\s*$", re.I)
+CHECKBOX = re.compile(r"^(?:[-*+])\s+\[[ xX]\]\s+(\S.*)$")
+TOP_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+(\S.*)$")
+USER_STORY = re.compile(r"^(\d+)[.)]\s+(As an?\b.+?\bI want\b.+)$", re.I)
+LOCAL_TICKET = re.compile(r"\A\s*#\s+\d+:\s+\S.*\n(?:.*\n)*?\*\*What to build:\*\*", re.I)
+CRITERION_PLACEHOLDER = re.compile(r"^(?:acceptance\s+)?criterion\s+\d+$", re.I)
+
+
+def _req_id(prefix, n, text):
+    """A stable name for a checkbox or user story: its position plus a short hash of its words, so a reworded, added or
+    reordered requirement gets a new name and can't silently keep an old `covers` entry."""
+    norm = re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text)).strip().lower()
+    return "%s%d-%s" % (prefix, n, hashlib.sha256(norm.encode("utf-8")).hexdigest()[:5])
 
 
 def spec_scenarios(text, unread=None):
@@ -719,6 +735,18 @@ def spec_scenarios(text, unread=None):
     <!-- comments --> are skipped. Lines that look like a scenario but weren't read go into `unread`."""
     text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text.replace("\r\n", "\n"), flags=re.S)
     out, story, n, fence, in_os = [], None, 0, None, False
+    # Matt Pocock's formats: 'ac' = checkbox criteria (a ticked box is still a requirement, never proof); 'us' = user stories
+    ticket = bool(LOCAL_TICKET.match(text))  # '# 01: Title' + '**What to build:**': its checkboxes are its criteria
+    sect = "ac" if ticket else None
+    explicit = False  # under a '## Acceptance criteria' / '## User Stories' heading: prose there is unreadable, not ignored
+    item, n_ac, n_us = None, 0, 0  # item: index in `out` of the requirement that indented lines belong to
+
+    def close():
+        nonlocal item
+        if item is not None:
+            kind, k, body = out[item]
+            out[item] = (_req_id(kind, k, body), body)
+            item = None
     for line in text.split("\n"):
         f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
         if fence is None and f:
@@ -727,6 +755,37 @@ def spec_scenarios(text, unread=None):
         if fence is not None:
             if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
                 fence = None
+            continue
+        if re.match(r"^#{1,6}\s", line):
+            close()
+            sect = "ac" if AC_HEADING.match(line) else ("us" if STORIES_HEADING.match(line) else None)
+            explicit = bool(sect)
+            if sect:
+                continue
+            if ticket:
+                sect = "ac"
+                continue
+        if sect and line.strip():
+            if line[:1] in (" ", "\t") and item is not None:  # a nested condition belongs to the requirement above it
+                kind, k, body = out[item]
+                out[item] = (kind, k, body + "\n" + line.strip())
+                continue
+            if line[:1] in (" ", "\t") or line.lstrip().startswith(">"):
+                if unread is not None:
+                    unread.append(line.strip())
+                continue
+            close()
+            m = CHECKBOX.match(line) if sect == "ac" else USER_STORY.match(line)
+            if m:
+                if sect == "ac":
+                    n_ac += 1; out.append(("ac", n_ac, m.group(1).strip()))
+                else:
+                    n_us += 1; out.append(("story", n_us, m.group(2).strip()))
+                item = len(out) - 1
+            elif (TOP_ITEM.match(line) or explicit) and unread is not None:
+                unread.append(line.strip())  # a line story-gate can't read as a requirement: block, don't drop it
+            continue
+        if not line.strip():
             continue
         m = OPENSPEC_SCENARIO.match(line)
         if m:
@@ -750,6 +809,7 @@ def spec_scenarios(text, unread=None):
             out.append(("US%s-%d" % (story, n), line.strip()))
         elif unread is not None and SCENARIO_LIKE.search(line):
             unread.append(line.strip())
+    close()
     return out
 
 
@@ -776,12 +836,16 @@ def linked_scenarios(entry):
         if f.is_symlink() or not r:
             return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % (
                 r or f.relative_to(ROOT).as_posix())
+        if subprocess.run(["git", "check-ignore", "-q", "--", r], cwd=ROOT, capture_output=True).returncode == 0:
+            return {}, ("%s is ignored by git (.gitignore), so the pull request and CI never see it. Commit it, or copy it into "
+                        "the story's folder" % r)
         unread = []
         scen = spec_scenarios(rd(f), unread)
         if unread:
-            return {}, ("%s: story-gate can't read %d scenario line(s), so it can't check them: %s. Write each as one list "
-                        "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), or as '#### Scenario: "
-                        "<name>' (OpenSpec)" % (r, len(unread), "; ".join(u[:80] for u in unread[:3])))
+            return {}, ("%s: story-gate can't read %d requirement line(s), so it can't check them: %s. Write each as one list "
+                        "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), as '#### Scenario: <name>' "
+                        "(OpenSpec), as '- [ ] <criterion>' under '## Acceptance criteria', or as '1. As a ..., I want ..., "
+                        "so that ...' under '## User Stories'" % (r, len(unread), "; ".join(u[:80] for u in unread[:3])))
         for lid, line in scen:
             if only and not lid.startswith(only + "-"):
                 continue
@@ -790,8 +854,9 @@ def linked_scenarios(entry):
                 return {}, "%s: two scenarios are both called '%s' - give each a unique name" % (r, lid)
             found[ref] = line
     if not found:
-        return {}, ("%s: no acceptance scenarios found (story-gate reads Spec Kit 'Given ... When ... Then' scenarios under "
-                    "'### User Story N', and OpenSpec '#### Scenario:' blocks)" % entry)
+        return {}, ("%s: no acceptance scenarios or criteria found (story-gate reads Spec Kit 'Given ... When ... Then' "
+                    "scenarios under '### User Story N', OpenSpec '#### Scenario:' blocks, '- [ ]' checkboxes under '## "
+                    "Acceptance criteria' or in a ticket file, and '## User Stories' lists)" % entry)
     return found, None
 
 
@@ -824,6 +889,7 @@ def spec_coverage(sd, fm, c):
     except Exception:
         covers = set()
     holes = [r for r, line in scen.items() if any(ph in line for ph in SPEC_PLACEHOLDERS)
+             or CRITERION_PLACEHOLDER.match(line.strip())  # 'Criterion 1' left from a ticket template
              or re.fullmatch(r"[<\[].*[>\]]", r.split("#", 1)[1].strip())]  # '[Scenario Name]', '<name>'
 
     missing = [r for r in scen if r not in covers]
@@ -831,11 +897,12 @@ def spec_coverage(sd, fm, c):
     if holes:
         why.append("the spec still has template placeholders: " + ", ".join(holes[:5]))
     if missing:
-        why.append("spec scenarios no AC covers (add them to an AC's `covers` in tests.json): "
+        why.append("spec requirements no AC covers (add them to an AC's `covers` in tests.json): "
                    + "; ".join('%s ("%s")' % (r, re.sub(r"[*#]", "", scen[r]).strip()[:70]) for r in missing[:8])
                    + (" and %d more" % (len(missing) - 8) if len(missing) > 8 else ""))
     if unknown:
-        why.append("`covers` names scenarios that aren't in the linked spec: " + ", ".join(unknown[:8]))
+        why.append("`covers` names requirements that aren't in the linked spec (a reworded or reordered checkbox or user "
+                   "story gets a new name: list them again with `story-gate spec-scenarios`): " + ", ".join(unknown[:8]))
     return not why, "; ".join(why)
 
 
@@ -3722,7 +3789,8 @@ def main(argv):
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
     if cmd == "spec-scenarios":
         if not args:
-            sys.exit("usage: spec-scenarios <spec file or folder>[#US1]   (lists the scenario names to put in `covers`)")
+            sys.exit("usage: spec-scenarios <spec, ticket file or folder>[#US1]   (lists the requirement names to put in "
+                     "`covers`: scenarios, checkbox criteria and user stories)")
         found, problem = linked_scenarios(args[0])
         if problem:
             sys.exit("story-gate: " + problem)

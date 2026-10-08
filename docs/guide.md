@@ -236,7 +236,7 @@ There are two kinds of check:
 | `context_present` | Structural | PRD, TRD, upstream handoffs and prior learnings are filled ("None — searched: …" is allowed) |
 | `test_matrix` | Structural | Every AC has positive, negative, edge **and** regression cases, or a reason one doesn't apply |
 | `upstream_handoffs` | Structural | Every `depends_on` story has a handoff |
-| `spec_covered` | Structural | When `story.md` links a Spec Kit or OpenSpec spec (`spec:`), every scenario in it is named in some AC's `covers` (checked again at DONE). See [Spec Kit, OpenSpec and BMAD](#spec-kit-openspec-and-bmad) |
+| `spec_covered` | Structural | When `story.md` links a spec or ticket (`spec:`: Spec Kit, OpenSpec, or a Matt Pocock ticket or spec), every scenario, checkbox criterion and user story in it is named in some AC's `covers` (checked again at DONE). See [Spec Kit, OpenSpec and BMAD](#spec-kit-openspec-and-bmad) |
 | `dor_value`, `dor_scope`, `dor_interfaces`, `dor_dependencies`, `dor_nfr`, `dor_small`, `dor_no_blockers` | Judge | Definition of Ready: value, scope, interfaces, dependencies, NFRs, small enough, no blockers |
 | `ac_testable`, `ac_covers_scope`, `tests_plan_adequate` | Judge | ACs are pass/fail, cover the scope, and the test plan is meaningful |
 | `drift_prd`, `drift_trd` + direction | Judge | Consistent with the PRD and TRD? If not, which side should change? |
@@ -386,6 +386,16 @@ These tools help your AI write the plan. None of them checks, when a pull reques
 READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). Each AC then needs passing tests and a recorded run as usual. story-gate checks that every scenario is assigned to an AC; whether that AC's tests really exercise the scenario is what the AI judge and your review check. Set `require_spec_link: true` to make every story link a spec.
 
 **BMAD:** its file layout is changing (v7), so story-gate doesn't read BMAD files yet. Copy the story's acceptance criteria into `story.md` as usual; everything else applies.
+
+**Matt Pocock's skills** (`to-spec`, `to-tickets`, `implement`): link the ticket or spec file, for example `spec: .scratch/refunds/issues/03-refund-one-order.md`.
+
+- **Ticket files** (`# 03: Title` with `**What to build:**`): every `- [ ]` line is a requirement. So is every `- [ ]` under a `## Acceptance criteria` heading in any linked file.
+- **Specs:** every numbered `As a …, I want …` line under `## User Stories` is a requirement.
+- **Ticked boxes still count as requirements.** A tick is never proof; only a passing test is.
+- **Names:** `ac1-938f7`, `story2-d0a81`: the position plus a short fingerprint of the words. Reword or reorder a criterion and its name changes, so an old `covers` entry can't silently point at the wrong one. Run `story-gate spec-scenarios <file>` to list the current names.
+- **Fails closed:** a plain bullet under `## Acceptance criteria`, or a user story not written as `As a …, I want …`, blocks the check rather than being skipped. Template text (`Criterion 1`, `<actor>`) blocks too.
+- **Commit the ticket.** `.scratch/` is often in `.gitignore`; story-gate refuses an ignored file, because the pull request and CI would never see it.
+- Tickets that live on GitHub issues: copy the ticket into the repository for now. `story-gate spec-pull` is coming next.
 
 Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 
