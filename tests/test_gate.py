@@ -5300,7 +5300,8 @@ class TestSpecPull(Base):
     def test_pull_links_and_the_gate_checks_the_copy(self):
         r = self.pull()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("2 requirement(s)", r.stdout); self.assertIn("not verified", self.snap.read_text())
+        self.assertIn("2 requirement(s)", r.stdout); self.assertIn("not verified", r.stdout)
+        self.assertIn("\nfetched_by: pasted\n", self.snap.read_text())
         rel = ".story-gate/stories/SAT-1/issue-7.md"
         self.assertIn("spec: " + rel, (self.repo / ".story-gate/stories/SAT-1/story.md").read_text())
         names = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith(rel + "#")]
@@ -5318,6 +5319,49 @@ class TestSpecPull(Base):
         self.snap.write_text(self.snap.read_text().replace("- [ ] Refunds over $500 need a manager\n", ""))  # drop one
         c = self.covered()
         self.assertEqual(c["status"], "FAIL"); self.assertIn("changed after `story-gate spec-pull`", c["why"])
+
+    def test_tampering_with_the_copy_or_its_source_fields_blocks(self):
+        self.pull()
+        good = self.snap.read_text()
+        for bad, why in ((lambda s: "\n" + s, "source block"),                                   # leading blank line
+                         (lambda s: "\ufeff" + s, "source block"),                               # BOM
+                         (lambda s: " " + s, "source block"),
+                         (lambda s: s.replace("fetched_by: pasted", "fetched_by: github-api"), "changed after"),  # relabel
+                         (lambda s: s.replace("repo: acme/shop", "repo: evil/x"), "doesn't match"),
+                         (lambda s: s.replace("issue: 7", "issue: 8").replace("issues/7", "issues/8"), "changed after"),
+                         (lambda s: s.replace("fetched_by: pasted", "fetched_by: someone"), "isn't one of"),
+                         (lambda s: s.replace("fetched_at:", "fetched_at: x\nfetched_at:"), "twice"),
+                         (lambda s: s.replace("source_kind: github-issue\n", ""), "source block")):
+            self.snap.write_text(bad(good))
+            c = self.covered()
+            self.assertEqual(c["status"], "FAIL", why); self.assertIn(why, c["why"])
+        self.snap.write_text(good)
+        (self.repo / ".story-gate/stories/SAT-1/issue-8.md").write_text(good)  # a copy of #7 saved as #8
+        st = self.repo / ".story-gate/stories/SAT-1/story.md"
+        st.write_text(st.read_text().replace("issue-7.md", "issue-8.md"))
+        self.assertIn("named for issue 8", self.covered()["why"])
+
+    def test_odd_input_never_crashes_or_destroys_the_old_copy(self):
+        self.pull(); before = self.snap.read_text()
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP
+        from unittest import mock
+        reply = (200, {"title": "T \ud800", "body": "## Acceptance criteria\n- [ ] a \udc80 b\n", "updated_at": "x",
+                       "html_url": "https://github.com/acme/shop/issues/7"}, {})
+        with mock.patch.object(G, "call", return_value=reply), mock.patch.object(G, "human_token", return_value=None):
+            self.assertEqual(SP.cli(g, ["SAT-1", "#7"]), 0)
+        self.assertIn("- [ ] a ? b", self.snap.read_text()); self.assertNotEqual(self.snap.read_text(), before)
+        self.snap.unlink(); self.snap.mkdir()
+        r = self.pull(); self.assertNotEqual(r.returncode, 0); self.assertIn("a link or a folder", r.stderr)
+
+    def test_the_token_is_never_sent_to_another_host_on_a_redirect(self):
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, urllib.request
+        h = G._SameHostRedirect()
+        for to, kept in (("https://api.github.com/repositories/1/issues/7", True), ("https://evil.example/x", False)):
+            req = urllib.request.Request("https://api.github.com/repos/acme/shop/issues/7", headers={"Authorization": "Bearer t"})
+            new = h.redirect_request(req, None, 301, "Moved", {}, to)
+            self.assertEqual(any(k.lower() == "authorization" for k in new.headers), kept, to)
 
     def test_other_repositories_pull_requests_and_errors_are_refused(self):
         r = run(self.repo, "spec-pull", "SAT-1", "other/repo#7", "--from-file", "ticket.txt")

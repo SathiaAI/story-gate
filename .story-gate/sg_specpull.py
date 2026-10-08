@@ -4,7 +4,7 @@ the live issue is only ever read here, on request, never by the gate itself.
 
 Rules: only this repository's issues (its 'origin' remote on github.com); the issue text is data, never run; the file
 records where it came from and a hash of its text, so an edit by hand is caught (spec_snapshot_problem in gate.py)."""
-import hashlib, json, re, sys, time
+import os, re, sys, tempfile
 from pathlib import Path
 
 MAX_BODY = 256_000          # characters: an issue body is at most 65,536 on GitHub; anything bigger isn't one
@@ -27,17 +27,23 @@ def parse_ref(ref, own):
     return None
 
 
+def clean(s):
+    """Text that can be written as UTF-8: a lone surrogate (broken input) becomes '?' instead of crashing the write."""
+    return str(s or "").encode("utf-8", "replace").decode("utf-8")
+
+
 def one_line(s, n=300):
-    return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
+    return re.sub(r"\s+", " ", clean(s)).strip()[:n]
 
 
-def snapshot_text(sid, ref_arg, meta, title, body):
-    """The file: front matter, a do-not-edit note, '# title', then the issue body. content_sha256 covers everything
-    after the front matter, so the gate can tell when the file no longer matches what was pulled."""
+def snapshot_text(gate, sid, ref_arg, meta, title, body):
+    """The file: the source block, a do-not-edit note, '# title', then the issue body. content_sha256 covers the source
+    fields and the text together (gate.snapshot_hash), so neither can be changed without the check failing."""
     content = "%s\n\n# %s\n\n%s\n" % (NOTE % (sid, ref_arg), one_line(title) or "Issue %s" % meta["issue"],
-                                      body.replace("\r\n", "\n").replace("\r", "\n").rstrip())
-    fm = dict(meta, content_sha256=hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest())
-    return "---\n%s\n---\n%s" % ("\n".join("%s: %s" % (k, one_line(v)) for k, v in fm.items()), content)
+                                      clean(body).replace("\r\n", "\n").replace("\r", "\n").rstrip())
+    fields = {k: one_line(meta[k]) for k in gate.SNAPSHOT_KEYS}
+    fields["content_sha256"] = gate.snapshot_hash(fields, content)
+    return "---\n%s\n---\n%s" % ("\n".join("%s: %s" % kv for kv in fields.items()), content)
 
 
 def link(story_md, rel):
@@ -48,7 +54,7 @@ def link(story_md, rel):
         return None
     lines = m.group(2).split("\n")
     for i, ln in enumerate(lines):
-        if re.match(r"spec\s*:", ln):
+        if re.match(r"\s*spec\s*:", ln):
             v = ln.split(":", 1)[1].strip()
             cur = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()] if v.startswith("[") else ([v] if v and v.lower() != "none" else [])
             if rel not in cur:
@@ -91,7 +97,7 @@ def cli(gate, args):
             sys.exit("story-gate: can't read %s: %s" % (src, e))
         title, body = kv.get("title", ""), raw
         meta = {"source_kind": KIND, "source_url": url, "repo": own, "issue": num, "source_updated_at": "unknown",
-                "fetched_at": gate.now(), "fetched_by": "pasted (not verified against the issue)"}
+                "fetched_at": gate.now(), "fetched_by": "pasted"}
     else:
         import sg_github as G
         st, data, _ = G.call("GET", "/repos/%s/issues/%d" % (own, num), G.human_token())
@@ -115,9 +121,21 @@ def cli(gate, args):
         sys.exit("story-gate: issue #%d has no text, so there's nothing to check. Nothing was saved." % num)
     out = sd / ("issue-%d.md" % num)
     rel = out.relative_to(gate.ROOT).as_posix()
-    if out.is_symlink():
-        sys.exit("story-gate: %s is a link; story-gate doesn't write through links." % rel)
-    out.write_text(snapshot_text(sid, ref_arg if ref_arg.startswith("#") else "#%d" % num, meta, title, body), encoding="utf-8")
+    if out.is_symlink() or (out.exists() and not out.is_file()):
+        sys.exit("story-gate: %s is a link or a folder; story-gate only replaces a plain file there." % rel)
+    text = snapshot_text(gate, sid, "#%d" % num, meta, title, body)
+    gate.parse_snapshot(text)  # the gate must be able to read what was written: fail here, not later
+    fd, tmp = tempfile.mkstemp(dir=str(sd), prefix=".issue-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, str(out))  # all or nothing: a failed write never leaves half a file
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        sys.exit("story-gate: couldn't write %s: %s" % (rel, e))
     st_md = sd / "story.md"
     new = link(st_md.read_text(encoding="utf-8"), rel)
     if new is None:
@@ -125,7 +143,8 @@ def cli(gate, args):
     else:
         st_md.write_text(new, encoding="utf-8")
     found, problem = gate.linked_scenarios(rel)
-    print("Saved issue #%d as %s (%s) and linked it in story.md." % (num, rel, meta["fetched_by"]))
+    print("Saved issue #%d as %s (%s) and linked it in story.md." % (
+        num, rel, "from GitHub" if meta["fetched_by"] == "github-api" else "pasted text, not verified against the issue"))
     if problem:
         print("It can't be checked yet: " + problem)
         return 1

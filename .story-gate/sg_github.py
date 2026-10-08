@@ -17,6 +17,21 @@ WEB = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
 
 
 # ------------------------------------------------------------------ REST / GraphQL
+class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never send the token to a different host (urllib would forward the Authorization header)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc.lower() != urllib.parse.urlsplit(req.full_url).netloc.lower():
+            for k in list(new.headers):
+                if k.lower() == "authorization":
+                    del new.headers[k]
+        return new
+
+
+_OPENER = urllib.request.build_opener(_SameHostRedirect)
+
+
 def call(method, path, token=None, body=None, accept="application/vnd.github+json"):
     url = path if path.startswith("http") else API + path
     h = {"Accept": accept, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "story-gate"}
@@ -27,7 +42,7 @@ def call(method, path, token=None, body=None, accept="application/vnd.github+jso
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
-        r = urllib.request.urlopen(req, timeout=30)
+        r = _OPENER.open(req, timeout=30)
         raw = r.read().decode()
         return r.status, (json.loads(raw) if raw.strip() else {}), r.headers
     except urllib.error.HTTPError as e:

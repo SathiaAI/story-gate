@@ -946,19 +946,57 @@ def spec_scenarios(text, unread=None):
     return [(o[0], "\n".join(o[2])) for o in out]
 
 
-def spec_snapshot(text):
-    """(text to read, problem or None). A file made by `story-gate spec-pull` starts with front matter naming its source
-    and a hash of everything after it: only that part is read, and if it no longer matches the hash (edited by hand,
-    or by an agent) the check fails. Other files are read whole."""
-    m = re.match(r"---\n(.*?)\n---\n", text.replace("\r\n", "\n"), re.S)
-    fm = front_matter(text) if m else {}
-    if fm.get("source_kind") != "github-issue":
+SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/[^/]+/issue-(\d{1,9})\.md$")
+SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
+SNAPSHOT_BY = ("github-api", "pasted")
+
+
+def snapshot_hash(fields, content):
+    """sha256 over the source fields (in a fixed order) and the text, so neither can change without the other."""
+    head = "\n".join("%s: %s" % (k, fields.get(k, "")) for k in SNAPSHOT_KEYS)
+    return hashlib.sha256((head + "\n---\n" + content).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def parse_snapshot(text):
+    """(fields, content) for a file `story-gate spec-pull` wrote: '---' on the very first line, the source fields, '---',
+    then the text. Raises ValueError (in plain words) for anything else. The one reader both spec-pull and the gate use."""
+    text = text.replace("\r\n", "\n")
+    m = re.match(r"---\n((?:[a-z_0-9]+: [^\n]*\n){1,20})---\n", text)
+    if not m:
+        raise ValueError("it doesn't start with the source block `story-gate spec-pull` writes")
+    fields = {}
+    for ln in m.group(1).splitlines():
+        k, v = ln.split(": ", 1)
+        if k in fields:
+            raise ValueError("its source block names '%s' twice" % k)
+        fields[k] = v
+    if set(fields) != set(SNAPSHOT_KEYS) | {"content_sha256"} or fields["source_kind"] != "github-issue":
+        raise ValueError("its source block isn't one `story-gate spec-pull` writes")
+    if fields["fetched_by"] not in SNAPSHOT_BY:
+        raise ValueError("'fetched_by: %s' isn't one of %s" % (fields["fetched_by"][:40], ", ".join(SNAPSHOT_BY)))
+    if fields["source_url"] != "https://github.com/%s/issues/%s" % (fields["repo"], fields["issue"]):
+        raise ValueError("its source_url doesn't match its repo and issue")
+    content = text[m.end():]
+    if snapshot_hash(fields, content) != fields["content_sha256"]:
+        raise ValueError("it was changed after `story-gate spec-pull` copied it from %s. Pull it again rather than "
+                         "editing it" % fields["source_url"])
+    return fields, content
+
+
+def spec_snapshot(text, rel=""):
+    """(text to read, problem or None). A file named .story-gate/stories/<ID>/issue-<N>.md must be a valid spec-pull
+    copy of issue N; only the issue text is then read. Any file that claims to be one ('source_kind: github-issue') is
+    held to the same rules. Other files are read whole."""
+    m = SNAPSHOT_NAME.match(rel)
+    if not m and "source_kind: github-issue" not in text[:2000]:
         return text, None
-    body = text.replace("\r\n", "\n")[m.end():]
-    if hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest() != fm.get("content_sha256"):
-        return "", ("it was changed after `story-gate spec-pull` copied it from %s. Pull it again rather than editing it"
-                    % (fm.get("source_url") or "the issue"))
-    return body, None
+    try:
+        fields, content = parse_snapshot(text)
+    except ValueError as e:
+        return "", str(e)
+    if m and fields["issue"] != m.group(1):
+        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m.group(1))
+    return content, None
 
 
 def story_spec_refs(fm):
@@ -994,7 +1032,7 @@ def linked_scenarios(entry):
         if rc != 1:  # 1 = not ignored; anything else is git failing, and the check fails closed
             return {}, "%s: git couldn't say whether this file is ignored (git check-ignore failed), so it can't be checked" % r
         unread = []
-        body, snap_problem = spec_snapshot(rd(f))
+        body, snap_problem = spec_snapshot(rd(f), r)
         if snap_problem:
             return {}, "%s: %s" % (r, snap_problem)
         scen = spec_scenarios(body, unread)
