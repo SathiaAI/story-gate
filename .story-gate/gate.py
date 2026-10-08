@@ -35,6 +35,8 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
+  spec-pull <ID> <issue> [--from-file F]   copy this repository's GitHub issue (#42 or its URL) into the story's folder
+                                      as a checked snapshot and link it in story.md (the gate never reads the live issue)
   spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
                                       checkboxes and user stories), as names for an AC's `covers` in tests.json
   evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
@@ -944,6 +946,59 @@ def spec_scenarios(text, unread=None):
     return [(o[0], "\n".join(o[2])) for o in out]
 
 
+SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/[^/]+/issue-(\d{1,9})\.md$")
+SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
+SNAPSHOT_BY = ("github-api", "pasted")
+
+
+def snapshot_hash(fields, content):
+    """sha256 over the source fields (in a fixed order) and the text, so neither can change without the other."""
+    head = "\n".join("%s: %s" % (k, fields.get(k, "")) for k in SNAPSHOT_KEYS)
+    return hashlib.sha256((head + "\n---\n" + content).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def parse_snapshot(text):
+    """(fields, content) for a file `story-gate spec-pull` wrote: '---' on the very first line, the source fields, '---',
+    then the text. Raises ValueError (in plain words) for anything else. The one reader both spec-pull and the gate use."""
+    text = text.replace("\r\n", "\n")
+    m = re.match(r"---\n((?:[a-z_0-9]+: [^\n]*\n){1,20})---\n", text)
+    if not m:
+        raise ValueError("it doesn't start with the source block `story-gate spec-pull` writes")
+    fields = {}
+    for ln in m.group(1).splitlines():
+        k, v = ln.split(": ", 1)
+        if k in fields:
+            raise ValueError("its source block names '%s' twice" % k)
+        fields[k] = v
+    if set(fields) != set(SNAPSHOT_KEYS) | {"content_sha256"} or fields["source_kind"] != "github-issue":
+        raise ValueError("its source block isn't one `story-gate spec-pull` writes")
+    if fields["fetched_by"] not in SNAPSHOT_BY:
+        raise ValueError("'fetched_by: %s' isn't one of %s" % (fields["fetched_by"][:40], ", ".join(SNAPSHOT_BY)))
+    if fields["source_url"] != "https://github.com/%s/issues/%s" % (fields["repo"], fields["issue"]):
+        raise ValueError("its source_url doesn't match its repo and issue")
+    content = text[m.end():]
+    if snapshot_hash(fields, content) != fields["content_sha256"]:
+        raise ValueError("it was changed after `story-gate spec-pull` copied it from %s. Pull it again rather than "
+                         "editing it" % fields["source_url"])
+    return fields, content
+
+
+def spec_snapshot(text, rel=""):
+    """(text to read, problem or None). A file named .story-gate/stories/<ID>/issue-<N>.md must be a valid spec-pull
+    copy of issue N; only the issue text is then read. Any file that claims to be one ('source_kind: github-issue') is
+    held to the same rules. Other files are read whole."""
+    m = SNAPSHOT_NAME.match(rel)
+    if not m and "source_kind: github-issue" not in text[:2000]:
+        return text, None
+    try:
+        fields, content = parse_snapshot(text)
+    except ValueError as e:
+        return "", str(e)
+    if m and fields["issue"] != m.group(1):
+        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m.group(1))
+    return content, None
+
+
 def story_spec_refs(fm):
     v = fm.get("spec") or []
     return [x for x in ([v] if isinstance(v, str) else v) if isinstance(x, str) and x.strip() and x.strip().lower() != "none"]
@@ -977,7 +1032,10 @@ def linked_scenarios(entry):
         if rc != 1:  # 1 = not ignored; anything else is git failing, and the check fails closed
             return {}, "%s: git couldn't say whether this file is ignored (git check-ignore failed), so it can't be checked" % r
         unread = []
-        scen = spec_scenarios(rd(f), unread)
+        body, snap_problem = spec_snapshot(rd(f), r)
+        if snap_problem:
+            return {}, "%s: %s" % (r, snap_problem)
+        scen = spec_scenarios(body, unread)
         if unread:
             return {}, ("%s: story-gate can't read %d requirement line(s), so it can't check them: %s. Write each as one list "
                         "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), as '#### Scenario: <name>' "
@@ -1002,7 +1060,11 @@ def linked_spec_pairs(sd):
     out = []
     for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
         found, problem = linked_scenarios(e)
-        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem])))
+        path = e.strip().partition("#")[0]
+        issue_text = ""
+        if SNAPSHOT_NAME.match(path) and not problem:  # a pulled issue: any change to its text re-opens READY and DONE
+            issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / path), path)[0].encode("utf-8", "surrogatepass")).hexdigest()
+        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem] + ([issue_text] if issue_text else []))))
     return out
 
 
@@ -2618,7 +2680,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -3924,6 +3986,9 @@ def main(argv):
             sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
                      "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "spec-pull":
+        import sg_specpull as SP
+        return SP.cli(sys.modules[__name__], args)
     if cmd == "spec-scenarios":
         if not args:
             sys.exit("usage: spec-scenarios <spec, ticket file or folder>[#US1]   (lists the requirement names to put in "
