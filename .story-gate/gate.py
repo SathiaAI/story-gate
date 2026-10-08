@@ -967,9 +967,15 @@ def linked_scenarios(entry):
         if f.is_symlink() or not r:
             return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % (
                 r or f.relative_to(ROOT).as_posix())
-        if subprocess.run(["git", "check-ignore", "-q", "--", r], cwd=ROOT, capture_output=True).returncode == 0:
+        try:
+            rc = subprocess.run(["git", "check-ignore", "-q", "--", r], cwd=ROOT, capture_output=True, timeout=30).returncode
+        except (OSError, subprocess.SubprocessError):
+            rc = -1
+        if rc == 0:
             return {}, ("%s is ignored by git (.gitignore), so the pull request and CI never see it. Commit it, or copy it into "
                         "the story's folder" % r)
+        if rc != 1:  # 1 = not ignored; anything else is git failing, and the check fails closed
+            return {}, "%s: git couldn't say whether this file is ignored (git check-ignore failed), so it can't be checked" % r
         unread = []
         scen = spec_scenarios(rd(f), unread)
         if unread:

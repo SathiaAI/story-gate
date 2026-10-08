@@ -5247,6 +5247,18 @@ class TestMattPocockFormats(Base):
         self.assertEqual(len(self.ids("## Acceptance criteria\n- [ ] x\n")[0][0].split("-")[1]), 10)
         self.g.spec_scenarios("## Acceptance criteria\n- [ ] bad \udc80 byte\n", [])  # no crash on odd text
 
+    def test_git_failing_to_answer_blocks(self):
+        from unittest import mock
+        import subprocess as sp
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        real = sp.run
+        for fake in (lambda *a, **k: sp.CompletedProcess(a[0], 128), mock.Mock(side_effect=OSError("no git"))):
+            def run_(cmd, *a, **k):
+                return fake(cmd, *a, **k) if cmd[:2] == ["git", "check-ignore"] else real(cmd, *a, **k)
+            with mock.patch.object(g.subprocess, "run", side_effect=run_):
+                found, problem = g.linked_scenarios(self.TK)
+            self.assertEqual(found, {}); self.assertIn("couldn't say whether this file is ignored", problem)
+
     def test_preview_command_lists_names(self):
         r = run(self.repo, "spec-scenarios", self.TK)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
