@@ -236,6 +236,7 @@ There are two kinds of check:
 | `context_present` | Structural | PRD, TRD, upstream handoffs and prior learnings are filled ("None — searched: …" is allowed) |
 | `test_matrix` | Structural | Every AC has positive, negative, edge **and** regression cases, or a reason one doesn't apply |
 | `upstream_handoffs` | Structural | Every `depends_on` story has a handoff |
+| `spec_covered` | Structural | When `story.md` links a Spec Kit or OpenSpec spec (`spec:`), every scenario in it is named in some AC's `covers` (checked again at DONE). See [Spec Kit, OpenSpec and BMAD](#spec-kit-openspec-and-bmad) |
 | `dor_value`, `dor_scope`, `dor_interfaces`, `dor_dependencies`, `dor_nfr`, `dor_small`, `dor_no_blockers` | Judge | Definition of Ready: value, scope, interfaces, dependencies, NFRs, small enough, no blockers |
 | `ac_testable`, `ac_covers_scope`, `tests_plan_adequate` | Judge | ACs are pass/fail, cover the scope, and the test plan is meaningful |
 | `drift_prd`, `drift_trd` + direction | Judge | Consistent with the PRD and TRD? If not, which side should change? |
@@ -352,6 +353,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
+| `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |
 | `judge_mode` | `"full"` | `"objective"` runs without an AI judge (setup's **Skip for now** sets it). See [Fallbacks](#fallbacks). Switching to it is reported as a weaker rule in the PR check |
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
@@ -368,6 +370,24 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 3. Add `pre_edit`.
 4. Add `checkpoint` and `stop`.
 5. Switch to `"mode": "enforce"`.
+
+### Spec Kit, OpenSpec and BMAD
+
+These tools help your AI write the plan. None of them checks, when a pull request is opened, that the code does what the plan says: their checks are run by the AI itself and only advise ([Spec Kit](https://github.github.io/spec-kit/reference/agentic-sdd.html), [OpenSpec](https://github.com/Fission-AI/OpenSpec/blob/main/docs/cli.md)). story-gate adds that gate.
+
+1. Link the spec in `story.md`'s front matter:
+   - Spec Kit: `spec: specs/001-checkout/spec.md`. To build one user story only: `spec: specs/001-checkout/spec.md#US1`.
+   - OpenSpec: `spec: openspec/changes/add-discount` (story-gate reads every `spec.md` in the change folder).
+2. List the scenario names: `story-gate spec-scenarios <the same path>`.
+   - Spec Kit: the numbered "Given … When … Then" lines under `### User Story N` become `US1-1`, `US1-2`, ...
+   - OpenSpec: each `#### Scenario: <name>` is named by its name.
+3. In `tests.json`, list the scenarios each AC covers: `"covers": ["specs/001-checkout/spec.md#US1-1"]`.
+
+READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). Each AC then needs passing tests and a recorded run as usual. story-gate checks that every scenario is assigned to an AC; whether that AC's tests really exercise the scenario is what the AI judge and your review check. Set `require_spec_link: true` to make every story link a spec.
+
+**BMAD:** its file layout is changing (v7), so story-gate doesn't read BMAD files yet. Copy the story's acceptance criteria into `story.md` as usual; everything else applies.
+
+Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 
 ## F. The dashboard: how it's going
 

@@ -35,6 +35,7 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
+  spec-scenarios <spec>[#US1]        list a Spec Kit / OpenSpec spec's scenarios, as names for an AC's `covers` in tests.json
   evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
   report <ID> [--out FILE] [--open]  build the validation page (one HTML file) for the owner
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
@@ -188,6 +189,8 @@ DEFAULT_CONFIG = {
     "junit_path": "",
     "test_globs": ["**/test_*.py", "**/*_test.py", "**/tests/**", "**/test/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/*Test.java", "**/*_test.go"],
     "spec_files": [],
+    # true: every story must link the spec it builds (`spec:` in story.md) and cover each of its scenarios with an AC
+    "require_spec_link": False,
     "thresholds": {"pass": 0.7, "concerns": 0.4},
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
@@ -341,6 +344,8 @@ def cfg():
                 c[k] = v
     if c.get("mode") not in ("warn", "enforce"):
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
+    if not isinstance(c.get("require_spec_link"), bool):
+        raise ConfigError('.story-gate/config.json: "require_spec_link" must be true or false - the gate fails closed until fixed')
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
@@ -511,7 +516,7 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
-                       "jm": c.get("judge_mode", "full"),  # switching mode re-scores: an objective verdict never counts in full mode
+                       "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
 
 
@@ -528,7 +533,7 @@ def inputs_hash(sd, phase, c=None):
         try:
             c = c or cfg()
             return ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
-                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c)
+                                   [(f, rd(ROOT / f)) for f in spec_files(c)] + linked_spec_pairs(sd), c)
         except ConfigError:
             return hashlib.sha256((rd(sd / "story.md") + rd(sd / "context.md") + rd(sd / "tests.json") + "<config unreadable>")
                                   .encode("utf-8", "ignore")).hexdigest()[:16]
@@ -550,6 +555,7 @@ def inputs_hash(sd, phase, c=None):
         blob += "<config unreadable>"
     if phase == "done":
         blob += "".join(json.dumps(r) for r in jsonl(LEARNINGS) if r.get("story") == sd.name) + work_fingerprint()
+        blob += "".join(k + v for k, v in linked_spec_pairs(sd))  # the linked spec changed: DONE is out of date
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
@@ -693,7 +699,144 @@ def struct_ready(sd):
     nohand = bad_ids + [d for d in deps if d not in bad_ids and not (STORIES / d / "handoff.md").exists()
                         and not re.search(r"^###\s+" + re.escape(d) + r"\b(?!-)", up, re.M)]
     out["upstream_handoffs"] = (not nohand, "no handoff found for upstream: " + ", ".join(nohand))
+    cov = spec_coverage(sd, fm, cfg())
+    if cov is not None:
+        out["spec_covered"] = cov
     return out, fm
+
+
+SPECKIT_STORY = re.compile(r"^#{2,4}\s+User Story\s+(\d+)\b", re.I)
+SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
+OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(\S.*?)\s*$")
+# lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
+SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|^\s*\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
+SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]")
+
+
+def spec_scenarios(text, unread=None):
+    """[(local id, line)] of the acceptance scenarios in one spec file. Spec Kit: one-line 'Given ... When ... Then' list
+    items under a 'User Story N' heading -> US<N>-<k>. OpenSpec: '#### Scenario: <name>' -> <name>. Code blocks and
+    <!-- comments --> are skipped. Lines that look like a scenario but weren't read go into `unread`."""
+    text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text.replace("\r\n", "\n"), flags=re.S)
+    out, story, n, fence, in_os = [], None, 0, None, False
+    for line in text.split("\n"):
+        f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is None and f:
+            fence = f.group(1)  # code block opened: skip until the same marker, at least as long, closes it
+            continue
+        if fence is not None:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
+                fence = None
+            continue
+        m = OPENSPEC_SCENARIO.match(line)
+        if m:
+            out.append((m.group(1), line.strip()))
+            in_os = True  # its GIVEN/WHEN/THEN bullets belong to this scenario
+            continue
+        if re.match(r"^#{1,6}\s", line):
+            in_os = False
+        if in_os:
+            if line.strip():
+                out[-1] = (out[-1][0], out[-1][1] + "\n" + line.strip())  # the body counts too: placeholders, edits
+            continue
+        m = SPECKIT_STORY.match(line)
+        if m:
+            story, n = m.group(1), 0
+            continue
+        if re.match(r"^#{1,3}\s", line):
+            story = None
+        if story and SPECKIT_SCENARIO.match(line):
+            n += 1
+            out.append(("US%s-%d" % (story, n), line.strip()))
+        elif unread is not None and SCENARIO_LIKE.search(line):
+            unread.append(line.strip())
+    return out
+
+
+def story_spec_refs(fm):
+    v = fm.get("spec") or []
+    return [x for x in ([v] if isinstance(v, str) else v) if isinstance(x, str) and x.strip() and x.strip().lower() != "none"]
+
+
+def linked_scenarios(entry):
+    """({'path#id': line}, problem or None) for one `spec:` entry: a spec file, a folder (every spec.md under it, e.g. an
+    OpenSpec change), optionally narrowed to one Spec Kit user story with '#US1'."""
+    path, _, only = entry.strip().partition("#")
+    try:
+        rel = repo_rel(path) if path and not os.path.isabs(path) and ".." not in path.replace("\\", "/").split("/") else None
+        p = ROOT / rel if rel else None
+        if not p or not p.exists():
+            return {}, "%s: not found inside the repository" % entry[:200]
+        files = sorted(p.rglob("spec.md")) if p.is_dir() else [p]
+    except (OSError, ValueError):
+        return {}, "%s: not a usable path" % entry[:200]
+    found = {}
+    for f in files:
+        r = repo_rel(f)
+        if f.is_symlink() or not r:
+            return {}, "%s is a link to another file; story-gate doesn't follow links. Link the real file instead" % (
+                r or f.relative_to(ROOT).as_posix())
+        unread = []
+        scen = spec_scenarios(rd(f), unread)
+        if unread:
+            return {}, ("%s: story-gate can't read %d scenario line(s), so it can't check them: %s. Write each as one list "
+                        "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), or as '#### Scenario: "
+                        "<name>' (OpenSpec)" % (r, len(unread), "; ".join(u[:80] for u in unread[:3])))
+        for lid, line in scen:
+            if only and not lid.startswith(only + "-"):
+                continue
+            ref = "%s#%s" % (r, lid)
+            if ref in found:
+                return {}, "%s: two scenarios are both called '%s' - give each a unique name" % (r, lid)
+            found[ref] = line
+    if not found:
+        return {}, ("%s: no acceptance scenarios found (story-gate reads Spec Kit 'Given ... When ... Then' scenarios under "
+                    "'### User Story N', and OpenSpec '#### Scenario:' blocks)" % entry)
+    return found, None
+
+
+def linked_spec_pairs(sd):
+    """[(label, text)] of the scenarios in the specs story.md links, for the READY and DONE evidence hashes."""
+    out = []
+    for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
+        found, problem = linked_scenarios(e)
+        out.append(("spec:" + e, json.dumps([sorted(found.items()), problem])))
+    return out
+
+
+def spec_coverage(sd, fm, c):
+    """(ok, why) when the story links a spec (or the config requires one): every scenario in the linked spec must be named
+    in some AC's `covers` list in tests.json, and every name there must exist. None when there is nothing to check."""
+    refs = story_spec_refs(fm)
+    if not refs:
+        if c.get("require_spec_link"):
+            return False, "story.md has no 'spec:' line naming the spec it builds (this repository requires one)"
+        return None
+    scen, why = {}, []
+    for e in refs:
+        found, problem = linked_scenarios(e)
+        if problem:
+            why.append(problem)
+        scen.update(found)
+    try:
+        acs_ = json.loads(rd(sd / "tests.json", "{}")).get("acceptance_criteria", [])
+        covers = {x for a in acs_ if isinstance(a, dict) and isinstance(a.get("covers"), list) for x in a["covers"] if isinstance(x, str)}
+    except Exception:
+        covers = set()
+    holes = [r for r, line in scen.items() if any(ph in line for ph in SPEC_PLACEHOLDERS)
+             or re.fullmatch(r"[<\[].*[>\]]", r.split("#", 1)[1].strip())]  # '[Scenario Name]', '<name>'
+
+    missing = [r for r in scen if r not in covers]
+    unknown = sorted(covers - set(scen))
+    if holes:
+        why.append("the spec still has template placeholders: " + ", ".join(holes[:5]))
+    if missing:
+        why.append("spec scenarios no AC covers (add them to an AC's `covers` in tests.json): "
+                   + "; ".join('%s ("%s")' % (r, re.sub(r"[*#]", "", scen[r]).strip()[:70]) for r in missing[:8])
+                   + (" and %d more" % (len(missing) - 8) if len(missing) > 8 else ""))
+    if unknown:
+        why.append("`covers` names scenarios that aren't in the linked spec: " + ", ".join(unknown[:8]))
+    return not why, "; ".join(why)
 
 
 def test_corpus(c):
@@ -772,6 +915,9 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
     out["handoff_written"] = (bool(h) and not miss, "handoff.md missing or sections empty/TODO: " + ", ".join(miss or ["(file)"]))
     has_learn = any(r.get("story") == sid for r in jsonl(LEARNINGS))
     out["learnings_recorded"] = (has_learn, "no learnings entry for this story (use 'learn --type none' if truly nothing)")
+    cov = spec_coverage(sd, front_matter(rd(sd / "story.md")), c)  # again at DONE: the spec may have changed since READY
+    if cov is not None:
+        out["spec_covered"] = cov
     tr = load_json(sd / "test_results.json")
     fresh = tr.get("fingerprint") == work_fingerprint()
     pinned = c.get("test_command")
@@ -1468,6 +1614,8 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     v = verdict(structural, judged, dec, wav, c)
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
+              "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
+                                                  [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
     wj(sd / ("%s.json" % phase), v)
     failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]
@@ -1726,8 +1874,11 @@ NEXT_READY = (("story_present", "story.md", "Paste the full story into story.md,
               ("story_source", "story.md", "Say where the story came from in story.md's front matter ('source: linear:ID', 'repo:path', ...)"),
               ("context_present", "context.md", "Fill every section of context.md"),
               ("test_matrix", "tests.json", "Plan a positive, negative, edge and regression case for every AC in tests.json (or give an N/A reason)"),
-              ("upstream_handoffs", "context.md", "Add a handoff for each story this one depends on"))
-NEXT_DONE = (("tests_ran_green", "tests", "Run the tests and record them: `{cmd}`"),
+              ("upstream_handoffs", "context.md", "Add a handoff for each story this one depends on"),
+              ("spec_covered", "spec links", "Name every scenario of the linked spec in an AC's `covers` list in tests.json "
+               "(list them with `story-gate spec-scenarios <spec path>`)"))
+NEXT_DONE = (("spec_covered", "spec links", "Name every scenario of the linked spec in an AC's `covers` list in tests.json"),
+             ("tests_ran_green", "tests", "Run the tests and record them: `{cmd}`"),
              ("traceability", "test links", "Point each AC to its automated tests in tests.json (`test_refs`: the test function names), and make them pass"),
              ("scenarios_prove_acs", "scenarios", "{scenario}"),
              ("validation_written", "validation.md", "Fill in validation.md for the owner"),
@@ -1746,6 +1897,8 @@ def next_step(sid, c):
         return [], "Start the story: `%s`" % gate_cmd("start %s --model <your model id>" % sid)
     done, ready = [], struct_ready(sd)[0]
     for key, label, todo in NEXT_READY:
+        if key not in ready:
+            continue  # e.g. no spec linked, so nothing to cover
         ok, why = ready[key]
         if not ok:
             return done, "%s (%s)." % (todo, why)
@@ -2386,6 +2539,16 @@ def cmd_ci(tests_dir=None):
                                  % (hook_cmd, ", ".join(extra[:5])))
         except Exception:
             pass
+        if sid and (STORIES / sid / "story.md").is_file():  # the spec this story is checked against, changed in the same PR
+            linked = set()
+            for e in story_spec_refs(front_matter(rd(STORIES / sid / "story.md"))):
+                linked |= {ref.split("#", 1)[0] for ref in linked_scenarios(e)[0]}
+            changed = sorted(f for f in files if f in linked)
+            if changed:
+                msg = ("This PR also changes the spec its story is checked against (%s). Reviewers: check that no scenario was "
+                       "removed or weakened to make the check pass." % ", ".join(changed))
+                notes.append(msg)
+                print("::warning title=story-gate: spec changed::%s" % msg)
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
@@ -3557,6 +3720,15 @@ def main(argv):
             sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
                      "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "spec-scenarios":
+        if not args:
+            sys.exit("usage: spec-scenarios <spec file or folder>[#US1]   (lists the scenario names to put in `covers`)")
+        found, problem = linked_scenarios(args[0])
+        if problem:
+            sys.exit("story-gate: " + problem)
+        for ref, line in found.items():
+            print("%s\n    %s" % (ref, line))
+        return 0
     if cmd == "scenarios":
         if not args:
             sys.exit("usage: scenarios <ID>   (runs every recorded scenario again on the current code)")

@@ -2663,6 +2663,26 @@ class TestDashboard(Base):
         self.assertIs(s["ready_fresh"], False)
         self.assertEqual({m["key"]: m for m in d["metrics"]}["ready_stale"]["value"], 1)
 
+    def test_ready_freshness_for_a_story_that_links_a_spec(self):
+        """The dashboard doesn't read the linked spec, so it compares the rest of READY's evidence: edits still show as stale."""
+        self.g("checkout", "-q", "-b", "feat/SAT-9")
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
+        run(self.repo, "start", "SAT-9"); self.fill_ready("SAT-9")
+        (self.repo / "specs").mkdir(); (self.repo / "specs/spec.md").write_text("#### Scenario: Only\n- **WHEN** x\n")
+        sd = self.repo / ".story-gate/stories/SAT-9"
+        (sd / "story.md").write_text((sd / "story.md").read_text().replace("depends_on: []", "spec: specs/spec.md\ndepends_on: []", 1))
+        t = json.loads((sd / "tests.json").read_text()); t["acceptance_criteria"][0]["covers"] = ["specs/spec.md#Only"]
+        (sd / "tests.json").write_text(json.dumps(t))
+        self.assertIn("READY: PASS", run(self.repo, "score", "SAT-9", "ready").stdout)
+        self.g("add", "-A"); self.g("commit", "-qm", "scored"); self.g("push", "-q", "origin", "feat/SAT-9")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-9"][0]
+        self.assertIs(s["ready_fresh"], True)
+        (sd / "tests.json").write_text((sd / "tests.json").read_text() + "\n")
+        self.g("commit", "-qam", "test plan changed after READY"); self.g("push", "-q", "origin", "feat/SAT-9")
+        s = [x for x in self.D.build(self.repo, "origin/main", "[A-Z][A-Z0-9]+-[0-9]+", gate=g)["stories"] if x["id"] == "SAT-9"][0]
+        self.assertIs(s["ready_fresh"], False)
+
     def test_ready_fresh_with_non_utf8_story_text(self):
         self.g("checkout", "-q", "-b", "feat/SAT-8")
         self.cfg(judge={"jev": False, "allow_self_judge_pass": True}); self.g("commit", "-qam", "cfg")
@@ -4734,6 +4754,282 @@ class TestObjectiveMode(Base):
         self.assertIn("checked without a judge", D.pill("PASS", {"judge": "objective"}))
         self.assertNotIn("without a judge", D.pill("PASS", {"judge": "jev"}))
         self.assertEqual(D.no_judge(None), "")
+
+
+
+SPECKIT_SPEC = """# Feature Specification: Bulk discount
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Discount on large orders (Priority: P1)
+
+**Acceptance Scenarios**:
+
+1. **Given** a cart with 10 items, **When** the shopper checks out, **Then** the total is 10% lower
+2. **Given** a cart with 9 items, **When** the shopper checks out, **Then** no discount applies
+
+---
+
+### User Story 2 - Show the saving (Priority: P2)
+
+**Acceptance Scenarios**:
+
+1. **Given** a discounted order, **When** the receipt prints, **Then** it shows the saving
+
+```
+1. **Given** an example in a code block, **When** read, **Then** it is ignored
+```
+
+<!--
+1. **Given** a commented-out scenario, **When** read, **Then** it is ignored
+-->
+
+## Requirements *(mandatory)*
+
+- **FR-001**: System MUST apply the discount. Given the rules above, nothing else changes.
+"""
+
+OPENSPEC_SPEC = """## ADDED Requirements
+### Requirement: Bulk discount
+The checkout SHALL give 10% off orders of 10 or more items.
+
+#### Scenario: Ten items get the discount
+- **WHEN** the cart has 10 items
+- **THEN** the total is reduced by 10%
+
+#### Scenario: Nine items pay full price
+- **GIVEN** a cart
+- **WHEN** the cart has 9 items
+- **THEN** no discount is applied
+"""
+
+
+class TestSpecCoverage(Base):
+    """A story that links a Spec Kit or OpenSpec spec must cover every scenario in it with an AC (tests.json `covers`)."""
+
+    SK = "specs/001-bulk-discount/spec.md"
+    OS = "openspec/changes/add-discount"
+
+    def setUp(self):
+        super().setUp()
+        for path, text in ((self.SK, SPECKIT_SPEC), (self.OS + "/specs/checkout/spec.md", OPENSPEC_SPEC),
+                           (self.OS + "/proposal.md", "#### Scenario: not a spec file\n")):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(text)
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+
+    def link(self, spec, covers):
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        st = sd / "story.md"
+        st.write_text(st.read_text().replace("depends_on: []", "spec: %s\ndepends_on: []" % spec, 1))
+        t = json.loads((sd / "tests.json").read_text())
+        t["acceptance_criteria"][0]["covers"] = covers
+        (sd / "tests.json").write_text(json.dumps(t))
+
+    def ready(self):
+        r = run(self.repo, "score", "SAT-1", "ready")
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r
+
+    def test_parser_reads_both_formats_and_skips_noise(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        self.assertEqual([i for i, _ in g.spec_scenarios(SPECKIT_SPEC)], ["US1-1", "US1-2", "US2-1"])  # code blocks, other sections skipped
+        self.assertEqual([i for i, _ in g.spec_scenarios(OPENSPEC_SPEC)], ["Ten items get the discount", "Nine items pay full price"])
+        self.assertEqual(g.spec_scenarios("# nothing here\n"), [])
+
+    def test_speckit_full_coverage_passes_and_a_dropped_scenario_blocks(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        v, r = self.ready()
+        self.assertEqual((v["checks"]["spec_covered"]["status"], v["overall"]), ("PASS", "PASS"), r.stdout)
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2"])  # the second link line is ignored; covers is replaced
+        v, r = self.ready()
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL")
+        self.assertIn(sk + "#US2-1", v["checks"]["spec_covered"]["why"])
+
+    def test_one_user_story_only(self):
+        sk = self.SK
+        self.link(sk + "#US1", [sk + "#US1-1", sk + "#US1-2"])
+        self.assertEqual(self.ready()[0]["checks"]["spec_covered"]["status"], "PASS")
+
+    def test_openspec_change_folder_reads_only_spec_files(self):
+        f = self.OS + "/specs/checkout/spec.md"
+        self.link(self.OS, [f + "#Ten items get the discount", f + "#Nine items pay full price"])
+        self.assertEqual(self.ready()[0]["checks"]["spec_covered"]["status"], "PASS")  # proposal.md's heading isn't required
+        self.link(self.OS, [f + "#Ten items get the discount", f + "#Nine items pay full price", f + "#Typo"])
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("aren't in the linked spec", v["checks"]["spec_covered"]["why"])
+
+    def test_template_placeholders_missing_or_outside_specs_fail(self):
+        (self.repo / "specs/002-x").mkdir(parents=True)
+        (self.repo / "specs/002-x/spec.md").write_text("### User Story 1 - T\n1. **Given** [initial state], **When** [action], **Then** [expected outcome]\n")
+        for spec, why in (("specs/002-x/spec.md", "template placeholders"), ("specs/nope/spec.md", "not found"),
+                          ("../outside/spec.md", "not found"), ("README.md", "no acceptance scenarios")):
+            (self.repo / "README.md").write_text("# readme\n")
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            self.link(spec, [spec + "#US1-1"])
+            v = self.ready()[0]
+            self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", spec); self.assertIn(why, v["checks"]["spec_covered"]["why"], spec)
+
+    def test_scenario_lines_it_cannot_read_block_instead_of_being_skipped(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        for text in ("### User Story 1 - T\n1. **Given** 9 items, **Then** no discount\n",          # no When
+                     "### User Story 1 - T\n3. **Given** a coupon\n   **When** applied\n   **Then** it stacks\n",  # split lines
+                     "## Requirements\n1. **Given** a scenario outside any user story, **When** x, **Then** y\n",
+                     "##### Scenario: wrong heading level\n"):
+            unread = []
+            g.spec_scenarios(text, unread)
+            self.assertTrue(unread, text)
+        for text, ids in (("#### User Story 3 - T\n1) **Given** a, **When** b, **Then** c\n- **Given** d, **When** e, **Then** f\n",
+                           ["US3-1", "US3-2"]),):
+            unread = []
+            self.assertEqual([i for i, _ in g.spec_scenarios(text, unread)], ids); self.assertEqual(unread, [])
+        (self.repo / "odd").mkdir()
+        (self.repo / "odd/spec.md").write_text("### User Story 1 - T\n1. **Given** a, **When** b, **Then** c\n2. **Given** 9 items, **Then** x\n")
+        self.link("odd/spec.md", ["odd/spec.md#US1-1"])  # only the line it could read: still blocked
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("can't read 1 scenario line", v["checks"]["spec_covered"]["why"])
+
+    def test_bad_paths_and_links_fail_closed(self):
+        if os.name != "nt":
+            (self.repo / "ln").mkdir(); os.symlink(self.repo / self.SK, self.repo / "ln/spec.md")
+            self.link("ln", ["ln/spec.md#US1-1"])
+            self.assertIn("is a link", self.ready()[0]["checks"]["spec_covered"]["why"])
+        if os.name != "nt":  # a folder with a valid spec plus a spec.md linked outside the repository: refused, not skipped
+            out = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, out, True); (out / "spec.md").write_text(OPENSPEC_SPEC)
+            (self.repo / "mix/a").mkdir(parents=True); (self.repo / "mix/a/spec.md").write_text("#### Scenario: Only\n")
+            (self.repo / "mix/b").mkdir(); os.symlink(out / "spec.md", self.repo / "mix/b/spec.md")
+            run(self.repo, "start", "SAT-1"); self.fill_ready()
+            self.link("mix", ["mix/a/spec.md#Only"])
+            self.assertIn("is a link", self.ready()[0]["checks"]["spec_covered"]["why"])
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        unread = []
+        g.spec_scenarios("## Requirements\n- **FR-001**: as noted, **Given** the rules above, nothing changes\n", unread)
+        self.assertEqual(unread, [])  # bold Given inside a sentence is prose, not a scenario
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.link("a" * 5000, [])
+        v, r = self.ready()
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL", r.stderr); self.assertNotIn("Traceback", r.stderr)
+
+    def test_code_fences_close_only_on_a_matching_marker(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        text = ("### User Story 1 - T\n````\n~~~\n1. **Given** in code, **When** a, **Then** b\n```\n````\n"
+                "1. **Given** real, **When** a, **Then** b\n")
+        self.assertEqual([l for _, l in g.spec_scenarios(text)], ["1. **Given** real, **When** a, **Then** b"])
+
+    def test_template_scenario_names_block(self):
+        (self.repo / "tpl").mkdir()
+        (self.repo / "tpl/spec.md").write_text("#### Scenario: [Scenario Name]\n- **WHEN** x\n")
+        self.link("tpl/spec.md", ["tpl/spec.md#[Scenario Name]"])
+        self.assertIn("template placeholders", self.ready()[0]["checks"]["spec_covered"]["why"])
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "tpl/spec.md").write_text("#### Scenario: <!-- scenario name -->\n- **WHEN** x\n")  # OpenSpec's own template
+        self.link("tpl/spec.md", [])
+        self.assertIn("can't read", self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_openspec_bodies_count_for_placeholders_and_freshness(self):
+        (self.repo / "osb").mkdir()
+        (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **GIVEN** [initial state]\n- **WHEN** x\n")
+        self.link("osb/spec.md", ["osb/spec.md#Checkout"])
+        self.assertIn("template placeholders", self.ready()[0]["checks"]["spec_covered"]["why"])
+        (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **WHEN** 10 items\n- **THEN** 10% off\n")
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "done", g.cfg())
+            (self.repo / "osb/spec.md").write_text("#### Scenario: Checkout\n- **WHEN** 10 items\n- **THEN** 5% off\n")
+            self.assertNotEqual(before, g.inputs_hash(sd, "done", g.cfg()))  # only the body changed
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_ready_is_out_of_date_when_the_linked_spec_changes(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "ready", g.cfg())
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("with 9 items", "with 8 items"))
+            self.assertNotEqual(before, g.inputs_hash(sd, "ready", g.cfg()))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+        sys.path.insert(0, str(SRC))
+        import importlib; D = importlib.import_module("sg_dashboard")
+        st = (self.repo / ".story-gate/stories/SAT-1/story.md").read_bytes()
+        self.assertTrue(D.parse_story("SAT-1", {"story.md": st})["spec_linked"])  # dashboard: freshness unknown, never "stale"
+        self.assertFalse(D.parse_story("SAT-1", {"story.md": b"---\nid: SAT-1\nspec: none\n---\n"})["spec_linked"])
+
+    def test_done_is_out_of_date_when_the_linked_spec_changes(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd = g.sdir("SAT-1")
+            before = g.inputs_hash(sd, "done", g.cfg())
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("with 9 items", "with 8 items"))
+            self.assertNotEqual(before, g.inputs_hash(sd, "done", g.cfg()))
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_missing_scenarios_are_shown_with_their_text(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2"])
+        self.assertIn('US2-1 ("1. Given a discounted order', self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_ci_warns_when_the_pr_changes_the_linked_spec(self):
+        sk = self.SK
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); g("add", "-A"); g("commit", "-qm", "specs"); g("checkout", "-q", "feature/SAT-1-thing")
+        g("merge", "-q", "main")
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        (self.repo / sk).write_text(SPECKIT_SPEC.replace("2. **Given** a cart with 9 items", "2. **Given** a cart with 8 items"))
+        (self.repo / "app.py").write_text("x = 2\n")
+        r = run(self.repo, "ci")
+        self.assertIn("also changes the spec its story is checked against (%s)" % sk, r.stdout)
+
+    def test_duplicate_scenario_names_fail(self):
+        (self.repo / "dup").mkdir()
+        (self.repo / "dup/spec.md").write_text("#### Scenario: Same\n#### Scenario: Same\n")
+        self.link("dup/spec.md", ["dup/spec.md#Same"])
+        self.assertIn("two scenarios are both called", self.ready()[0]["checks"]["spec_covered"]["why"])
+
+    def test_no_link_means_no_check_unless_required(self):
+        v = self.ready()[0]
+        self.assertNotIn("spec_covered", v["checks"])
+        self.cfg(require_spec_link=True)
+        v = self.ready()[0]
+        self.assertEqual(v["checks"]["spec_covered"]["status"], "FAIL"); self.assertIn("no 'spec:' line", v["checks"]["spec_covered"]["why"])
+        self.cfg(require_spec_link="yes")
+        r = run(self.repo, "score", "SAT-1", "ready")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("require_spec_link", r.stdout + r.stderr)
+
+    def test_done_checks_coverage_again(self):
+        sk = self.SK
+        self.link(sk, [sk + "#US1-1", sk + "#US1-2", sk + "#US2-1"])
+        g = load_gate(self.repo)
+        try:
+            sd, c = g.sdir("SAT-1"), g.cfg()
+            self.assertTrue(g.struct_done(sd, "SAT-1", [], c, write=False)["spec_covered"][0])
+            (self.repo / sk).write_text(SPECKIT_SPEC.replace("### User Story 2", "### User Story 3"))  # the spec changed after READY
+            self.assertFalse(g.struct_done(sd, "SAT-1", [], c, write=False)["spec_covered"][0])
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+
+    def test_spec_scenarios_command_lists_names(self):
+        r = run(self.repo, "spec-scenarios", self.OS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(self.OS + "/specs/checkout/spec.md#Nine items pay full price", r.stdout)
+        r = run(self.repo, "spec-scenarios", "nope.md")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not found", r.stdout + r.stderr)
+
+    def test_trust_rules(self):
+        import importlib
+        sys.path.insert(0, str(SRC)); T = importlib.import_module("sg_trust")
+        self.assertIn("stories no longer have to link the spec they build (require_spec_link)",
+                      T.weaker({"require_spec_link": True}, {"require_spec_link": False}))
+        self.assertEqual(T.weaker({"require_spec_link": False}, {"require_spec_link": True}), [])
+        self.assertTrue(T.tighten({"require_spec_link": False}, {"require_spec_link": True})["require_spec_link"])
+        self.assertTrue(T.tighten({"require_spec_link": True}, {"require_spec_link": False})["require_spec_link"])
 
 
 if __name__ == "__main__":
