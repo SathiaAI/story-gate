@@ -395,7 +395,11 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
 - **Names:** `ac1-938f7`, `story2-d0a81`: the position plus a short fingerprint of the words. Reword or reorder a criterion and its name changes, so an old `covers` entry can't silently point at the wrong one. Run `story-gate spec-scenarios <file>` to list the current names.
 - **Fails closed:** a plain bullet under `## Acceptance criteria`, or a user story not written as `As a …, I want …`, blocks the check rather than being skipped. So does any checkbox or `As a …` line outside those sections, and template text (`Criterion 1`, `<actor>`).
 - **Commit the ticket.** `.scratch/` is often in `.gitignore`; story-gate refuses an ignored file, because the pull request and CI would never see it.
-- Tickets that live on GitHub issues: copy the ticket into the repository for now. `story-gate spec-pull` is coming next.
+- **Tickets and specs on GitHub issues:** run `story-gate spec-pull <story> #42` (or paste the issue's URL). It copies the issue into the story's folder as `issue-42.md`, links it in `story.md`, and lists the requirement names. The gate checks that copy, which is reviewed in the pull request like any other file; it never reads the live issue.
+  - Only this repository's issues can be pulled. Comments on the issue aren't copied: put anything that matters in the issue text.
+  - The copy records where it came from and a hash of its text. Edit it by hand and the check fails: pull it again instead.
+  - The issue changed? Pull it again; READY is then out of date until you re-check it.
+  - Already have the text, for example from your AI tool's GitHub connector? `story-gate spec-pull <story> #42 --from-file ticket.md` saves it marked "not verified".
 
 Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 

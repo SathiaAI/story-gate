@@ -35,6 +35,8 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
+  spec-pull <ID> <issue> [--from-file F]   copy this repository's GitHub issue (#42 or its URL) into the story's folder
+                                      as a checked snapshot and link it in story.md (the gate never reads the live issue)
   spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
                                       checkboxes and user stories), as names for an AC's `covers` in tests.json
   evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
@@ -944,6 +946,21 @@ def spec_scenarios(text, unread=None):
     return [(o[0], "\n".join(o[2])) for o in out]
 
 
+def spec_snapshot(text):
+    """(text to read, problem or None). A file made by `story-gate spec-pull` starts with front matter naming its source
+    and a hash of everything after it: only that part is read, and if it no longer matches the hash (edited by hand,
+    or by an agent) the check fails. Other files are read whole."""
+    m = re.match(r"---\n(.*?)\n---\n", text.replace("\r\n", "\n"), re.S)
+    fm = front_matter(text) if m else {}
+    if fm.get("source_kind") != "github-issue":
+        return text, None
+    body = text.replace("\r\n", "\n")[m.end():]
+    if hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest() != fm.get("content_sha256"):
+        return "", ("it was changed after `story-gate spec-pull` copied it from %s. Pull it again rather than editing it"
+                    % (fm.get("source_url") or "the issue"))
+    return body, None
+
+
 def story_spec_refs(fm):
     v = fm.get("spec") or []
     return [x for x in ([v] if isinstance(v, str) else v) if isinstance(x, str) and x.strip() and x.strip().lower() != "none"]
@@ -977,7 +994,10 @@ def linked_scenarios(entry):
         if rc != 1:  # 1 = not ignored; anything else is git failing, and the check fails closed
             return {}, "%s: git couldn't say whether this file is ignored (git check-ignore failed), so it can't be checked" % r
         unread = []
-        scen = spec_scenarios(rd(f), unread)
+        body, snap_problem = spec_snapshot(rd(f))
+        if snap_problem:
+            return {}, "%s: %s" % (r, snap_problem)
+        scen = spec_scenarios(body, unread)
         if unread:
             return {}, ("%s: story-gate can't read %d requirement line(s), so it can't check them: %s. Write each as one list "
                         "line 'Given ... When ... Then' under a 'User Story N' heading (Spec Kit), as '#### Scenario: <name>' "
@@ -2618,7 +2638,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -3924,6 +3944,9 @@ def main(argv):
             sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
                      "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "spec-pull":
+        import sg_specpull as SP
+        return SP.cli(sys.modules[__name__], args)
     if cmd == "spec-scenarios":
         if not args:
             sys.exit("usage: spec-scenarios <spec, ticket file or folder>[#US1]   (lists the requirement names to put in "

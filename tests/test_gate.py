@@ -5265,5 +5265,102 @@ class TestMattPocockFormats(Base):
         self.assertEqual(r.stdout.count(self.TK + "#ac"), 3)
 
 
+class TestSpecPull(Base):
+    """`spec-pull` copies this repository's issue into the story folder; the gate checks only that reviewed copy."""
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/shop.git"], cwd=self.repo, capture_output=True)
+        self.cfg(judge_mode="objective")
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "ticket.txt").write_text(MATT_ISSUE)
+        self.snap = self.repo / ".story-gate/stories/SAT-1/issue-7.md"
+
+    def pull(self, *extra):
+        return run(self.repo, "spec-pull", "SAT-1", "#7", "--from-file", "ticket.txt", *extra)
+
+    def covers(self, names):
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        t = json.loads((sd / "tests.json").read_text()); t["acceptance_criteria"][0]["covers"] = names
+        (sd / "tests.json").write_text(json.dumps(t))
+
+    def covered(self):
+        run(self.repo, "score", "SAT-1", "ready")
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())["checks"]["spec_covered"]
+
+    def test_references(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_specpull as SP
+        own = "acme/shop"
+        for ref, want in (("42", (own, 42)), ("#42", (own, 42)), ("acme/shop#42", (own, 42)),
+                          ("https://github.com/acme/shop/issues/42", (own, 42)), ("https://github.com/acme/shop/issues/42#issuecomment-1", (own, 42)),
+                          ("https://evil.example/acme/shop/issues/42", None), ("#4x", None), ("acme/shop/42", None)):
+            self.assertEqual(SP.parse_ref(ref, own), want, ref)
+
+    def test_pull_links_and_the_gate_checks_the_copy(self):
+        r = self.pull()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("2 requirement(s)", r.stdout); self.assertIn("not verified", self.snap.read_text())
+        rel = ".story-gate/stories/SAT-1/issue-7.md"
+        self.assertIn("spec: " + rel, (self.repo / ".story-gate/stories/SAT-1/story.md").read_text())
+        names = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith(rel + "#")]
+        self.assertEqual(len(names), 2)
+        self.covers(names[:1])
+        self.assertEqual(self.covered()["status"], "FAIL")
+        self.covers(names)
+        self.assertEqual(self.covered()["status"], "PASS")
+        self.pull()  # pulling the same text again keeps the same names, and doesn't add a second link
+        self.assertEqual(self.covered()["status"], "PASS")
+        self.assertEqual((self.repo / ".story-gate/stories/SAT-1/story.md").read_text().count(rel), 1)
+
+    def test_a_hand_edit_to_the_copy_blocks(self):
+        self.pull()
+        self.snap.write_text(self.snap.read_text().replace("- [ ] Refunds over $500 need a manager\n", ""))  # drop one
+        c = self.covered()
+        self.assertEqual(c["status"], "FAIL"); self.assertIn("changed after `story-gate spec-pull`", c["why"])
+
+    def test_other_repositories_pull_requests_and_errors_are_refused(self):
+        r = run(self.repo, "spec-pull", "SAT-1", "other/repo#7", "--from-file", "ticket.txt")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("only this repository's issues", r.stderr)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G
+        from unittest import mock
+        for reply, msg in (((404, {}, {}), "wasn't found"), ((403, {}, {}), "refused"),
+                           ((200, {"pull_request": {}, "title": "x", "body": "y"}, {}), "pull request"),
+                           ((200, {"title": "x", "body": "", "html_url": "https://github.com/acme/shop/issues/7"}, {}), "no text"),
+                           ((200, {"title": "x", "body": "a" * 300000, "html_url": "https://github.com/acme/shop/issues/7"}, {}), "bigger than"),
+                           ((200, {"title": "x", "body": "y", "html_url": "https://github.com/other/repo/issues/9"}, {}), "was the issue moved"),
+                           ((500, {}, {}), "HTTP 500")):
+            with mock.patch.object(G, "call", return_value=reply), mock.patch.object(G, "human_token", return_value=None), \
+                    self.assertRaises(SystemExit, msg=msg) as e:
+                import sg_specpull as SP; SP.cli(g, ["SAT-1", "#7"])
+            self.assertIn(msg, str(e.exception), msg)
+        self.assertFalse(self.snap.exists())
+
+    def test_api_pull_is_marked_verified_source(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP
+        from unittest import mock
+        reply = (200, {"title": "Refunds", "body": MATT_ISSUE.replace("\n", "\r\n"), "updated_at": "2026-10-08T10:00:00Z",
+                       "html_url": "https://github.com/acme/shop/issues/7"}, {})
+        with mock.patch.object(G, "call", return_value=reply) as c, mock.patch.object(G, "human_token", return_value=None):
+            self.assertEqual(SP.cli(g, ["SAT-1", "https://github.com/acme/shop/issues/7"]), 0)
+        self.assertEqual(c.call_args[0][1], "/repos/acme/shop/issues/7")
+        text = self.snap.read_text()
+        self.assertIn("fetched_by: github-api", text); self.assertIn("source_updated_at: 2026-10-08T10:00:00Z", text)
+        self.assertNotIn("\r", text)
+        found, problem = g.linked_scenarios(".story-gate/stories/SAT-1/issue-7.md")
+        self.assertIsNone(problem); self.assertEqual(len(found), 2)
+
+    def test_link_keeps_existing_specs(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sgp", self.repo / ".story-gate/sg_specpull.py")
+        SP = importlib.util.module_from_spec(spec); spec.loader.exec_module(SP)
+        self.assertEqual(SP.link("---\nid: X\nspec: a.md\n---\nbody", "b.md"), "---\nid: X\nspec: [a.md, b.md]\n---\nbody")
+        self.assertEqual(SP.link("---\nid: X\n---\n", "b.md"), "---\nid: X\nspec: b.md\n---\n")
+        self.assertEqual(SP.link("---\nspec: [a.md, b.md]\n---\n", "b.md"), "---\nspec: [a.md, b.md]\n---\n")
+        self.assertIsNone(SP.link("no front matter", "b.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
