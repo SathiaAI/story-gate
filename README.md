@@ -216,7 +216,7 @@ Keep the tool you plan with. These tools write a good plan, and Matt Pocock's sk
 - **Every requirement must be covered.** The merge is blocked until each scenario, criterion or user story is assigned to an acceptance criterion with passing tests, a recorded run and your approval.
 - **Nothing can be hidden or skipped.** A dropped scenario, template text, or a requirement tucked into a code block or comment blocks the check and says which one.
 - **A ticked box is not proof.** Only a passing test is.
-- **Issues stay honest.** `spec-pull` copies the issue into the pull request, where it is reviewed. CI then compares the copy with the live issue on every run: unchanged, changed or not checked. Set `"spec_source_check": "block"` to block on a change.
+- **Issues stay honest.** `spec-pull` copies the issue into the pull request, where it is reviewed. CI then compares the copy with the live issue on every run: unchanged, changed or not checked. Set `"spec_source_check": "block"` to block the merge on a change (in enforce mode).
 
 [How it works](docs/guide.md#spec-kit-openspec-and-bmad).
 

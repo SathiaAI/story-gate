@@ -5393,6 +5393,8 @@ class TestSpecPull(Base):
         same = (200, {"title": "", "body": MATT_ISSUE, "html_url": url}, {})
         state, why = self.live(same)
         self.assertEqual(state, "unchanged"); self.assertIn("pasted copy is now verified", why)
+        titled = (200, {"title": "Refund one order", "body": MATT_ISSUE, "html_url": url}, {})
+        self.assertEqual(self.live(titled)[0], "unchanged")  # pasted without --title: the issue's real title still matches
         more = (200, {"title": "", "body": MATT_ISSUE.replace("need a manager\n", "need a manager\n- [ ] Refunds are logged\n"), "html_url": url}, {})
         state, why = self.live(more)
         self.assertEqual(state, "changed"); self.assertIn("1 requirement(s) added", why); self.assertIn("spec-pull SAT-1 #7", why)
@@ -5420,10 +5422,12 @@ class TestSpecPull(Base):
         self.assertIn("issue-7.md (issue #7): not compared with the live issue: CI has no GitHub token", r.stdout)
         self.assertIn("::warning title=story-gate: issue not checked::", r.stdout)
         self.assertNotIn('spec_source_check is \\"block\\"', r.stdout)
-        self.cfg(judge_mode="objective", spec_source_check="block")
+        self.assertEqual(r.returncode, 0, r.stdout)  # warn: a warning, not a failure
+        self.cfg(judge_mode="objective", spec_source_check="block", mode="enforce")
         gitc("add", "-A"); gitc("commit", "-qm", "block"); gitc("checkout", "-q", "feature/SAT-1-thing")
         r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
         self.assertIn('(spec_source_check is "block")', r.stdout + r.stderr)
+        self.assertNotEqual(r.returncode, 0, r.stdout)  # block + enforce: the pull request fails
 
     def test_every_linked_copy_is_found_however_it_is_spelled(self):
         self.pull()

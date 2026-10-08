@@ -194,9 +194,10 @@ def live_status(gate, sid, rel, num, repo, token):
     if not isinstance(body, str) or len(body) > MAX_BODY:
         return "not checked", "the live issue is too big to compare"
     live = snapshot_content(sid, num, data.get("title") or "", body)
-    verified = " (the pasted copy is now verified)" if fields["fetched_by"] == "pasted" else ""
-    if live == content:
-        return "unchanged", "matches the live issue" + verified
+    pasted = fields["fetched_by"] == "pasted"
+    # pasted without --title, the copy's heading is 'Issue <N>': the issue text must still match exactly
+    if live == content or (pasted and snapshot_content(sid, num, "", body) == content):
+        return "unchanged", "matches the live issue" + (" (the pasted copy is now verified)" if pasted else "")
     old_u, new_u = [], []
     old = {k for k, _ in gate.spec_scenarios(content, old_u)}
     new = {k for k, _ in gate.spec_scenarios(live, new_u)}
