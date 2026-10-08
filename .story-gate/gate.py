@@ -706,111 +706,242 @@ def struct_ready(sd):
     return out, fm
 
 
-SPECKIT_STORY = re.compile(r"^#{2,4}\s+User Story\s+(\d+)\b", re.I)
-SPECKIT_SCENARIO = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+.*\bGiven\b.*\bWhen\b.*\bThen\b", re.I)
-OPENSPEC_SCENARIO = re.compile(r"^####\s+Scenario:\s*(\S.*?)\s*$")
+SPECKIT_STORY = re.compile(r"^ {0,3}#{2,4}[ \t]+User Story[ \t]+(\d+)\b", re.I)
+OPENSPEC_SCENARIO = re.compile(r"^####[ \t]+Scenario:[ \t]*(\S.*?)[ \t]*$")
 # lines that look like a scenario: if the parser didn't read one, the check fails rather than skip it
-SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|^\s*\*\*Given\*\*|^\s*#{1,6}\s*Scenario\b|^\s*\*\*Scenario\b", re.I)
+SCENARIO_LIKE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(?:\*\*)?Given\b|^\s*\*\*Given\*\*|^\s*\*\*Scenario\b", re.I)
+SCENARIO_HEADING_LIKE = re.compile(r"^ {0,3}#{1,6}[ \t]*\**[ \t]*Scenario\b", re.I)
 SPEC_PLACEHOLDERS = ("[initial state]", "[action]", "[expected outcome]", "<actor>", "<feature>", "<benefit>")
-# Matt Pocock's skills: '## Acceptance criteria' checkboxes (tickets), '## User Stories' (specs), and the local ticket file
-AC_HEADING = re.compile(r"^#{1,6}\s+Acceptance criteria\s*$", re.I)
-STORIES_HEADING = re.compile(r"^#{1,6}\s+User Stories\s*$", re.I)
-CHECKBOX = re.compile(r"^(?:[-*+])\s+\[[ xX]\]\s+(\S.*)$")
-TOP_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+(\S.*)$")
-USER_STORY = re.compile(r"^(\d+)[.)]\s+(As an?\b.+?\bI want\b.+)$", re.I)
-LOCAL_TICKET = re.compile(r"\A\s*#\s+\d+:\s+\S.*\n(?:.*\n)*?\*\*What to build:\*\*", re.I)
+# Matt Pocock's skills: checkboxes in a ticket file or under 'Acceptance criteria'; 'As a ..., I want ...' under 'User Stories'
+LIST_ITEM = re.compile(r"^(?:[-*+]|\d{1,9}[.)])[ \t]+(\S.*)$")
+CHECKBOX = re.compile(r"^[-*+][ \t]+\[[ xX]\][ \t]+(\S.*)$")
+LIST_MARKS = r"(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*"  # '- ', '1. ', '- 1. ' ... each mark eats its own space: no backtracking
+CHECKBOX_LIKE = re.compile(r"^[ \t]*" + LIST_MARKS + r"(?:[-*+]|\d{1,9}[.)])?[ \t]*\[[^\]]?\]")  # what a reader takes for a box
+USER_STORY = re.compile(r"^(\d{1,9})[.)][ \t]+(As an?\b.*)$", re.I)
+STORY_LIKE = re.compile(r"^" + LIST_MARKS + r"\**[ \t]*As an?\b", re.I)
+I_WANT = re.compile(r"\bI[ \t]+want\b", re.I)
+WHAT_TO_BUILD = re.compile(r"^[ \t]*\*\*What to build\b", re.I | re.M)
+TICKET_TITLE = re.compile(r"^ {0,3}#[ \t]+\d{1,4}[ \t]*[:.)\-–—]")
+SETEXT = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+BOLD_LABEL = re.compile(r"^ {0,3}\*\*([^*\n]+?)\*\*[ \t]*:?[ \t]*$")
 CRITERION_PLACEHOLDER = re.compile(r"^(?:acceptance\s+)?criterion\s+\d+$", re.I)
 
 
 def _req_id(prefix, n, text):
-    """A stable name for a checkbox or user story: its position plus a short hash of its words, so a reworded, added or
-    reordered requirement gets a new name and can't silently keep an old `covers` entry."""
-    norm = re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text)).strip().lower()
-    return "%s%d-%s" % (prefix, n, hashlib.sha256(norm.encode("utf-8")).hexdigest()[:5])
+    """A stable name for a checkbox or user story: its position plus a hash of its words, so a reworded, added or reordered
+    requirement gets a new name and can't silently keep an old `covers` entry."""
+    norm = re.sub(r"\s+", " ", re.sub(r"[*`]", "", text)).strip()
+    return "%s%d-%s" % (prefix, n, hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:10])
+
+
+def _visible(lines):
+    """The lines GitHub shows as text: fenced code and <!-- comment --> blocks become None (one pass, no backtracking).
+    A fence inside a list item ends where the item ends; a '<!--' inside a `code span`, or a comment that never closes,
+    stays visible. This is simpler than GitHub's renderer, so spec_scenarios also blocks on anything requirement-like in
+    a hidden line: a mistake here can only make the check stricter, never hide a requirement."""
+    closers = [i for i, ln in enumerate(lines) if "-->" in ln]
+    out, fence, find, cmt, ci, span = [], None, 0, False, 0, False
+    for i, line in enumerate(lines):
+        if cmt:
+            out.append(None)
+            cmt = "-->" not in line
+            continue
+        exp = line.expandtabs(4)
+        ind, st = len(exp) - len(exp.lstrip()), line.strip()
+        if fence is not None:
+            if st and ind < find:
+                fence = None  # the list item holding the fence ended
+            else:
+                if st[:len(fence)] == fence and not st.strip(fence[0]):
+                    fence = None
+                out.append(None)
+                continue
+        f = re.match(r"(`{3,}|~{3,})(.*)$", st)
+        if f and not (f.group(1)[0] == "`" and "`" in f.group(2)) and not LIST_ITEM.match(st):
+            fence, find = f.group(1), ind
+            out.append(None)
+            continue
+        # a comment block (CommonMark HTML block type 2): '<!--' at the start of a line indented 0-3 spaces, not inside a
+        # `code span` left open on the line above; it ends on the first line with '-->' ('<!-->' ends on its own line)
+        if st.startswith("<!--") and ind <= 3 and not span and "-->" not in st[2:]:
+            while ci < len(closers) and closers[ci] <= i:
+                ci += 1
+            if ci < len(closers):  # a comment block that closes later: hidden until then
+                cmt = True
+                out.append(None)
+                continue
+        span = (span + line.count("`")) % 2 == 1 if st else False  # a `code span` still open at the end of this line
+        if "<!--" in line:  # comments within one line; one inside a `code span` is text
+            parts, pos, ticks, k = [], 0, 0, -1
+            while True:
+                j = line.find("<!--", pos)
+                if k < j + 2:
+                    k = line.find("-->", j + 2) if j >= 0 else -1  # '<!-->' is a whole comment
+                if j < 0 or k < 0:
+                    break
+                ticks += line.count("`", pos, j)
+                if ticks % 2:
+                    parts.append(line[pos:j + 4]); pos = j + 4
+                    continue
+                parts.append(line[pos:j]); pos = k + 3; k = -1
+            parts.append(line[pos:])
+            line = "".join(parts)
+        out.append(line)
+    return out
+
+
+def _atx(line):
+    """(level, text) for a '## Heading ##' line as GitHub shows it, else None. Plain string work: no backtracking."""
+    ind = len(line) - len(line.lstrip(" "))
+    s = line[ind:]
+    n = len(s) - len(s.lstrip("#"))
+    if ind > 3 or not 1 <= n <= 6 or (len(s) > n and s[n] not in " \t"):
+        return None
+    body = s[n:].strip(" \t")
+    bare = body.rstrip("#")
+    if bare != body and (not bare or bare[-1] in " \t"):
+        body = bare.rstrip(" \t")
+    return n, body
+
+
+def _section(text):
+    k = re.sub(r"\s+", " ", re.sub(r"[*_`:.]", " ", text)).strip().lower()
+    return "ac" if k == "acceptance criteria" else ("story" if k == "user stories" else None)
+
+
+def _gwt(s):
+    """'Given ... When ... Then', in that order (searched one after the other: no backtracking)."""
+    g = re.search(r"\bGiven\b", s, re.I)
+    w = g and re.compile(r"\bWhen\b", re.I).search(s, g.end())
+    return bool(w and re.compile(r"\bThen\b", re.I).search(s, w.end()))
+
+
+def _req_like(s, broad=True):
+    """Does this line look like a requirement a reader would expect the gate to check? `broad` (hidden lines, ticket
+    files) also counts any list line with Given, or with When and Then; otherwise a list line needs Given, When, Then
+    in order, so a functional requirement that merely says 'given' isn't mistaken for a scenario."""
+    r = re.sub(r"^(?:>[ \t]?)+", "", s.replace("<!--", " ").replace("-->", " ").strip()).strip()
+    if not r:
+        return False
+    a, li = _atx(r), LIST_ITEM.match(r)
+    gwt = (re.search(r"\bGiven\b", r, re.I) or re.search(r"\bWhen\b", r, re.I) and re.search(r"\bThen\b", r, re.I)) if broad else _gwt(r)
+    return bool(CHECKBOX_LIKE.match(r) or STORY_LIKE.match(r) and (li or I_WANT.search(r)) or li and gwt
+                or SCENARIO_LIKE.search(r) or a and (_section(a[1]) or SPECKIT_STORY.match(r) or SCENARIO_HEADING_LIKE.match(r)))
 
 
 def spec_scenarios(text, unread=None):
-    """[(local id, line)] of the acceptance scenarios in one spec file. Spec Kit: one-line 'Given ... When ... Then' list
-    items under a 'User Story N' heading -> US<N>-<k>. OpenSpec: '#### Scenario: <name>' -> <name>. Code blocks and
-    <!-- comments --> are skipped. Lines that look like a scenario but weren't read go into `unread`."""
-    text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text.replace("\r\n", "\n"), flags=re.S)
-    out, story, n, fence, in_os = [], None, 0, None, False
-    # Matt Pocock's formats: 'ac' = checkbox criteria (a ticked box is still a requirement, never proof); 'us' = user stories
-    ticket = bool(LOCAL_TICKET.match(text))  # '# 01: Title' + '**What to build:**': its checkboxes are its criteria
-    sect = "ac" if ticket else None
-    explicit = False  # under a '## Acceptance criteria' / '## User Stories' heading: prose there is unreadable, not ignored
-    item, n_ac, n_us = None, 0, 0  # item: index in `out` of the requirement that indented lines belong to
+    """[(local id, text)] of the requirements in one spec or ticket file.
+    - Spec Kit: one-line 'Given ... When ... Then' list items under a 'User Story N' heading -> US<N>-<k>.
+    - OpenSpec: '#### Scenario: <name>' -> <name>.
+    - Matt Pocock's skills: '- [ ]' checkboxes in a ticket file ('# 03: Title' or '**What to build:**') or under an
+      'Acceptance criteria' heading -> ac<k>-<hash>; 'As a ..., I want ...' under 'User Stories' -> story<k>-<hash>.
+      A ticked box is still a requirement. Lines indented under one, or running on from it, belong to it.
+    Code blocks and <!-- comments --> are skipped (GitHub doesn't show them as text). Anything that looks like a
+    requirement but wasn't read goes into `unread`, so the check fails instead of skipping it. That includes every
+    checkbox or 'As a ...' line no section claimed (Spec Kit's spec template has none; its checklists are separate files)."""
+    raw = text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = _visible(raw)
+    first = next((ln for ln in lines if ln and ln.strip()), "")
+    ticket = bool(TICKET_TITLE.match(first) or any(ln and WHAT_TO_BUILD.match(ln) for ln in lines))
+    out, story, n, in_os = [], None, 0, False
+    sect, lvl, explicit, item, count, prev_blank = ("ac" if ticket else None), 0, False, None, {"ac": 0, "story": 0}, True
+
+    def bad(line):
+        if unread is not None:
+            unread.append(line.strip()[:200])
 
     def close():
         nonlocal item
         if item is not None:
-            kind, k, body = out[item]
-            out[item] = (_req_id(kind, k, body), body)
+            out[item][0] = _req_id(out[item][0], out[item][1], "\n".join(out[item][2]))
             item = None
-    for line in text.split("\n"):
-        f = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-        if fence is None and f:
-            fence = f.group(1)  # code block opened: skip until the same marker, at least as long, closes it
+
+    for i, line in enumerate(lines):
+        if line is None:
+            if _req_like(raw[i]):
+                bad(raw[i] + "   (inside a code block or comment: delete it, or take it out of the block)")
             continue
-        if fence is not None:
-            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
-                fence = None
-            continue
-        if re.match(r"^#{1,6}\s", line):
-            close()
-            sect = "ac" if AC_HEADING.match(line) else ("us" if STORIES_HEADING.match(line) else None)
-            explicit = bool(sect)
-            if sect:
+        nxt = lines[i + 1] if i + 1 < len(lines) else None
+        h, atx = _atx(line), True
+        if h is None and line.strip() and not LIST_ITEM.match(line.strip()) and nxt is not None and SETEXT.match(nxt) \
+                and not (prev_blank is False and item is not None):
+            h, atx = (1 if "=" in nxt else 2, line.strip()), False  # 'Title' over '----'
+        if h is None:
+            bl = BOLD_LABEL.match(line)
+            if bl and _section(bl.group(1)):
+                h, atx = (7, bl.group(1)), False  # '**Acceptance criteria:**' on its own line
+        if h is not None:
+            prev_blank = True
+            name = _section(h[1])
+            if name:
+                close(); sect, lvl, explicit, in_os = name, h[0], True, False
                 continue
+            if sect and explicit and h[0] > lvl:  # a sub-heading inside the section: the section goes on
+                close()
+                if _req_like(line):
+                    bad(line)
+                continue
+            close()
+            sect, explicit = ("ac" if ticket else None), False
             if ticket:
-                sect = "ac"
+                if _req_like(line):
+                    bad(line)  # a Spec Kit or OpenSpec heading in a ticket file: not read there, so it blocks
                 continue
-        if sect and line.strip():
-            if line[:1] in (" ", "\t") and item is not None:  # a nested condition belongs to the requirement above it
-                kind, k, body = out[item]
-                out[item] = (kind, k, body + "\n" + line.strip())
-                continue
-            if line[:1] in (" ", "\t") or line.lstrip().startswith(">"):
-                if unread is not None:
-                    unread.append(line.strip())
-                continue
-            close()
-            m = CHECKBOX.match(line) if sect == "ac" else USER_STORY.match(line)
+            m = OPENSPEC_SCENARIO.match(line)
             if m:
-                if sect == "ac":
-                    n_ac += 1; out.append(("ac", n_ac, m.group(1).strip()))
-                else:
-                    n_us += 1; out.append(("story", n_us, m.group(2).strip()))
-                item = len(out) - 1
-            elif (TOP_ITEM.match(line) or explicit) and unread is not None:
-                unread.append(line.strip())  # a line story-gate can't read as a requirement: block, don't drop it
+                out.append([m.group(1), 0, [line.strip()]])
+                in_os = True  # its GIVEN/WHEN/THEN bullets belong to this scenario
+                continue
+            in_os = False
+            m = SPECKIT_STORY.match(line)
+            if m:
+                story, n = m.group(1), 0
+                continue
+            if h[0] <= 3:
+                story = None
+            if atx and SCENARIO_HEADING_LIKE.match(line):
+                bad(line)  # '##### Scenario:', '#### **Scenario**'
             continue
         if not line.strip():
+            prev_blank = True
             continue
-        m = OPENSPEC_SCENARIO.match(line)
-        if m:
-            out.append((m.group(1), line.strip()))
-            in_os = True  # its GIVEN/WHEN/THEN bullets belong to this scenario
-            continue
-        if re.match(r"^#{1,6}\s", line):
-            in_os = False
+        if SETEXT.match(line) and i and lines[i - 1] is not None and lines[i - 1].strip() and _atx(lines[i - 1]) is None \
+                and not LIST_ITEM.match(lines[i - 1].strip()):
+            continue  # the underline of a setext heading
+        was_blank, prev_blank = prev_blank, False
         if in_os:
-            if line.strip():
-                out[-1] = (out[-1][0], out[-1][1] + "\n" + line.strip())  # the body counts too: placeholders, edits
+            out[-1][2].append(line.strip())  # the body counts too: placeholders, edits
             continue
-        m = SPECKIT_STORY.match(line)
-        if m:
-            story, n = m.group(1), 0
+        exp = line.expandtabs(4)
+        ind = len(exp) - len(exp.lstrip())
+        s = line.strip()
+        if sect:
+            if item is not None and (ind >= 2 or not was_blank and not LIST_ITEM.match(s) and not s.startswith((">", "<"))
+                                     and not re.match(r"^([-*_])(?:[ \t]*\1){2,}[ \t]*$", s)):
+                out[item][2].append(s)  # nested, or running on from the line above: part of that requirement
+                continue
+            if ind >= 2 or s.startswith(">"):
+                bad(line); continue
+            close()
+            m = CHECKBOX.match(s) if sect == "ac" else USER_STORY.match(s)
+            if m and (sect == "ac" or I_WANT.search(m.group(2))):
+                count[sect] += 1
+                out.append([sect, count[sect], [m.group(m.lastindex).strip()]])
+                item = len(out) - 1
+            elif explicit or _req_like(s):
+                bad(line)  # a line story-gate can't read as a requirement: block, don't drop it
             continue
-        if re.match(r"^#{1,3}\s", line):
-            story = None
-        if story and SPECKIT_SCENARIO.match(line):
+        li = LIST_ITEM.match(s)
+        if story and li and _gwt(s):
             n += 1
-            out.append(("US%s-%d" % (story, n), line.strip()))
-        elif unread is not None and SCENARIO_LIKE.search(line):
-            unread.append(line.strip())
+            out.append(["US%s-%d" % (story, n), 0, [s]])
+        elif story and (li and (re.search(r"\bGiven\b", s, re.I) or re.search(r"\bWhen\b", s, re.I) and re.search(r"\bThen\b", s, re.I))
+                        or not li and (re.search(r"\bGiven\b", s, re.I) or re.match(r"^\W*(?:When|Then)\b", s, re.I))):
+            bad(line)  # part of a scenario it can't read: a split line, no list mark, or a table row
+        elif _req_like(s, broad=False):
+            bad(line)  # a checkbox, user story or scenario outside the sections story-gate reads
     close()
-    return out
+    return [(o[0], "\n".join(o[2])) for o in out]
 
 
 def story_spec_refs(fm):

@@ -4776,13 +4776,12 @@ SPECKIT_SPEC = """# Feature Specification: Bulk discount
 
 1. **Given** a discounted order, **When** the receipt prints, **Then** it shows the saving
 
-```
-1. **Given** an example in a code block, **When** read, **Then** it is ignored
+```python
+def discount(items):  # code is not a scenario
+    return 0.1 if items >= 10 else 0
 ```
 
-<!--
-1. **Given** a commented-out scenario, **When** read, **Then** it is ignored
--->
+<!-- reviewer note: check the rounding rule -->
 
 ## Requirements *(mandatory)*
 
@@ -4836,6 +4835,11 @@ class TestSpecCoverage(Base):
         self.assertEqual([i for i, _ in g.spec_scenarios(SPECKIT_SPEC)], ["US1-1", "US1-2", "US2-1"])  # code blocks, other sections skipped
         self.assertEqual([i for i, _ in g.spec_scenarios(OPENSPEC_SPEC)], ["Ten items get the discount", "Nine items pay full price"])
         self.assertEqual(g.spec_scenarios("# nothing here\n"), [])
+        for hidden in ("```\n1. **Given** an example, **When** read, **Then** x\n```\n",
+                       "<!--\n1. **Given** a commented-out scenario, **When** read, **Then** x\n-->\n"):
+            unread = []
+            g.spec_scenarios("### User Story 1 - T\n" + hidden, unread)
+            self.assertIn("inside a code block or comment", unread[0])  # hiding a scenario blocks instead of skipping it
 
     def test_speckit_full_coverage_passes_and_a_dropped_scenario_blocks(self):
         sk = self.SK
@@ -5060,8 +5064,8 @@ Agents can't refund orders.
 
 - Test through the refunds API.
 
-```
-- [ ] fenced, not a requirement
+```ts
+type Refund = { orderId: string; amount: number }  // a prototype snippet, as to-spec allows
 ```
 
 ## Further Notes
@@ -5134,7 +5138,8 @@ class TestMattPocockFormats(Base):
 
     def test_spec_user_stories_and_issue_criteria(self):
         ids, unread = self.ids(MATT_SPEC)
-        self.assertEqual([i.split("-")[0] for i in ids], ["story1", "story2"]); self.assertEqual(unread, [])  # fences, notes skipped
+        self.assertEqual([i.split("-")[0] for i in ids], ["story1", "story2"])  # the code snippet is not a requirement
+        self.assertEqual(unread, ["- [ ] a to-do outside the criteria, not a requirement"])  # a stray checkbox blocks
         ids, unread = self.ids(MATT_ISSUE)
         self.assertEqual([i.split("-")[0] for i in ids], ["ac1", "ac2"]); self.assertEqual(unread, [])
 
@@ -5177,9 +5182,70 @@ class TestMattPocockFormats(Base):
         c = self.covered()
         self.assertEqual(c["status"], "FAIL"); self.assertIn("ignored by git", c["why"])
 
-    def test_speckit_checklists_outside_criteria_are_not_requirements(self):
-        text = "## Review & Acceptance Checklist\n- [ ] No [NEEDS CLARIFICATION] markers remain\n"
-        self.assertEqual(self.ids(text), ([], []))
+    def test_attempts_to_hide_a_requirement_block(self):
+        """Each of these hides 'secret' from a naive parser while GitHub still shows it as a requirement."""
+        cases = [
+            "## Acceptance criteria\n- [ ] a\n### Functional\n- [ ] secret\n",              # sub-heading inside the list
+            "## Acceptance criteria ##\n- [ ] secret\n",                                    # closing hashes
+            "### Acceptance Criteria:\n- [ ] secret\n",
+            "Acceptance criteria\n-------------------\n- [ ] secret\n",                     # setext heading
+            "**Acceptance criteria:**\n- [ ] secret\n",                                     # bold label
+            "<h2>Acceptance criteria</h2>\n\n- [ ] secret\n",                                # html heading: stray box blocks
+            "## Acceptance criteria\r- [ ] a\r- [ ] secret\r",                               # old Mac line endings
+            "\ufeff# 03: T\n\n**What to build:** x\n\n- [ ] a\n- [ ] secret\n",            # BOM before the title
+            "---\nid: 3\n---\n# 03 - T\n\n- [ ] secret\n",                                 # front matter, other title dash
+            "## Acceptance criteria\n- [ ] a\n##\u00a0Notes\n- [ ] secret\n",               # NBSP: not a heading
+            "Use `<!--` here.\n## Acceptance criteria\n- [ ] a\n- [ ] secret\nend `-->`\n",  # comment marker in code
+            "## Acceptance criteria\n- [ ] a\n```x``` note\n- [ ] secret\n",                 # not a fence: backtick in info
+            "## Acceptance criteria\n- [ ] a\n #### Scenario: secret\n",
+            "## User Stories\n1. As a user, I want a\n### More\n2. As a user, I want secret\n",
+            # a fake Spec Kit heading must not switch the stray-checkbox check off
+            "```\n### User Story 1\n```\n## Acceptance criteria (MVP)\n- [ ] secret\n",
+            "#### Scenario: x\n- **GIVEN** a\n## Notes\n- [ ] secret\n",
+            "## Acceptance criteria\n- [ ] a\n  ```\n- [ ] secret\n",                       # a fence that ends with its item
+            "```\n<!--\n```\n## Acceptance criteria\n- [ ] secret\n```\n-->\n```\n",      # comment marker inside code
+            "- - [ ] secret\n", "1. - [ ] secret\n", "- 1. As a user, I want secret\n",     # nested list marks
+            "> - [ ] secret\n",                                                              # a quoted checkbox
+            "<!-->\n## Acceptance criteria\n- [ ] secret\n<!-- note -->\n",                  # '<!-->' is a whole comment
+            "<!--->\n## Acceptance criteria\n- [ ] secret\n-->\n",
+            "text\n\n    <!-- x\n## Acceptance criteria\n- [ ] secret\n-->\n",             # indented: code, not a comment
+            "a `span\n<!-- b` c\n## Acceptance criteria\n- [ ] secret\n-->\n",             # '<!--' inside a code span
+            "#### Scenario: x\n## Acceptance criteria checklist\n- [ ] secret\n",           # not Spec Kit's review checklist
+            "### User Story 1\n## Review & Acceptance Checklist\n- [ ] secret\n",
+            "<div>\n```\n\n## Acceptance criteria\n- [ ] secret\n",                          # html then a fence
+            "<kbd>x</kbd> run:\n```\na\n\nb\n```\n## Acceptance criteria\n- [ ] secret\n```\n",
+            "<pre>\n\n```\n</pre>\n## Acceptance criteria\n- [ ] secret\n```\n",
+            "<!--\n## Acceptance criteria\n- [ ] secret\n-->\n",                              # commented out: blocks
+            "```\n- [ ] secret\n```\n",
+            "**What to build:** x\n### User Story 1 - T\n1. **Given** a, **When** b, **Then** secret\n",  # ticket marker
+            "# 1. Feature\n### User Story 1 - T\n1. **Given** a, **When** b, **Then** secret\n",
+            "### User Story 1 - T\n### Notes\n- As admin, given x when y then secret\n",
+            "```\n1. When b, then secret\n```\n",
+            "### User Story 1 - T\nGiven a, when b, then secret.\n",                         # no list mark
+            "### User Story 1 - T\n| Given secret | When | Then |\n|---|---|---|\n| a | b | c |\n",          # a table: blocks
+        ]
+        for text in cases:
+            ids, unread = self.ids(text)
+            lines = dict(self.g.spec_scenarios(text))
+            claimed = any("secret" in v for v in lines.values())
+            self.assertTrue(claimed or any("secret" in u for u in unread), repr(text))
+        self.assertEqual(len(self.ids("## Acceptance criteria\n- [ ] a\n - [ ] b\n")[0]), 2)  # 1-space indent: a sibling
+        lazy = dict(self.g.spec_scenarios("# 03: T\n\n- [ ] Must validate\nexcept when admin\n"))
+        self.assertIn("except when admin", list(lazy.values())[0])  # a line running on from a criterion is part of it
+        a = self.ids("## Acceptance criteria\n- [ ] Do NOT log PII\n")[0]; b = self.ids("## Acceptance criteria\n- [ ] do not log pii\n")[0]
+        self.assertNotEqual(a, b)  # case matters
+        sk = "### User Story 1 - T\n1. **Given** a, **When** b, **Then** c\n## Review & Acceptance Checklist\n- [ ] old\n"
+        self.assertEqual(self.ids(sk), (["US1-1"], ["- [ ] old"]))  # no exemptions: any stray checkbox blocks
+
+    def test_crafted_input_stays_fast_and_names_are_long_enough(self):
+        import time as _t
+        for text in ("<!--" * 50000, "### User Story 1 - T\n- " + "Given When " * 10000 + "\n",
+                     "## Acceptance criteria\n" + "- [ ] x\n" * 20000, "#" * 100000 + "\n", "**" + "a**" * 30000 + "\n",
+                     "`" + "<!--" * 50000 + "-->\n", "<!-- a -->" * 20000 + "\n", "#### Scenario: s\n" + "x\n" * 100000,
+                     "# 03: T\n- [ ] a\n" + "  more\n" * 100000):
+            t0 = _t.time(); self.g.spec_scenarios(text, []); self.assertLess(_t.time() - t0, 2.0, text[:30])
+        self.assertEqual(len(self.ids("## Acceptance criteria\n- [ ] x\n")[0][0].split("-")[1]), 10)
+        self.g.spec_scenarios("## Acceptance criteria\n- [ ] bad \udc80 byte\n", [])  # no crash on odd text
 
     def test_preview_command_lists_names(self):
         r = run(self.repo, "spec-scenarios", self.TK)

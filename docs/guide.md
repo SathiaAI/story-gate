@@ -383,7 +383,7 @@ These tools help your AI write the plan. None of them checks, when a pull reques
    - OpenSpec: each `#### Scenario: <name>` is named by its name.
 3. In `tests.json`, list the scenarios each AC covers: `"covers": ["specs/001-checkout/spec.md#US1-1"]`.
 
-READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). Each AC then needs passing tests and a recorded run as usual. story-gate checks that every scenario is assigned to an AC; whether that AC's tests really exercise the scenario is what the AI judge and your review check. Set `require_spec_link: true` to make every story link a spec.
+READY and DONE then fail if a scenario has no AC, if `covers` names a scenario that isn't in the spec, or if the spec still has template text (`[initial state]`). A scenario, checkbox or user story inside a code block or `<!-- comment -->` also fails the check (from v0.9): delete it, or take it out of the block, so nothing can be hidden from the gate. Each AC then needs passing tests and a recorded run as usual. story-gate checks that every scenario is assigned to an AC; whether that AC's tests really exercise the scenario is what the AI judge and your review check. Set `require_spec_link: true` to make every story link a spec.
 
 **BMAD:** its file layout is changing (v7), so story-gate doesn't read BMAD files yet. Copy the story's acceptance criteria into `story.md` as usual; everything else applies.
 
@@ -393,7 +393,7 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
 - **Specs:** every numbered `As a …, I want …` line under `## User Stories` is a requirement.
 - **Ticked boxes still count as requirements.** A tick is never proof; only a passing test is.
 - **Names:** `ac1-938f7`, `story2-d0a81`: the position plus a short fingerprint of the words. Reword or reorder a criterion and its name changes, so an old `covers` entry can't silently point at the wrong one. Run `story-gate spec-scenarios <file>` to list the current names.
-- **Fails closed:** a plain bullet under `## Acceptance criteria`, or a user story not written as `As a …, I want …`, blocks the check rather than being skipped. Template text (`Criterion 1`, `<actor>`) blocks too.
+- **Fails closed:** a plain bullet under `## Acceptance criteria`, or a user story not written as `As a …, I want …`, blocks the check rather than being skipped. So does any checkbox or `As a …` line outside those sections, and template text (`Criterion 1`, `<actor>`).
 - **Commit the ticket.** `.scratch/` is often in `.gitignore`; story-gate refuses an ignored file, because the pull request and CI would never see it.
 - Tickets that live on GitHub issues: copy the ticket into the repository for now. `story-gate spec-pull` is coming next.
 
