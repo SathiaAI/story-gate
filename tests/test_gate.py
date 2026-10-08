@@ -5399,7 +5399,7 @@ class TestSpecPull(Base):
         stray = (200, {"title": "", "body": MATT_ISSUE + "- [ ] Refunds are logged\n", "html_url": url}, {})
         self.assertIn("1 new line(s) that look like requirements", self.live(stray)[1])
         state, why = self.live((200, {"title": "", "body": MATT_ISSUE.replace("Refunds.", "Refunds!"), "html_url": url}, {}))
-        self.assertEqual(state, "changed"); self.assertIn("text only, same requirements", why)
+        self.assertEqual(state, "changed"); self.assertIn("text outside the requirements changed", why)
         for args, kw, st, word in (((same,), {"token": None}, "not checked", "no GitHub token"),
                                    ((same,), {"repo": ""}, "not checked", "which repository"),
                                    (((403, {}, {}),), {}, "not checked", "issues: read"),
@@ -5424,6 +5424,30 @@ class TestSpecPull(Base):
         gitc("add", "-A"); gitc("commit", "-qm", "block"); gitc("checkout", "-q", "feature/SAT-1-thing")
         r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
         self.assertIn('(spec_source_check is "block")', r.stdout + r.stderr)
+
+    def test_every_linked_copy_is_found_however_it_is_spelled(self):
+        self.pull()
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        other = self.repo / ".story-gate/stories/OTHER"; other.mkdir()
+        (other / "issue-5.md").write_text(self.snap.read_text(encoding="utf-8"), encoding="utf-8")
+        text = ("---\nid: SAT-1\nspec: [./.story-gate/stories/SAT-1/issue-7.md, .story-gate//stories/OTHER/issue-5.md#ac1, "
+                "notes/issue-9.md, docs/issue-tracker.md]\n---\n")
+        snaps, odd = g.snapshot_links(text)
+        self.assertEqual(snaps, [(".story-gate/stories/SAT-1/issue-7.md", "SAT-1", 7), (".story-gate/stories/OTHER/issue-5.md", "OTHER", 5)])
+        self.assertEqual(odd, ["notes/issue-9.md"])  # an issue-<N>.md copy outside the story folders can't be compared
+
+    def test_ci_flags_removed_links_and_odd_copies(self):
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        self.pull()
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base with the link")
+        gitc("checkout", "-q", "feature/SAT-1-thing"); gitc("merge", "-q", "main")
+        st = self.repo / ".story-gate/stories/SAT-1/story.md"
+        st.write_text(st.read_text(encoding="utf-8").replace("spec: .story-gate/stories/SAT-1/issue-7.md", "spec: notes/issue-9.md"),
+                      encoding="utf-8")
+        (self.repo / "app.py").write_text("x = 2\n")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
+        self.assertIn("removes the story's link to .story-gate/stories/SAT-1/issue-7.md", r.stdout)
+        self.assertIn("notes/issue-9.md looks like a pulled issue", r.stdout)
 
     def test_the_setting_is_checked_and_loosening_it_is_flagged(self):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")

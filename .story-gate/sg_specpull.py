@@ -208,4 +208,5 @@ def live_status(gate, sid, rel, num, repo, token):
     if len(new_u) > len(old_u):
         diff.append("%d new line(s) that look like requirements but can't be read" % (len(new_u) - len(old_u)))
     return "changed", ("the live issue differs from the copy (%s). Run `story-gate spec-pull %s #%d` and check the "
-                       "requirements again" % ("; ".join(diff) or "text only, same requirements", sid, num))
+                       "requirements again" % ("; ".join(diff) or "text outside the requirements changed; read the "
+                                               "difference, it may still matter", sid, num))
