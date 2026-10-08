@@ -1,6 +1,6 @@
 #!/bin/sh
 # story-gate installer for macOS and Linux:
-#   curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+#   curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 # It installs uv (Astral's Python tool manager) if you don't have it, then story-gate at the pinned
 # release, puts it on your PATH, and runs nothing else. Read it before you run it: it's short.
 set -eu
@@ -8,7 +8,7 @@ set -eu
 # Everything runs from main(), called on the last line, so a download cut off halfway runs nothing.
 main() {
   PATH_NOTE=
-  REF="${STORY_GATE_REF:-v0.7.0}"
+  REF="${STORY_GATE_REF:-v0.8.0}"
   SRC="git+https://github.com/SathiaAI/story-gate@$REF"
 
   say() { printf '%s\n' "story-gate install: $*"; }

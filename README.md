@@ -77,13 +77,13 @@ See story-gate catch a real bug before you change anything. Install it with one 
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.7.0/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.ps1 | iex"
 ```
 
 Then run:
@@ -92,7 +92,7 @@ Then run:
 story-gate try
 ```
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. It doesn't change anything else. It's short: read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. It doesn't change anything else. It's short: read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.8.0` instead.
 
 `story-gate try` makes a throwaway example project in your temp folder with one small story and a real bug. It runs each goal for real, shows one passing and one failing, and opens the validation page. No GitHub, no judge key, no network, and your own projects aren't touched.
 
@@ -230,7 +230,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.7.0`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.8.0`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).

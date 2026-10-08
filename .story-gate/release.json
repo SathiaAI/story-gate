@@ -1,0 +1,25 @@
+{
+  "files": {
+    "PROTOCOL.md": "d032579bb00de7cd622614e9fe8b349a6c0ec67627ede9eb503d63cbec7126e4",
+    "SKILL.md": "3cf1e8cf8b8f797d1db0c73d1bb5890294f51e07ba31391b356749adcb03a3d8",
+    "gate.py": "82d529f0b107c9fad4c08e09968c9529243636d9e71f6d147bcbe11681854c00",
+    "sg_dashboard.py": "42c56d3fa16de63630c0ff0d46ed9c8198b66b13d7518bf76235cfed87242299",
+    "sg_github.py": "5528b97991974437590ade93d07cddcb0343a9e28abd3f8879886ba5c8c08836",
+    "sg_guard.py": "49509cbea6789a1f33e689cd654d24537ccf769677e7454410b8cf64cb1c6617",
+    "sg_judges.py": "cba2df40ebc7ebde7129731791ad8f95e2f8cd50428961a70639441a5b17b7f5",
+    "sg_pin.py": "00e6386f2ba94f451539a5dd57a9a7682cbfb4baec5ca7c1d38aa202a90d692c",
+    "sg_report.py": "4c417666f5d19b77372d91002fb208200103759fbb9709480e9ae6bd640ec174",
+    "sg_setup.py": "f30d0f706b2952941a87006ba479abcbe243a0a227f3f3ff9114dbf6c6f8d215",
+    "sg_trust.py": "3cd4e6fce8a787b554a602e7cc0371d817c0e24e4aaa798978646dbc3dffe768",
+    "sg_validation.py": "b7a059d8abb85dc275d582fc85e32762e05c27d9caad52f1e2e357455a8b2902",
+    "sg_writing.py": "d89816a47cd84b36e906b239803d4860ad523d07cd9be4d59ff36492c06b3bbd",
+    "vendor/ClashDisplay-600.woff2": "2d7c1c6da950bc14572a77b45ca7d8a80180e9ba0aa2aa90a5b3304dd6fb89e5",
+    "vendor/FONTS-LICENSE": "5ae41267001df152caabd001af9819fc28d3052b6502474462bc0da8203ba2f5",
+    "vendor/Switzer-400.woff2": "4c76d015843b66e89bafa13271056fa685ad50bd74c26335df2d29dfa17506e4",
+    "vendor/Switzer-600.woff2": "7d6dd0d988497db913de2d06e7dfcd6da3e5936f4fb1be0c46d9979c605e3730",
+    "vendor/TABLER-LICENSE": "4f88a82d13be3c5c63a12c5631eae914aa4381b6dc17641bf1ab85f3f8f6c8a5",
+    "vendor/tabler.min.css": "370a2d4e608ae518351d10528fc7dbe19b354ae5062c51b2a9cb294850d65403",
+    "vendor/viaknox-wordmark.svg": "ad84538aceb17894497e72f88a388e5acf53ce3d49a2f5064277efb7c86e04f6"
+  },
+  "version": "0.8.0"
+}
