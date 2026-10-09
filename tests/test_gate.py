@@ -5381,7 +5381,8 @@ class TestSpecPull(Base):
         import sg_github as G, sg_specpull as SP
         from unittest import mock
         kw = {"side_effect": exc} if exc else {"return_value": reply}
-        with mock.patch.object(G, "call", **kw) as c:
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "acme/shop"}), mock.patch.object(G, "call", **kw) as c:
+            os.environ.pop("GITHUB_EVENT_PATH", None)  # CI's own event must not leak into the test
             out = SP.live_status(g, "SAT-1", ".story-gate/stories/SAT-1/issue-7.md", 7, repo, token)
         if reply and not exc and token and repo == "acme/shop":
             self.assertEqual(c.call_args[0][1], "/repos/acme/shop/issues/7")  # repo from CI, number from the file name
@@ -5658,7 +5659,10 @@ class TestSpecRepos(Base):
     def test_live_comparison_of_another_repos_issue(self):
         self.pull()
         from unittest import mock
-        with mock.patch.object(self.G, "call", side_effect=self.fake()) as c:
+        ev = self.repo.parent / (self.repo.name + "-event.json"); self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        ev.write_text(json.dumps({"repository": {"private": True}}))  # a private repo may compare a private specs repo
+        env = {"GITHUB_REPOSITORY": "acme/shop", "GITHUB_EVENT_PATH": str(ev)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.G, "call", side_effect=self.fake()) as c:
             state, why = self.SP.live_status(self.g, "SAT-1", ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md", 12, "acme/specs-2", "t")
         self.assertEqual(state, "unchanged", why)
 
