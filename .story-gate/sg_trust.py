@@ -572,6 +572,9 @@ def tighten(policy, local):
         out["require_spec_link"] = True
     if local.get("spec_source_check") == "block":
         out["spec_source_check"] = "block"
+    if isinstance(local.get("spec_repos"), list):  # this computer may allow fewer repositories, never more
+        mine = {str(r).lower() for r in local["spec_repos"]}
+        out["spec_repos"] = [r for r in out.get("spec_repos") or [] if str(r).lower() in mine]
     w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
     if isinstance(lw, dict):
         if lw.get("enforce") is True:
@@ -630,6 +633,10 @@ def weaker(old, new):
             out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
+    lst = lambda v: [str(r).lower() for r in v] if isinstance(v, list) else ([str(v).lower()] if v else [])
+    added = sorted(set(lst(n.get("spec_repos"))) - set(lst(o.get("spec_repos"))))
+    if added:
+        out.append("issues from more repositories can now be copied in and checked against (spec_repos: %s)" % ", ".join(added[:5]))
     if o.get("spec_source_check") == "block" and n.get("spec_source_check") != "block":
         out.append("a pulled issue that changed, or couldn't be checked, no longer blocks (spec_source_check)")
     if o.get("require_spec_link") is True and n.get("require_spec_link") is not True:
