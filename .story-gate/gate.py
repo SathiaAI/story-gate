@@ -3086,7 +3086,7 @@ def cmd_ci(tests_dir=None):
             import sg_trackers as TR  # tickets copied in from a tracker set up in the default branch's config
             for rel, owner, kind, key in tracker_links(story_text):
                 settings = (c.get("trackers") or {}).get(kind)
-                token, missing = TR.ci_token(kind) if kind in TR.CI_SECRETS else ("", ["a key"])
+                token, missing = TR.ci_token(kind, settings=settings) if kind in TR.CI_SECRETS else ("", ["a key"])
                 try:
                     if not isinstance(settings, dict):
                         state, detail = "not checked", ("%s isn't set up in the default branch's config (trackers), so CI "
@@ -4200,7 +4200,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                 print("             fork pull requests get no secrets, so their copies from those repositories always show 'not checked'")
             for kind, settings in sorted((c.get("trackers") or {}).items()):  # tickets from a tracker: can CI read them?
                 import sg_trackers as TR
-                for name in TR.CI_SECRETS.get(kind, ()):
+                for name in (TR.secrets_for(kind, settings) if kind in TR.CI_SECRETS else ()):
                     st_t, _, _ = G.call("GET", "/repos/%s/actions/secrets/%s" % (repo, name), tok)
                     print("  trackers.%s (%s) - CI: %s" % (kind, TR.site_of(kind, settings), {
                         200: "%s secret is set" % name,

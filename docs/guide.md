@@ -466,7 +466,7 @@ Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket
 
 #### Specs in Jira
 
-Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as Linear. Jira Server and Data Center come next.
+Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as Linear. Jira Server and Data Center are below.
 
 1. **Set it up.** Run `story-gate jira-setup your-site.atlassian.net "Acceptance criteria"` and paste what it prints into `.story-gate/config.json` in a pull request. It finds your site's cloud id (public) and, with your own token, the id of the field your team keeps acceptance criteria in (leave the name out if you keep them in the description). Reviewers see the new tracker as a weaker rule.
 2. **Your token.** Create an Atlassian API token **with scopes** and give it only `read:jira-work` (id.atlassian.com → Security → API tokens → Create API token with scopes). Set `JIRA_EMAIL` and `JIRA_API_TOKEN` on your computer. story-gate reads Jira only through Atlassian's API address for your site (`api.atlassian.com/ex/jira/<cloud id>`), which is where scoped tokens work.
@@ -476,8 +476,19 @@ Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as
    - The description: list items under a heading named "Acceptance criteria" become criteria; other lists stay as they are. Checklists (action items) keep their boxes.
    - Tables, code, panels, mentions and links are kept as text; images show as `[attachment]`.
    - Criteria in a table (under "Acceptance criteria", in the criteria field, or a checklist inside any table) stop the copy: they can't be read one by one, so write them as a list.
+   - Under an "Acceptance criteria" heading, keep only the list. A sentence or a table there is something story-gate can't read as a criterion, so the check stops and says which line.
    - Anything story-gate can't read yet (a macro, an extension, a synced block) stops the copy, with its name. Nothing is ever half-copied or called verified.
 5. **Let CI read it.** Create a second token the same way, ideally for an Atlassian **service account** so it doesn't depend on a person. In this repository add two secrets: `STORY_GATE_JIRA_EMAIL` (the account's email) and `STORY_GATE_JIRA_TOKEN`. Without both, or on a fork, Jira copies show **not checked**. Private tickets stay out of public repositories, exactly as with Linear.
+
+
+##### Jira Server and Data Center
+
+Jira on your own servers (version 8.14 or later) works the same way, with a personal access token.
+
+1. **Set it up.** `story-gate jira-setup jira.acme.com "Acceptance criteria"` (add the context path if Jira lives under one, e.g. `jira.acme.com/jira`). It prints `{"site": "jira.acme.com", "server": true, "ac_field": "customfield_…"}` for your config. Use a read-only account: in Jira, Profile → Personal Access Tokens → Create token, and set `JIRA_API_TOKEN` on your computer. Use Jira's full name, not an IP address or `localhost`.
+   - **Your token only goes to the address on the default branch's config.** Before that's merged, or if a branch changes it, `spec-pull` stops; name the address yourself with `STORY_GATE_JIRA_SITE=jira.acme.com` if it's right. (Jira Cloud and Linear always use their fixed addresses.)
+2. **Pull a ticket** with `spec-pull <story> ENG-12` or its `/browse/` link, as above. Jira's wiki text is read the same careful way: lists under "Acceptance criteria" become criteria, `{code}` and `{noformat}` blocks stay code, and a block that never closes, or criteria in a table, stops the copy.
+3. **Let CI read it.** Add one secret, `STORY_GATE_JIRA_TOKEN`, with that account's token. GitHub's own runners usually can't reach a Jira inside your network, so those copies show **not checked** (never verified). To check them in CI, run the story-gate job on a **self-hosted runner** inside your network, and only for this private repository: GitHub advises against self-hosted runners for public repositories, because a pull request could run its code on your machine.
 
 ## F. The dashboard: how it's going
 

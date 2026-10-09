@@ -6234,6 +6234,9 @@ class TestTrackerJira(Base):
         with self.assertRaises(TR.TrackerError):
             TR.adf_to_text(adf(table), ac=True)
         self.assertIn("| - hide secrets |", TR.adf_to_text(adf(table)))  # an ordinary table elsewhere is kept as text
+        h = lambda lvl, t: {"type": "heading", "attrs": {"level": lvl}, "content": [{"type": "text", "text": t}]}
+        deeper = TR.adf_to_text(adf(h(2, "Acceptance criteria"), bullets("a"), h(3, "Sub"), bullets("b"), h(2, "Other"), bullets("c")))
+        self.assertIn("- [ ] b", deeper); self.assertIn("\n- c", deeper)  # same sections as the gate reads
         for odd in (adf({"type": "bulletList", "content": [{"type": "listItem", "content": 5}]}),
                     adf({"type": "table", "content": [{"type": "tableRow", "content": 5}]}),
                     adf({"type": "taskList", "content": [{"type": "taskItem", "content": 5}]})):
@@ -6366,12 +6369,197 @@ class TestTrackerJira(Base):
         with mock.patch.object(TR, "get_json", side_effect=get), contextlib.redirect_stdout(buf):
             TR.jira_setup(["acme.atlassian.net", "acceptance criteria"], env={"JIRA_EMAIL": "e", "JIRA_API_TOKEN": "t"})
         self.assertIn('"ac_field": "customfield_10050"', buf.getvalue()); self.assertIn(self.CLOUD, buf.getvalue())
-        with self.assertRaises(SystemExit):
-            TR.jira_setup(["https://acme.atlassian.net"])
+        for bad in (["acme atlassian"], ["https://u@acme.atlassian.net"], ["acme.atlassian.net?x=1"], []):
+            with self.assertRaises(SystemExit):
+                TR.jira_setup(bad)
         y = self.g.CI_YML
         for name in ("STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"):
             self.assertIn("%s: ${{ secrets.%s }}" % (name, name), y)
             self.assertNotIn(name, y.split("  story-gate:")[0])
+
+
+WIKI_TICKET = """h2. What to build
+
+Refunds, see {{RefundService}} and {color:red}the note{color}.
+
+h2. Acceptance criteria
+
+* Refund button appears on paid orders
+* Refunds over $500 need a manager
+
+h2. Notes
+
+{code:java}
+// * not a criterion
+x = 1;
+{code}
+|| a || b ||
+| 1 | 2 |
+"""
+
+
+class TestTrackerJiraServer(Base):
+    """Jira Server / Data Center: REST v2 + a personal access token, wiki markup read fail-closed, same copy model."""
+
+    SETTINGS = {"site": "jira.acme.com/jira", "server": True, "ac_field": "customfield_10100"}
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/shop.git"], cwd=self.repo, capture_output=True)
+        self.cfg(trackers={"jira": dict(self.SETTINGS)})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP, sg_trackers as TR
+        self.G, self.SP, self.TR = G, SP, TR
+        self.rel = ".story-gate/stories/SAT-1/jira-ENG-12.md"
+        self.snap = self.repo / self.rel
+
+    def answer(self, **fields):
+        f = {"summary": "Refunds", "updated": "2026-10-09T10:00:00.000+0000", "description": WIKI_TICKET, "customfield_10100": None}
+        f.update(fields)
+        return {"id": "13536578", "key": "ENG-12", "self": "https://jira.acme.com/jira/rest/api/2/issue/13536578", "fields": f}
+
+    def fetch(self, ans=None, status=200):
+        seen = {}
+        def get(url, headers):
+            seen.update(url=url, headers=headers)
+            return status, (self.answer() if ans is None else ans)
+        return self.TR.jira_any_fetch(self.SETTINGS, "ENG-12", "pat-123", get=get), seen
+
+    def test_wiki_markup_is_read_and_fails_closed(self):
+        TR = self.TR
+        text = TR.wiki_to_text(WIKI_TICKET)
+        for want in ("## What to build", "`RefundService`", "the note", "## Acceptance criteria",
+                     "- [ ] Refund button appears on paid orders", "- [ ] Refunds over $500 need a manager",
+                     "## Notes", "```\n// * not a criterion\nx = 1;\n```", "|| a || b ||"):
+            self.assertIn(want, text)
+        self.assertNotIn("{color", text); self.assertNotIn("- [ ] not a criterion", text)
+        self.assertIn("  - b", TR.wiki_to_text("* a\n** b"))
+        self.assertIn("1. a", TR.wiki_to_text("# a"))
+        self.assertEqual(TR.wiki_to_text("{noformat}x{noformat} after"), "```\nx\n```\n after")
+        one_line = TR.wiki_to_text("h2. Acceptance criteria\n{code}x{code}\n* must A\n* must B")
+        self.assertIn("- [ ] must A", one_line); self.assertIn("- [ ] must B", one_line)  # nothing after a one-line block is lost
+        mid = TR.wiki_to_text("h2. Acceptance criteria\nsee {code}\n* fake\nend{code}")
+        self.assertNotIn("- [ ] fake", mid); self.assertIn("```\n* fake\nend\n```", mid)  # a block opening mid-line is code
+        self.assertIn("a {code} b", TR.wiki_to_text("{noformat}a {code} b{noformat}"))
+        for bad in ("x {code} y", "{noformat}a{code}"):
+            with self.assertRaises(TR.TrackerError):
+                TR.wiki_to_text(bad)
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:  # a ``` line in a ticket can't hide criteria from the gate: it blocks instead
+            unread = []
+            self.g.spec_scenarios(TR.content("SAT-1", "ENG-12", "T", TR.wiki_to_text("h2. Acceptance criteria\n```\n* A")), unread)
+            self.assertTrue(unread)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertEqual(TR.wiki_to_text("* one\n* two", ac=True), "- [ ] one\n- [ ] two")
+        self.assertIn("> quoted", TR.wiki_to_text("bq. quoted"))
+        for bad in ("{code}\nnever closed", "h2. Acceptance criteria\n| a | b |", 5):
+            with self.assertRaises(TR.TrackerError):
+                TR.wiki_to_text(bad)
+        self.assertEqual(TR.wiki_to_text(None), "")
+        deeper = TR.wiki_to_text("h2. Acceptance criteria\n* a\nh3. Sub\n* b\nh2. Other\n* c")
+        self.assertIn("- [ ] b", deeper); self.assertIn("\n- c", deeper)  # a deeper heading stays in the section, as the gate reads it
+        self.assertIn("````", TR.wiki_to_text("{code}\n```\n* x\n{code}"))  # the code's own ``` can't end the block
+
+    def test_fetch_contract(self):
+        t, seen = self.fetch()
+        self.assertEqual(seen["url"], "https://jira.acme.com/jira/rest/api/2/issue/ENG-12?fields=summary,description,updated,customfield_10100")
+        self.assertEqual(seen["headers"], {"Authorization": "Bearer pat-123"})
+        self.assertEqual((t["key"], t["id"], t["url"]), ("ENG-12", "13536578", "https://jira.acme.com/jira/browse/ENG-12"))
+        t, _ = self.fetch(self.answer(customfield_10100="* Logged\n* Audited"))
+        self.assertIn("## Acceptance criteria\n\n- [ ] Logged\n- [ ] Audited", t["body"])
+        TR = self.TR
+        with self.assertRaises(TR.NotFound):
+            self.fetch(status=404)
+        for kw, why in (({"status": 401}, "refused the token"),
+                        ({"ans": dict(self.answer(), self="https://jira.evil.com/rest/api/2/issue/1")}, "somewhere else"),
+                        ({"ans": self.answer(description="{code}x")}, "never closes"),
+                        ({"ans": self.answer(description=5)}, "isn't text")):
+            with self.assertRaises(TR.TrackerError) as e:
+                self.fetch(**kw)
+            self.assertIn(why, str(e.exception)); self.assertNotIn("pat-123", str(e.exception))
+
+    def pull(self, args=("SAT-1", "ENG-12"), env=None):
+        from unittest import mock
+        gh = lambda m, path, tok=None, body=None: (200, {"private": True}, {}) if path == "/repos/acme/shop" else (404, {}, {})
+        fetch = lambda settings, key, tok: self.TR.jira_any_fetch(settings, key, tok, get=lambda u, h: (200, self.answer()))
+        with mock.patch.object(self.G, "call", side_effect=gh), mock.patch.object(self.G, "human_token", return_value="t"), \
+                mock.patch.dict(self.TR.FETCH, {"jira": fetch}), mock.patch.dict(os.environ, {"JIRA_API_TOKEN": "pat", "STORY_GATE_JIRA_SITE": "jira.acme.com/jira"} if env is None else env):
+            os.environ["STORY_GATE_ROOT"] = str(self.repo)
+            try:
+                return self.SP.cli(self.g, list(args))
+            finally:
+                os.environ.pop("STORY_GATE_ROOT", None)
+
+    def test_pull_settings_and_ci(self):
+        TR = self.TR
+        self.assertEqual(self.pull(), 0)  # a personal access token alone is enough here
+        text = self.snap.read_text(encoding="utf-8")
+        self.assertIn("site: jira.acme.com/jira", text); self.assertIn("source_url: https://jira.acme.com/jira/browse/ENG-12", text)
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            found, problem = self.g.linked_scenarios(self.rel)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertIsNone(problem); self.assertEqual(len(found), 2)
+        self.snap.unlink()
+        self.assertEqual(self.pull(args=("SAT-1", "https://jira.acme.com/jira/browse/ENG-12")), 0)
+        with self.assertRaises(SystemExit) as e:
+            self.pull(args=("SAT-1", "https://jira.other.com/browse/ENG-12"))
+        self.assertIn("set up for 'jira.acme.com/jira'", str(e.exception))
+        for ref in ("https://jira.acme.com@evil.com/browse/ENG-12", "http://jira.acme.com/browse/ENG-12", "https://jira.acme.com/browse/eng-12"):
+            self.assertIsNone(TR.parse_ticket_ref(ref), ref)
+        for junk in ({"site": "jira.acme.com", "server": False}, {"site": "https://jira.acme.com", "server": True},
+                     {"site": "acme.atlassian.net", "server": True}, {"site": "jira.acme.com?x=1", "server": True},
+                     {"site": "jira.acme.com", "server": True, "cloud_id": "x"}):
+            self.assertTrue(TR.settings_problem("jira", junk), junk)
+        self.assertIsNone(TR.settings_problem("jira", {"site": "jira.acme.com:8443/jira", "server": True}))
+        for host in ("localhost", "localhost:8080", "169.254.169.254", "2130706433", "10.0.0.1:80", "a..b.com", "jira.acme.com:99999",
+                     "jira.acme.com/../x", "jira", "u@jira.acme.com"):
+            self.assertTrue(TR.settings_problem("jira", {"site": host, "server": True}), host)  # never an internal address by number
+        # a branch can't send your token to another server: the address must be the default branch's, or named by you
+        self.snap.unlink()
+        with self.assertRaises(SystemExit) as e:
+            self.pull(env={"JIRA_API_TOKEN": "pat"})
+        self.assertIn("isn't the address on main's config", str(e.exception)); self.assertFalse(self.snap.exists())
+        self.assertEqual(self.pull(env={"JIRA_API_TOKEN": "pat", "STORY_GATE_JIRA_SITE": "https://jira.acme.com/jira/"}), 0)  # as jira-setup takes it
+        self.snap.unlink()
+        self.assertEqual(TR.ci_token("jira", env={"STORY_GATE_JIRA_TOKEN": "p"}, settings=self.SETTINGS), ("p", []))
+        self.assertEqual(TR.ci_token("jira", env={}, settings={"site": "a.atlassian.net"})[1], ["STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"])
+        self.pull()
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main"); (self.repo / "app.py").write_text("x = 3\n")
+        self.assertEqual(self.pull(env={"JIRA_API_TOKEN": "pat"}), 0)  # once the address is on main, no extra step
+        ev = self.repo.parent / (self.repo.name + "-event.json"); self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        ev.write_text(json.dumps({"repository": {"private": True}}))
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop", "GITHUB_EVENT_PATH": str(ev)})
+        self.assertIn("no STORY_GATE_JIRA_TOKEN secret", r.stdout); self.assertNotIn("STORY_GATE_JIRA_EMAIL", r.stdout)
+
+    def test_live_comparison_and_setup(self):
+        self.pull()
+        TR = self.TR
+        def live(ans):
+            os.environ["STORY_GATE_ROOT"] = str(self.repo)
+            try:
+                return TR.live_status(self.g, "SAT-1", self.rel, "jira", "ENG-12", self.SETTINGS, "pat",
+                                      fetch=lambda s, k, t: TR.jira_any_fetch(s, k, t, get=lambda u, h: (200, ans)))
+            finally:
+                os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertEqual(live(self.answer())[0], "unchanged")
+        state, why = live(self.answer(description=WIKI_TICKET.replace("need a manager\n", "need a manager\n* Refunds are logged\n")))
+        self.assertEqual(state, "changed"); self.assertIn("1 requirement(s) added", why)
+        from unittest import mock
+        import io, contextlib
+        def get(url, headers):
+            self.assertEqual((url, headers), ("https://jira.acme.com/jira/rest/api/2/field", {"Authorization": "Bearer pat"}))
+            return 200, [{"id": "customfield_10100", "name": "Acceptance Criteria"}]
+        buf = io.StringIO()
+        with mock.patch.object(TR, "get_json", side_effect=get), contextlib.redirect_stdout(buf):
+            TR.jira_setup(["https://jira.acme.com/jira/", "Acceptance criteria"], env={"JIRA_API_TOKEN": "pat"})
+        self.assertIn('"server": true', buf.getvalue()); self.assertIn('"ac_field": "customfield_10100"', buf.getvalue())
+        self.assertIn('"site": "jira.acme.com/jira"', buf.getvalue())
 
 
 if __name__ == "__main__":
