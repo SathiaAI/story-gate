@@ -1024,7 +1024,17 @@ def spec_snapshot(text, rel=""):
         return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m[1])
     if m and m[2] and fields["repo"].lower() != m[2].lower():
         return "", "it holds an issue of %s but is named for %s" % (fields["repo"][:80], m[2])
+    here = this_repo() if m and not m[2] else None
+    if here and fields["repo"].lower() != here.lower():  # issue-<N>.md is this repository's issue N, never another's
+        return "", ("it holds an issue of %s but is named as one of this repository (%s). Pull it again; a copy from "
+                    "another repository is saved as issue-<owner>--<repo>-<N>.md" % (fields["repo"][:80], here))
     return content, None
+
+
+def this_repo():
+    """'owner/repo' this checkout belongs to: CI's GITHUB_REPOSITORY, else the origin remote; None when unknown."""
+    r = os.environ.get("GITHUB_REPOSITORY", "").strip() or origin_repo() or ""
+    return r if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r) else None
 
 
 # One set of words for a pulled issue's status, the same in CI notes, the validation page and the dashboard. Only CI's
@@ -4004,7 +4014,8 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                 st_s, _, _ = G.call("GET", "/repos/%s/actions/secrets/STORY_GATE_SPECS_TOKEN" % repo, tok)
                 print("  spec_repos: %s - CI token: %s" % (", ".join(c["spec_repos"]), {
                     200: "STORY_GATE_SPECS_TOKEN secret is set (or your own step makes one)",
-                    404: "MISSING - copies from those repositories will show 'not checked'; see the guide, 'Specs in another repository'"}.get(
+                    404: "no STORY_GATE_SPECS_TOKEN secret. Fine if your own workflow step makes the token (the GitHub App way); "
+                         "otherwise copies from those repositories show 'not checked'. See the guide, 'Specs in another repository'"}.get(
                     st_s, "could not check (HTTP %s; listing secrets needs admin rights)" % st_s)))
                 print("             fork pull requests get no secrets, so their copies from those repositories always show 'not checked'")
             me = G.whoami(tok)

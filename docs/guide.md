@@ -408,7 +408,7 @@ Keep tickets in a central specs repository? List it, then pull from it like any 
 1. GitHub → Settings → Developer settings → Fine-grained personal access tokens → Generate new token.
 2. Repository access: **only** the specs repositories. Permissions: **Issues: Read-only**. Nothing else. Pick an expiry date and put a reminder in your calendar.
 3. In this repository: Settings → Secrets and variables → Actions → New repository secret: name `STORY_GATE_SPECS_TOKEN`, value the token.
-4. `story-gate doctor` shows whether the secret is set. Only the story-gate job sees it; the job that runs the pull request's code never does.
+4. `story-gate doctor --repo owner/repo`, run as yourself (signed in with `gh auth login`; listing secrets needs admin rights on the repository), shows whether the secret is set. Only the story-gate job sees it; the job that runs the pull request's code never does.
 
 The token belongs to the person who made it. If they leave or it expires, the copies show **not checked** until someone makes a new one.
 

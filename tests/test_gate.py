@@ -21,6 +21,9 @@ def run(repo, *args, stdin=None, env=None):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(os.environ); env.start(); self.addCleanup(env.stop)
+        for k in ("GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "GITHUB_ACTIONS"):
+            os.environ.pop(k, None)  # code run in-process must not see the CI runner's own repository or event
         self.repo = Path(tempfile.mkdtemp())
         shutil.copytree(SRC, self.repo / ".story-gate", ignore=shutil.ignore_patterns("stories", "__pycache__", "*.jsonl", "judge-calibration.json"))
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
@@ -5665,6 +5668,15 @@ class TestSpecRepos(Base):
         with mock.patch.dict(os.environ, env), mock.patch.object(self.G, "call", side_effect=self.fake()) as c:
             state, why = self.SP.live_status(self.g, "SAT-1", ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md", 12, "acme/specs-2", "t")
         self.assertEqual(state, "unchanged", why)
+
+    def test_another_repos_issue_named_as_ours_blocks(self):
+        self.pull()
+        ours = self.repo / ".story-gate/stories/SAT-1/issue-12.md"
+        ours.write_text(self.snap.read_text(encoding="utf-8"), encoding="utf-8")
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "acme/shop"}):
+            _, problem = self.g.linked_scenarios(".story-gate/stories/SAT-1/issue-12.md")
+        self.assertIn("named as one of this repository (acme/shop)", problem or "")
 
     def test_a_copy_outside_its_place_blocks(self):
         self.pull()
