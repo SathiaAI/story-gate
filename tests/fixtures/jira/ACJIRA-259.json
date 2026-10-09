@@ -1,0 +1,67 @@
+{
+ "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+ "fields": {
+  "description": {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "xxxxx xxxxxxxxx xxxx \"xxx.xx.xxxxx.xxxxxxx.xxx\" xxx xxxxxxxx xx xxxxxxx x xxxx. xxxxxxxxxxxxx xx xxx'x xxxx xx xx xxxx xx xx xxxx xxxxxxx xxx xxxxxxx xxxxxxxxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxxxxxx xxxx xxx xxxxxxxxxxx:",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "xxx.xx.xxxxx.xxxxxxx.xxx",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "xxxxxxxxx.xxxxx.xxxxxxx.<xxxx|xxxxx>-xxxxxx",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      }
+     ],
+     "type": "bulletList"
+    }
+   ],
+   "type": "doc",
+   "version": 1
+  },
+  "summary": "Recorded ticket ACJIRA-259",
+  "updated": "2017-10-06T10:07:33.567-0500"
+ },
+ "id": "102411",
+ "key": "ACJIRA-259",
+ "self": "https://api.atlassian.com/ex/jira/fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem/rest/api/3/issue/102411"
+}

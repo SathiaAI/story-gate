@@ -1,0 +1,221 @@
+{
+ "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+ "fields": {
+  "description": {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "xxx-xxxxx xxxxx xxxxxx xxxxxxx xx xx xxxxxx xxxxxx xx xxx xxxx xx xxxx xxxx x xxxxxx xxxxxxxxx xxxxx xxxxxxxxx xxxxxxxxxxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxxxx:",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "javascript"
+     },
+     "content": [
+      {
+       "text": "xxxxxxxx: [{\r\n    xxx: \"/xxxxx/{xxxxx.xxx}\",\r\n    xxxxxxx: \"xxxxx\",\r\n    xxxxxx: {\r\n        xxxx: \"xxxxxxxxxxxx\"\r\n    },\r\n    xxxxxxxxxx: [{\r\n        xxxxxxxxx: \"/xxxxxxxxx/xxxxx/{xxxxx.xxx}/xxxxx\"\r\n    }]\r\n}",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxxxxxx xxxx:",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "attrs": {
+            "id": "00000000000000000000",
+            "shortName": ":check_mark:",
+            "text": ":xxxxx_xxxx:"
+           },
+           "type": "emoji"
+          },
+          {
+           "text": " xxxxxx xxxxxxxxx xx xxxxxxxx xx xxxxx xx xxx xxx-xxxx xxxxxx xxxx. xx xxxxxxxx xxx xxxxxxxxx xxx xxxx xxx xxx-xx:",
+           "type": "text"
+          },
+          {
+           "type": "hardBreak"
+          },
+          {
+           "marks": [
+            {
+             "attrs": {
+              "href": "https://example.com/link"
+             },
+             "type": "link"
+            }
+           ],
+           "text": "xxxxx://xxxx/xxxxxxxxx/xxxxx/xxxx-x/xxxxx",
+           "type": "text"
+          },
+          {
+           "text": " xxxxx xxxxxxx xxxxxxxxxxx xxx xxxxxxx xxxxxxxxx",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "attrs": {
+            "id": "00000000000000000000",
+            "shortName": ":check_mark:",
+            "text": ":xxxxx_xxxx:"
+           },
+           "type": "emoji"
+          },
+          {
+           "text": " xxx xxxx xx xxxxxxxx xxxxxxxxx",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "attrs": {
+            "id": "00000000000000000000",
+            "shortName": ":check_mark:",
+            "text": ":xxxxx_xxxx:"
+           },
+           "type": "emoji"
+          },
+          {
+           "text": " xxxx xxxxxx xx xxx xxx-xxxx, xxxxx xxxxxxxx xxx xxx-xx xxxxxx xxx xx xxxxxxxxx xx xxx xxxxxxxxxx, xx xxxx xx xx xxxxxx xxxxxx",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "attrs": {
+            "id": "00000000000000000000",
+            "shortName": ":cross_mark:",
+            "text": ":xxxxx_xxxx:"
+           },
+           "type": "emoji"
+          },
+          {
+           "text": " xxxxxxxxx xxxxxxx xxxxx x xxxxxxx xx xxx xxx-xx xxxx xx xxxxxx xxx xxxxxxxxx, xxx xxxx xxx xxxxxxxxxx xxx xxxxxxx xxxxxxxxxx xxxxxxxxx",
+           "type": "text"
+          },
+          {
+           "type": "hardBreak"
+          },
+          {
+           "marks": [
+            {
+             "attrs": {
+              "href": "https://example.com/link"
+             },
+             "type": "link"
+            }
+           ],
+           "text": "xxxxx://xxxx/xxxxxxxxx/xxxxx//xxxxx",
+           "type": "text"
+          },
+          {
+           "text": " xxxxx xx ",
+           "type": "text"
+          },
+          {
+           "marks": [
+            {
+             "type": "em"
+            }
+           ],
+           "text": "xxxxxxxxx",
+           "type": "text"
+          },
+          {
+           "text": ".",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "attrs": {
+            "id": "00000000000000000000",
+            "shortName": ":cross_mark:",
+            "text": ":xxxxx_xxxx:"
+           },
+           "type": "emoji"
+          },
+          {
+           "text": " xxx-xx xxxx xxxxxxxx xxxxxx x xxxxx xxxxx xxx xxx xxxxxx xx xxx xxxxx xx xxx xxxxxx xxxxxxxxx xxx xxx xxxx.",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      }
+     ],
+     "type": "bulletList"
+    }
+   ],
+   "type": "doc",
+   "version": 1
+  },
+  "summary": "Recorded ticket ACJIRA-315",
+  "updated": "2023-05-16T19:48:22.404-0500"
+ },
+ "id": "111753",
+ "key": "AC-1503",
+ "self": "https://api.atlassian.com/ex/jira/fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem/rest/api/3/issue/111753"
+}
