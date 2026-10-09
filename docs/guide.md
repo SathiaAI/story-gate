@@ -425,7 +425,7 @@ The token belongs to the person who made it. If they leave or it expires, the co
           permission-issues: read
 ```
 
-The step's token lasts about an hour, is masked in logs, and goes straight into `STORY_GATE_SPECS_TOKEN`. It's never written to a file or printed. Rotate the private key in the App's settings. We haven't yet run this recipe end to end on a real second repository, so treat it as unvalidated until we have.
+The step's token lasts about an hour, is masked in logs, and goes straight into `STORY_GATE_SPECS_TOKEN`. It's never written to a file or printed. Rotate the private key in the App's settings. We haven't yet run this recipe end to end on a real second repository, so treat it as unvalidated until we have ([#51](https://github.com/SathiaAI/story-gate/issues/51)).
 
 
 - **Ticket files** (`# 03: Title` with `**What to build:**`): every `- [ ]` line is a requirement. So is every `- [ ]` under a `## Acceptance criteria` heading in any linked file.

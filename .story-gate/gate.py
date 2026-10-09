@@ -3996,6 +3996,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                     200: "STORY_GATE_SPECS_TOKEN secret is set (or your own step makes one)",
                     404: "MISSING - copies from those repositories will show 'not checked'; see the guide, 'Specs in another repository'"}.get(
                     st_s, "could not check (HTTP %s; listing secrets needs admin rights)" % st_s)))
+                print("             fork pull requests get no secrets, so their copies from those repositories always show 'not checked'")
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
