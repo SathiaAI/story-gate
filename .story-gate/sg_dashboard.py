@@ -219,6 +219,8 @@ def parse_story(sid, files):
         "trace": trace_acs((files.get("trace.md") or b"").decode("utf-8", "replace")),
         "tests_green": (tr.get("exit_code") == 0) if isinstance(tr, dict) and "exit_code" in tr else None,
         "spec_linked": bool(fm.get("spec")) and str(fm.get("spec")).strip().lower() not in ("none", "[]"),
+        # issues copied in with spec-pull: CI's check on the pull request says whether each still matches the live issue
+        "snapshots": len(re.findall(r"(?:^|[\s,\[/])\.story-gate/+stories/+[^/\s,\]]+/+issue-[0-9]{1,9}\.md", str(fm.get("spec") or ""))),
     }
 
 
@@ -425,7 +427,7 @@ def ci_cell(s):
     ci = s.get("ci")
     if not ci:
         return "no PR"
-    return "#%s %s" % (ci.get("pr"), md(ci.get("result"), 20))
+    return "#%s %s%s" % (ci.get("pr"), md(ci.get("result"), 20), " · source %s" % md(ci["source"], 12) if ci.get("source") else "")
 
 
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
@@ -468,6 +470,8 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
            ["- **%s**: %s." % (m["label"], md(m["formula"], 200)) for m in d.get("metrics", [])] + \
            ["", "Verdicts are recorded by the coding agents. The `story-gate` check in CI re-checks them on every pull request.", "</details>"]
     notes = []
+    if any((s.get("ci") or {}).get("source") for s in d["stories"]):
+        notes += ["", SOURCE_LEGEND + "."]
     if d.get("conflicts"):
         notes += ["", "**Ownership conflicts:** " + "; ".join("%s on %s" % (md(c["story"], 40), ", ".join(md(b, 60) for b in c["branches"])) for c in d["conflicts"][:20])]
     if d.get("omissions"):
@@ -583,7 +587,8 @@ def to_html(d, artifact_note=""):
         " · " + h((s.get("checkpoint") or {}).get("status"), 20) if (s.get("checkpoint") or {}).get("status") else "",
         ("%d%% <span class=\"sg-est\">estimate</span>" % s["checkpoint"]["percent"]) if isinstance((s.get("checkpoint") or {}).get("percent"), int) else "—",
         h((s.get("checkpoint") or {}).get("drift") or (s.get("ready") or {}).get("drift") or "none", 30),
-        h(("PR #%s · %s" % (s["ci"].get("pr"), s["ci"].get("result"))) if s.get("ci") else "no PR", 40), h((s.get("last_reported") or "—")[:16], 16),
+        h(("PR #%s · %s%s" % (s["ci"].get("pr"), s["ci"].get("result"), " · source " + s["ci"]["source"] if s["ci"].get("source") else ""))
+          if s.get("ci") else "no PR", 60), h((s.get("last_reported") or "—")[:16], 16),
         ' <span class="sg-pill fail">stale</span>' if s.get("stale") else "") for s in d["stories"] if s["status"] in ("in_progress", "blocked", "in_review")) \
         or '<tr><td colspan="8" class="text-secondary">No agent is working on a story right now.</td></tr>'
     feats = "".join('<tr><td><strong>%s</strong> <span class="text-secondary">%s</span></td><td class="text-end">%d</td><td class="text-end">%d</td><td class="text-end">%d</td></tr>' % (
@@ -596,6 +601,8 @@ def to_html(d, artifact_note=""):
         pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80)) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
     notes = ""
+    if any((s.get("ci") or {}).get("source") for s in d["stories"]):
+        notes += '<div class="alert alert-info">%s</div>' % h(SOURCE_LEGEND, 400)
     if d.get("conflicts"):
         notes += '<div class="alert alert-warning">Ownership conflicts: %s</div>' % h("; ".join("%s on %s" % (c["story"], ", ".join(c["branches"])) for c in d["conflicts"]), 1000)
     if d.get("omissions"):
@@ -674,8 +681,36 @@ def ci_status(G, repo, token, data):
         if st == 200 and runs:
             r = runs[0]
             s["ci"] = {"pr": num, "result": clean(r.get("conclusion") or r.get("status"), 20)}
+            if s.get("snapshots"):
+                s["ci"]["source"] = source_state(G, repo, token, r, s["snapshots"])
         else:
             s["ci"] = {"pr": num, "result": "not run"}
+            if s.get("snapshots"):
+                s["ci"]["source"] = "not checked"
+
+
+SOURCE_TITLE = re.compile(r"^story-gate: source (verified|changed|not checked)$")
+
+
+def source_state(G, repo, token, run, expected):
+    """'verified' only when the story-gate check on this exact commit has finished and left a 'source verified' note
+    for each pulled issue and nothing worse; 'changed' if any differs; otherwise 'not checked'. Annotations are written
+    by CI (default-branch code), never by the pull request."""
+    if run.get("status") != "completed" or not run.get("id"):
+        return "not checked"
+    st, notes, _ = call(G, "GET", "/repos/%s/check-runs/%s/annotations?per_page=100" % (repo, int(run["id"])), token)
+    if st != 200 or not isinstance(notes, list):
+        return "not checked"
+    words = [m.group(1) for m in (SOURCE_TITLE.match(str(n.get("title") or "")) for n in notes if isinstance(n, dict)) if m]
+    if "changed" in words:
+        return "changed"
+    if "not checked" in words or words.count("verified") < expected:
+        return "not checked"
+    return "verified"
+
+
+SOURCE_LEGEND = ("Source (stories with issues copied in by spec-pull): verified = CI compared each copy with the live issue on "
+                 "the pull request's latest commit and they match; changed = they differ; not checked = no comparison yet")
 
 def publish_issue(G, repo, token, body, generated_at, issue_number=None):
     """Create or update the single dashboard issue. Never overwrites a newer snapshot. Returns a plain-English result.

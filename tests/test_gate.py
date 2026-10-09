@@ -5420,7 +5420,7 @@ class TestSpecPull(Base):
         (self.repo / "app.py").write_text("x = 2\n")
         r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
         self.assertIn("issue-7.md (issue #7): not compared with the live issue: CI has no GitHub token", r.stdout)
-        self.assertIn("::warning title=story-gate: issue not checked::", r.stdout)
+        self.assertIn("::warning title=story-gate: source not checked::", r.stdout)
         self.assertNotIn('spec_source_check is \\"block\\"', r.stdout)
         self.assertEqual(r.returncode, 0, r.stdout)  # warn: a warning, not a failure
         self.cfg(judge_mode="objective", spec_source_check="block", mode="enforce")
@@ -5513,6 +5513,64 @@ class TestSpecPull(Base):
         self.assertEqual(SP.link("---\nid: X\n---\n", "b.md"), "---\nid: X\nspec: b.md\n---\n")
         self.assertEqual(SP.link("---\nspec: [a.md, b.md]\n---\n", "b.md"), "---\nspec: [a.md, b.md]\n---\n")
         self.assertIsNone(SP.link("no front matter", "b.md"))
+
+
+class TestSourceStatus(Base):
+    """Whether a pulled issue still matches: one set of words, from CI only, on the validation page and the dashboard."""
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/shop.git"], cwd=self.repo, capture_output=True)
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "ticket.txt").write_text(MATT_ISSUE)
+        run(self.repo, "spec-pull", "SAT-1", "#7", "--from-file", "ticket.txt")
+        sys.path.insert(0, str(SRC))
+        import importlib; self.D = importlib.import_module("sg_dashboard")
+
+    def test_validation_page_shows_ci_result_and_never_verified_off_ci(self):
+        g = load_gate(self.repo)
+        try:
+            local = g.report_facts("SAT-1")
+            self.assertEqual([s["state"] for s in local["sources"]], ["not checked"])
+            g.CI_SOURCES["SAT-1"] = [{"path": ".story-gate/stories/SAT-1/issue-7.md", "issue": 7, "state": "verified", "detail": "matches"}]
+            facts = g.report_facts("SAT-1", in_ci=True)
+            import sg_report as R
+            page = R.to_html(facts)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT")
+        self.assertIn("Linked issues", page); self.assertIn("verified", page); self.assertIn("they match", page)
+
+    def test_dashboard_reads_ci_annotations_for_the_exact_commit(self):
+        D = self.D
+        def fake(st, notes):
+            class G:
+                @staticmethod
+                def call(m, path, tok, body=None):
+                    assert "/check-runs/55/annotations" in path, path
+                    return st, notes, {}
+            return G
+        n = lambda w: {"title": "story-gate: source " + w}
+        run_ = {"status": "completed", "id": 55}
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("verified")]), "a/b", "t", run_, 2), "verified")
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("changed")]), "a/b", "t", run_, 2), "changed")
+        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", run_, 2), "not checked")  # one missing
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("not checked")]), "a/b", "t", run_, 1), "not checked")
+        self.assertEqual(D.source_state(fake(403, {}), "a/b", "t", run_, 1), "not checked")
+        self.assertEqual(D.source_state(fake(200, [{"title": "verified"}, {"title": "story-gate: source verifiedX"}]), "a/b", "t", run_, 1), "not checked")
+        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", {"status": "in_progress", "id": 55}, 1), "not checked")
+
+    def test_dashboard_counts_linked_copies_and_shows_the_word(self):
+        D = self.D
+        st = (self.repo / ".story-gate/stories/SAT-1/story.md").read_bytes()
+        self.assertEqual(D.parse_story("SAT-1", {"story.md": st})["snapshots"], 1)
+        self.assertEqual(D.parse_story("SAT-1", {"story.md": b"---\nid: SAT-1\nspec: specs/a/spec.md\n---\n"})["snapshots"], 0)
+        self.assertEqual(D.ci_cell({"ci": {"pr": 3, "result": "success", "source": "verified"}}), "#3 success · source verified")
+        self.assertIn("verified = CI compared", D.SOURCE_LEGEND)
+
+    def test_dashboard_workflow_can_read_checks_and_pull_requests(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        y = g.dash_yml()
+        self.assertIn("checks: read", y); self.assertIn("pull-requests: read", y)
 
 
 if __name__ == "__main__":

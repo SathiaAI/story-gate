@@ -462,6 +462,7 @@ A READY that passed only with a waiver doesn't count as ready. A story finished 
 | **(out of date)** next to READY | The story, test plan, linked spec or policy changed after READY passed | Re-score READY before more work is built on it |
 | **(checked without a judge)** | Objective mode: only tests, structure and traceability were checked | Expected if you chose it. See [objective mode](#fallbacks) for what it doesn't check |
 | **Ownership conflicts** | The same story is claimed on two branches by different agents | Keep one claim and stop the other agent |
+| **source changed** or **source not checked** next to a CI result | A ticket copied in with `spec-pull` no longer matches the live issue, or CI hasn't compared them on the latest commit. Only CI can say **verified** | Pull the issue again and re-check READY; for "not checked", make sure the workflow can read issues |
 | **Verdicts marked wrong** rising | People keep labelling gate verdicts as wrong | Look at those stories; the policy or thresholds may need tuning |
 
 ### The numbers
