@@ -1441,11 +1441,17 @@ CLIENT_ENV = (("CLAUDECODE", "claude-code"), ("CURSOR_TRACE_ID", "cursor"), ("CO
 def start_branch_check(sid, c):
     """'' when the current branch suits a story; otherwise a plain warning. Raises SystemExit on the base branch in
     enforce mode: a story's work reaches the base branch through a pull request, where the gate checks it."""
-    branch = current_branch()
-    if os.environ.get("GITHUB_ACTIONS"):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
         return ""
     enforce = c.get("mode") == "enforce" or "pre_edit" in (c.get("enforce_points") or [])
-    if not branch or branch == "HEAD":  # no branch: the work has nowhere to go but a later, unchecked commit
+    branch = git("symbolic-ref", "-q", "--short", "HEAD").strip()  # also names a branch with no commits yet
+    if not branch and not git("rev-parse", "--git-dir").strip():  # git missing, or not a repository: nothing to check
+        msg = ("can't read the git branch here (git isn't installed, or this folder isn't a git repository), so story-gate "
+               "can't tell whether this is the base branch")
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
+    if not branch:  # detached HEAD: the work has nowhere to go but a later, unchecked commit
         msg = "no branch is checked out (detached HEAD). Make one for the story first: git switch -c feature/%s" % sid
         if enforce:
             sys.exit("story-gate: not started: " + msg)
@@ -1453,7 +1459,7 @@ def start_branch_check(sid, c):
     configured = c.get("base_branch", "main")
     ref = T.default_policy_ref(str(ROOT), configured) or configured
     bases = {configured, ref.split("/", 1)[1] if ref.startswith("origin/") else ref}  # origin/HEAD can be stale: both count
-    if branch in bases:
+    if branch.lower() in {b.lower() for b in bases}:  # Main and main are the same branch on most machines
         base = branch
         msg = ("you're on %s, the base branch. A story's work should reach %s through a pull request, where story-gate "
                "checks it. Make a branch for it first: git switch -c feature/%s" % (base, base, sid))

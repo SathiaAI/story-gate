@@ -5763,6 +5763,33 @@ class TestStartBranch(Base):
         self.assertFalse((self.repo / ".story-gate/stories/SAT-2").exists())
         self.assertFalse((self.repo / ".story-gate/.active").exists())
 
+    def test_unborn_branch_no_git_ci_and_case(self):
+        fresh = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, fresh, True)
+        shutil.copytree(self.repo / ".story-gate", fresh / ".story-gate")
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=fresh, capture_output=True)
+        subprocess.run(["git", "checkout", "-qb", "feature/SAT-1-x"], cwd=fresh, capture_output=True)
+        r = run(fresh, "start", "SAT-1")  # a branch with no commits yet is still a branch, not a detached HEAD
+        self.assertNotIn("detached", r.stdout + r.stderr); self.assertEqual(r.returncode, 0, r.stderr)
+        subprocess.run(["git", "checkout", "-qb", "main2"], cwd=fresh, capture_output=True)
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=fresh, capture_output=True)
+        self.assertIn("you're on main, the base branch", run(fresh, "start", "SAT-1").stdout)  # unborn main is the base
+        self.cfg(mode="enforce")
+        r = run(self.repo, "start", "SAT-2", env={"PATH": str(self.repo / "no-such-dir")})
+        self.assertIn("can't read the git branch here", r.stderr); self.assertNotIn("detached", r.stderr)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-2").exists())
+        self.cfg(mode="enforce", base_branch="MAIN"); self.git("checkout", "-q", "main")
+        r = run(self.repo, "start", "SAT-2")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("the base branch", r.stderr)  # MAIN is main
+        r = run(self.repo, "start", "SAT-2", env={"GITHUB_ACTIONS": "false"})
+        self.assertNotEqual(r.returncode, 0)  # only GitHub's own "true" means CI
+        r = run(self.repo, "start", "SAT-2", env={"GITHUB_ACTIONS": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_pre_edit_enforce_point_also_refuses(self):
+        self.cfg(enforce_points=["pre_edit"]); self.git("checkout", "-q", "main")
+        r = run(self.repo, "start", "SAT-2")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not started", r.stderr)
+
     def test_branch_names_and_detached_head(self):
         r = run(self.repo, "start", "SAT-1")
         self.assertNotIn("WARNING", r.stdout); self.assertNotIn("note:", r.stdout)  # feature/SAT-1-thing is right
