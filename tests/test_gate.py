@@ -5420,7 +5420,7 @@ class TestSpecPull(Base):
         (self.repo / "app.py").write_text("x = 2\n")
         r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
         self.assertIn("issue-7.md (issue #7): not compared with the live issue: CI has no GitHub token", r.stdout)
-        self.assertIn("::warning title=story-gate: source not checked::", r.stdout)
+        self.assertRegex(r.stdout, r"::warning file=\.story-gate/stories/SAT-1/issue-7\.md,title=story-gate: source not checked::")
         self.assertNotIn('spec_source_check is \\"block\\"', r.stdout)
         self.assertEqual(r.returncode, 0, r.stdout)  # warn: a warning, not a failure
         self.cfg(judge_mode="objective", spec_source_check="block", mode="enforce")
@@ -5542,7 +5542,7 @@ class TestSourceStatus(Base):
         finally:
             os.environ.pop("STORY_GATE_ROOT")
         self.assertIn("Linked issues", page); self.assertIn("verified", page); self.assertIn("they matched then", page)
-        self.assertIn("copied 2026-10-09T01:00:00Z", page); self.assertIn("actions/runs/9", page)
+        self.assertIn("copied 2026-10-09T01:00:00Z", page); self.assertIn('<a href="https://github.com/acme/shop/actions/runs/9">CI run</a>', page)
         self.assertNotIn("issue updated unknown", page); self.assertNotIn("javascript:x", page); self.assertNotIn("<b>odd</b>", page)
 
     def test_dashboard_reads_ci_annotations_for_the_exact_commit(self):
@@ -5554,21 +5554,38 @@ class TestSourceStatus(Base):
                     assert "/check-runs/55/annotations" in path, path
                     return st, notes, {}
             return G
-        n = lambda w: {"title": "story-gate: source " + w}
+        A, B = ".story-gate/stories/SAT-1/issue-7.md", ".story-gate/stories/SAT-1/issue-8.md"
+        n = lambda w, p=A: {"title": "story-gate: source " + w, "path": p}
         run_ = {"status": "completed", "id": 55}
-        self.assertEqual(D.source_state(fake(200, [n("verified"), n("verified")]), "a/b", "t", run_, 2), "verified")
-        self.assertEqual(D.source_state(fake(200, [n("verified"), n("changed")]), "a/b", "t", run_, 2), "changed")
-        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", run_, 2), "not checked")  # one missing
-        self.assertEqual(D.source_state(fake(200, [n("verified"), n("not checked")]), "a/b", "t", run_, 1), "not checked")
-        self.assertEqual(D.source_state(fake(403, {}), "a/b", "t", run_, 1), "not checked")
-        self.assertEqual(D.source_state(fake(200, [{"title": "verified"}, {"title": "story-gate: source verifiedX"}]), "a/b", "t", run_, 1), "not checked")
-        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", {"status": "in_progress", "id": 55}, 1), "not checked")
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("verified", B)]), "a/b", "t", run_, [A, B]), "verified")
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("changed", B)]), "a/b", "t", run_, [A, B]), "changed")
+        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", run_, [A, B]), "not checked")  # one missing
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("verified")]), "a/b", "t", run_, [A, B]), "not checked")  # A twice isn't B
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("not checked")]), "a/b", "t", run_, [A]), "not checked")
+        self.assertEqual(D.source_state(fake(403, {}), "a/b", "t", run_, [A]), "not checked")
+        self.assertEqual(D.source_state(fake(200, [{"title": "verified", "path": A}, n("verifiedX")]), "a/b", "t", run_, [A]), "not checked")
+        self.assertEqual(D.source_state(fake(200, [n("verified")]), "a/b", "t", {"status": "in_progress", "id": 55}, [A]), "not checked")
+        # another story on the same pull request: its notes never count for this one's copies
+        other = ".story-gate/stories/SAT-2/issue-9.md"
+        self.assertEqual(D.source_state(fake(200, [n("verified", other)]), "a/b", "t", run_, [A]), "not checked")
+        self.assertEqual(D.source_state(fake(200, [n("verified"), n("changed", other)]), "a/b", "t", run_, [A]), "verified")
+        self.assertEqual(D.source_state(fake(200, [{"title": "story-gate: source verified"}]), "a/b", "t", run_, [A]), "not checked")  # no file
 
     def test_dashboard_counts_linked_copies_and_shows_the_word(self):
         D = self.D
         st = (self.repo / ".story-gate/stories/SAT-1/story.md").read_bytes()
-        self.assertEqual(D.parse_story("SAT-1", {"story.md": st})["snapshots"], 1)
-        self.assertEqual(D.parse_story("SAT-1", {"story.md": b"---\nid: SAT-1\nspec: specs/a/spec.md\n---\n"})["snapshots"], 0)
+        self.assertEqual(D.parse_story("SAT-1", {"story.md": st})["snapshots"], [".story-gate/stories/SAT-1/issue-7.md"])
+        self.assertEqual(D.parse_story("SAT-1", {"story.md": b"---\nid: SAT-1\nspec: specs/a/spec.md\n---\n"})["snapshots"], [])
+        self.assertEqual(D.snapshot_paths([".story-gate/stories/SAT-1/issue-7.md", "specs/a.md", "./.story-gate//stories/SAT-1/issue-8.md"]),
+                         [".story-gate/stories/SAT-1/issue-7.md", ".story-gate/stories/SAT-1/issue-8.md"])  # list form counts each
+        self.assertEqual(D.snapshot_paths(".story-gate/stories/SAT-1/issue-7.md, .story-gate/stories/SAT-1/issue-7.md"),
+                         [".story-gate/stories/SAT-1/issue-7.md"])
+        queued = {"id": "SAT-9", "title": "t", "feature": "", "status": "queued", "ref": "feature/SAT-9", "trace": [],
+                  "ci": {"pr": 4, "result": "success", "source": "changed"}}
+        self.assertIn("#4 success · source changed", D.ci_cell(queued))
+        d = {"stories": [queued], "features": [], "omissions": [], "generated_at": "x", "default_ref": "main", "default_sha": "", "refs_scanned": []}
+        self.assertIn("feature/SAT-9 · #4 success · source changed", D.to_markdown(d))  # a queued story with a PR shows it too
+        self.assertIn("feature/SAT-9 · #4 success · source changed", D.to_html(d))
         self.assertEqual(D.ci_cell({"ci": {"pr": 3, "result": "success", "source": "verified"}}), "#3 success · source verified")
         self.assertIn("verified = CI compared", D.SOURCE_LEGEND)
 

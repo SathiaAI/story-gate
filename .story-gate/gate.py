@@ -1004,6 +1004,11 @@ def spec_snapshot(text, rel=""):
     return content, None
 
 
+def gh_prop(v):
+    """A value for a GitHub Actions workflow-command property (file=...), escaped as GitHub requires."""
+    return str(v).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace(":", "%3A").replace(",", "%2C")
+
+
 # One set of words for a pulled issue's status, the same in CI notes, the validation page and the dashboard. Only CI's
 # own comparison, on the pull request's exact commit, can say "verified"; anything else is "changed" or "not checked".
 SOURCE_WORDS = {"unchanged": "verified", "changed": "changed", "not checked": "not checked"}
@@ -2898,7 +2903,7 @@ def cmd_ci(tests_dir=None):
             for path in odd:
                 msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
                        "so CI can't compare it with the live issue" % path)
-                print("::warning title=story-gate: source not checked::%s" % msg)
+                print("::warning file=%s,title=story-gate: source not checked::%s" % (gh_prop(path), msg))
                 sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
             for rel, owner, num in snaps:
@@ -2919,10 +2924,10 @@ def cmd_ci(tests_dir=None):
                 sources.append({"path": rel, "issue": num, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
                                 "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
                 if state == "unchanged":
-                    print("::notice title=story-gate: source verified::%s" % msg)  # the dashboard reads these annotations
+                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))  # the dashboard reads these, by file
                     notes.append(msg)
                     continue
-                print("::warning title=story-gate: source %s::%s" % (word, msg))
+                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
                 if c.get("spec_source_check") == "block":
                     problems.append(msg + " (spec_source_check is \"block\")")
                 else:
