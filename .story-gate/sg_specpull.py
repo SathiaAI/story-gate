@@ -36,20 +36,37 @@ def one_line(s, n=300):
     return re.sub(r"\s+", " ", clean(s)).strip()[:n]
 
 
-def snapshot_content(sid, num, title, body):
+def snapshot_content(sid, num, title, body, other=None):
     """The text part of the copy: a do-not-edit note, '# title', then the issue body. CI rebuilds it from the live issue
-    the same way, so 'unchanged' means exactly the same text."""
-    return "%s\n\n# %s\n\n%s\n" % (NOTE % (sid, "#%d" % num), one_line(title) or "Issue %d" % num,
+    the same way, so 'unchanged' means exactly the same text. `other`: 'owner/repo' for another repository's issue."""
+    return "%s\n\n# %s\n\n%s\n" % (NOTE % (sid, "%s#%d" % (other or "", num)), one_line(title) or "Issue %d" % num,
                                      clean(body).replace("\r\n", "\n").replace("\r", "\n").rstrip())
 
 
-def snapshot_text(gate, sid, ref_arg, meta, title, body):
+def snapshot_text(gate, sid, ref_arg, meta, title, body, other=None):
     """The file: the source block, then snapshot_content. content_sha256 covers the source fields and the text together
     (gate.snapshot_hash), so neither can be changed without the check failing."""
-    content = snapshot_content(sid, int(meta["issue"]), title, body)
+    content = snapshot_content(sid, int(meta["issue"]), title, body, other)
     fields = {k: one_line(meta[k]) for k in gate.SNAPSHOT_KEYS}
     fields["content_sha256"] = gate.snapshot_hash(fields, content)
     return "---\n%s\n---\n%s" % ("\n".join("%s: %s" % kv for kv in fields.items()), content)
+
+
+def private_text_into_public_repo(own, other):
+    """Refuse to copy a private repository's issue into a public one (the copy would publish it), and refuse when that
+    can't be confirmed either way."""
+    import sg_github as G
+    tok = G.human_token()
+    seen = {}
+    for r in (own, other):
+        st, data, _ = G.call("GET", "/repos/%s" % r, tok)
+        if st != 200 or not isinstance(data, dict) or not isinstance(data.get("private"), bool):
+            sys.exit("story-gate: couldn't check whether %s is private (HTTP %s), so nothing was copied: a private issue "
+                     "must never be copied into a public repository. Sign in with `gh auth login` and try again." % (r, st))
+        seen[r] = data["private"]
+    if seen[other] and not seen[own]:
+        sys.exit("story-gate: %s is private and %s is public, so copying its issue here would publish it. Nothing was "
+                 "copied." % (other, own))
 
 
 def link(story_md, rel):
@@ -74,7 +91,8 @@ def link(story_md, rel):
 
 def cli(gate, args):
     kv, rest = gate.flags(args)
-    usage = ("usage: spec-pull <ID> <issue>   (42, #42, owner/repo#42 or the issue's URL; this repository's issues only)\n"
+    usage = ("usage: spec-pull <ID> <issue>   (42, #42, owner/repo#42 or the issue's URL: this repository's issues, or one "
+             "on spec_repos in .story-gate/config.json)\n"
              "       spec-pull <ID> <issue> --from-file <file or ->   (text you already have, e.g. from your AI tool; marked "
              "'not verified')")
     if len(rest) != 2:
@@ -97,10 +115,15 @@ def cli(gate, args):
     if not parsed:
         sys.exit("story-gate: '%s' isn't an issue reference.\n%s" % (ref_arg[:120], usage))
     repo, num = parsed
+    other = None
     if repo.lower() != own.lower():
-        sys.exit("story-gate: only this repository's issues (%s) can be pulled; %s is another repository. Its text "
-                 "isn't covered by this repository's reviews." % (own, repo))
-    url = "https://github.com/%s/issues/%d" % (own, num)
+        allowed = {r.lower(): r for r in gate.cfg().get("spec_repos") or []}
+        if repo.lower() not in allowed:
+            sys.exit("story-gate: %s isn't on spec_repos in .story-gate/config.json, so its issues can't be pulled. To allow "
+                     "it, add \"%s\" there in a pull request (reviewers see it as a weaker rule)." % (repo, repo))
+        other = repo = allowed[repo.lower()]
+        private_text_into_public_repo(own, other)
+    url = "https://github.com/%s/issues/%d" % (repo, num)
     if kv.get("from-file"):
         src = kv["from-file"]
         try:
@@ -108,15 +131,15 @@ def cli(gate, args):
         except (OSError, UnicodeDecodeError) as e:
             sys.exit("story-gate: can't read %s: %s" % (src, e))
         title, body = kv.get("title", ""), raw
-        meta = {"source_kind": KIND, "source_url": url, "repo": own, "issue": num, "source_updated_at": "unknown",
+        meta = {"source_kind": KIND, "source_url": url, "repo": repo, "issue": num, "source_updated_at": "unknown",
                 "fetched_at": gate.now(), "fetched_by": "pasted"}
     else:
         import sg_github as G
-        st, data, _ = G.call("GET", "/repos/%s/issues/%d" % (own, num), G.human_token())
+        st, data, _ = G.call("GET", "/repos/%s/issues/%d" % (repo, num), G.human_token())
         if st in (401, 403):
             sys.exit("story-gate: GitHub refused (HTTP %s). Sign in with `gh auth login`, or set GH_TOKEN, then try again." % st)
         if st == 404:
-            sys.exit("story-gate: issue #%d wasn't found in %s (or this login can't see it)." % (num, own))
+            sys.exit("story-gate: issue #%d wasn't found in %s (or this login can't see it)." % (num, repo))
         if st != 200 or not isinstance(data, dict):
             sys.exit("story-gate: GitHub answered HTTP %s; nothing was saved. Try again." % st)
         if "pull_request" in data:
@@ -125,17 +148,19 @@ def cli(gate, args):
             sys.exit("story-gate: GitHub answered with %s, not %s (was the issue moved?). Nothing was saved."
                      % (one_line(data.get("html_url"), 120) or "another issue", url))
         title, body = data.get("title") or "", data.get("body") or ""
-        meta = {"source_kind": KIND, "source_url": url, "repo": own, "issue": num,
+        meta = {"source_kind": KIND, "source_url": url, "repo": repo, "issue": num,
                 "source_updated_at": one_line(data.get("updated_at"), 40), "fetched_at": gate.now(), "fetched_by": "github-api"}
     if not isinstance(body, str) or len(body) > MAX_BODY:
         sys.exit("story-gate: the issue text is bigger than %d characters; nothing was saved." % MAX_BODY)
     if not body.strip():
         sys.exit("story-gate: issue #%d has no text, so there's nothing to check. Nothing was saved." % num)
-    out = sd / ("issue-%d.md" % num)
+    out = sd / (("issue-%s--%s-%d.md" % (other.split("/")[0], other.split("/")[1], num)) if other else ("issue-%d.md" % num))
     rel = out.relative_to(gate.ROOT).as_posix()
+    if gate.snapshot_name(rel) != (sid, num, other):  # the name must read back as exactly this issue
+        sys.exit("story-gate: %s can't be named unambiguously (%s); nothing was saved." % (other or own, rel))
     if out.is_symlink() or (out.exists() and not out.is_file()):
         sys.exit("story-gate: %s is a link or a folder; story-gate only replaces a plain file there." % rel)
-    text = snapshot_text(gate, sid, "#%d" % num, meta, title, body)
+    text = snapshot_text(gate, sid, "#%d" % num, meta, title, body, other)
     gate.parse_snapshot(text)  # the gate must be able to read what was written: fail here, not later
     fd, tmp = tempfile.mkstemp(dir=str(sd), prefix=".issue-", suffix=".tmp")
     try:
@@ -193,10 +218,11 @@ def live_status(gate, sid, rel, num, repo, token):
     body = data.get("body") or ""
     if not isinstance(body, str) or len(body) > MAX_BODY:
         return "not checked", "the live issue is too big to compare"
-    live = snapshot_content(sid, num, data.get("title") or "", body)
+    other = (gate.snapshot_name(rel) or (None, None, None))[2]
+    live = snapshot_content(sid, num, data.get("title") or "", body, other)
     pasted = fields["fetched_by"] == "pasted"
     # pasted without --title, the copy's heading is 'Issue <N>': the issue text must still match exactly
-    if live == content or (pasted and snapshot_content(sid, num, "", body) == content):
+    if live == content or (pasted and snapshot_content(sid, num, "", body, other) == content):
         return "unchanged", "matches the live issue" + (" (the pasted copy is now verified)" if pasted else "")
     old_u, new_u = [], []
     old = {k for k, _ in gate.spec_scenarios(content, old_u)}
@@ -208,6 +234,6 @@ def live_status(gate, sid, rel, num, repo, token):
         diff.append("%d removed or reworded" % len(old - new))
     if len(new_u) > len(old_u):
         diff.append("%d new line(s) that look like requirements but can't be read" % (len(new_u) - len(old_u)))
-    return "changed", ("the live issue differs from the copy (%s). Run `story-gate spec-pull %s #%d` and check the "
+    return "changed", ("the live issue differs from the copy (%s). Run `story-gate spec-pull %s %s#%d` and check the "
                        "requirements again" % ("; ".join(diff) or "text outside the requirements changed; read the "
-                                               "difference, it may still matter", sid, num))
+                                               "difference, it may still matter", sid, other or "", num))

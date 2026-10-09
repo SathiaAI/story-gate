@@ -5437,7 +5437,7 @@ class TestSpecPull(Base):
         text = ("---\nid: SAT-1\nspec: [./.story-gate/stories/SAT-1/issue-7.md, .story-gate//stories/OTHER/issue-5.md#ac1, "
                 "notes/issue-9.md, docs/issue-tracker.md]\n---\n")
         snaps, odd = g.snapshot_links(text)
-        self.assertEqual(snaps, [(".story-gate/stories/SAT-1/issue-7.md", "SAT-1", 7), (".story-gate/stories/OTHER/issue-5.md", "OTHER", 5)])
+        self.assertEqual(snaps, [(".story-gate/stories/SAT-1/issue-7.md", "SAT-1", 7, None), (".story-gate/stories/OTHER/issue-5.md", "OTHER", 5, None)])
         self.assertEqual(odd, ["notes/issue-9.md"])  # an issue-<N>.md copy outside the story folders can't be compared
 
     def test_ci_flags_removed_links_and_odd_copies(self):
@@ -5474,7 +5474,7 @@ class TestSpecPull(Base):
 
     def test_other_repositories_pull_requests_and_errors_are_refused(self):
         r = run(self.repo, "spec-pull", "SAT-1", "other/repo#7", "--from-file", "ticket.txt")
-        self.assertNotEqual(r.returncode, 0); self.assertIn("only this repository's issues", r.stderr)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("isn't on spec_repos", r.stderr)
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         import sg_github as G
         from unittest import mock
@@ -5576,6 +5576,111 @@ class TestSourceStatus(Base):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         y = g.dash_yml()
         self.assertIn("checks: read", y); self.assertIn("pull-requests: read", y)
+
+
+class TestSpecRepos(Base):
+    """Issues from other repositories on the spec_repos allowlist: unambiguous names, no private text in public repos,
+    CI reads only allowlisted repositories, with STORY_GATE_SPECS_TOKEN."""
+
+    URL = "https://github.com/acme/specs-2/issues/12"
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/shop.git"], cwd=self.repo, capture_output=True)
+        self.cfg(spec_repos=["acme/specs-2"])
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP
+        self.G, self.SP = G, SP
+        self.snap = self.repo / ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md"
+
+    def fake(self, shop_private=True, specs_private=True, repo_status=200):
+        issue = {"title": "Refunds", "body": MATT_ISSUE, "updated_at": "2026-10-09T00:00:00Z", "html_url": self.URL}
+        def call(method, path, tok=None, body=None):
+            if path == "/repos/acme/shop":
+                return repo_status, {"private": shop_private}, {}
+            if path == "/repos/acme/specs-2":
+                return repo_status, {"private": specs_private}, {}
+            if path == "/repos/acme/specs-2/issues/12":
+                return 200, issue, {}
+            return 404, {}, {}
+        return call
+
+    def pull(self, **kw):
+        from unittest import mock
+        with mock.patch.object(self.G, "call", side_effect=self.fake(**kw)), mock.patch.object(self.G, "human_token", return_value="t"):
+            return self.SP.cli(self.g, ["SAT-1", "acme/specs-2#12"])
+
+    def test_names_read_back_unambiguously(self):
+        n = self.g.snapshot_name
+        self.assertEqual(n(".story-gate/stories/S/issue-7.md"), ("S", 7, None))
+        self.assertEqual(n(".story-gate/stories/S/issue-acme--specs-2-12.md"), ("S", 12, "acme/specs-2"))
+        self.assertEqual(n(".story-gate/stories/S/issue-a-b--r--x-3.md"), ("S", 3, "a-b/r--x"))
+        self.assertEqual(n(".story-gate/stories/S/issue-a--b--c--.-3.md"), ("S", 3, "a/b--c--."))  # owners can't hold '--'
+        for bad in (".story-gate/stories/S/issue--x--r-3.md",
+                    ".story-gate/stories/S/issue-a--..-3.md", ".story-gate/stories/S/issue-acme--specs.md"):
+            self.assertIsNone(n(bad), bad)
+
+    def test_pull_from_an_allowed_private_repo_into_a_private_repo(self):
+        self.assertEqual(self.pull(), 0)
+        text = self.snap.read_text(encoding="utf-8")
+        self.assertIn("repo: acme/specs-2", text); self.assertIn("spec-pull SAT-1 acme/specs-2#12", text)
+        found, problem = self.g.linked_scenarios(".story-gate/stories/SAT-1/issue-acme--specs-2-12.md")
+        self.assertIsNone(problem); self.assertEqual(len(found), 2)
+        self.assertIn("issue-acme--specs-2-12.md", (self.repo / ".story-gate/stories/SAT-1/story.md").read_text(encoding="utf-8"))
+
+    def test_private_text_never_goes_into_a_public_repo_and_unknown_is_refused(self):
+        for kw, why in (({"shop_private": False}, "would publish it"), ({"repo_status": 404}, "couldn't check whether")):
+            with self.assertRaises(SystemExit) as e:
+                self.pull(**kw)
+            self.assertIn(why, str(e.exception)); self.assertFalse(self.snap.exists())
+        self.assertEqual(self.pull(shop_private=False, specs_private=False), 0)  # public into public is fine
+
+    def test_a_copy_renamed_for_another_repo_blocks(self):
+        self.pull()
+        other = self.repo / ".story-gate/stories/SAT-1/issue-acme--other-12.md"
+        other.write_text(self.snap.read_text(encoding="utf-8"), encoding="utf-8")
+        _, problem = self.g.linked_scenarios(".story-gate/stories/SAT-1/issue-acme--other-12.md")
+        self.assertIn("named for acme/other", problem)
+
+    def test_ci_reads_only_allowlisted_repos_and_needs_the_token(self):
+        self.pull()
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main"); (self.repo / "app.py").write_text("x = 3\n")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
+        self.assertIn("no STORY_GATE_SPECS_TOKEN secret", r.stdout)
+        self.cfg(spec_repos=[]); gitc("add", "-A"); gitc("commit", "-qm", "drop"); gitc("checkout", "-q", "main")
+        gitc("merge", "-q", "feature/SAT-1-thing"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop", "STORY_GATE_SPECS_TOKEN": "t"})
+        self.assertIn("isn't on spec_repos in the default branch's config", r.stdout)
+
+    def test_live_comparison_of_another_repos_issue(self):
+        self.pull()
+        from unittest import mock
+        with mock.patch.object(self.G, "call", side_effect=self.fake()) as c:
+            state, why = self.SP.live_status(self.g, "SAT-1", ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md", 12, "acme/specs-2", "t")
+        self.assertEqual(state, "unchanged", why)
+
+    def test_settings_rules_and_workflow(self):
+        import sg_trust as T
+        self.assertIn("spec_repos", " ".join(T.weaker({"spec_repos": []}, {"spec_repos": ["a/b"]})))
+        self.assertEqual(T.weaker({"spec_repos": ["a/b"]}, {"spec_repos": []}), [])
+        self.assertEqual(T.tighten({"spec_repos": ["a/b", "c/d"]}, {"spec_repos": ["C/D"]})["spec_repos"], ["c/d"])
+        self.cfg(spec_repos=["not a repo"])
+        self.assertIn('"spec_repos" must be a list', (lambda r: r.stdout + r.stderr)(run(self.repo, "status", "SAT-1")))
+        y = self.g.CI_YML
+        self.assertIn("STORY_GATE_SPECS_TOKEN: ${{ steps.specs_token.outputs.token || secrets.STORY_GATE_SPECS_TOKEN }}", y)
+        tests_job = y.split("  story-gate:")[0]
+        self.assertNotIn("STORY_GATE_SPECS_TOKEN", tests_job)  # the job that runs PR code never gets it
+
+    def test_install_keeps_the_users_own_steps(self):
+        a, b = self.g.USER_STEPS
+        mine = "      - id: specs_token\n        uses: actions/create-github-app-token@0123456789abcdef0123456789abcdef01234567\n"
+        old = self.g.CI_YML.replace(a + b, a + mine + b)
+        new = self.g.with_user_steps(old, self.g.CI_YML)
+        self.assertEqual(new, old)
+        self.assertEqual(self.g.with_user_steps("# managed by story-gate old\n", self.g.CI_YML), self.g.CI_YML)
 
 
 if __name__ == "__main__":

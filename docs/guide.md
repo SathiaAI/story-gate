@@ -355,6 +355,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |
 | `spec_source_check` | `"warn"` | Issues copied in with `spec-pull`: CI compares each copy with the live issue. `"warn"`: a changed issue, or one CI couldn't check, is a warning on the pull request. `"block"`: either one is a failing problem (it fails the pull request when story-gate runs in enforce mode, like every other check). Fix a change by pulling the copy again; fix "not checked" by giving the workflow `issues: read`. Changing `block` to `warn` is reported as a weaker rule |
+| `spec_repos` | `[]` | Other repositories (`owner/repo`) whose issues `spec-pull` may copy in. CI reads them only if they're on this list in the default branch's config, using the `STORY_GATE_SPECS_TOKEN` secret. Adding one is reported as a weaker rule; a computer's own config can only shorten the list. See [Specs in another repository](#specs-in-another-repository) |
 | `judge_mode` | `"full"` | `"objective"` runs without an AI judge (setup's **Skip for now** sets it). See [Fallbacks](#fallbacks). Switching to it is reported as a weaker rule in the PR check |
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
@@ -392,6 +393,40 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
 
 - **One ticket, one story, one branch.** Make a branch with the story id in its name (`git switch -c feature/PAY-12-refund`), run `story-gate start PAY-12` on it, then run `/implement` there. `/implement` commits to whatever branch you are on, so never run it on `main`; story-gate only checks work that reaches `main` through a pull request. With `/implement-spec`, give each ticket its own story and branch rather than one integration branch, so each ticket is checked on its own.
 - **What gets checked is what you link.** Link the ticket and only its checkboxes count. Link the parent spec as well and every user story in it counts too; story-gate never picks a subset for you. To build part of a spec, link the ticket, not the spec.
+
+#### Specs in another repository
+
+Keep tickets in a central specs repository? List it, then pull from it like any other issue.
+
+1. **Allow it.** In `.story-gate/config.json`, add `"spec_repos": ["acme/specs"]` in a pull request. Reviewers see it as a weaker rule.
+2. **Pull an issue.** Run `story-gate spec-pull <story> acme/specs#12`. The copy is saved as `issue-acme--specs-12.md`, a name that can't be read two ways.
+   - **Private into public is refused.** If the specs repository is private and this one is public, the copy would publish it, so nothing is copied. If GitHub can't confirm both, nothing is copied either.
+3. **Let CI read it.** CI's own token can't read another private repository. Give it read-only access in one of two ways. Both fill the same `STORY_GATE_SPECS_TOKEN`; without either, those copies show **not checked** (a failing problem with `"spec_source_check": "block"`). Fork pull requests get no secrets, so they always show **not checked**.
+
+**A. A read-only token (the default).**
+
+1. GitHub → Settings → Developer settings → Fine-grained personal access tokens → Generate new token.
+2. Repository access: **only** the specs repositories. Permissions: **Issues: Read-only**. Nothing else. Pick an expiry date and put a reminder in your calendar.
+3. In this repository: Settings → Secrets and variables → Actions → New repository secret: name `STORY_GATE_SPECS_TOKEN`, value the token.
+4. `story-gate doctor` shows whether the secret is set. Only the story-gate job sees it; the job that runs the pull request's code never does.
+
+The token belongs to the person who made it. If they leave or it expires, the copies show **not checked** until someone makes a new one.
+
+**B. A GitHub App (for organisations; not yet validated end to end).** Short-lived tokens that don't belong to a person. Create a GitHub App with only **Issues: Read-only**, install it on the specs repositories, save its client ID as the variable `STORY_GATE_APP_CLIENT_ID` and its private key as the secret `STORY_GATE_APP_KEY`. Then paste this step between the `your steps` markers in `.github/workflows/story-gate.yml`. Install keeps what's there.
+
+```yaml
+      - id: specs_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.STORY_GATE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STORY_GATE_APP_KEY }}
+          owner: acme
+          repositories: specs
+          permission-issues: read
+```
+
+The step's token lasts about an hour, is masked in logs, and goes straight into `STORY_GATE_SPECS_TOKEN`. It's never written to a file or printed. Rotate the private key in the App's settings. We haven't yet run this recipe end to end on a real second repository, so treat it as unvalidated until we have.
+
 
 - **Ticket files** (`# 03: Title` with `**What to build:**`): every `- [ ]` line is a requirement. So is every `- [ ]` under a `## Acceptance criteria` heading in any linked file.
 - **Specs:** every numbered `As a …, I want …` line under `## User Stories` is a requirement.

@@ -197,6 +197,9 @@ DEFAULT_CONFIG = {
     # issues copied in with `spec-pull`: CI compares each copy with the live issue. "warn": a change, or a check it couldn't
     # run, is a warning on the pull request. "block": either one fails the check until the copy is pulled again.
     "spec_source_check": "warn",
+    # other repositories (owner/repo) whose issues spec-pull may copy in, e.g. a central specs repository. CI reads them
+    # with the STORY_GATE_SPECS_TOKEN secret; without it they show as "not checked". Adding one is a weaker rule.
+    "spec_repos": [],
     "thresholds": {"pass": 0.7, "concerns": 0.4},
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
@@ -352,6 +355,8 @@ def cfg():
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
     if not isinstance(c.get("require_spec_link"), bool):
         raise ConfigError('.story-gate/config.json: "require_spec_link" must be true or false - the gate fails closed until fixed')
+    if not isinstance(c.get("spec_repos"), list) or not all(isinstance(r, str) and REPO_NAME.fullmatch(r) for r in c["spec_repos"]):
+        raise ConfigError('.story-gate/config.json: "spec_repos" must be a list of "owner/repo" names - the gate fails closed until fixed')
     if c.get("spec_source_check") not in ("warn", "block"):
         raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
     if c.get("judge_mode") not in ("full", "objective"):
@@ -951,7 +956,20 @@ def spec_scenarios(text, unread=None):
     return [(o[0], "\n".join(o[2])) for o in out]
 
 
-SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/issue-([0-9]{1,9})\.md$")
+# issue-<N>.md: an issue of this repository. issue-<owner>--<repo>-<N>.md: an issue of another repository on the
+# spec_repos allowlist (GitHub owners can't contain '--'; the number is the last '-<digits>', so repo names with
+# hyphens or digits stay unambiguous).
+SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/issue-(?:([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})--([A-Za-z0-9_.-]{1,100})-)?"
+                           r"([0-9]{1,9})\.md$")
+REPO_NAME = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/[A-Za-z0-9_.-]{1,100}")
+
+
+def snapshot_name(rel):
+    """(story id, issue number, 'owner/repo' or None for this repository) for a spec-pull copy's path, else None."""
+    m = SNAPSHOT_NAME.match(rel or "")
+    if not m or (m.group(3) or "x") in (".", ".."):
+        return None
+    return m.group(1), int(m.group(4)), ("%s/%s" % (m.group(2), m.group(3)) if m.group(2) else None)
 SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
 SNAPSHOT_BY = ("github-api", "pasted")
 
@@ -992,15 +1010,17 @@ def spec_snapshot(text, rel=""):
     """(text to read, problem or None). A file named .story-gate/stories/<ID>/issue-<N>.md must be a valid spec-pull
     copy of issue N; only the issue text is then read. Any file that claims to be one ('source_kind: github-issue') is
     held to the same rules. Other files are read whole."""
-    m = SNAPSHOT_NAME.match(rel)
+    m = snapshot_name(rel)
     if not m and "source_kind: github-issue" not in text[:2000]:
         return text, None
     try:
         fields, content = parse_snapshot(text)
     except ValueError as e:
         return "", str(e)
-    if m and fields["issue"] != m.group(2):
-        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m.group(2))
+    if m and fields["issue"] != str(m[1]):
+        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m[1])
+    if m and m[2] and fields["repo"].lower() != m[2].lower():
+        return "", "it holds an issue of %s but is named for %s" % (fields["repo"][:80], m[2])
     return content, None
 
 
@@ -1014,7 +1034,7 @@ CI_SOURCES = {}  # story id -> [{path, issue, state, detail}] from this CI run, 
 
 
 def snapshot_links(story_text):
-    """([(rel, story id of its folder, issue number)], [odd]) for the pulled issues a story.md links, with each path
+    """([(rel, story id of its folder, issue number, 'owner/repo' or None)], [odd]) for the pulled issues a story.md links, with each path
     resolved the way linked_scenarios reads it ('./x', 'a//b' and the like). `odd`: links to an 'issue-<N>.md' file that
     isn't a spec-pull copy's place, which CI can't compare and so reports."""
     out, odd = [], []
@@ -1024,10 +1044,10 @@ def snapshot_links(story_text):
             rel = repo_rel(path) if path and ".." not in path.replace("\\", "/").split("/") else None
         except (OSError, ValueError):
             rel = None
-        m = SNAPSHOT_NAME.match(rel or "")
+        m = snapshot_name(rel)
         if m:
-            if (rel, m.group(1), int(m.group(2))) not in out:
-                out.append((rel, m.group(1), int(m.group(2))))
+            if (rel,) + m not in out:
+                out.append((rel,) + m)
         elif re.search(r"(?:^|/)issue-[0-9]+\.md$", path, re.I):
             odd.append(path[:200])
     return out, odd
@@ -1095,7 +1115,7 @@ def linked_spec_pairs(sd):
     for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
         found, problem = linked_scenarios(e)
         issue_text = ""
-        for rel, _, _ in (snapshot_links("---\nspec: %s\n---\n" % e)[0] if not problem else []):
+        for rel, _, _, _ in (snapshot_links("---\nspec: %s\n---\n" % e)[0] if not problem else []):
             # a pulled issue: any change to its text re-opens READY and DONE
             issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / rel), rel)[0].encode("utf-8", "surrogatepass")).hexdigest()
         out.append(("spec:" + e, json.dumps([sorted(found.items()), problem] + ([issue_text] if issue_text else []))))
@@ -1644,7 +1664,7 @@ def report_facts(sid, in_ci=False):
             "fingerprint": fp, "spec_hash": V.spec_hash, "validation_md": rd(sd / "validation.md"), "images": images, "images_skipped": skipped,
             "sources": CI_SOURCES.get(sid) if in_ci else [  # off CI nothing is compared: say so, never "verified"
                 {"path": rel, "issue": num, "state": "not checked", "detail": "CI compares it with the live issue on each pull request"}
-                for rel, _, num in snapshot_links(story)[0]],
+                for rel, _, num, _ in snapshot_links(story)[0]],
             "source_legend": SOURCE_LEGEND}
 
 
@@ -2870,13 +2890,22 @@ def cmd_ci(tests_dir=None):
                 print("::warning title=story-gate: source not checked::%s" % msg)
                 sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
-            for rel, owner, num in snaps:
+            allowed = {r.lower() for r in c.get("spec_repos") or []}
+            for rel, owner, num, other in snaps:
                 try:
-                    state, detail = SP.live_status(sys.modules[__name__], owner, rel, num,
-                                                   os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_TOKEN"))
+                    if other and other.lower() not in allowed:  # never fetch outside the default branch's allowlist
+                        state, detail = "not checked", ("%s isn't on spec_repos in the default branch's config, so CI doesn't "
+                                                        "read it" % other)
+                    elif other and not os.environ.get("STORY_GATE_SPECS_TOKEN"):
+                        state, detail = "not checked", ("no STORY_GATE_SPECS_TOKEN secret (or the pull request comes from a fork, "
+                                                        "which gets no secrets), so CI can't read %s" % other)
+                    else:
+                        state, detail = SP.live_status(sys.modules[__name__], owner, rel, num,
+                                                       other or os.environ.get("GITHUB_REPOSITORY", ""),
+                                                       os.environ.get("STORY_GATE_SPECS_TOKEN") if other else os.environ.get("GITHUB_TOKEN"))
                 except Exception as e:  # never let the comparison itself crash CI or pass silently
                     state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
-                msg = "%s (issue #%d): %s" % (rel, num, detail)
+                msg = "%s (issue %s#%d): %s" % (rel, other or "", num, detail)
                 word = SOURCE_WORDS.get(state, "not checked")
                 try:
                     fields = parse_snapshot(rd(ROOT / rel))[0]
@@ -3207,7 +3236,10 @@ def put_block(path, py):
     p.write_text(text, encoding="utf-8")
 
 
-MANAGED = "# managed by story-gate %s - re-run `gate.py install` to update; local edits are overwritten" % VERSION
+MANAGED = ("# managed by story-gate %s - re-run `gate.py install` to update; local edits are overwritten, except between "
+           "the 'your steps' markers" % VERSION)
+USER_STEPS = ("      # >>> your steps: kept when install updates this file (e.g. the GitHub App recipe in docs/guide.md)\n",
+              "      # <<< your steps\n")
 TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=story-gate::.story-gate is a symlink in this PR; refusing to run"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/sg"
           if ! git cat-file -e "$BASE:.story-gate/gate.py" 2>/dev/null; then
@@ -3284,7 +3316,7 @@ jobs:
           name: sg-tests
           path: ${{ runner.temp }}/sg-tests
         continue-on-error: true
-      - name: story gate
+""" + USER_STEPS[0] + USER_STEPS[1] + """      - name: story gate
         env:
           BASE: origin/${{ github.event.pull_request.base.ref }}
           SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -3295,6 +3327,8 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+          # read access to the issues of other repositories on spec_repos: a secret, or a token your own step made
+          STORY_GATE_SPECS_TOKEN: ${{ steps.specs_token.outputs.token || secrets.STORY_GATE_SPECS_TOKEN }}
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
@@ -3390,12 +3424,21 @@ jobs:
 """
 
 
+def with_user_steps(old, body):
+    """body, with the user's own steps from the current file (between the 'your steps' markers) carried over."""
+    a, b = USER_STEPS
+    if old and a in old and b in old.split(a, 1)[1] and a + b in body:
+        return body.replace(a + b, a + old.split(a, 1)[1].split(b, 1)[0] + b, 1)
+    return body
+
+
 def write_managed(rel, body):
     """Write a story-gate workflow; refuse to overwrite a hand-made file with the same name."""
     p = ROOT / rel
     old = rd(p)
     if old and not old.startswith("# managed by story-gate"):
         return "%s exists and is not managed by story-gate - left untouched (rename it or delete it, then re-run install)" % rel
+    body = with_user_steps(old, body)  # the user's own steps are kept
     if old == body:
         return "%s up to date" % rel
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -3906,7 +3949,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML),
                     (".github/workflows/story-gate-dashboard.yml", dash_yml())):
         cur = rd(ROOT / f)
-        st = "ok" if cur == body else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
+        st = "ok" if cur == with_user_steps(cur, body) else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
         print("  %-42s %s" % (f, st))
         if st != "ok":
             fails.append(f)
@@ -3947,6 +3990,12 @@ def cmd_doctor(repo=None, strict=False, prove=False):
             elif st_ == 200:
                 dash_shown = True
                 show_dashboard(repo)
+            if c.get("spec_repos"):  # issues from other repositories: can CI read them?
+                st_s, _, _ = G.call("GET", "/repos/%s/actions/secrets/STORY_GATE_SPECS_TOKEN" % repo, tok)
+                print("  spec_repos: %s - CI token: %s" % (", ".join(c["spec_repos"]), {
+                    200: "STORY_GATE_SPECS_TOKEN secret is set (or your own step makes one)",
+                    404: "MISSING - copies from those repositories will show 'not checked'; see the guide, 'Specs in another repository'"}.get(
+                    st_s, "could not check (HTTP %s; listing secrets needs admin rights)" % st_s)))
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
