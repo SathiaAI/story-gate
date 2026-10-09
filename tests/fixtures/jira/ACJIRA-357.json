@@ -1,0 +1,107 @@
+{
+ "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+ "fields": {
+  "description": {
+   "content": [
+    {
+     "attrs": {
+      "level": 2
+     },
+     "content": [
+      {
+       "text": "xxxxxxxxxxx x",
+       "type": "text"
+      }
+     ],
+     "type": "heading"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxx /xxxx/xxxxx/x.x/xxxx/{xxxxxx}/xxxxx",
+       "type": "text"
+      },
+      {
+       "type": "hardBreak"
+      },
+      {
+       "text": "xxxx /xxxx/xxxxx/x.x/xxxx/xxxx/xxxxx",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "{\r\n  \"xxxxxxxxx\": [\"xxxx-x\", \"xxxx-x\"]\r\n}",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "attrs": {
+      "level": 2
+     },
+     "content": [
+      {
+       "text": "xxxxxxxxxxx x",
+       "type": "text"
+      }
+     ],
+     "type": "heading"
+    },
+    {
+     "content": [
+      {
+       "text": "xxx /xxxx/xxxxx/x.x/xxxx/{xxxxxx}/xxxxx/{xxxxxxxx}",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxx /xxxx/xxxxx/x.x/xxxx/{xxxxxx}/xxxxx",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "{\r\n  \"xxxxxxxxx\": [\"xxxx-x\", \"xxxx-x\"]\r\n}",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxxx /xxxx/xxxxx/x.x/xxxx/{xxxxxx}/xxxxx/{xxxxxxxx}",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "doc",
+   "version": 1
+  },
+  "summary": "Recorded ticket ACJIRA-357",
+  "updated": "2015-11-26T04:48:18.969-0600"
+ },
+ "id": "112956",
+ "key": "ACJIRA-357",
+ "self": "https://api.atlassian.com/ex/jira/fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem/rest/api/3/issue/112956"
+}

@@ -1,0 +1,304 @@
+{
+ "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+ "fields": {
+  "description": {
+   "content": [
+    {
+     "content": [
+      {
+       "attrs": {
+        "accessLevel": "",
+        "id": "0000000000000000000000000000000000000000000",
+        "text": "@xxxxxx xxxxxxxx"
+       },
+       "type": "mention"
+      },
+      {
+       "text": ", ",
+       "type": "text"
+      },
+      {
+       "attrs": {
+        "accessLevel": "",
+        "id": "0000000000000000000000000000000000000000000",
+        "text": "@xxx xxxxxx"
+       },
+       "type": "mention"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xx'xx xxxxx xxxxxx xx xxxxxxxxx x xxxx xxxxxx xxxx xxx xxx xxxxxxxxxx xxxxxxxx xxxxxxxx xx x xxxxxxxxxx xxxx (xxxx xxxx).",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xx xxxxxx xxxx xxx xxx xx xx xxx xx xxxxxx x xxxxxx xxxxxx x xxxxx xxxx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxxx: 'xxxxxxx'",
+       "type": "text"
+      },
+      {
+       "text": ", xxxxxxx xxx xxxxxxx xxx xx xxxx xxxxx'x xx xxx xx xxxx xxx xxxxxxxxxx xxxx xxxxxxx x xxxxxx. xx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "attrs": {
+          "href": "https://example.com/link"
+         },
+         "type": "link"
+        }
+       ],
+       "text": "xxx xxxx xxx",
+       "type": "text"
+      },
+      {
+       "text": ", x xxx xxxx xxxxxxx x ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxx",
+       "type": "text"
+      },
+      {
+       "text": " xxx xxx xxxx x xxxx xx xxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxx'x xx xxxxxxx xxxx xx xxx xxxx xxxx xxxxxxxxxx xxxxx xxxx xxxxxxx x xxxxxx xxxx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxxxxx.xxxxxx()",
+       "type": "text"
+      },
+      {
+       "text": " (xxxxx xx xxx xxxxxxxxxxx):",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "xx.xxxxxx.xxxxxx({\r\n    xxx: \"xxxxx-xxxxx\", // xxxx xx x xxxxxxx xxxx\r\n    xxxx: 'xxxxxxx'\r\n  });",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "xxxxx://xxxxxxxxx.xxxxxxxxxx.xxx/xx/xxxxx?xx=xxxxxxx%xxxxxxxx&xxx=xx-xx&xxxx_xx=xxxxx&xxxx_xxx=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&xxx_x=xxxxx%xx%xx%xxxxxxxxxxxx.xxx%xxxxxx&xxx_x=xxxxxxx-xxxxxxxxxx-xxx__xxxxx-xxxxx&xx=%xxxxxxxxxxxx&xxx=xxxx&xx-xxxxxx=xxxxxxxxxxxx&xxx=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxx--xxxxxxxxxxxxxxxxxxx-_xxx",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "\"xxxxx-xxxxx\"",
+       "type": "text"
+      },
+      {
+       "text": " xx xxxx x xxxxxx xxxxxxx xxxx x xxxxx xxx xxxxxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxx'x xxxxxxxxxxx xx xxxx xx x xxxx x ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "strong"
+        }
+       ],
+       "text": "xxx xxx xxx xxxxxxx xxxxxxx xxxxx",
+       "type": "text"
+      },
+      {
+       "text": " (xxxxxxx xx x xxxxxxx xxxx) xx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxxxxx.xxxxxx",
+       "type": "text"
+      },
+      {
+       "text": " xxxx, xxx xxx xxxx xxxxxxxxxx xxxxx xx xxxx xxxxxxxxx:",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "xxxxx://xxxxxxxxx.xxxxxxxxxx.xxx:xxxx/xxxxxxxxxx/xxxxxxx/xxxxxxx/xx/xxxxxxxxxx-xxx/xxxxxxxxxx?xx-xxxxxx=xxxxxxxxxxxx&xxxxxx-xxx=xxxxxxxxxx-xxx&xxxxxxx-xxxxxxx=%xx%xxxxxxxxxxx%xx%xx%xxx%xx%xx%xxxxxx.xxxx%xx%xx%xxxxxx%xx%xx%xxxxxx.xxxxxxx%xx%xx%xxxx%xx%xx%xxxxxx.xxx%xx%xx%xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx%xx%xx%xxxxxxx%xx%xx%xxxxx%xx%xx%xxxxxxx%xx%xx%xx%xx%xx%xxxxxxx%xx%xx%xxxxxx%xx%xx%xxxxxxx.xx%xx%xx%xxxxxxx%xx%xx%xxxxxxxxxxxx%xx%xx%xxxxxxxxxxxx%xxxxxxxxxxxx%xx%xx%xxxxxx.xxxxx%xx%xx%xxxxxxxxx+xx+xxx+xxxxxxxxxx+xxxxxxxxxxxxx+xxxxx%xx%xx%xxxxxxxxx%xx%xx%xxxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx%xx%xx%xxxxxxx.xxxxxxxxx%xx%xx%xxxxxxx%xx%xx%xxxxxx%xx%xx%xxxxxxxx%xx%xx%xxxxxxxx.xxxx%xx%xx%xxxxxxxxx%xx%xx%xxxxxxx.xxx%xx%xx%xxxx%xx%xx%xx%xx+%xx+%xx+xxx+%xx+%xx+%xx%xx%xx%xxxxxxxxxxx%xxx%xxxxxxxx%xxxxx%xxxxxxxxx%xxxxxxxxxxxxxxx%xxxxxxx%xxxxxx%xxxxxxx%xx%xxxxxxx%xxxxx%xxxxxxxxxxxx%xxxxxxxxxxxx%xxxxxxxxxxxx%xxxxxxxxx%xxxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx%xxxxxx%xxxxxxxx%xxxxxxxxxxxx%xxxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx%xx%xx%xxxxxxxx%xx%xx%xxxxx%xx%xx%xxxxxxxxx%xx%xx%xxxxxxxxxxxxxxx%xx%xx%xxxxxx.xx%xx%xx%xxxxxxx%xx%xx%xxxxxxx.xxxx%xx%xx%xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx%xx%xx%xxxxxxx.xxxx%xx%xx%xx%xx%xx%xxxxxx.xx%xx%xx%xxxxxxx%xx%xx%xxxxxxxxxxxx%xx%xx%xxxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx%xx%xx&xxx=xxxxxxxxxx&xxxxx=xxx%xx&xxxxxx=xxx%xx&xxx=xxxx&_=xxxxxxxxxxxxx",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "content": [
+      {
+       "text": "xxx xxx xxxx xx xxxxxxxx xx x xxx-xxxxxxxx xxxxxxxx (",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxxxxxxxx.xxxxxxxxxx.xxx:xxxx/xxxxxxxxxx/xxxxxxx/xxxxxxx/xx/xxxxxxxxxx-xxx/xxxxxxxxxx",
+       "type": "text"
+      },
+      {
+       "text": "), xxx xxxxx xx xxxx ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "code"
+        }
+       ],
+       "text": "xxxxxxx-xxxxxxx",
+       "type": "text"
+      },
+      {
+       "text": " xxxxxxxxx xxxx, xxxxx xxxxx xxxxxx, xxxxxxxx xxx xxxxx xxxxxxxxxx xx xxx xxxxx xx'xx xxxxxxx xxx xxxxxx xxxx (xxx xxxxxxx xxxxx): ",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "attrs": {
+      "language": "java"
+     },
+     "content": [
+      {
+       "text": "{\"xxxxxxxxx\":\"x\",\"xxxx.xxxx\":\"xxxx\",\"xxxx.xxxxxxx\":\"xx\",\"xxxx.xxx\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"xxxxx\":\"xxx\",\"xxxxx\":\"\",\"xxxxx\":\"xxxx\",\"xxxxx.xx\":\"xxxxx\",\"xxxxxxxxxx\":\"xxxxxxxxxx:xxxxxxxxxx\",\"xxxx.xxxxx\":\"xxxxxxx+xx+xxx+xxxxxxxxxx+xxxxxxxxxxxxx+xxxxx\",\"xxxxxxx\":\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\",\"xxxxx.xxxxxxxxx\":\"xxxxx\",\"xxxx\":\"xxxxxx\",\"xxxxxx.xxxx\":\"xxxxxxx\",\"xxxxx.xxx\":\"xx\",\":+=+|+xxx+|+=+:\":\"xxxxxxxxx=x|xxxxxx=xxx|xxxxxxx=xxxxxxxxxxxxx|xxxxx=xxxx|xxxxx=|xxxxx=xxx|xxxxxxxxxx=xxxxxxxxxx:xxxxxxxxxx|xxxxxxx=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx|xxxx=xxxxxx|xxxxxxxxxx=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\",\"xxxxxx\":\"xxx\",\"xxxxxxx\":\"xxxxxxxxxxxxx\",\"xxxx.xx\":\"xxxxx\",\"xxxxx.xxxx\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"xxxxx.xxxx\":\"\",\"xxxx.xx\":\"xxxxx\",\"xxxxxxxxxx\":\"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\"}",
+       "type": "text"
+      }
+     ],
+     "type": "codeBlock"
+    },
+    {
+     "content": [
+      {
+       "text": "xxx xxxxxx xxxx xx xxxxxxxxx xxxxxxx (xxx xxxxxxxx xxxxxx xx xxxxxxxxxx), xxx xxxx xxxx xx xxxxx xxxx xxxxx xxx xxxx xxxxx xxxx xx x xxx xx xxxxxxxxx xxxxxxx xxxxxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxx xxxxxxxx xx xxxxxxxxxxx?",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "marks": [
+        {
+         "type": "strong"
+        }
+       ],
+       "text": "xxxx xx xxxxxxxxx xxxxxxxx xx xxxx xxxxxxxx x \"xxxx xxxxxx xxxx\" xxx xxx xxxxx.",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "xxxxxx!",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "doc",
+   "version": 1
+  },
+  "summary": "Recorded ticket ACJIRA-119",
+  "updated": "2016-01-28T10:23:52.565-0600"
+ },
+ "id": "102247",
+ "key": "CE-172",
+ "self": "https://api.atlassian.com/ex/jira/fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem/rest/api/3/issue/102247"
+}

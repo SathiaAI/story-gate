@@ -35,8 +35,11 @@ Commands (run from the repo root):
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
                                      run the feature end to end and record it as proof for those ACs (CI runs it again)
   scenario <ID> --name N --remove    delete a recorded scenario;  scenarios <ID>: run every recorded scenario again
-  spec-pull <ID> <issue> [--from-file F]   copy this repository's GitHub issue (#42 or its URL) into the story's folder
+  spec-pull <ID> <issue|ticket> [--from-file F] [--tracker linear|jira]   copy a GitHub issue (#42 or its URL), or a
+                                      Linear or Jira ticket (ENG-12 or its link), into the story's folder
                                       as a checked snapshot and link it in story.md (the gate never reads the live issue)
+  jira-setup <site> ["field name"]   print the trackers.jira settings: the site's cloud id, and the id of the
+                                      acceptance-criteria field found by its name (with your read-only Jira token)
   spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
                                       checkboxes and user stories), as names for an AC's `covers` in tests.json
   evidence <ID> <image> --scenario N [--caption T]   add a screenshot (PNG/JPEG, 300 KB max) to the validation page
@@ -362,12 +365,15 @@ def cfg():
     if not isinstance(c.get("spec_repos"), list) or not all(isinstance(r, str) and REPO_NAME.fullmatch(r) for r in c["spec_repos"]):
         raise ConfigError('.story-gate/config.json: "spec_repos" must be a list of "owner/repo" names - the gate fails closed until fixed')
     tr = c.get("trackers")
-    if not isinstance(tr, dict) or set(tr) - {"linear"} or any(
-            not isinstance(v, dict) or set(v) - {"workspace", "allow_in_public_repo"}
-            or not isinstance(v.get("workspace"), str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?", v["workspace"])
-            or not isinstance(v.get("allow_in_public_repo", False), bool) for v in tr.values()):
+    if not isinstance(tr, dict):
         raise ConfigError('.story-gate/config.json: "trackers" must look like {"linear": {"workspace": "your-workspace"}} '
-                          '(optional "allow_in_public_repo": true) - the gate fails closed until fixed')
+                          '- the gate fails closed until fixed')
+    if tr:
+        import sg_trackers as TR
+        for k, v in tr.items():
+            why = TR.settings_problem(k, v)
+            if why:
+                raise ConfigError('.story-gate/config.json: "trackers" > "%s" %s - the gate fails closed until fixed' % (str(k)[:20], why))
     if c.get("spec_source_check") not in ("warn", "block"):
         raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
     if c.get("judge_mode") not in ("full", "objective"):
@@ -984,10 +990,10 @@ def snapshot_name(rel):
 SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
 SNAPSHOT_BY = ("github-api", "pasted")
 # a tracker ticket's copy: .story-gate/stories/<ID>/linear-<KEY>.md (the key in capitals, as the tracker shows it)
-TRACKER_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/(linear)-([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})\.md$")
+TRACKER_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/(linear|jira)-([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})\.md$")
 TRACKER_KEYS = ("source_kind", "source_url", "site", "ticket", "ticket_id", "source_updated_at", "fetched_at", "fetched_by",
                 "format")
-SNAPSHOT_KINDS = {"github-issue": SNAPSHOT_KEYS, "linear-issue": TRACKER_KEYS}
+SNAPSHOT_KINDS = {"github-issue": SNAPSHOT_KEYS, "linear-issue": TRACKER_KEYS, "jira-issue": TRACKER_KEYS}
 
 
 def tracker_name(rel):
@@ -1027,11 +1033,11 @@ def parse_snapshot(text):
         kind = fields["source_kind"][:-len("-issue")]
         if fields["fetched_by"] not in (kind + "-api", "pasted"):
             raise ValueError("'fetched_by: %s' isn't %s-api or pasted" % (fields["fetched_by"][:40], kind))
-        if not re.fullmatch(r"[A-Z][A-Z0-9]{0,9}-[0-9]{1,9}", fields["ticket"]) or not re.fullmatch(
-                r"[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?", fields["site"]):
-            raise ValueError("its ticket or workspace isn't readable")
-        if fields["source_url"] != "https://linear.app/%s/issue/%s" % (fields["site"], fields["ticket"]):
-            raise ValueError("its source_url doesn't match its workspace and ticket")
+        import sg_trackers as TR
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{0,9}-[0-9]{1,9}", fields["ticket"]) or not TR.site_ok(kind, fields["site"]):
+            raise ValueError("its ticket or site isn't readable")
+        if fields["source_url"] != TR.url_of(kind, fields["site"], fields["ticket"]):
+            raise ValueError("its source_url doesn't match its site and ticket")
         if (fields["ticket_id"] == "unknown") != (fields["fetched_by"] == "pasted"):
             raise ValueError("its ticket_id doesn't fit how it was copied")
     content = text[m.end():]
@@ -1076,7 +1082,8 @@ def tracker_snapshot(text, rel, tn):
     repository is set up for (default branch's config in CI)."""
     if not tn:
         return "", ("it says it's a copy of a tracker ticket, but it isn't where `story-gate spec-pull` saves one "
-                    "(.story-gate/stories/<ID>/linear-<KEY>.md), so CI can't compare it with the live ticket. Pull it again")
+                    "(.story-gate/stories/<ID>/linear-<KEY>.md or jira-<KEY>.md), so CI can't compare it with the live ticket. "
+                    "Pull it again")
     try:
         fields, content = parse_snapshot(text)
     except ValueError as e:
@@ -1087,8 +1094,9 @@ def tracker_snapshot(text, rel, tn):
     if not isinstance(settings, dict):
         return "", ("it's a %s ticket, but %s isn't set up in .story-gate/config.json (trackers), so it can't be checked"
                     % (tn[1], tn[1]))
-    if fields["site"] != settings.get("workspace"):
-        return "", "it comes from the workspace '%s', but this repository is set up for '%s'" % (fields["site"][:60], settings.get("workspace"))
+    import sg_trackers as TR
+    if fields["site"] != TR.site_of(tn[1], settings):
+        return "", "it comes from '%s', but this repository is set up for '%s'" % (fields["site"][:80], TR.site_of(tn[1], settings))
     return content, None
 
 
@@ -1143,7 +1151,7 @@ def snapshot_links(story_text):
             if (rel,) + m not in out:
                 out.append((rel,) + m)
         elif re.search(r"(?:^|/)issue-[0-9]+\.md$", path, re.I) or (
-                re.search(r"(?:^|/)linear-[^/]*\.md$", path, re.I) and not tracker_name(rel)):
+                re.search(r"(?:^|/)(?:linear|jira)-[^/]*\.md$", path, re.I) and not tracker_name(rel)):
             odd.append(path[:200])
     return out, odd
 
@@ -3076,7 +3084,7 @@ def cmd_ci(tests_dir=None):
             import sg_trackers as TR  # tickets copied in from a tracker set up in the default branch's config
             for rel, owner, kind, key in tracker_links(story_text):
                 settings = (c.get("trackers") or {}).get(kind)
-                token = os.environ.get(TR.TOKEN_ENV.get(kind, ""), "")
+                token, missing = TR.ci_token(kind) if kind in TR.CI_SECRETS else ("", ["a key"])
                 try:
                     if not isinstance(settings, dict):
                         state, detail = "not checked", ("%s isn't set up in the default branch's config (trackers), so CI "
@@ -3086,7 +3094,7 @@ def cmd_ci(tests_dir=None):
                                                         "in a public repository, so CI doesn't read it" % kind)
                     elif not token:
                         state, detail = "not checked", ("no %s secret (or the pull request comes from a fork, which gets no "
-                                                        "secrets), so CI can't read %s" % (TR.TOKEN_ENV[kind], key))
+                                                        "secrets), so CI can't read %s" % (" / ".join(missing), key))
                     else:
                         state, detail = TR.live_status(sys.modules[__name__], owner, rel, kind, key, settings, token)
                 except Exception as e:  # never let the comparison itself crash CI or pass silently
@@ -3498,6 +3506,8 @@ jobs:
           STORY_GATE_SPECS_TOKEN: ${{ steps.specs_token.outputs.token || secrets.STORY_GATE_SPECS_TOKEN }}
           # read-only key for tickets on trackers set up in config (trackers)
           STORY_GATE_LINEAR_KEY: ${{ secrets.STORY_GATE_LINEAR_KEY }}
+          STORY_GATE_JIRA_EMAIL: ${{ secrets.STORY_GATE_JIRA_EMAIL }}
+          STORY_GATE_JIRA_TOKEN: ${{ secrets.STORY_GATE_JIRA_TOKEN }}
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
@@ -4188,11 +4198,12 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                 print("             fork pull requests get no secrets, so their copies from those repositories always show 'not checked'")
             for kind, settings in sorted((c.get("trackers") or {}).items()):  # tickets from a tracker: can CI read them?
                 import sg_trackers as TR
-                st_t, _, _ = G.call("GET", "/repos/%s/actions/secrets/%s" % (repo, TR.TOKEN_ENV[kind]), tok)
-                print("  trackers.%s: workspace %s - CI key: %s" % (kind, settings.get("workspace"), {
-                    200: "%s secret is set" % TR.TOKEN_ENV[kind],
-                    404: "no %s secret, so its tickets show 'not checked'; see the guide, 'Specs in Linear'" % TR.TOKEN_ENV[kind]}.get(
-                    st_t, "could not check (HTTP %s; listing secrets needs admin rights)" % st_t)))
+                for name in TR.CI_SECRETS.get(kind, ()):
+                    st_t, _, _ = G.call("GET", "/repos/%s/actions/secrets/%s" % (repo, name), tok)
+                    print("  trackers.%s (%s) - CI: %s" % (kind, TR.site_of(kind, settings), {
+                        200: "%s secret is set" % name,
+                        404: "no %s secret, so its tickets show 'not checked'; see the guide, 'Specs in %s'" % (name, TR.LABEL[kind])}.get(
+                        st_t, "could not check %s (HTTP %s; listing secrets needs admin rights)" % (name, st_t))))
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)
@@ -4316,6 +4327,9 @@ def main(argv):
             sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
                      "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "jira-setup":
+        import sg_trackers as TR
+        return TR.jira_setup(args)
     if cmd == "spec-pull":
         import sg_specpull as SP
         return SP.cli(sys.modules[__name__], args)
