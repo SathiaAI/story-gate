@@ -1037,6 +1037,11 @@ def this_repo():
     return r if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r) else None
 
 
+def gh_prop(v):
+    """A value for a GitHub Actions workflow-command property (file=...), escaped as GitHub requires."""
+    return str(v).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace(":", "%3A").replace(",", "%2C")
+
+
 # One set of words for a pulled issue's status, the same in CI notes, the validation page and the dashboard. Only CI's
 # own comparison, on the pull request's exact commit, can say "verified"; anything else is "changed" or "not checked".
 SOURCE_WORDS = {"unchanged": "verified", "changed": "changed", "not checked": "not checked"}
@@ -1433,9 +1438,38 @@ None
 CLIENT_ENV = (("CLAUDECODE", "claude-code"), ("CURSOR_TRACE_ID", "cursor"), ("CODEX_SANDBOX", "codex"), ("GEMINI_CLI", "gemini"))
 
 
+def start_branch_check(sid, c):
+    """'' when the current branch suits a story; otherwise a plain warning. Raises SystemExit on the base branch in
+    enforce mode: a story's work reaches the base branch through a pull request, where the gate checks it."""
+    branch = current_branch()
+    if os.environ.get("GITHUB_ACTIONS"):
+        return ""
+    enforce = c.get("mode") == "enforce" or "pre_edit" in (c.get("enforce_points") or [])
+    if not branch or branch == "HEAD":  # no branch: the work has nowhere to go but a later, unchecked commit
+        msg = "no branch is checked out (detached HEAD). Make one for the story first: git switch -c feature/%s" % sid
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
+    configured = c.get("base_branch", "main")
+    ref = T.default_policy_ref(str(ROOT), configured) or configured
+    bases = {configured, ref.split("/", 1)[1] if ref.startswith("origin/") else ref}  # origin/HEAD can be stale: both count
+    if branch in bases:
+        base = branch
+        msg = ("you're on %s, the base branch. A story's work should reach %s through a pull request, where story-gate "
+               "checks it. Make a branch for it first: git switch -c feature/%s" % (base, base, sid))
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
+    if not re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(sid), branch, re.I):  # SAT-1 isn't in SAT-10
+        return ("note: branch '%s' doesn't contain %s. CI finds the story from the branch name, or from a leading '[%s]' in "
+                "the pull request title" % (branch[:80], sid, sid))
+    return ""
+
+
 def cmd_start(sid, client=None, model=None):
     """Create (or complete) a story's folder, including validation.md's template for stories started before it existed."""
     sd = sdir(sid)
+    branch_note = start_branch_check(sid, cfg())  # before anything is written: a refused start leaves nothing behind
     sd.mkdir(parents=True, exist_ok=True)
     client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
     if client or model or not (sd / "coder.json").exists():
@@ -1454,6 +1488,8 @@ def cmd_start(sid, client=None, model=None):
     baseline = prev[2].strip() if len(prev) >= 3 and prev[0].strip() == sid and prev[1].strip() == branch else git("rev-parse", "HEAD").strip()
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, branch, baseline), encoding="utf-8")  # restarting a story keeps its baseline
     emit("started", sid, load_json(sd / "coder.json"))
+    if branch_note:
+        print("story-gate: " + branch_note)
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready. "
           "Not sure what's next? Run: %s" % (sid, sd.relative_to(ROOT), sid, gate_cmd("next")))
 
@@ -2900,7 +2936,7 @@ def cmd_ci(tests_dir=None):
             for path in odd:
                 msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
                        "so CI can't compare it with the live issue" % path)
-                print("::warning title=story-gate: source not checked::%s" % msg)
+                print("::warning file=%s,title=story-gate: source not checked::%s" % (gh_prop(path), msg))
                 sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
             allowed = {r.lower() for r in c.get("spec_repos") or []}
@@ -2933,10 +2969,10 @@ def cmd_ci(tests_dir=None):
                 sources.append({"path": rel, "issue": num, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
                                 "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
                 if state == "unchanged":
-                    print("::notice title=story-gate: source verified::%s" % msg)  # the dashboard reads these annotations
+                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))  # the dashboard reads these, by file
                     notes.append(msg)
                     continue
-                print("::warning title=story-gate: source %s::%s" % (word, msg))
+                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
                 if c.get("spec_source_check") == "block":
                     problems.append(msg + " (spec_source_check is \"block\")")
                 else:

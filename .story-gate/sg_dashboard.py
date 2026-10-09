@@ -220,8 +220,20 @@ def parse_story(sid, files):
         "tests_green": (tr.get("exit_code") == 0) if isinstance(tr, dict) and "exit_code" in tr else None,
         "spec_linked": bool(fm.get("spec")) and str(fm.get("spec")).strip().lower() not in ("none", "[]"),
         # issues copied in with spec-pull: CI's check on the pull request says whether each still matches the live issue
-        "snapshots": len(re.findall(r"(?:^|[\s,\[/])\.story-gate/+stories/+[^/\s,\]]+/+issue-[0-9]{1,9}\.md", str(fm.get("spec") or ""))),
+        "snapshots": snapshot_paths(fm.get("spec")),
     }
+
+
+def snapshot_paths(spec):
+    """The pulled-issue copies a story's `spec` names (a list or a comma/space separated string), normalised and in order."""
+    items = spec if isinstance(spec, list) else re.split(r"[,\s]+", str(spec or ""))
+    out = []
+    for it in items:
+        p = re.sub(r"/+", "/", str(it).strip().strip("'\"").replace("\\", "/")).lstrip("./") if str(it).strip() else ""
+        p = ".story-gate/" + p[len("story-gate/"):] if p.startswith("story-gate/") else p
+        if re.fullmatch(r"\.story-gate/stories/[A-Za-z0-9._-]+/issue-[A-Za-z0-9_.-]*?[0-9]{1,9}\.md", p) and p not in out:
+            out.append(p)
+    return out
 
 
 # ------------------------------------------------------------------ build the snapshot
@@ -480,7 +492,7 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     for s in d["stories"]:
         stories.append("| %s %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), dict((k, l) for k, l, _ in STATUSES)[s["status"]],
                                                          (s.get("ready") or {}).get("overall", "—") + no_judge(s.get("ready")) + (" (out of date)" if s.get("ready_fresh") is False else ""),
-                                                         (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60)))
+                                                         (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60) + (" · " + ci_cell(s) if s.get("ci") else "")))
     footer = ["", "_Managed by story-gate. Edits to this issue are overwritten._"]
     table_chart = ["", "| Stage | Stories |", "|---|---|"] + ["| %s | %d |" % (lab, n) for lab, n in counts]
     # Fixed order on the page; when space runs out, sections are kept by priority (deterministic):
@@ -598,7 +610,7 @@ def to_html(d, artifact_note=""):
         or '<tr><td colspan="4" class="text-secondary">No features yet. Add one with gate.py feature &lt;ID&gt; --title "…"</td></tr>'
     rows = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (
         h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], pill((s.get("ready") or {}).get("overall"), s.get("ready")),
-        pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80)) for s in d["stories"]) \
+        pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80) + (h(" · " + ci_cell(s), 80) if s.get("ci") else "")) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
     notes = ""
     if any((s.get("ci") or {}).get("source") for s in d["stories"]):
@@ -694,17 +706,22 @@ SOURCE_TITLE = re.compile(r"^story-gate: source (verified|changed|not checked)$"
 
 def source_state(G, repo, token, run, expected):
     """'verified' only when the story-gate check on this exact commit has finished and left a 'source verified' note
-    for each pulled issue and nothing worse; 'changed' if any differs; otherwise 'not checked'. Annotations are written
+    on each of this story's pulled copies (expected: their paths) and nothing worse; 'changed' if any differs; otherwise 'not checked'. Annotations are written
     by CI (default-branch code), never by the pull request."""
     if run.get("status") != "completed" or not run.get("id"):
         return "not checked"
     st, notes, _ = call(G, "GET", "/repos/%s/check-runs/%s/annotations?per_page=100" % (repo, int(run["id"])), token)
     if st != 200 or not isinstance(notes, list):
         return "not checked"
-    words = [m.group(1) for m in (SOURCE_TITLE.match(str(n.get("title") or "")) for n in notes if isinstance(n, dict)) if m]
+    seen = {}  # copy path -> words CI wrote for it; only this story's own copies count
+    for n in notes:
+        m = SOURCE_TITLE.match(str(n.get("title") or "")) if isinstance(n, dict) else None
+        if m and n.get("path") in expected:
+            seen.setdefault(n["path"], set()).add(m.group(1))
+    words = set().union(*seen.values()) if seen else set()
     if "changed" in words:
         return "changed"
-    if "not checked" in words or words.count("verified") < expected:
+    if "not checked" in words or any("verified" not in seen.get(p, ()) for p in expected):
         return "not checked"
     return "verified"
 

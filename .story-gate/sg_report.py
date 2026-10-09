@@ -269,7 +269,7 @@ def to_html(f):
         bits = [("copied " + esc(s.get("copied_at"), 30)) if s.get("copied_at") else "",
                 ("issue updated " + esc(s.get("issue_updated_at"), 30)) if s.get("issue_updated_at") not in (None, "", "unknown") else "",
                 ("checked " + esc(s.get("checked_at"), 30)) if s.get("checked_at") else "",
-                esc(s.get("run"), 300) if str(s.get("run") or "").startswith("https://") else ""]
+                ('<a href="%s">CI run</a>' % esc(s.get("run"), 300)) if re.fullmatch(r"https://[^\s\"'<>]{1,290}", str(s.get("run") or "")) else ""]
         return " · ".join(b for b in bits if b)
     src_rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td class="small">%s<div class="text-secondary">%s</div></td></tr>' % (
         esc(s.get("path"), 200), "#%s" % esc(s.get("issue"), 12) if s.get("issue") else "—",
