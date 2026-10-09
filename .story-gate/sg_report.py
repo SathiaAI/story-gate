@@ -264,6 +264,17 @@ def to_html(f):
         for rec, uri in f["images"])
     if f.get("images_skipped"):
         imgs += '<div class="alert alert-warning">Not shown: %s</div>' % esc("; ".join(f["images_skipped"]), 1000)
+    def src_when(s):
+        """Copied / issue updated / checked times, and the CI run, for one pulled issue (what's known)."""
+        bits = [("copied " + esc(s.get("copied_at"), 30)) if s.get("copied_at") else "",
+                ("issue updated " + esc(s.get("issue_updated_at"), 30)) if s.get("issue_updated_at") not in (None, "", "unknown") else "",
+                ("checked " + esc(s.get("checked_at"), 30)) if s.get("checked_at") else "",
+                ('<a href="%s">CI run</a>' % esc(s.get("run"), 300)) if re.fullmatch(r"https://[^\s\"'<>]{1,290}", str(s.get("run") or "")) else ""]
+        return " · ".join(b for b in bits if b)
+    src_rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td class="small">%s<div class="text-secondary">%s</div></td></tr>' % (
+        esc(s.get("path"), 200), "#%s" % esc(s.get("issue"), 12) if s.get("issue") else "—",
+        D.pill({"verified": "PASS", "changed": "FAIL"}.get(s.get("state"))) + " " + esc(s.get("state"), 20), esc(s.get("detail"), 400),
+        src_when(s)) for s in f.get("sources") or [])
     card = lambda title, body, note="": ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">%s</h3>%s</div>%s</div>'
                                          % (title, ('<div class="card-actions">%s</div>' % note) if note else "", body))
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -274,7 +285,7 @@ def to_html(f):
 <main class="container-xl">
 <p class="text-secondary">%s: CI ran it, or story-gate worked it out from its own records. %s: the AI wrote it, or ran it on its own computer. Read it as a claim.</p>
 <div class="row row-cards mb-3">%s</div>
-%s%s%s%s%s
+%s%s%s%s%s%s
 </main>
 <footer class="container-xl py-3"><span class="sg-brand text-secondary">story-gate · by <span aria-label="Viaknox">%s</span></span></footer>
 </body></html>""" % (
@@ -287,6 +298,9 @@ def to_html(f):
         card("Scenarios run", '<div class="table-responsive"><table class="table card-table"><thead><tr><th>Scenario</th><th>Covers</th>'
              '<th>Command</th><th>Expected</th><th>Result</th></tr></thead><tbody>%s</tbody></table></div>' % (
                  sc_rows or '<tr><td colspan="5" class="text-secondary">No scenarios recorded.</td></tr>')),
+        card("Linked issues", '<div class="table-responsive"><table class="table card-table"><thead><tr><th>Copy</th><th>Issue</th>'
+             '<th>Source</th><th>Detail</th></tr></thead><tbody>%s</tbody></table></div><div class="card-body small text-secondary">%s</div>'
+             % (src_rows, esc(f.get("source_legend"), 400)), tag("checked")) if src_rows else "",
         card("Screenshots", '<div class="card-body"><div class="row">%s</div></div>' % imgs, tag("reported")) if imgs else "",
         card("Validation summary", '<div class="card-body sg-doc">%s</div>' % (md_html(f.get("validation_md")) or
              '<span class="text-secondary">validation.md is missing.</span>'), tag("reported")),

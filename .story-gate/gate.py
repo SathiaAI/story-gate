@@ -1004,6 +1004,20 @@ def spec_snapshot(text, rel=""):
     return content, None
 
 
+def gh_prop(v):
+    """A value for a GitHub Actions workflow-command property (file=...), escaped as GitHub requires."""
+    return str(v).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace(":", "%3A").replace(",", "%2C")
+
+
+# One set of words for a pulled issue's status, the same in CI notes, the validation page and the dashboard. Only CI's
+# own comparison, on the pull request's exact commit, can say "verified"; anything else is "changed" or "not checked".
+SOURCE_WORDS = {"unchanged": "verified", "changed": "changed", "not checked": "not checked"}
+SOURCE_LEGEND = ("verified: CI compared the copy with the live issue in this commit's check and they matched then; changed: "
+                 "they differ; not checked: CI hasn't compared them on this commit. An issue edited after the check shows up "
+                 "at the next check")
+CI_SOURCES = {}  # story id -> [{path, issue, state, detail}] from this CI run, for the validation page
+
+
 def snapshot_links(story_text):
     """([(rel, story id of its folder, issue number)], [odd]) for the pulled issues a story.md links, with each path
     resolved the way linked_scenarios reads it ('./x', 'a//b' and the like). `odd`: links to an 'issue-<N>.md' file that
@@ -1663,7 +1677,11 @@ def report_facts(sid, in_ci=False):
             "generated_at": now(), "branch": os.environ.get("SG_HEAD_REF") or current_branch(), "commit": git("rev-parse", "HEAD").strip(),
             "ready": verdicts["ready"], "done": verdicts["done"], "tests": tr, "acs": ids,
             "coverage": V.coverage(doc, res, [a for a, _, _ in ids], fp, in_ci), "scenarios": V.specs_of(doc), "results": res,
-            "fingerprint": fp, "spec_hash": V.spec_hash, "validation_md": rd(sd / "validation.md"), "images": images, "images_skipped": skipped}
+            "fingerprint": fp, "spec_hash": V.spec_hash, "validation_md": rd(sd / "validation.md"), "images": images, "images_skipped": skipped,
+            "sources": CI_SOURCES.get(sid) if in_ci else [  # off CI nothing is compared: say so, never "verified"
+                {"path": rel, "issue": num, "state": "not checked", "detail": "CI compares it with the live issue on each pull request"}
+                for rel, _, num in snapshot_links(story)[0]],
+            "source_legend": SOURCE_LEGEND}
 
 
 def cmd_report(sid, out=None, open_=False, in_ci=False):
@@ -2881,10 +2899,12 @@ def cmd_ci(tests_dir=None):
                        "that's intended." % ", ".join(dropped))
                 notes.append(msg)
                 print("::warning title=story-gate: spec link removed::%s" % msg)
+            sources = CI_SOURCES.setdefault(sid, [])
             for path in odd:
                 msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
                        "so CI can't compare it with the live issue" % path)
-                print("::warning title=story-gate: issue not checked::%s" % msg)
+                print("::warning file=%s,title=story-gate: source not checked::%s" % (gh_prop(path), msg))
+                sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
             for rel, owner, num in snaps:
                 try:
@@ -2893,10 +2913,21 @@ def cmd_ci(tests_dir=None):
                 except Exception as e:  # never let the comparison itself crash CI or pass silently
                     state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
                 msg = "%s (issue #%d): %s" % (rel, num, detail)
+                word = SOURCE_WORDS.get(state, "not checked")
+                try:
+                    fields = parse_snapshot(rd(ROOT / rel))[0]
+                except ValueError:
+                    fields = {}
+                run_url = ("%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
+                                                      os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_RUN_ID", ""))
+                           if os.environ.get("GITHUB_RUN_ID") else "")
+                sources.append({"path": rel, "issue": num, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
+                                "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
                 if state == "unchanged":
+                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))  # the dashboard reads these, by file
                     notes.append(msg)
                     continue
-                print("::warning title=story-gate: issue %s::%s" % (state, msg))
+                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
                 if c.get("spec_source_check") == "block":
                     problems.append(msg + " (spec_source_check is \"block\")")
                 else:
@@ -3356,6 +3387,8 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: read  # which pull request each story is on
+  checks: read  # the story-gate check's result and its source notes
 concurrency:
   group: story-gate-dashboard
   cancel-in-progress: false

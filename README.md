@@ -169,6 +169,7 @@ The dashboard answers one question: **is the work on course, and does anything n
 | **(out of date)** next to READY | The story or its tests changed after READY passed | Ask your AI to re-check READY before it carries on |
 | **(checked without a judge)** | The story was checked in objective mode | Fine if that's your choice. Only tests, structure and traceability were checked |
 | **Ownership conflicts** | Two agents claimed the same story | Pick one and stop the other |
+| **source changed** next to a story's CI result | A ticket copied in with `spec-pull` differs from the live issue | Ask your AI to pull it again and re-check READY |
 | **Refresh failed** note at the top | The last update didn't run | The numbers shown are from the last good refresh. Open the linked run, or run the workflow again |
 
 **The full report.** Click **download the HTML dashboard** in the issue for charts, the pipeline and every quality number with how it's calculated. Or ask your AI to run `story-gate dashboard --open` to build it from your computer, including branches you haven't pushed yet.

@@ -405,7 +405,7 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
   - The copy records where it came from and a hash of its text. Edit it by hand and the check fails: pull it again instead.
   - The issue changed? Pull it again; READY is then out of date until you re-check it.
   - Already have the text, for example from your AI tool's GitHub connector? `story-gate spec-pull <story> #42 --from-file ticket.md` saves it marked "not verified".
-  - **CI compares the copy with the live issue** on every pull request, using the repository CI runs in and the number in the file name (never what the copy says): **unchanged**, **changed** (with how many requirements were added or removed), or **not checked** (no token, or GitHub didn't answer). A pasted copy that matches is then verified. The workflow needs `issues: read`. New setups get it; in a repository set up before v0.9, `story-gate doctor` shows the workflow as out of date until you re-run install. With `"spec_source_check": "block"`, a change or a failed check is a failing problem, which blocks the merge in enforce mode.
+  - **CI compares the copy with the live issue** on every pull request, using the repository CI runs in and the number in the file name (never what the copy says): **unchanged**, **changed** (with how many requirements were added or removed), or **not checked** (no token, or GitHub didn't answer). A pasted copy that matches is then verified. **Only CI can say "verified"**: nothing stored in the copy counts, because an AI could edit it. The validation page and the dashboard show each pulled issue as verified, changed or not checked, from the story-gate check on the pull request's latest commit; an issue edited after that check shows up at the next one. The workflow needs `issues: read`. New setups get it; in a repository set up before v0.9, `story-gate doctor` shows the workflow as out of date until you re-run install. With `"spec_source_check": "block"`, a change or a failed check is a failing problem, which blocks the merge in enforce mode.
 
 Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 
@@ -463,6 +463,7 @@ A READY that passed only with a waiver doesn't count as ready. A story finished 
 | **(out of date)** next to READY | The story, test plan, linked spec or policy changed after READY passed | Re-score READY before more work is built on it |
 | **(checked without a judge)** | Objective mode: only tests, structure and traceability were checked | Expected if you chose it. See [objective mode](#fallbacks) for what it doesn't check |
 | **Ownership conflicts** | The same story is claimed on two branches by different agents | Keep one claim and stop the other agent |
+| **source changed** or **source not checked** next to a CI result | A ticket copied in with `spec-pull` no longer matches the live issue, or CI hasn't compared them on the latest commit. Only CI can say **verified** | Pull the issue again and re-check READY; for "not checked", make sure the workflow can read issues |
 | **Verdicts marked wrong** rising | People keep labelling gate verdicts as wrong | Look at those stories; the policy or thresholds may need tuning |
 
 ### The numbers
