@@ -5723,6 +5723,9 @@ class TestSpecRepos(Base):
         self.assertIn("spec_repos", " ".join(T.weaker({"spec_repos": []}, {"spec_repos": ["a/b"]})))
         self.assertEqual(T.weaker({"spec_repos": ["a/b"]}, {"spec_repos": []}), [])
         self.assertEqual(T.tighten({"spec_repos": ["a/b", "c/d"]}, {"spec_repos": ["C/D"]})["spec_repos"], ["c/d"])
+        for bad in ("a/.", "a/..", "-a/b", "a/b/c"):
+            self.assertIsNone(self.g.REPO_NAME.fullmatch(bad), bad)  # the same names snapshot_name refuses
+        self.assertTrue(self.g.REPO_NAME.fullmatch("a/.github")); self.assertTrue(self.g.REPO_NAME.fullmatch("a/..x"))
         self.cfg(spec_repos=["not a repo"])
         self.assertIn('"spec_repos" must be a list', (lambda r: r.stdout + r.stderr)(run(self.repo, "status", "SAT-1")))
         y = self.g.CI_YML

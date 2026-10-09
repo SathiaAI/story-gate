@@ -961,7 +961,7 @@ def spec_scenarios(text, unread=None):
 # hyphens or digits stay unambiguous).
 SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/issue-(?:([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})--([A-Za-z0-9_.-]{1,100})-)?"
                            r"([0-9]{1,9})\.md$")
-REPO_NAME = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/[A-Za-z0-9_.-]{1,100}")
+REPO_NAME = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}")  # never '.' or '..' 
 
 
 def snapshot_name(rel):
