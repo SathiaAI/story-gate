@@ -342,6 +342,18 @@ story-gate asks every AI to write for a non-coder. The rules are in `.story-gate
 
 All settings live in `.story-gate/config.json`. CI always reads the copy on your main branch, so a pull request can't loosen its own rules.
 
+You don't have to edit that file by hand. Ask your AI, or run:
+
+| Command | What it does |
+|---|---|
+| `story-gate settings` | Lists every setting: its value here, the value CI enforces (from your main branch) and what it does |
+| `story-gate settings mode` | Shows one setting |
+| `story-gate settings set mode enforce` | Changes it in this folder. It checks the value first and tells you if the change is stricter or looser than what CI enforces |
+| `story-gate settings set mode enforce --pr` | Leaves this folder alone and opens a pull request that changes only `config.json` on your main branch |
+| `story-gate settings unset mode` | Puts the default back |
+
+Lists are comma-separated (`settings set enforce_points ci,stop`); `""` empties one. Every change still reaches CI only through a pull request that changes nothing else, and a code owner approves it. A looser change is marked as a weaker rule on that pull request. `settings` never accepts keys or tokens: those go in environment variables on your computer and in GitHub secrets. A few settings (`trackers`, `sources`, `sinks`, `project_hooks_allowed`, the judge's provider) are still edited in the file; `settings` lists them and says so. `story-gate doctor` points out a setting name story-gate doesn't know (usually a typo).
+
 | Setting | Default | What changing it does |
 |---|---|---|
 | `mode` | `"warn"` | `"enforce"` blocks at every point below. `"warn"` reports everything and blocks nothing |
