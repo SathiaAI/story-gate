@@ -776,6 +776,8 @@ class TestV03Integrity(Base):
         self.assertIn("SG_BASE_REF: ${{ github.event.pull_request.base.ref }}", g.CI_YML)
         self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", g.AUDIT_YML)
         self.assertIn(".claude/settings.json", g.GATE_FILES)
+        for f in sorted(SRC.glob("*.py")):  # every runtime module: a pull request that changes one is flagged
+            self.assertIn(".story-gate/" + f.name, g.GATE_FILES)
 
 
 class TestStoryGateOnlyPullRequests(Base):
