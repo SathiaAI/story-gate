@@ -5532,13 +5532,18 @@ class TestSourceStatus(Base):
         try:
             local = g.report_facts("SAT-1")
             self.assertEqual([s["state"] for s in local["sources"]], ["not checked"])
-            g.CI_SOURCES["SAT-1"] = [{"path": ".story-gate/stories/SAT-1/issue-7.md", "issue": 7, "state": "verified", "detail": "matches"}]
+            g.CI_SOURCES["SAT-1"] = [{"path": ".story-gate/stories/SAT-1/issue-7.md", "issue": 7, "state": "verified", "detail": "matches",
+                                      "copied_at": "2026-10-09T01:00:00Z", "checked_at": "2026-10-09T02:00:00Z",
+                                      "run": "https://github.com/acme/shop/actions/runs/9", "issue_updated_at": "unknown"},
+                                     {"path": "x/issue-9.md", "issue": None, "state": "not checked", "detail": "<b>odd</b>", "run": "javascript:x"}]
             facts = g.report_facts("SAT-1", in_ci=True)
             import sg_report as R
             page = R.to_html(facts)
         finally:
             os.environ.pop("STORY_GATE_ROOT")
-        self.assertIn("Linked issues", page); self.assertIn("verified", page); self.assertIn("they match", page)
+        self.assertIn("Linked issues", page); self.assertIn("verified", page); self.assertIn("they matched then", page)
+        self.assertIn("copied 2026-10-09T01:00:00Z", page); self.assertIn("actions/runs/9", page)
+        self.assertNotIn("issue updated unknown", page); self.assertNotIn("javascript:x", page); self.assertNotIn("<b>odd</b>", page)
 
     def test_dashboard_reads_ci_annotations_for_the_exact_commit(self):
         D = self.D

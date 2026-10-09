@@ -264,10 +264,17 @@ def to_html(f):
         for rec, uri in f["images"])
     if f.get("images_skipped"):
         imgs += '<div class="alert alert-warning">Not shown: %s</div>' % esc("; ".join(f["images_skipped"]), 1000)
-    src_rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td class="small">%s</td></tr>' % (
+    def src_when(s):
+        """Copied / issue updated / checked times, and the CI run, for one pulled issue (what's known)."""
+        bits = [("copied " + esc(s.get("copied_at"), 30)) if s.get("copied_at") else "",
+                ("issue updated " + esc(s.get("issue_updated_at"), 30)) if s.get("issue_updated_at") not in (None, "", "unknown") else "",
+                ("checked " + esc(s.get("checked_at"), 30)) if s.get("checked_at") else "",
+                esc(s.get("run"), 300) if str(s.get("run") or "").startswith("https://") else ""]
+        return " · ".join(b for b in bits if b)
+    src_rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td class="small">%s<div class="text-secondary">%s</div></td></tr>' % (
         esc(s.get("path"), 200), "#%s" % esc(s.get("issue"), 12) if s.get("issue") else "—",
-        D.pill({"verified": "PASS", "changed": "FAIL"}.get(s.get("state"))) + " " + esc(s.get("state"), 20), esc(s.get("detail"), 400))
-        for s in f.get("sources") or [])
+        D.pill({"verified": "PASS", "changed": "FAIL"}.get(s.get("state"))) + " " + esc(s.get("state"), 20), esc(s.get("detail"), 400),
+        src_when(s)) for s in f.get("sources") or [])
     card = lambda title, body, note="": ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">%s</h3>%s</div>%s</div>'
                                          % (title, ('<div class="card-actions">%s</div>' % note) if note else "", body))
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

@@ -1007,8 +1007,9 @@ def spec_snapshot(text, rel=""):
 # One set of words for a pulled issue's status, the same in CI notes, the validation page and the dashboard. Only CI's
 # own comparison, on the pull request's exact commit, can say "verified"; anything else is "changed" or "not checked".
 SOURCE_WORDS = {"unchanged": "verified", "changed": "changed", "not checked": "not checked"}
-SOURCE_LEGEND = ("verified: CI compared the copy with the live issue on this commit and they match; changed: they differ; "
-                 "not checked: CI hasn't compared them on this commit")
+SOURCE_LEGEND = ("verified: CI compared the copy with the live issue in this commit's check and they matched then; changed: "
+                 "they differ; not checked: CI hasn't compared them on this commit. An issue edited after the check shows up "
+                 "at the next check")
 CI_SOURCES = {}  # story id -> [{path, issue, state, detail}] from this CI run, for the validation page
 
 
@@ -2877,7 +2878,15 @@ def cmd_ci(tests_dir=None):
                     state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
                 msg = "%s (issue #%d): %s" % (rel, num, detail)
                 word = SOURCE_WORDS.get(state, "not checked")
-                sources.append({"path": rel, "issue": num, "state": word, "detail": detail})
+                try:
+                    fields = parse_snapshot(rd(ROOT / rel))[0]
+                except ValueError:
+                    fields = {}
+                run_url = ("%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
+                                                      os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_RUN_ID", ""))
+                           if os.environ.get("GITHUB_RUN_ID") else "")
+                sources.append({"path": rel, "issue": num, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
+                                "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
                 if state == "unchanged":
                     print("::notice title=story-gate: source verified::%s" % msg)  # the dashboard reads these annotations
                     notes.append(msg)
