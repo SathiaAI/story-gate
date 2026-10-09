@@ -5539,6 +5539,8 @@ class TestStartBranch(Base):
     def test_branch_names_and_detached_head(self):
         r = run(self.repo, "start", "SAT-1")
         self.assertNotIn("WARNING", r.stdout); self.assertNotIn("note:", r.stdout)  # feature/SAT-1-thing is right
+        self.git("checkout", "-qb", "feature/SAT-10-work")
+        self.assertIn("doesn't contain SAT-1", run(self.repo, "start", "SAT-1").stdout)  # SAT-1 isn't SAT-10
         self.git("checkout", "-qb", "misc-work")
         r = run(self.repo, "start", "SAT-1")
         self.assertIn("note: branch 'misc-work' doesn't contain SAT-1", r.stdout)
@@ -5558,7 +5560,7 @@ class TestStartBranch(Base):
         r = run(self.repo, "start", "SAT-1")
         self.assertIn("you're on feature/SAT-1-thing, the base branch", r.stdout)
         self.git("checkout", "-q", "main")
-        self.assertNotIn("the base branch", run(self.repo, "start", "SAT-1").stdout)
+        self.assertIn("you're on main, the base branch", run(self.repo, "start", "SAT-1").stdout)  # still the configured base
 
     def test_the_base_branch_comes_from_the_repository_not_a_fixed_name(self):
         self.git("branch", "-m", "main", "trunk")

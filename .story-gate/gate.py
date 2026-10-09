@@ -1403,15 +1403,17 @@ def start_branch_check(sid, c):
         if enforce:
             sys.exit("story-gate: not started: " + msg)
         return "WARNING: " + msg
-    ref = T.default_policy_ref(str(ROOT), c.get("base_branch", "main")) or c.get("base_branch", "main")
-    base = ref.split("/", 1)[1] if ref.startswith("origin/") else ref
-    if branch == base:
+    configured = c.get("base_branch", "main")
+    ref = T.default_policy_ref(str(ROOT), configured) or configured
+    bases = {configured, ref.split("/", 1)[1] if ref.startswith("origin/") else ref}  # origin/HEAD can be stale: both count
+    if branch in bases:
+        base = branch
         msg = ("you're on %s, the base branch. A story's work should reach %s through a pull request, where story-gate "
                "checks it. Make a branch for it first: git switch -c feature/%s" % (base, base, sid))
         if enforce:
             sys.exit("story-gate: not started: " + msg)
         return "WARNING: " + msg
-    if sid.lower() not in branch.lower():
+    if not re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(sid), branch, re.I):  # SAT-1 isn't in SAT-10
         return ("note: branch '%s' doesn't contain %s. CI finds the story from the branch name, or from a leading '[%s]' in "
                 "the pull request title" % (branch[:80], sid, sid))
     return ""
