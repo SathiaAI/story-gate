@@ -419,6 +419,7 @@ The token belongs to the person who made it. If they leave or it expires, the co
 
 ```yaml
       - id: specs_token
+        if: ${{ !github.event.pull_request.head.repo.fork }}  # forks get no secrets: skip, so the copies show "not checked"
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           client-id: ${{ vars.STORY_GATE_APP_CLIENT_ID }}
