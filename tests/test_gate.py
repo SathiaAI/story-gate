@@ -5578,5 +5578,60 @@ class TestSourceStatus(Base):
         self.assertIn("checks: read", y); self.assertIn("pull-requests: read", y)
 
 
+class TestStartBranch(Base):
+    """`start` warns on the base branch (refuses in enforce mode) and notes a branch name without the story id."""
+
+    def git(self, *a):
+        return subprocess.run(["git", *a], cwd=self.repo, capture_output=True, text=True)
+
+    def test_on_the_base_branch_it_warns_and_still_starts_in_warn_mode(self):
+        self.git("checkout", "-q", "main")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: you're on main, the base branch", r.stdout); self.assertIn("git switch -c feature/SAT-1", r.stdout)
+        self.assertTrue((self.repo / ".story-gate/stories/SAT-1/story.md").exists())
+
+    def test_enforce_mode_refuses_and_writes_nothing(self):
+        self.cfg(mode="enforce"); self.git("add", "-A"); self.git("commit", "-qm", "enforce")
+        self.git("checkout", "-q", "main"); self.git("merge", "-q", "feature/SAT-1-thing")
+        r = run(self.repo, "start", "SAT-2")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not started: you're on main", r.stderr)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-2").exists())
+        self.assertFalse((self.repo / ".story-gate/.active").exists())
+
+    def test_branch_names_and_detached_head(self):
+        r = run(self.repo, "start", "SAT-1")
+        self.assertNotIn("WARNING", r.stdout); self.assertNotIn("note:", r.stdout)  # feature/SAT-1-thing is right
+        self.git("checkout", "-qb", "feature/SAT-10-work")
+        self.assertIn("doesn't contain SAT-1", run(self.repo, "start", "SAT-1").stdout)  # SAT-1 isn't SAT-10
+        self.git("checkout", "-qb", "misc-work")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertIn("note: branch 'misc-work' doesn't contain SAT-1", r.stdout)
+        self.git("checkout", "-q", "--detach")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertEqual(r.returncode, 0); self.assertIn("WARNING: no branch is checked out", r.stdout)
+        self.cfg(mode="enforce")
+        r = run(self.repo, "start", "SAT-3")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not started: no branch is checked out", r.stderr)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-3").exists())
+
+    def test_the_base_branch_follows_origin_head(self):
+        origin = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, origin, True)
+        subprocess.run(["git", "clone", "-q", "--bare", str(self.repo), str(origin / "o.git")], capture_output=True, check=True)
+        self.git("remote", "add", "origin", str(origin / "o.git")); self.git("fetch", "-q", "origin")
+        self.git("remote", "set-head", "origin", "feature/SAT-1-thing")  # the repository's default is not main
+        r = run(self.repo, "start", "SAT-1")
+        self.assertIn("you're on feature/SAT-1-thing, the base branch", r.stdout)
+        self.git("checkout", "-q", "main")
+        self.assertIn("you're on main, the base branch", run(self.repo, "start", "SAT-1").stdout)  # still the configured base
+
+    def test_the_base_branch_comes_from_the_repository_not_a_fixed_name(self):
+        self.git("branch", "-m", "main", "trunk")
+        self.cfg(base_branch="trunk")
+        self.git("checkout", "-q", "trunk")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertIn("you're on trunk, the base branch", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

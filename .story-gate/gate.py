@@ -1400,9 +1400,38 @@ None
 CLIENT_ENV = (("CLAUDECODE", "claude-code"), ("CURSOR_TRACE_ID", "cursor"), ("CODEX_SANDBOX", "codex"), ("GEMINI_CLI", "gemini"))
 
 
+def start_branch_check(sid, c):
+    """'' when the current branch suits a story; otherwise a plain warning. Raises SystemExit on the base branch in
+    enforce mode: a story's work reaches the base branch through a pull request, where the gate checks it."""
+    branch = current_branch()
+    if os.environ.get("GITHUB_ACTIONS"):
+        return ""
+    enforce = c.get("mode") == "enforce" or "pre_edit" in (c.get("enforce_points") or [])
+    if not branch or branch == "HEAD":  # no branch: the work has nowhere to go but a later, unchecked commit
+        msg = "no branch is checked out (detached HEAD). Make one for the story first: git switch -c feature/%s" % sid
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
+    configured = c.get("base_branch", "main")
+    ref = T.default_policy_ref(str(ROOT), configured) or configured
+    bases = {configured, ref.split("/", 1)[1] if ref.startswith("origin/") else ref}  # origin/HEAD can be stale: both count
+    if branch in bases:
+        base = branch
+        msg = ("you're on %s, the base branch. A story's work should reach %s through a pull request, where story-gate "
+               "checks it. Make a branch for it first: git switch -c feature/%s" % (base, base, sid))
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
+    if not re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(sid), branch, re.I):  # SAT-1 isn't in SAT-10
+        return ("note: branch '%s' doesn't contain %s. CI finds the story from the branch name, or from a leading '[%s]' in "
+                "the pull request title" % (branch[:80], sid, sid))
+    return ""
+
+
 def cmd_start(sid, client=None, model=None):
     """Create (or complete) a story's folder, including validation.md's template for stories started before it existed."""
     sd = sdir(sid)
+    branch_note = start_branch_check(sid, cfg())  # before anything is written: a refused start leaves nothing behind
     sd.mkdir(parents=True, exist_ok=True)
     client = client or next((name for var, name in CLIENT_ENV if os.environ.get(var)), "")
     if client or model or not (sd / "coder.json").exists():
@@ -1421,6 +1450,8 @@ def cmd_start(sid, client=None, model=None):
     baseline = prev[2].strip() if len(prev) >= 3 and prev[0].strip() == sid and prev[1].strip() == branch else git("rev-parse", "HEAD").strip()
     ACTIVE.write_text("%s\n%s\n%s\n" % (sid, branch, baseline), encoding="utf-8")  # restarting a story keeps its baseline
     emit("started", sid, load_json(sd / "coder.json"))
+    if branch_note:
+        print("story-gate: " + branch_note)
     print("story-gate: active story %s -> fill %s (story.md, context.md, tests.json), then: score %s ready. "
           "Not sure what's next? Run: %s" % (sid, sd.relative_to(ROOT), sid, gate_cmd("next")))
 
