@@ -966,7 +966,7 @@ REPO_NAME = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/[A-Za-z0-9_.-]{1,100
 
 def snapshot_name(rel):
     """(story id, issue number, 'owner/repo' or None for this repository) for a spec-pull copy's path, else None."""
-    m = SNAPSHOT_NAME.match(rel or "")
+    m = SNAPSHOT_NAME.fullmatch(rel or "")
     if not m or (m.group(3) or "x") in (".", ".."):
         return None
     return m.group(1), int(m.group(4)), ("%s/%s" % (m.group(2), m.group(3)) if m.group(2) else None)
@@ -1013,6 +1013,9 @@ def spec_snapshot(text, rel=""):
     m = snapshot_name(rel)
     if not m and "source_kind: github-issue" not in text[:2000]:
         return text, None
+    if not m:  # it claims to be a pulled copy, but CI only compares copies where spec-pull saves them
+        return "", ("it says it's a copy of an issue, but it isn't where `story-gate spec-pull` saves one "
+                    "(.story-gate/stories/<ID>/issue-<N>.md), so CI can't compare it with the live issue. Pull it again")
     try:
         fields, content = parse_snapshot(text)
     except ValueError as e:
@@ -2891,7 +2894,10 @@ def cmd_ci(tests_dir=None):
                 sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
             allowed = {r.lower() for r in c.get("spec_repos") or []}
+            here = os.environ.get("GITHUB_REPOSITORY", "")
             for rel, owner, num, other in snaps:
+                if other and other.lower() == here.lower():
+                    other = None  # this repository's own issue, however the copy is named: compare it as one
                 try:
                     if other and other.lower() not in allowed:  # never fetch outside the default branch's allowlist
                         state, detail = "not checked", ("%s isn't on spec_repos in the default branch's config, so CI doesn't "
@@ -3951,6 +3957,10 @@ def cmd_doctor(repo=None, strict=False, prove=False):
         cur = rd(ROOT / f)
         st = "ok" if cur == with_user_steps(cur, body) else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
         print("  %-42s %s" % (f, st))
+        a_, b_ = USER_STEPS
+        if a_ in cur and cur.split(a_, 1)[1].split(b_, 1)[0].strip():
+            print("  %-42s has your own steps between the 'your steps' markers: review them like any workflow change "
+                  "(they run with this job's secrets)" % f)
         if st != "ok":
             fails.append(f)
     owners = rd(ROOT / ".github/CODEOWNERS") or rd(ROOT / "CODEOWNERS")

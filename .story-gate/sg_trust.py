@@ -633,7 +633,8 @@ def weaker(old, new):
             out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
-    added = sorted({str(r).lower() for r in n.get("spec_repos") or []} - {str(r).lower() for r in o.get("spec_repos") or []})
+    lst = lambda v: [str(r).lower() for r in v] if isinstance(v, list) else ([str(v).lower()] if v else [])
+    added = sorted(set(lst(n.get("spec_repos"))) - set(lst(o.get("spec_repos"))))
     if added:
         out.append("issues from more repositories can now be copied in and checked against (spec_repos: %s)" % ", ".join(added[:5]))
     if o.get("spec_source_check") == "block" and n.get("spec_source_check") != "block":

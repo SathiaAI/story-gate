@@ -412,6 +412,8 @@ Keep tickets in a central specs repository? List it, then pull from it like any 
 
 The token belongs to the person who made it. If they leave or it expires, the copies show **not checked** until someone makes a new one.
 
+**About secrets in pull requests.** A pull request from a branch of this repository runs its own copy of the workflow, with this repository's secrets. Someone who can push a branch here could change the workflow to print any secret: the judge key, this token or the App's key. Keep these tokens read-only, scoped to the specs repositories, and require a code owner's review of `.github/workflows` (setup's CODEOWNERS does; story-gate also flags workflow changes on the pull request). An App's permissions cap any token made with its key, so give it Issues: Read-only and nothing else. CI also won't compare a private specs repository's issues while this repository is public.
+
 **B. A GitHub App (for organisations; not yet validated end to end).** Short-lived tokens that don't belong to a person. Create a GitHub App with only **Issues: Read-only**, install it on the specs repositories, save its client ID as the variable `STORY_GATE_APP_CLIENT_ID` and its private key as the secret `STORY_GATE_APP_KEY`. Then paste this step between the `your steps` markers in `.github/workflows/story-gate.yml`. Install keeps what's there.
 
 ```yaml

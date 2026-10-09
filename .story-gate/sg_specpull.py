@@ -191,6 +191,16 @@ def cli(gate, args):
     return 0
 
 
+def public_here():
+    """Is the repository CI runs in public? From the event GitHub wrote for this run; unknown counts as public."""
+    import json as _json
+    try:
+        with open(os.environ.get("GITHUB_EVENT_PATH") or "", encoding="utf-8") as fh:
+            return _json.load(fh).get("repository", {}).get("private") is not True
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
 def live_status(gate, sid, rel, num, repo, token):
     """CI: compare the copy at rel with issue #num as it is now. The repository comes from CI (GITHUB_REPOSITORY) and the
     number from the file name, never from the copy, which an agent could rewrite. Returns (state, plain-English detail):
@@ -206,6 +216,16 @@ def live_status(gate, sid, rel, num, repo, token):
     if fields["repo"].lower() != repo.lower():
         return "changed", "the copy says it came from %s, but this repository is %s" % (fields["repo"][:80], repo)
     import sg_github as G
+    here = os.environ.get("GITHUB_REPOSITORY", "")
+    if here and repo.lower() != here.lower():  # another repository: never let a public repository probe a private one
+        if public_here():
+            try:
+                st_v, info, _ = G.call("GET", "/repos/%s" % repo, token)
+            except Exception:
+                st_v, info = 0, None
+            if st_v != 200 or not isinstance(info, dict) or info.get("private") is not False:
+                return "not checked", ("%s is private (or its visibility couldn't be read) and this repository is public, so CI "
+                                       "doesn't compare its issues here; spec-pull refuses such a copy" % repo)
     try:
         st, data, _ = G.call("GET", "/repos/%s/issues/%d" % (repo, num), token)
     except Exception as e:  # network trouble: say so, never pass silently

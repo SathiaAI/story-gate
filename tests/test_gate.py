@@ -5662,8 +5662,31 @@ class TestSpecRepos(Base):
             state, why = self.SP.live_status(self.g, "SAT-1", ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md", 12, "acme/specs-2", "t")
         self.assertEqual(state, "unchanged", why)
 
+    def test_a_copy_outside_its_place_blocks(self):
+        self.pull()
+        stray = self.repo / "notes" / "copy.md"; stray.parent.mkdir()
+        stray.write_text(self.snap.read_text(encoding="utf-8"), encoding="utf-8")
+        _, problem = self.g.linked_scenarios("notes/copy.md")
+        self.assertIn("isn't where `story-gate spec-pull` saves one", problem)
+        self.assertIsNone(self.g.snapshot_name(".story-gate/stories/S/issue-o--x-5.md\n"))
+
+    def test_a_public_repo_never_probes_a_private_specs_repo(self):
+        self.pull()
+        ev = self.repo.parent / (self.repo.name + "-event.json"); self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        from unittest import mock
+        for private_here, specs_private, want in ((False, True, "not checked"), (False, False, "unchanged"),
+                                                  (True, True, "unchanged"), (None, True, "not checked")):
+            ev.write_text(json.dumps({"repository": {"private": private_here}} if private_here is not None else {}))
+            env = {"GITHUB_REPOSITORY": "acme/shop", "GITHUB_EVENT_PATH": str(ev)}
+            with mock.patch.dict(os.environ, env), mock.patch.object(self.G, "call", side_effect=self.fake(specs_private=specs_private)):
+                state, why = self.SP.live_status(self.g, "SAT-1", ".story-gate/stories/SAT-1/issue-acme--specs-2-12.md", 12, "acme/specs-2", "t")
+            self.assertEqual(state, want, (private_here, specs_private, why))
+        self.assertIn("this repository is public", why)
+
     def test_settings_rules_and_workflow(self):
         import sg_trust as T
+        for junk in (5, True, "a/b", None):
+            T.weaker({"spec_repos": []}, {"spec_repos": junk})  # never crashes on a malformed value
         self.assertIn("spec_repos", " ".join(T.weaker({"spec_repos": []}, {"spec_repos": ["a/b"]})))
         self.assertEqual(T.weaker({"spec_repos": ["a/b"]}, {"spec_repos": []}), [])
         self.assertEqual(T.tighten({"spec_repos": ["a/b", "c/d"]}, {"spec_repos": ["C/D"]})["spec_repos"], ["c/d"])
