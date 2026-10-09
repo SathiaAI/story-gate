@@ -348,7 +348,7 @@ You don't have to edit that file by hand. Ask your AI, or run:
 |---|---|
 | `story-gate settings` | Lists every setting: its value here, the value CI enforces (from your main branch) and what it does |
 | `story-gate settings mode` | Shows one setting |
-| `story-gate settings set mode enforce` | Changes it in this folder. It checks the value first and tells you if the change is stricter or looser than what CI enforces |
+| `story-gate settings set mode enforce` | Changes it in this folder. It checks the value first and tells you if the change is looser than what CI enforces (a preview: CI makes the same check on the pull request) |
 | `story-gate settings set mode enforce --pr` | Leaves this folder alone and opens a pull request that changes only `config.json` on your main branch |
 | `story-gate settings unset mode` | Puts the default back |
 

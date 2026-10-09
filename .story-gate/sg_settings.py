@@ -10,7 +10,7 @@ change is made to the default branch's config.json on a new branch, as a pull re
 approves. Every value is checked with the rules the gate itself applies. Keys and tokens are never accepted: they belong
 in environment variables and GitHub secrets, not in the repository.
 """
-import base64, difflib, json, os, re, tempfile, time
+import base64, difflib, json, os, re, secrets, stat, tempfile, time
 
 # key: (kind, what it does). Kinds: bool, choice:a|b, list, list:a|b, users, reviewers, repos, number01, int0, int1,
 # text, regex, branch, issue.
@@ -59,8 +59,16 @@ EXTRA_KNOWN = ("min_runtime_version",)  # top-level keys the gate reads that are
 GH_USER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 BOT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?")
 BRANCH = re.compile(r"(?!-)(?!.*\.\.)(?!.*//)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![./])(?<!\.lock)")
-SECRET = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}|\bsk-[A-Za-z0-9_-]{16,}|\blin_(?:api|oauth)_\w{16,}"
-                    r"|\bATATT\w{16,}|\bxox[abprs]-|-----BEGIN|\b(?i:bearer)\s+\S{16,}|\bAKIA[0-9A-Z]{16}")
+_B = r"(?<![\w-])"  # a token starts at the beginning of a word, not after a hyphen ("make test-sk-model" is fine)
+SECRET = re.compile("|".join([
+    _B + r"gh[pousr]_[A-Za-z0-9]{20,}", _B + r"github_pat_\w{20,}", _B + r"sk-(?=[\w-]*\d)[A-Za-z0-9_-]{32,}", _B + r"sk_(?:live|test)_\w{16,}",
+    _B + r"lin_(?:api|oauth)_\w{16,}", _B + r"ATATT\w{16,}", _B + r"xox[abprs]-[\w-]{10,}", _B + r"glpat-[\w-]{20,}",
+    _B + r"npm_[A-Za-z0-9]{30,}", _B + r"AIza[\w-]{30,}", _B + r"hf_[A-Za-z0-9]{30,}", _B + r"(?:AKIA|ASIA)[0-9A-Z]{16}",
+    _B + r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}",  # a JSON web token
+    r"-----BEGIN [A-Z ]*PRIVATE KEY", r"(?i:\b(?:bearer|basic)\s+[A-Za-z0-9+/=._~-]{16,})",
+    r"://[^/\s:@]+:[^/\s@]+@",  # a password inside a link
+]))
+DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers")
 CONFIG = ".story-gate/config.json"
 REPO = re.compile(r"$^")  # owner/repo names: gate.REPO_NAME, set in cli()
 
@@ -111,12 +119,15 @@ def parse(key, raw):
             raise SettingsError("%s must be an issue number, or none" % key)
         return int(s.lstrip("#"))
     if kind == "regex":
-        try:
-            re.compile(s)
+        if not s or len(s) > 200:
+            raise SettingsError("%s must be a pattern of 1 to 200 characters" % key)
+        if re.search(r"\(\?[aiLmsux]+\)", s):
+            raise SettingsError("%s can't use inline flags such as (?i): the gate puts the pattern inside a larger one" % key)
+        try:  # the forms the gate compiles it in
+            for form in (r"(?<![A-Za-z0-9])(?:%s)(?![0-9])", r"\s*\[?(%s)\]?(?:[:\s]|$)"):
+                re.compile(form % s)
         except re.error as e:
             raise SettingsError("%s isn't a valid pattern (%s)" % (key, e))
-        if not s:
-            raise SettingsError("%s can't be empty" % key)
         return s
     if kind == "branch":
         if not BRANCH.fullmatch(s):
@@ -182,6 +193,9 @@ def unknown_keys(doc, defaults):
 
 def validate(G, doc):
     """The full config the gate would use for this config.json object; SettingsError when the gate would refuse it."""
+    for k in DICTS:
+        if k in doc and not isinstance(doc[k], dict):
+            raise SettingsError('"%s" in %s must be an object like {...}. Fix it by hand first' % (k, CONFIG))
     c = G.full_config(json.dumps(doc))
     try:
         G.check_config(c)
@@ -196,24 +210,26 @@ def validate(G, doc):
     return c
 
 
-def compare(G, old_full, new_full):
-    """(looser, stricter): plain-English lists of how new_full differs in strictness from old_full."""
-    return G.T.weaker(old_full, new_full), G.T.weaker(new_full, old_full)
+def looser_than(G, old_full, new_full):
+    """Plain-English list of ways new_full is looser than old_full (weaker() is the same check CI reports)."""
+    try:
+        return G.T.weaker(old_full, new_full)
+    except Exception:  # odd values in the committed policy: say so rather than guess
+        return ["story-gate couldn't compare it with the current policy, so a code owner should read the change closely"]
 
 
 def policy_ref(G):
-    """(ref, label) for the policy CI enforces: the enrolled policy ref, else origin/<base_branch>, else <base_branch>."""
+    """(ref, label) for the policy CI enforces: the enrolled policy ref, else the remote's default branch (origin/HEAD),
+    else origin/main or origin/master, else a local main or master. Never the base_branch in the file being changed,
+    which the change itself could point somewhere else. A preview only: CI makes the same comparison on the pull request."""
     e = G.enrolled()
     if e and e.get("policy_ref"):
         return e["policy_ref"], e["policy_ref"]
-    try:
-        base = (json.loads(G.rd(G.GATE / "config.json") or "{}") or {}).get("base_branch") or "main"
-    except ValueError:
-        base = "main"
-    for ref in ("origin/" + str(base), str(base)):
+    head = G.git("symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").strip()
+    for ref in ([head] if head else []) + ["origin/main", "origin/master", "main", "master"]:
         if G.git("rev-parse", "--verify", "-q", ref + "^{commit}").strip():
             return ref, ref
-    return None, "origin/" + str(base)
+    return None, "your main branch"
 
 
 def read_local(G):
@@ -238,10 +254,13 @@ def write_local(p, before, doc):
     now = p.read_text(encoding="utf-8-sig") if p.is_file() else None
     if now != before:
         raise SettingsError("%s changed while this ran. Nothing was written: run the command again" % CONFIG)
+    mode = stat.S_IMODE(p.stat().st_mode) if p.is_file() else None
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".config.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(dump(doc))
+        if mode is not None:
+            os.chmod(tmp, mode)  # mkstemp makes the file private; keep the permissions config.json had
         os.replace(tmp, str(p))
     except BaseException:
         try:
@@ -259,15 +278,14 @@ def describe(key, value, remove):
     return "put %s back to the default" % key if remove else "set %s to %s" % (key, show(value))
 
 
-def strictness(looser, stricter, label):
-    lines = []
-    if looser:
-        lines.append("Looser than %s: %s." % (label, "; ".join(looser)))
-    if stricter:
-        lines.append("Stricter than %s: %s." % (label, "; ".join(stricter)))
-    if not lines:
-        lines.append("Neither stricter nor looser than %s." % label)
-    return lines
+def strictness(looser, label):
+    return ["Looser than %s: %s." % (label, "; ".join(looser))] if looser else ["Not looser than %s." % label]
+
+
+def fence(text, lang=""):
+    """A Markdown code block that the text can't break out of."""
+    ticks = "`" * max(3, 1 + max([len(m) for m in re.findall(r"`+", text)] or [0]))
+    return "%s%s\n%s\n%s" % (ticks, lang, text, ticks)
 
 
 def cmd_set(G, key, raw, remove, pr):
@@ -289,9 +307,11 @@ def cmd_set(G, key, raw, remove, pr):
     if not base_text:
         print("%s has no story-gate settings yet, so CI isn't using any." % label)
     else:
-        looser, stricter = compare(G, G.full_config(base_text), new_full)
-        for line in strictness(looser, stricter, label + " (what CI enforces)"):
+        looser = looser_than(G, G.full_config(base_text), new_full)
+        for line in strictness(looser, label + " (what CI enforces)"):
             print(line)
+        if not looser:
+            print("CI uses it once it's merged into the default branch.")
         if looser:
             print("A code owner has to approve this in a pull request; CI reports it as a weaker rule.")
             if G.enrolled():
@@ -330,8 +350,8 @@ def open_pr(G, key, value, remove):
     f = ok("/repos/%s/contents/%s?ref=%s" % (repo, CONFIG, tip))
     if not f or f.get("encoding") != "base64":
         raise SettingsError("%s has no %s on %s yet. Set story-gate up first (`story-gate init`)" % (repo, CONFIG, base))
-    text = base64.b64decode(f.get("content") or "").decode("utf-8-sig")
     try:
+        text = base64.b64decode(f.get("content") or "").decode("utf-8-sig")
         doc = json.loads(text)
         assert isinstance(doc, dict)
     except Exception:
@@ -342,22 +362,29 @@ def open_pr(G, key, value, remove):
     if new == doc:
         print("%s is already %s on %s. No pull request needed." % (key, show(value_of(new_full, key)), base))
         return 0
-    looser, stricter = compare(G, old_full, new_full)
+    looser = looser_than(G, old_full, new_full)
     what = describe(key, value, remove)
-    body = ["story-gate settings: %s." % what, "",
-            "- Before: `%s`" % show(value_of(old_full, key)), "- After: `%s`" % show(value_of(new_full, key)), ""]
-    body += ["**%s**" % x if x.startswith("Looser") else x for x in strictness(looser, stricter, base)]
+    body = ["story-gate settings: %s `%s`." % ("reset" if remove else "change", key), "",
+            "Before:", fence(show(value_of(old_full, key)), "json"), "After:", fence(show(value_of(new_full, key)), "json"), ""]
+    if looser:
+        body += ["**This makes the rules looser than %s:**" % base, fence("\n".join("- " + x for x in looser), "text")]
+    else:
+        body += ["Not looser than %s." % base]
     body += ["", "Only `%s` changes. A code owner approves this pull request; GitHub doesn't count an approval from "
                  "whoever opened it or pushed its latest commit (or a code owner adds the label `%s`)."
              % (CONFIG, getattr(G, "CHANGE_LABEL", "story-gate-change"))]
-    branch = "story-gate-settings-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-"), time.strftime("%Y%m%d%H%M%S", time.gmtime()))
+    branch = "story-gate-settings-%s-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-"),
+                                                time.strftime("%Y%m%d%H%M%S", time.gmtime()), secrets.token_hex(3))
     try:
         res = GH.open_setup_pr(tok, repo, {CONFIG: dump(new).encode("utf-8")}, branch=branch,
-                               title="story-gate settings: " + what, body="\n".join(body), base=base, parent=tip)
+                               title="story-gate settings: %s %s" % ("reset" if remove else "change", key),
+                               body="\n".join(body), base=base, parent=tip)
     except RuntimeError as e:
         raise SettingsError(str(e))
+    if res.get("branch") != branch:
+        raise SettingsError("GitHub returned another pull request (%s) instead of a new one. Check it before running this again" % res.get("url"))
     print("Opened pull request #%s to %s: %s" % (res["number"], what, res["url"]))
-    for line in strictness(looser, stricter, base):
+    for line in strictness(looser, base):
         print(line)
     print("Nothing changed in this folder. A code owner approves the pull request; it takes effect when it's merged.")
     return 0
@@ -429,4 +456,7 @@ def cli(G, args):
         raise SettingsError("usage: settings | settings KEY | settings set KEY VALUE [--pr] | settings unset KEY [--pr]")
     except SettingsError as e:
         print("story-gate settings: %s" % e)
+        return 1
+    except (OSError, ValueError) as e:  # network, disk or encoding trouble: a plain message, never a traceback
+        print("story-gate settings: nothing was changed (%s: %s)" % (e.__class__.__name__, str(e)[:200]))
         return 1

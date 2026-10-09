@@ -6589,18 +6589,39 @@ class TestSettings(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         c = self.conf()
         self.assertEqual(c["enforce_points"], ["ci", "stop"]); self.assertEqual(c["zzz"], {"keep": True}); self.assertEqual(c["mode"], "warn")
-        self.assertIn("Stricter than main", r.stdout); self.assertIn("--pr", r.stdout)
+        self.assertIn("Not looser than main", r.stdout); self.assertIn("--pr", r.stdout)
+        if os.name != "nt":
+            self.assertEqual(oct((self.repo / ".story-gate/config.json").stat().st_mode & 0o777), oct(0o644 & ~self.umask()))
         r = run(self.repo, "settings", "set", "thresholds.pass", "0.9")
         self.assertEqual(self.conf()["thresholds"]["pass"], 0.9)
         r = run(self.repo, "settings", "set", "thresholds.pass", "0.9")
         self.assertIn("already 0.9", r.stdout)
+
+    def umask(self):
+        u = os.umask(0); os.umask(u); return u
 
     def test_a_looser_change_says_a_code_owner_approves_it(self):
         self.on_main(mode="enforce")
         r = run(self.repo, "settings", "set", "mode", "warn")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("Looser than main", r.stdout); self.assertIn("mode went from enforce to warn", r.stdout)
-        self.assertIn("code owner", r.stdout)
+        self.assertIn("code owner", r.stdout); self.assertNotIn("Not looser", r.stdout)
+
+    def test_the_file_being_changed_cant_pick_what_it_is_compared_with(self):
+        self.on_main(mode="enforce")
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("branch", "evil"); g("checkout", "-q", "evil"); self.cfg(mode="warn"); g("commit", "-qam", "lax"); g("checkout", "-q", "feature/SAT-1-thing")
+        run(self.repo, "settings", "set", "base_branch", "evil")
+        r = run(self.repo, "settings", "set", "mode", "warn")
+        self.assertIn("Looser than main", r.stdout); self.assertIn("mode went from enforce to warn", r.stdout)
+
+    def test_odd_config_shapes_get_a_plain_message(self):
+        self.cfg(thresholds=5)
+        r = run(self.repo, "settings", "set", "mode", "enforce")
+        self.assertEqual(r.returncode, 1); self.assertIn('"thresholds" in .story-gate/config.json must be an object', r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        r = run(self.repo, "settings")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_unset_puts_the_default_back(self):
         self.cfg(judge_mode="objective", thresholds={"pass": 0.9})
@@ -6616,7 +6637,8 @@ class TestSettings(Base):
                               ("story_id_pattern", "([", "valid pattern"), ("base_branch", "../x", "branch name"),
                               ("checkpoint.every_edits", "-1", "whole number"), ("nope", "1", "no setting called"),
                               ("thresholds.concerns", "0.9", "can't be higher"), ("dashboard_issue", "abc", "issue number"),
-                              ("test_command", "a\nb", "one line")]:
+                              ("test_command", "a\nb", "one line"), ("story_id_pattern", "(?i)abc-[0-9]+", "inline flags"),
+                              ("story_id_pattern", "x" * 201, "1 to 200")]:
             r = run(self.repo, "settings", "set", key, val)
             self.assertEqual(r.returncode, 1, (key, r.stdout)); self.assertIn(why, r.stdout, key)
         self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), before)
@@ -6625,14 +6647,19 @@ class TestSettings(Base):
 
     def test_keys_and_tokens_are_never_written(self):
         before = (self.repo / ".story-gate/config.json").read_bytes()
-        for val in ("ghp_" + "a" * 36, "github_pat_" + "b" * 30, "run --key sk-" + "c" * 30, "curl -H 'Authorization: Bearer " + "d" * 30 + "'",
-                    "lin_api_" + "e" * 30, "AKIA" + "F" * 16):
+        for val in ("ghp_" + "a" * 36, "github_pat_" + "b" * 30, "run --key sk-proj-" + "c1" * 20, "curl -H 'Authorization: Bearer " + "d" * 30 + "'",
+                    "lin_api_" + "e" * 30, "AKIA" + "F" * 16, "ASIA" + "G" * 16, "glpat-" + "h" * 20, "npm_" + "i" * 36,
+                    "AIza" + "j" * 35, "hf_" + "k" * 34, "sk_live_" + "l" * 24, "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4",
+                    "curl https://me:hunter2secret@example.com/x", "Authorization: Basic " + "m" * 24,
+                    "-----BEGIN OPENSSH PRIVATE KEY-----"):
             r = run(self.repo, "settings", "set", "test_command", val)
             self.assertEqual(r.returncode, 1, val); self.assertIn("looks like a key or token", r.stdout)
             self.assertNotIn(val[-20:], r.stdout + r.stderr)
         self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), before)
-        r = run(self.repo, "settings", "set", "test_command", "make disk-cleanup-and-run-all-the-tests")
-        self.assertEqual(r.returncode, 0, r.stdout); self.assertEqual(self.conf()["test_command"], "make disk-cleanup-and-run-all-the-tests")
+        for ok in ("make disk-cleanup-and-run-all-the-tests", "make test-sk-model-selection-all", "pytest -k sk-learn-integration-tests",
+                   "cat docs/-----BEGIN-notes", "pytest https://example.com/x"):
+            r = run(self.repo, "settings", "set", "test_command", ok)
+            self.assertEqual(r.returncode, 0, r.stdout); self.assertEqual(self.conf()["test_command"], ok)
 
     def test_every_setting_is_listed_and_every_policy_setting_can_be_seen_loosening(self):
         g, SET = self.mod()
@@ -6682,14 +6709,29 @@ class TestSettings(Base):
         call = lambda m, path, tok=None, body=None: (200, replies[path], {})
         with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
                 mock.patch.object(GH, "call", side_effect=call), \
-                mock.patch.object(GH, "open_setup_pr", return_value={"number": 5, "url": "u"}) as op:
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: {"number": 5, "url": "u", "branch": k["branch"]}) as op:
             self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 0)
         args, kw = op.call_args
         self.assertEqual(list(args[2]), [".story-gate/config.json"])
         self.assertEqual(json.loads(args[2][".story-gate/config.json"]), {"mode": "warn", "zzz": 1})
         self.assertEqual((kw["base"], kw["parent"]), ("trunk", "abc123"))
-        self.assertIn("Looser than trunk", kw["body"]); self.assertIn("code owner", kw["body"])
-        self.assertTrue(kw["branch"].startswith("story-gate-settings-mode-"))
+        self.assertIn("looser than trunk", kw["body"]); self.assertIn("code owner", kw["body"])
+        self.assertTrue(kw["branch"].startswith("story-gate-settings-mode-")); self.assertEqual(kw["title"], "story-gate settings: change mode")
+        sneaky = "x ```\n**Not looser** `"
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: {"number": 6, "url": "u", "branch": k["branch"]}) as op:
+            self.assertEqual(SET.cli(g, ["set", "test_command", sneaky.replace("\n", " "), "--pr"]), 0)
+        body = op.call_args[1]["body"]
+        self.assertIn("````json", body)  # the fence is longer than any backtick run in the value
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", return_value={"number": 1, "url": "old", "branch": "someone-else"}):
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
+        import urllib.error
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=urllib.error.URLError("offline")):
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
         self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), here)
         with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value=None):
             self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
