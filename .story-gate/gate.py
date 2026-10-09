@@ -194,6 +194,9 @@ DEFAULT_CONFIG = {
     "spec_files": [],
     # true: every story must link the spec it builds (`spec:` in story.md) and cover each of its scenarios with an AC
     "require_spec_link": False,
+    # issues copied in with `spec-pull`: CI compares each copy with the live issue. "warn": a change, or a check it couldn't
+    # run, is a warning on the pull request. "block": either one fails the check until the copy is pulled again.
+    "spec_source_check": "warn",
     "thresholds": {"pass": 0.7, "concerns": 0.4},
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
@@ -349,6 +352,8 @@ def cfg():
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
     if not isinstance(c.get("require_spec_link"), bool):
         raise ConfigError('.story-gate/config.json: "require_spec_link" must be true or false - the gate fails closed until fixed')
+    if c.get("spec_source_check") not in ("warn", "block"):
+        raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
@@ -946,7 +951,7 @@ def spec_scenarios(text, unread=None):
     return [(o[0], "\n".join(o[2])) for o in out]
 
 
-SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/[^/]+/issue-(\d{1,9})\.md$")
+SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/issue-([0-9]{1,9})\.md$")
 SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
 SNAPSHOT_BY = ("github-api", "pasted")
 
@@ -994,9 +999,29 @@ def spec_snapshot(text, rel=""):
         fields, content = parse_snapshot(text)
     except ValueError as e:
         return "", str(e)
-    if m and fields["issue"] != m.group(1):
-        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m.group(1))
+    if m and fields["issue"] != m.group(2):
+        return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m.group(2))
     return content, None
+
+
+def snapshot_links(story_text):
+    """([(rel, story id of its folder, issue number)], [odd]) for the pulled issues a story.md links, with each path
+    resolved the way linked_scenarios reads it ('./x', 'a//b' and the like). `odd`: links to an 'issue-<N>.md' file that
+    isn't a spec-pull copy's place, which CI can't compare and so reports."""
+    out, odd = [], []
+    for e in story_spec_refs(front_matter(story_text)):
+        path = e.strip().partition("#")[0]
+        try:
+            rel = repo_rel(path) if path and ".." not in path.replace("\\", "/").split("/") else None
+        except (OSError, ValueError):
+            rel = None
+        m = SNAPSHOT_NAME.match(rel or "")
+        if m:
+            if (rel, m.group(1), int(m.group(2))) not in out:
+                out.append((rel, m.group(1), int(m.group(2))))
+        elif re.search(r"(?:^|/)issue-[0-9]+\.md$", path, re.I):
+            odd.append(path[:200])
+    return out, odd
 
 
 def story_spec_refs(fm):
@@ -1060,10 +1085,10 @@ def linked_spec_pairs(sd):
     out = []
     for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
         found, problem = linked_scenarios(e)
-        path = e.strip().partition("#")[0]
         issue_text = ""
-        if SNAPSHOT_NAME.match(path) and not problem:  # a pulled issue: any change to its text re-opens READY and DONE
-            issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / path), path)[0].encode("utf-8", "surrogatepass")).hexdigest()
+        for rel, _, _ in (snapshot_links("---\nspec: %s\n---\n" % e)[0] if not problem else []):
+            # a pulled issue: any change to its text re-opens READY and DONE
+            issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / rel), rel)[0].encode("utf-8", "surrogatepass")).hexdigest()
         out.append(("spec:" + e, json.dumps([sorted(found.items()), problem] + ([issue_text] if issue_text else []))))
     return out
 
@@ -2815,6 +2840,36 @@ def cmd_ci(tests_dir=None):
                        "removed or weakened to make the check pass." % ", ".join(changed))
                 notes.append(msg)
                 print("::warning title=story-gate: spec changed::%s" % msg)
+            import sg_specpull as SP  # issues copied in with spec-pull: compare each copy with the live issue
+            story_text = rd(STORIES / sid / "story.md")
+            snaps, odd = snapshot_links(story_text)
+            base_story = git("show", "%s:.story-gate/stories/%s/story.md" % (base, sid))
+            dropped = sorted(set(story_spec_refs(front_matter(base_story))) - set(story_spec_refs(front_matter(story_text))))
+            if dropped:  # a link the base branch had is gone: its requirements are no longer checked
+                msg = ("This PR removes the story's link to %s, so its requirements are no longer checked. Reviewers: make sure "
+                       "that's intended." % ", ".join(dropped))
+                notes.append(msg)
+                print("::warning title=story-gate: spec link removed::%s" % msg)
+            for path in odd:
+                msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
+                       "so CI can't compare it with the live issue" % path)
+                print("::warning title=story-gate: issue not checked::%s" % msg)
+                (problems if c.get("spec_source_check") == "block" else notes).append(msg)
+            for rel, owner, num in snaps:
+                try:
+                    state, detail = SP.live_status(sys.modules[__name__], owner, rel, num,
+                                                   os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_TOKEN"))
+                except Exception as e:  # never let the comparison itself crash CI or pass silently
+                    state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
+                msg = "%s (issue #%d): %s" % (rel, num, detail)
+                if state == "unchanged":
+                    notes.append(msg)
+                    continue
+                print("::warning title=story-gate: issue %s::%s" % (state, msg))
+                if c.get("spec_source_check") == "block":
+                    problems.append(msg + " (spec_source_check is \"block\")")
+                else:
+                    notes.append(msg)
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
@@ -3191,6 +3246,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     steps:
       - uses: actions/checkout@v4
         with:

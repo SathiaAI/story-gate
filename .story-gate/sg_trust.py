@@ -570,6 +570,8 @@ def tighten(policy, local):
         out["judge_mode"] = "full"
     if local.get("require_spec_link") is True:
         out["require_spec_link"] = True
+    if local.get("spec_source_check") == "block":
+        out["spec_source_check"] = "block"
     w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
     if isinstance(lw, dict):
         if lw.get("enforce") is True:
@@ -628,6 +630,8 @@ def weaker(old, new):
             out.append("diagram minimum raised from %s to %s files" % (ow.get("diagram_min_files", 5), nw.get("diagram_min_files", 5)))
     except (TypeError, ValueError):
         pass
+    if o.get("spec_source_check") == "block" and n.get("spec_source_check") != "block":
+        out.append("a pulled issue that changed, or couldn't be checked, no longer blocks (spec_source_check)")
     if o.get("require_spec_link") is True and n.get("require_spec_link") is not True:
         out.append("stories no longer have to link the spec they build (require_spec_link)")
     if (o.get("judge_mode") or "full") == "full" and n.get("judge_mode") == "objective":

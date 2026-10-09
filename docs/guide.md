@@ -354,6 +354,7 @@ All settings live in `.story-gate/config.json`. CI always reads the copy on your
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |
+| `spec_source_check` | `"warn"` | Issues copied in with `spec-pull`: CI compares each copy with the live issue. `"warn"`: a changed issue, or one CI couldn't check, is a warning on the pull request. `"block"`: either one is a failing problem (it fails the pull request when story-gate runs in enforce mode, like every other check). Fix a change by pulling the copy again; fix "not checked" by giving the workflow `issues: read`. Changing `block` to `warn` is reported as a weaker rule |
 | `judge_mode` | `"full"` | `"objective"` runs without an AI judge (setup's **Skip for now** sets it). See [Fallbacks](#fallbacks). Switching to it is reported as a weaker rule in the PR check |
 | `judge.provider` | `openrouter` | `jev-direct`, `decisions-proxy` (LiteLLM etc.), `openai-compatible` (any model, capped), or `none` |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
@@ -389,6 +390,9 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
 
 **Matt Pocock's skills** (`to-spec`, `to-tickets`, `implement`): link the ticket or spec file, for example `spec: .scratch/refunds/issues/03-refund-one-order.md`.
 
+- **One ticket, one story, one branch.** Make a branch with the story id in its name (`git switch -c feature/PAY-12-refund`), run `story-gate start PAY-12` on it, then run `/implement` there. `/implement` commits to whatever branch you are on, so never run it on `main`; story-gate only checks work that reaches `main` through a pull request. With `/implement-spec`, give each ticket its own story and branch rather than one integration branch, so each ticket is checked on its own.
+- **What gets checked is what you link.** Link the ticket and only its checkboxes count. Link the parent spec as well and every user story in it counts too; story-gate never picks a subset for you. To build part of a spec, link the ticket, not the spec.
+
 - **Ticket files** (`# 03: Title` with `**What to build:**`): every `- [ ]` line is a requirement. So is every `- [ ]` under a `## Acceptance criteria` heading in any linked file.
 - **Specs:** every numbered `As a …, I want …` line under `## User Stories` is a requirement.
 - **Ticked boxes still count as requirements.** A tick is never proof; only a passing test is.
@@ -400,6 +404,7 @@ READY and DONE then fail if a scenario has no AC, if `covers` names a scenario t
   - The copy records where it came from and a hash of its text. Edit it by hand and the check fails: pull it again instead.
   - The issue changed? Pull it again; READY is then out of date until you re-check it.
   - Already have the text, for example from your AI tool's GitHub connector? `story-gate spec-pull <story> #42 --from-file ticket.md` saves it marked "not verified".
+  - **CI compares the copy with the live issue** on every pull request, using the repository CI runs in and the number in the file name (never what the copy says): **unchanged**, **changed** (with how many requirements were added or removed), or **not checked** (no token, or GitHub didn't answer). A pasted copy that matches is then verified. The workflow needs `issues: read`. New setups get it; in a repository set up before v0.9, `story-gate doctor` shows the workflow as out of date until you re-run install. With `"spec_source_check": "block"`, a change or a failed check is a failing problem, which blocks the merge in enforce mode.
 
 Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 
