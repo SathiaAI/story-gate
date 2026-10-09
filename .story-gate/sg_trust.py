@@ -575,6 +575,13 @@ def tighten(policy, local):
     if isinstance(local.get("spec_repos"), list):  # this computer may allow fewer repositories, never more
         mine = {str(r).lower() for r in local["spec_repos"]}
         out["spec_repos"] = [r for r in out.get("spec_repos") or [] if str(r).lower() in mine]
+    if isinstance(local.get("trackers"), dict):  # this computer may drop a tracker or the public-repo allowance, never add
+        lt, mine = local["trackers"], {}
+        for k, v in (out.get("trackers") or {}).items():
+            l = lt.get(k)
+            if isinstance(l, dict) and isinstance(v, dict) and l.get("workspace") == v.get("workspace"):
+                mine[k] = dict(v, allow_in_public_repo=bool(v.get("allow_in_public_repo")) and l.get("allow_in_public_repo") is True)
+        out["trackers"] = mine
     w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
     if isinstance(lw, dict):
         if lw.get("enforce") is True:
@@ -637,6 +644,17 @@ def weaker(old, new):
     added = sorted(set(lst(n.get("spec_repos"))) - set(lst(o.get("spec_repos"))))
     if added:
         out.append("issues from more repositories can now be copied in and checked against (spec_repos: %s)" % ", ".join(added[:5]))
+    ot = o.get("trackers") if isinstance(o.get("trackers"), dict) else {}
+    nt = n.get("trackers") if isinstance(n.get("trackers"), dict) else {}
+    for k, v in nt.items():
+        old = ot.get(k) if isinstance(ot.get(k), dict) else None
+        v = v if isinstance(v, dict) else {}
+        if old is None:
+            out.append("tickets from %s can now be copied in and checked against (trackers)" % str(k)[:20])
+        elif old.get("workspace") != v.get("workspace"):
+            out.append("trackers.%s now reads another workspace (%s)" % (str(k)[:20], str(v.get("workspace"))[:60]))
+        if v.get("allow_in_public_repo") is True and (old or {}).get("allow_in_public_repo") is not True:
+            out.append("%s ticket text may now be copied into a public repository (allow_in_public_repo)" % str(k)[:20])
     if o.get("spec_source_check") == "block" and n.get("spec_source_check") != "block":
         out.append("a pulled issue that changed, or couldn't be checked, no longer blocks (spec_source_check)")
     if o.get("require_spec_link") is True and n.get("require_spec_link") is not True:

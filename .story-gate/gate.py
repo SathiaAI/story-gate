@@ -200,6 +200,10 @@ DEFAULT_CONFIG = {
     # other repositories (owner/repo) whose issues spec-pull may copy in, e.g. a central specs repository. CI reads them
     # with the STORY_GATE_SPECS_TOKEN secret; without it they show as "not checked". Adding one is a weaker rule.
     "spec_repos": [],
+    # trackers whose tickets spec-pull may copy in, e.g. {"linear": {"workspace": "acme"}}. CI reads them with a read-only
+    # key secret (STORY_GATE_LINEAR_KEY); without it they show as "not checked". "allow_in_public_repo": true lets ticket
+    # text be copied into a public repository. Adding a tracker, or allowing that, is a weaker rule.
+    "trackers": {},
     "thresholds": {"pass": 0.7, "concerns": 0.4},
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
@@ -357,6 +361,13 @@ def cfg():
         raise ConfigError('.story-gate/config.json: "require_spec_link" must be true or false - the gate fails closed until fixed')
     if not isinstance(c.get("spec_repos"), list) or not all(isinstance(r, str) and REPO_NAME.fullmatch(r) for r in c["spec_repos"]):
         raise ConfigError('.story-gate/config.json: "spec_repos" must be a list of "owner/repo" names - the gate fails closed until fixed')
+    tr = c.get("trackers")
+    if not isinstance(tr, dict) or set(tr) - {"linear"} or any(
+            not isinstance(v, dict) or set(v) - {"workspace", "allow_in_public_repo"}
+            or not isinstance(v.get("workspace"), str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?", v["workspace"])
+            or not isinstance(v.get("allow_in_public_repo", False), bool) for v in tr.values()):
+        raise ConfigError('.story-gate/config.json: "trackers" must look like {"linear": {"workspace": "your-workspace"}} '
+                          '(optional "allow_in_public_repo": true) - the gate fails closed until fixed')
     if c.get("spec_source_check") not in ("warn", "block"):
         raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
     if c.get("judge_mode") not in ("full", "objective"):
@@ -972,11 +983,22 @@ def snapshot_name(rel):
     return m.group(1), int(m.group(4)), ("%s/%s" % (m.group(2), m.group(3)) if m.group(2) else None)
 SNAPSHOT_KEYS = ("source_kind", "source_url", "repo", "issue", "source_updated_at", "fetched_at", "fetched_by")
 SNAPSHOT_BY = ("github-api", "pasted")
+# a tracker ticket's copy: .story-gate/stories/<ID>/linear-<KEY>.md (the key in capitals, as the tracker shows it)
+TRACKER_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/(linear)-([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})\.md$")
+TRACKER_KEYS = ("source_kind", "source_url", "site", "ticket", "ticket_id", "source_updated_at", "fetched_at", "fetched_by",
+                "format")
+SNAPSHOT_KINDS = {"github-issue": SNAPSHOT_KEYS, "linear-issue": TRACKER_KEYS}
 
 
-def snapshot_hash(fields, content):
+def tracker_name(rel):
+    """(story id, tracker, ticket key) for a tracker copy's path, else None."""
+    m = TRACKER_NAME.fullmatch(rel or "")
+    return (m.group(1), m.group(2), m.group(3)) if m else None
+
+
+def snapshot_hash(fields, content, keys=SNAPSHOT_KEYS):
     """sha256 over the source fields (in a fixed order) and the text, so neither can change without the other."""
-    head = "\n".join("%s: %s" % (k, fields.get(k, "")) for k in SNAPSHOT_KEYS)
+    head = "\n".join("%s: %s" % (k, fields.get(k, "")) for k in keys)
     return hashlib.sha256((head + "\n---\n" + content).encode("utf-8", "surrogatepass")).hexdigest()
 
 
@@ -993,14 +1015,27 @@ def parse_snapshot(text):
         if k in fields:
             raise ValueError("its source block names '%s' twice" % k)
         fields[k] = v
-    if set(fields) != set(SNAPSHOT_KEYS) | {"content_sha256"} or fields["source_kind"] != "github-issue":
+    keys = SNAPSHOT_KINDS.get(fields.get("source_kind"))
+    if not keys or set(fields) != set(keys) | {"content_sha256"}:
         raise ValueError("its source block isn't one `story-gate spec-pull` writes")
-    if fields["fetched_by"] not in SNAPSHOT_BY:
-        raise ValueError("'fetched_by: %s' isn't one of %s" % (fields["fetched_by"][:40], ", ".join(SNAPSHOT_BY)))
-    if fields["source_url"] != "https://github.com/%s/issues/%s" % (fields["repo"], fields["issue"]):
-        raise ValueError("its source_url doesn't match its repo and issue")
+    if keys is SNAPSHOT_KEYS:
+        if fields["fetched_by"] not in SNAPSHOT_BY:
+            raise ValueError("'fetched_by: %s' isn't one of %s" % (fields["fetched_by"][:40], ", ".join(SNAPSHOT_BY)))
+        if fields["source_url"] != "https://github.com/%s/issues/%s" % (fields["repo"], fields["issue"]):
+            raise ValueError("its source_url doesn't match its repo and issue")
+    else:
+        kind = fields["source_kind"][:-len("-issue")]
+        if fields["fetched_by"] not in (kind + "-api", "pasted"):
+            raise ValueError("'fetched_by: %s' isn't %s-api or pasted" % (fields["fetched_by"][:40], kind))
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{0,9}-[0-9]{1,9}", fields["ticket"]) or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?", fields["site"]):
+            raise ValueError("its ticket or workspace isn't readable")
+        if fields["source_url"] != "https://linear.app/%s/issue/%s" % (fields["site"], fields["ticket"]):
+            raise ValueError("its source_url doesn't match its workspace and ticket")
+        if (fields["ticket_id"] == "unknown") != (fields["fetched_by"] == "pasted"):
+            raise ValueError("its ticket_id doesn't fit how it was copied")
     content = text[m.end():]
-    if snapshot_hash(fields, content) != fields["content_sha256"]:
+    if snapshot_hash(fields, content, keys) != fields["content_sha256"]:
         raise ValueError("it was changed after `story-gate spec-pull` copied it from %s. Pull it again rather than "
                          "editing it" % fields["source_url"])
     return fields, content
@@ -1010,8 +1045,11 @@ def spec_snapshot(text, rel=""):
     """(text to read, problem or None). A file named .story-gate/stories/<ID>/issue-<N>.md must be a valid spec-pull
     copy of issue N; only the issue text is then read. Any file that claims to be one ('source_kind: github-issue') is
     held to the same rules. Other files are read whole."""
-    m = snapshot_name(rel)
-    if not m and "source_kind: github-issue" not in text[:2000]:
+    tn, m = tracker_name(rel), snapshot_name(rel)
+    claims_github = "source_kind: github-issue" in text[:2000]
+    if tn or (not m and not claims_github and re.search(r"(?m)^source_kind: [a-z]+-issue$", text[:2000])):
+        return tracker_snapshot(text, rel, tn)  # the place decides the kind; a tracker copy elsewhere is refused there
+    if not m and not claims_github:
         return text, None
     if not m:  # it claims to be a pulled copy, but CI only compares copies where spec-pull saves them
         return "", ("it says it's a copy of an issue, but it isn't where `story-gate spec-pull` saves one "
@@ -1020,6 +1058,8 @@ def spec_snapshot(text, rel=""):
         fields, content = parse_snapshot(text)
     except ValueError as e:
         return "", str(e)
+    if fields["source_kind"] != "github-issue":  # e.g. a tracker ticket's copy saved under an issue copy's name
+        return "", "it holds a %s copy but is named like a GitHub issue's copy. Pull it again" % fields["source_kind"][:30]
     if m and fields["issue"] != str(m[1]):
         return "", "it holds issue %s but is named for issue %s" % (fields["issue"][:12], m[1])
     if m and m[2] and fields["repo"].lower() != m[2].lower():
@@ -1029,6 +1069,42 @@ def spec_snapshot(text, rel=""):
         return "", ("it holds an issue of %s but is named as one of this repository (%s). Pull it again; a copy from "
                     "another repository is saved as issue-<owner>--<repo>-<N>.md" % (fields["repo"][:80], here))
     return content, None
+
+
+def tracker_snapshot(text, rel, tn):
+    """(text to read, problem or None) for a tracker ticket's copy: valid, at its place, for the tracker and workspace this
+    repository is set up for (default branch's config in CI)."""
+    if not tn:
+        return "", ("it says it's a copy of a tracker ticket, but it isn't where `story-gate spec-pull` saves one "
+                    "(.story-gate/stories/<ID>/linear-<KEY>.md), so CI can't compare it with the live ticket. Pull it again")
+    try:
+        fields, content = parse_snapshot(text)
+    except ValueError as e:
+        return "", str(e)
+    if fields["source_kind"] != tn[1] + "-issue" or fields["ticket"] != tn[2]:
+        return "", "it holds %s but is named for %s" % (fields["ticket"][:20], tn[2])
+    settings = (cfg().get("trackers") or {}).get(tn[1])
+    if not isinstance(settings, dict):
+        return "", ("it's a %s ticket, but %s isn't set up in .story-gate/config.json (trackers), so it can't be checked"
+                    % (tn[1], tn[1]))
+    if fields["site"] != settings.get("workspace"):
+        return "", "it comes from the workspace '%s', but this repository is set up for '%s'" % (fields["site"][:60], settings.get("workspace"))
+    return content, None
+
+
+def tracker_links(story_text):
+    """[(rel, story id of its folder, tracker, ticket key)] for the tracker copies a story.md links."""
+    out = []
+    for e in story_spec_refs(front_matter(story_text)):
+        path = e.strip().partition("#")[0]
+        try:
+            rel = repo_rel(path) if path and ".." not in path.replace("\\", "/").split("/") else None
+        except (OSError, ValueError):
+            rel = None
+        t = tracker_name(rel)
+        if t and (rel,) + t not in out:
+            out.append((rel,) + t)
+    return out
 
 
 def this_repo():
@@ -1066,7 +1142,8 @@ def snapshot_links(story_text):
         if m:
             if (rel,) + m not in out:
                 out.append((rel,) + m)
-        elif re.search(r"(?:^|/)issue-[0-9]+\.md$", path, re.I):
+        elif re.search(r"(?:^|/)issue-[0-9]+\.md$", path, re.I) or (
+                re.search(r"(?:^|/)linear-[^/]*\.md$", path, re.I) and not tracker_name(rel)):
             odd.append(path[:200])
     return out, odd
 
@@ -1133,7 +1210,8 @@ def linked_spec_pairs(sd):
     for e in story_spec_refs(front_matter(rd(sd / "story.md"))):
         found, problem = linked_scenarios(e)
         issue_text = ""
-        for rel, _, _, _ in (snapshot_links("---\nspec: %s\n---\n" % e)[0] if not problem else []):
+        one = "---\nspec: %s\n---\n" % e
+        for rel in ([x[0] for x in snapshot_links(one)[0] + tracker_links(one)] if not problem else []):
             # a pulled issue: any change to its text re-opens READY and DONE
             issue_text = hashlib.sha256(spec_snapshot(rd(ROOT / rel), rel)[0].encode("utf-8", "surrogatepass")).hexdigest()
         out.append(("spec:" + e, json.dumps([sorted(found.items()), problem] + ([issue_text] if issue_text else []))))
@@ -2222,6 +2300,13 @@ def story_id(c, payload=None):
         m = pat.search(src or "")
         if m:
             return m.group(0)
+    if "linear" in (c.get("trackers") or {}):  # Linear names branches 'eng-12-title': accept it for a story that exists
+        low = re.compile(r"(?<![A-Za-z0-9])(?:%s)(?![0-9])" % c["story_id_pattern"], re.I)
+        for src in (os.environ.get("SG_HEAD_REF") or os.environ.get("GITHUB_HEAD_REF", ""), git("rev-parse", "--abbrev-ref", "HEAD").strip()):
+            for m in low.finditer(src or ""):
+                cand = m.group(0).upper()
+                if pat.fullmatch(cand) and (STORIES / cand / "story.md").is_file():
+                    return cand
     lines = rd(ACTIVE).strip().splitlines()
     if lines and lines[0].strip():
         if len(lines) < 2 or lines[1].strip() == current_branch():
@@ -2939,6 +3024,30 @@ def cmd_ci(tests_dir=None):
                 notes.append(msg)
                 print("::warning title=story-gate: spec link removed::%s" % msg)
             sources = CI_SOURCES.setdefault(sid, [])
+
+            def report_source(rel, label, issue, state, detail):
+                """One pulled copy's result: a GitHub annotation on its path (the dashboard reads these), the validation
+                page's row, and a note or (with spec_source_check "block") a problem."""
+                msg = "%s (%s): %s" % (rel, label, detail)
+                word = SOURCE_WORDS.get(state, "not checked")
+                try:
+                    fields = parse_snapshot(rd(ROOT / rel))[0]
+                except ValueError:
+                    fields = {}
+                run_url = ("%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
+                                                      os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_RUN_ID", ""))
+                           if os.environ.get("GITHUB_RUN_ID") else "")
+                sources.append({"path": rel, "issue": issue, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
+                                "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
+                if state == "unchanged":
+                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))
+                    notes.append(msg)
+                    return
+                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
+                if c.get("spec_source_check") == "block":
+                    problems.append(msg + " (spec_source_check is \"block\")")
+                else:
+                    notes.append(msg)
             for path in odd:
                 msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
                        "so CI can't compare it with the live issue" % path)
@@ -2963,26 +3072,26 @@ def cmd_ci(tests_dir=None):
                                                        os.environ.get("STORY_GATE_SPECS_TOKEN") if other else os.environ.get("GITHUB_TOKEN"))
                 except Exception as e:  # never let the comparison itself crash CI or pass silently
                     state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
-                msg = "%s (issue %s#%d): %s" % (rel, other or "", num, detail)
-                word = SOURCE_WORDS.get(state, "not checked")
+                report_source(rel, "issue %s#%d" % (other or "", num), num, state, detail)
+            import sg_trackers as TR  # tickets copied in from a tracker set up in the default branch's config
+            for rel, owner, kind, key in tracker_links(story_text):
+                settings = (c.get("trackers") or {}).get(kind)
+                token = os.environ.get(TR.TOKEN_ENV.get(kind, ""), "")
                 try:
-                    fields = parse_snapshot(rd(ROOT / rel))[0]
-                except ValueError:
-                    fields = {}
-                run_url = ("%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
-                                                      os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_RUN_ID", ""))
-                           if os.environ.get("GITHUB_RUN_ID") else "")
-                sources.append({"path": rel, "issue": num, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
-                                "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
-                if state == "unchanged":
-                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))  # the dashboard reads these, by file
-                    notes.append(msg)
-                    continue
-                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
-                if c.get("spec_source_check") == "block":
-                    problems.append(msg + " (spec_source_check is \"block\")")
-                else:
-                    notes.append(msg)
+                    if not isinstance(settings, dict):
+                        state, detail = "not checked", ("%s isn't set up in the default branch's config (trackers), so CI "
+                                                        "doesn't read it" % TR.LABEL.get(kind, kind))
+                    elif SP.public_here() and settings.get("allow_in_public_repo") is not True:
+                        state, detail = "not checked", ("this repository is public and trackers.%s doesn't allow ticket text "
+                                                        "in a public repository, so CI doesn't read it" % kind)
+                    elif not token:
+                        state, detail = "not checked", ("no %s secret (or the pull request comes from a fork, which gets no "
+                                                        "secrets), so CI can't read %s" % (TR.TOKEN_ENV[kind], key))
+                    else:
+                        state, detail = TR.live_status(sys.modules[__name__], owner, rel, kind, key, settings, token)
+                except Exception as e:  # never let the comparison itself crash CI or pass silently
+                    state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
+                report_source(rel, "%s %s" % (TR.LABEL.get(kind, kind), key), key, state, detail)
         if code and not sid:
             problems.append("code changed but no story id in the branch name or a leading '[ID]' in the PR title (pattern %s)" % c["story_id_pattern"])
         elif code:
@@ -3387,6 +3496,8 @@ jobs:
           JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
           # read access to the issues of other repositories on spec_repos: a secret, or a token your own step made
           STORY_GATE_SPECS_TOKEN: ${{ steps.specs_token.outputs.token || secrets.STORY_GATE_SPECS_TOKEN }}
+          # read-only key for tickets on trackers set up in config (trackers)
+          STORY_GATE_LINEAR_KEY: ${{ secrets.STORY_GATE_LINEAR_KEY }}
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
@@ -3913,6 +4024,18 @@ def shutil_rmtree(p):
     shutil.rmtree(p, ignore_errors=True)
 
 
+def tracker_hint(c):
+    """A one-line suggestion when branch names look like a tracker's but none is set up; else ''."""
+    if c.get("trackers"):
+        return ""
+    names = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes").split()
+    linear = [n for n in names if re.search(r"(?:^|/)[a-z][a-z0-9]{0,9}-[0-9]{1,9}-[a-z0-9]", n)]
+    if len(linear) < 2:
+        return ""
+    return ("branch names like %s look like Linear's. To check stories against Linear tickets, set \"trackers\": "
+            "{\"linear\": {\"workspace\": \"...\"}} in .story-gate/config.json (guide: 'Specs in Linear')" % linear[0][:60])
+
+
 def cmd_doctor(repo=None, strict=False, prove=False):
     """Plain-English health check. With --repo it also checks GitHub protection and agent identity."""
     import sg_github as G
@@ -3922,6 +4045,9 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     except ConfigError as e:
         print("  FAIL  " + str(e)); return 1
     print("story-gate %s  root=%s  mode=%s  enforce_points=%s" % (VERSION, ROOT, c["mode"], c.get("enforce_points")))
+    hint = tracker_hint(c)
+    if hint:
+        print("  note: " + hint)
     act = T.read_json(T.active_path())
     if act:
         rt = Path(act.get("dir", ""))
@@ -4060,6 +4186,13 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                          "otherwise copies from those repositories show 'not checked'. See the guide, 'Specs in another repository'"}.get(
                     st_s, "could not check (HTTP %s; listing secrets needs admin rights)" % st_s)))
                 print("             fork pull requests get no secrets, so their copies from those repositories always show 'not checked'")
+            for kind, settings in sorted((c.get("trackers") or {}).items()):  # tickets from a tracker: can CI read them?
+                import sg_trackers as TR
+                st_t, _, _ = G.call("GET", "/repos/%s/actions/secrets/%s" % (repo, TR.TOKEN_ENV[kind]), tok)
+                print("  trackers.%s: workspace %s - CI key: %s" % (kind, settings.get("workspace"), {
+                    200: "%s secret is set" % TR.TOKEN_ENV[kind],
+                    404: "no %s secret, so its tickets show 'not checked'; see the guide, 'Specs in Linear'" % TR.TOKEN_ENV[kind]}.get(
+                    st_t, "could not check (HTTP %s; listing secrets needs admin rights)" % st_t)))
             me = G.whoami(tok)
             if me and me.lower() in [u.lower() for u in users]:
                 print("  WARNING: this shell holds the GitHub login of code owner '%s'. AI agents must not run with it - use gate.py agent-env." % me)

@@ -5824,5 +5824,297 @@ class TestStartBranch(Base):
         self.assertIn("you're on trunk, the base branch", r.stdout)
 
 
+class TestTrackerLinear(Base):
+    """Tickets from Linear: the same copy-and-check model as GitHub issues. The copy is the contract; only CI's own
+    comparison with the live ticket can say verified; anything unexpected is 'not checked', never verified."""
+
+    UUID = "0f3b2c4d-1a2b-4c3d-8e9f-001122334455"
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/shop.git"], cwd=self.repo, capture_output=True)
+        self.cfg(trackers={"linear": {"workspace": "acme"}})
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as G, sg_specpull as SP, sg_trackers as TR
+        self.G, self.SP, self.TR = G, SP, TR
+        self.snap = self.repo / ".story-gate/stories/SAT-1/linear-ENG-12.md"
+        self.rel = ".story-gate/stories/SAT-1/linear-ENG-12.md"
+
+    def ticket(self, **kw):
+        t = {"id": self.UUID, "key": "ENG-12", "title": "Refunds", "body": MATT_ISSUE, "updated_at": "2026-10-09T00:00:00.000Z",
+             "url": "https://linear.app/acme/issue/ENG-12"}
+        t.update(kw)
+        return t
+
+    def pull(self, args=("SAT-1", "ENG-12"), private=True, status=200, fetch=None, env=None):
+        from unittest import mock
+        gh = lambda m, path, tok=None, body=None: (status, {"private": private}, {}) if path == "/repos/acme/shop" else (404, {}, {})
+        fetch = fetch or (lambda settings, key, tok: self.ticket())
+        with mock.patch.object(self.G, "call", side_effect=gh), mock.patch.object(self.G, "human_token", return_value="t"), \
+                mock.patch.dict(self.TR.FETCH, {"linear": fetch}), mock.patch.dict(os.environ, {"LINEAR_API_KEY": "lin_api_x"} if env is None else env):
+            os.environ["STORY_GATE_ROOT"] = str(self.repo)
+            try:
+                return self.SP.cli(self.g, list(args))
+            finally:
+                os.environ.pop("STORY_GATE_ROOT", None)
+
+    def problem(self, rel=None):
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            return self.g.linked_scenarios(rel or self.rel)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+
+    def test_names_and_references(self):
+        n, TR = self.g.tracker_name, self.TR
+        self.assertEqual(n(".story-gate/stories/S-1/linear-ENG-12.md"), ("S-1", "linear", "ENG-12"))
+        for bad in (".story-gate/stories/S-1/linear-eng-12.md", ".story-gate/stories/S-1/linear-ENG-12.txt",
+                    ".story-gate/stories/S-1/x/linear-ENG-12.md", ".story-gate/stories/S-1/linear-ENG-.md", "linear-ENG-12.md"):
+            self.assertIsNone(n(bad), bad)
+        self.assertEqual(TR.parse_ticket_ref("ENG-12"), (None, "ENG-12", None))
+        self.assertEqual(TR.parse_ticket_ref("https://linear.app/acme/issue/ENG-12/refunds"), ("linear", "ENG-12", "acme"))
+        for bad in ("eng-12", "#12", "acme/shop#12", "https://linear.app.evil.com/acme/issue/ENG-12", "http://linear.app/acme/issue/ENG-12"):
+            self.assertIsNone(TR.parse_ticket_ref(bad), bad)
+
+    def test_pull_saves_a_checked_copy_and_links_it(self):
+        self.assertEqual(self.pull(), 0)
+        text = self.snap.read_text(encoding="utf-8")
+        for want in ("source_kind: linear-issue", "site: acme", "ticket: ENG-12", "ticket_id: " + self.UUID, "fetched_by: linear-api",
+                     "format: 1", "source_url: https://linear.app/acme/issue/ENG-12", "spec-pull SAT-1 ENG-12"):
+            self.assertIn(want, text)
+        self.assertIn("linear-ENG-12.md", (self.repo / ".story-gate/stories/SAT-1/story.md").read_text(encoding="utf-8"))
+        found, problem = self.problem()
+        self.assertIsNone(problem); self.assertEqual(len(found), 2)
+
+    def test_private_tickets_never_go_into_a_public_repo(self):
+        for kw, why in (({"private": False}, "is public"), ({"status": 404}, "couldn't check whether")):
+            with self.assertRaises(SystemExit) as e:
+                self.pull(**kw)
+            self.assertIn(why, str(e.exception)); self.assertFalse(self.snap.exists())
+        self.cfg(trackers={"linear": {"workspace": "acme", "allow_in_public_repo": True}})
+        self.assertEqual(self.pull(private=False), 0)  # the owner allowed it in the default branch's config
+
+    def test_refusals_say_what_to_do(self):
+        cases = [((), {}, "no Linear key here"),
+                 (("SAT-1", "https://linear.app/other/issue/ENG-12"), {"LINEAR_API_KEY": "k"}, "workspace 'other'")]
+        for args, env, why in cases:
+            with self.assertRaises(SystemExit) as e:
+                self.pull(args=args or ("SAT-1", "ENG-12"), env=env)
+            self.assertIn(why, str(e.exception))
+        with self.assertRaises(SystemExit) as e:
+            self.pull(fetch=lambda s, k, t: self.ticket(key="OPS-3"))
+        self.assertIn("is now OPS-3", str(e.exception))
+        def fails(s, k, t):
+            raise self.TR.TrackerError("Linear refused the key (HTTP 401)")
+        with self.assertRaises(SystemExit) as e:
+            self.pull(fetch=fails)
+        self.assertIn("refused the key", str(e.exception)); self.assertNotIn("lin_api_x", str(e.exception))
+        self.cfg(trackers={})
+        with self.assertRaises(SystemExit) as e:
+            self.pull()
+        self.assertIn("no tracker is set up", str(e.exception)); self.assertFalse(self.snap.exists())
+
+    def test_pasted_copy_is_marked_and_readable(self):
+        t = self.repo / "ticket.md"; t.write_text(MATT_ISSUE, encoding="utf-8")
+        self.assertEqual(self.pull(args=("SAT-1", "ENG-12", "--from-file", str(t)), env={}), 0)
+        text = self.snap.read_text(encoding="utf-8")
+        self.assertIn("fetched_by: pasted", text); self.assertIn("ticket_id: unknown", text)
+        self.assertIsNone(self.problem()[1])
+
+    def test_edits_wrong_names_and_wrong_places_block(self):
+        self.pull()
+        good = self.snap.read_text(encoding="utf-8")
+        self.snap.write_text(good.replace("Refund button", "Refund link"), encoding="utf-8")
+        self.assertIn("was changed after", self.problem()[1])
+        self.snap.write_text(good.replace("ticket_id: " + self.UUID, "ticket_id: unknown"), encoding="utf-8")
+        self.assertTrue(self.problem()[1])  # the fingerprint covers every field
+        self.snap.write_text(good, encoding="utf-8")
+        other = self.repo / ".story-gate/stories/SAT-1/linear-ENG-13.md"; other.write_text(good, encoding="utf-8")
+        self.assertIn("named for ENG-13", self.problem(".story-gate/stories/SAT-1/linear-ENG-13.md")[1])
+        stray = self.repo / "notes.md"; stray.write_text(good, encoding="utf-8")
+        self.assertIn("isn't where", self.problem("notes.md")[1])
+        disguised = self.repo / ".story-gate/stories/SAT-1/issue-5.md"  # a ticket copy under an issue copy's name
+        disguised.write_text(good, encoding="utf-8")
+        self.assertIn("named like a GitHub issue's copy", self.problem(".story-gate/stories/SAT-1/issue-5.md")[1])
+        t = self.TR
+        tricky = t.snapshot_text(self.g, "SAT-1", "linear", {"workspace": "acme"}, "ENG-12",
+                                 {"source_kind": "linear-issue", "source_url": "https://linear.app/acme/issue/ENG-12", "site": "acme",
+                                  "ticket": "ENG-12", "ticket_id": self.UUID, "source_updated_at": "x", "fetched_at": "x",
+                                  "fetched_by": "linear-api", "format": "1"}, "T", "source_kind: github-issue\n" + MATT_ISSUE)
+        disguised.write_text(tricky, encoding="utf-8")  # even when its text mentions the GitHub kind: refused, never a crash
+        self.assertIn("named like a GitHub issue's copy", self.problem(".story-gate/stories/SAT-1/issue-5.md")[1])
+        disguised.unlink()
+        self.cfg(trackers={"linear": {"workspace": "acme-2"}})
+        self.assertIn("set up for 'acme-2'", self.problem()[1])
+        self.cfg(trackers={})
+        self.assertIn("isn't set up", self.problem()[1])
+
+    def test_new_ticket_text_reopens_ready_even_if_the_requirements_are_the_same(self):
+        self.pull()
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            sd = self.repo / ".story-gate/stories/SAT-1"
+            before = self.g.linked_spec_pairs(sd)
+            self.pull(fetch=lambda s, k, t: self.ticket(body=MATT_ISSUE.replace("Refunds.", "Refunds, within 30 days.")))
+            os.environ["STORY_GATE_ROOT"] = str(self.repo)
+            after = self.g.linked_spec_pairs(sd)
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertNotEqual(before, after)
+        self.assertEqual(json.loads(before[0][1])[0], json.loads(after[0][1])[0])  # same requirements, still re-opened
+
+    def test_fetch_contract_and_fail_closed(self):
+        TR = self.TR
+        issue = {"id": self.UUID, "identifier": "ENG-12", "title": "Refunds", "description": MATT_ISSUE,
+                 "url": "https://linear.app/acme/issue/ENG-12/refunds", "updatedAt": "2026-10-09T00:00:00.000Z"}
+        ok = lambda d: (lambda url, h, payload: (200, {"data": d}))
+        seen = {}
+        def capture(url, h, payload):
+            seen.update(url=url, h=h, payload=payload)
+            return 200, {"data": {"organization": {"urlKey": "acme"}, "issue": issue}}
+        t = TR.linear_fetch({"workspace": "acme"}, "ENG-12", "lin_api_x", post=capture)
+        self.assertEqual((t["key"], t["id"], t["url"]), ("ENG-12", self.UUID, "https://linear.app/acme/issue/ENG-12"))
+        self.assertEqual(seen["url"], "https://api.linear.app/graphql"); self.assertEqual(seen["h"], {"Authorization": "lin_api_x"})
+        self.assertEqual(seen["payload"]["variables"], {"id": "ENG-12"})  # the key is a variable, never pasted into the query
+        bad = [(ok({"organization": {"urlKey": "other"}, "issue": issue}), "workspace 'other'"),
+               (ok({"organization": {"urlKey": "acme"}, "issue": None}), "wasn't found"),
+               (lambda u, h, p: (200, {"errors": [{"message": "Entity not found: Issue"}], "data": {"issue": None}}), "wasn't found"),
+               (lambda u, h, p: (200, {"errors": [{"message": "boom"}]}), "error"),
+               (lambda u, h, p: (401, None), "refused the key"),
+               (lambda u, h, p: (302, None), "HTTP 302"),
+               (lambda u, h, p: (200, "x"), "HTTP 200"),
+               (ok({"organization": {"urlKey": "acme"}, "issue": dict(issue, url="https://linear.app/other/issue/ENG-12")}), "another workspace"),
+               (ok({"organization": {"urlKey": "acme"}, "issue": dict(issue, id="1")}), "unexpected ticket id"),
+               (ok({"organization": {"urlKey": "acme"}, "issue": dict(issue, description=5)}), "unreadable description"),
+               (ok({"organization": {"urlKey": "acme"}, "issue": dict(issue, title=None)}), "no 'title'")]
+        for post, why in bad:
+            with self.assertRaises(TR.TrackerError) as e:
+                TR.linear_fetch({"workspace": "acme"}, "ENG-12", "lin_api_x", post=post)
+            self.assertIn(why, str(e.exception)); self.assertNotIn("lin_api_x", str(e.exception))
+
+    def test_http_never_follows_redirects_and_is_bounded(self):
+        import http.server, threading
+        hits = []
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_POST(self):
+                hits.append((self.path, self.headers.get("Authorization")))
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path == "/redirect":
+                    self.send_response(302); self.send_header("Location", "/elsewhere"); self.end_headers(); return
+                if self.path == "/big":
+                    body = b"[" + b"1," * 600000 + b"1]"
+                elif self.path == "/flaky" and len([h for h in hits if h[0] == "/flaky"]) == 1:
+                    self.send_response(503); self.send_header("Retry-After", "1"); self.end_headers(); return
+                else:
+                    body = b'{"ok": true}'
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        base = "http://127.0.0.1:%d" % srv.server_port
+        TR = self.TR
+        from unittest import mock
+        with self.assertRaises(TR.TrackerError):
+            TR.post_json(base + "/ok", {}, {})  # plain HTTP is refused
+        with mock.patch.dict(os.environ, {"STORY_GATE_TEST_HTTP": "1", "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            self.assertEqual(TR.post_json(base + "/redirect", {"Authorization": "secret"}, {}), (302, None))
+            self.assertNotIn("/elsewhere", [h[0] for h in hits])  # never followed, so the key never went anywhere else
+            with self.assertRaises(TR.TrackerError) as e:
+                TR.post_json(base + "/big", {}, {})
+            self.assertIn("bigger than", str(e.exception))
+            slept = []
+            self.assertEqual(TR.post_json(base + "/flaky", {}, {}, sleep=slept.append), (200, {"ok": True}))
+            self.assertEqual(slept, [1])
+
+    def test_live_comparison(self):
+        self.pull()
+        TR, g = self.TR, self.g
+        def live(t=None, exc=None, settings=None, rel=None):
+            def fetch(s, k, tok):
+                if exc:
+                    raise exc
+                return t or self.ticket()
+            os.environ["STORY_GATE_ROOT"] = str(self.repo)
+            try:
+                return TR.live_status(g, "SAT-1", rel or self.rel, "linear", "ENG-12", settings or {"workspace": "acme"}, "k", fetch=fetch)
+            finally:
+                os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertEqual(live(), ("unchanged", "matches the live ticket"))
+        state, why = live(self.ticket(body=MATT_ISSUE.replace("need a manager\n", "need a manager\n- [ ] Refunds are logged\n")))
+        self.assertEqual(state, "changed"); self.assertIn("1 requirement(s) added", why); self.assertIn("spec-pull SAT-1 ENG-12", why)
+        self.assertEqual(live(self.ticket(key="OPS-3"))[0], "changed")
+        self.assertEqual(live(self.ticket(id="0f3b2c4d-1a2b-4c3d-8e9f-999999999999"))[0], "changed")  # same key, another ticket
+        self.assertEqual(live(exc=TR.NotFound("ENG-12 wasn't found"))[0], "changed")
+        self.assertEqual(live(exc=TR.TrackerError("couldn't reach api.linear.app (URLError)"))[0], "not checked")
+        self.assertEqual(live(settings={"workspace": "acme-2"})[0], "changed")
+        self.assertEqual(live(self.ticket(body="x" * 300000))[0], "not checked")
+        t = self.repo / "ticket.md"; t.write_text(MATT_ISSUE, encoding="utf-8")
+        self.pull(args=("SAT-1", "ENG-12", "--from-file", str(t)), env={})
+        self.assertEqual(live(), ("unchanged", "matches the live ticket (the pasted copy is now verified)"))
+
+    def test_ci_reads_only_set_up_trackers_and_needs_the_key(self):
+        self.pull()
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main"); (self.repo / "app.py").write_text("x = 3\n")
+        ev = self.repo.parent / (self.repo.name + "-event.json"); self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        ev.write_text(json.dumps({"repository": {"private": True}}))
+        env = {"GITHUB_REPOSITORY": "acme/shop", "GITHUB_EVENT_PATH": str(ev)}
+        r = run(self.repo, "ci", env=env)
+        self.assertIn("no STORY_GATE_LINEAR_KEY secret", r.stdout)
+        self.assertRegex(r.stdout, r"::warning file=\.story-gate/stories/SAT-1/linear-ENG-12\.md,title=story-gate: source not checked::")
+        ev.write_text(json.dumps({"repository": {"private": False}}))
+        r = run(self.repo, "ci", env=dict(env, STORY_GATE_LINEAR_KEY="k"))
+        self.assertIn("this repository is public", r.stdout)  # refused before any request is made
+        ev.write_text(json.dumps({"repository": {"private": True}}))
+        self.cfg(trackers={}); gitc("add", "-A"); gitc("commit", "-qm", "drop"); gitc("checkout", "-q", "main")
+        gitc("merge", "-q", "feature/SAT-1-thing"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        r = run(self.repo, "ci", env=dict(env, STORY_GATE_LINEAR_KEY="k"))
+        self.assertIn("isn't set up in the default branch's config", r.stdout)
+
+    def test_settings_rules_branches_and_dashboard(self):
+        import sg_trust as T
+        for junk in ({"jira": {"workspace": "a"}}, {"linear": {"workspace": "Acme"}}, {"linear": {"workspace": "a", "x": 1}},
+                     {"linear": {"workspace": "a", "allow_in_public_repo": "yes"}}, [], {"linear": "acme"}):
+            self.cfg(trackers=junk)
+            self.assertIn('"trackers" must look like', (lambda r: r.stdout + r.stderr)(run(self.repo, "status", "SAT-1")), junk)
+        self.cfg(trackers={"linear": {"workspace": "acme"}})
+        self.assertIn("tickets from linear", " ".join(T.weaker({"trackers": {}}, {"trackers": {"linear": {"workspace": "a"}}})))
+        self.assertIn("another workspace", " ".join(T.weaker({"trackers": {"linear": {"workspace": "a"}}}, {"trackers": {"linear": {"workspace": "b"}}})))
+        self.assertIn("public repository", " ".join(T.weaker({"trackers": {"linear": {"workspace": "a"}}},
+                                                             {"trackers": {"linear": {"workspace": "a", "allow_in_public_repo": True}}})))
+        for junk in (5, None, {"linear": 3}):
+            T.weaker({"trackers": {}}, {"trackers": junk})  # never crashes on a malformed value
+        tight = T.tighten({"trackers": {"linear": {"workspace": "a", "allow_in_public_repo": True}}}, {"trackers": {"linear": {"workspace": "a"}}})
+        self.assertEqual(tight["trackers"], {"linear": {"workspace": "a", "allow_in_public_repo": False}})
+        self.assertEqual(T.tighten({"trackers": {"linear": {"workspace": "a"}}}, {"trackers": {}})["trackers"], {})
+        # Linear's own branch names ('eng-12-refunds') find a story that exists; 'utf-8' never becomes one
+        run(self.repo, "start", "ENG-12")
+        g = load_gate(self.repo)
+        try:
+            from unittest import mock
+            for ref, want in (("eng-12-refunds", "ENG-12"), ("fix-utf-8-bug", None)):
+                with mock.patch.dict(os.environ, {"SG_HEAD_REF": ref}), mock.patch.object(g, "git", return_value=""), \
+                        mock.patch.object(g, "rd", return_value=""):
+                    self.assertEqual(g.story_id(g.cfg()), want, ref)
+            with mock.patch.dict(os.environ, {"SG_HEAD_REF": "eng-12-refunds"}), mock.patch.object(g, "git", return_value=""), \
+                    mock.patch.object(g, "rd", return_value=""):
+                self.assertIsNone(g.story_id(dict(g.cfg(), trackers={})))  # only when Linear is set up
+            self.assertEqual(g.tracker_hint({"trackers": {}}), "")
+            with mock.patch.object(g, "git", return_value="eng-1-a\norigin/eng-2-b\nmain"):
+                self.assertIn("look like Linear's", g.tracker_hint({"trackers": {}}))
+                self.assertEqual(g.tracker_hint({"trackers": {"linear": {"workspace": "a"}}}), "")
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        y = g.CI_YML
+        self.assertIn("STORY_GATE_LINEAR_KEY: ${{ secrets.STORY_GATE_LINEAR_KEY }}", y)
+        self.assertNotIn("STORY_GATE_LINEAR_KEY", y.split("  story-gate:")[0])  # the job that runs PR code never gets it
+        sys.path.insert(0, str(SRC))
+        import importlib; D = importlib.import_module("sg_dashboard"); R = importlib.import_module("sg_report")
+        self.assertEqual(D.snapshot_paths([self.rel, ".story-gate/stories/SAT-1/linear-eng-12.md"]), [self.rel])
+
+
 if __name__ == "__main__":
     unittest.main()

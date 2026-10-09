@@ -92,7 +92,8 @@ def link(story_md, rel):
 def cli(gate, args):
     kv, rest = gate.flags(args)
     usage = ("usage: spec-pull <ID> <issue>   (42, #42, owner/repo#42 or the issue's URL: this repository's issues, or one "
-             "on spec_repos in .story-gate/config.json)\n"
+             "on spec_repos in .story-gate/config.json; or a ticket key like ENG-12 or its Linear URL, for a tracker set up "
+             "in config)\n"
              "       spec-pull <ID> <issue> --from-file <file or ->   (text you already have, e.g. from your AI tool; marked "
              "'not verified')")
     if len(rest) != 2:
@@ -107,6 +108,9 @@ def cli(gate, args):
                      % p.relative_to(gate.ROOT).as_posix())
     if not (sd / "story.md").is_file():
         sys.exit("story-gate: story %s has no story.md yet. Run `%s` first." % (sid, gate.gate_cmd("start " + sid)))
+    import sg_trackers as TR
+    if TR.parse_ticket_ref(ref_arg):
+        return TR.cli(gate, sid, ref_arg, kv, sd, lambda text, out, rel, what, fetched: save(gate, sd, text, out, rel, what, fetched))
     own = gate.origin_repo()
     if not own:
         sys.exit("story-gate: this repository's 'origin' remote isn't on github.com, so there's no issue to pull. Copy the "
@@ -158,10 +162,15 @@ def cli(gate, args):
     rel = out.relative_to(gate.ROOT).as_posix()
     if gate.snapshot_name(rel) != (sid, num, other):  # the name must read back as exactly this issue
         sys.exit("story-gate: %s can't be named unambiguously (%s); nothing was saved." % (other or own, rel))
-    if out.is_symlink() or (out.exists() and not out.is_file()):
-        sys.exit("story-gate: %s is a link or a folder; story-gate only replaces a plain file there." % rel)
     text = snapshot_text(gate, sid, "#%d" % num, meta, title, body, other)
     gate.parse_snapshot(text)  # the gate must be able to read what was written: fail here, not later
+    return save(gate, sd, text, out, rel, "issue #%d" % num, meta["fetched_by"] == "github-api")
+
+
+def save(gate, sd, text, out, rel, what, fetched):
+    """Write the copy (all or nothing, never through a link), link it in story.md and list its requirements."""
+    if out.is_symlink() or (out.exists() and not out.is_file()):
+        sys.exit("story-gate: %s is a link or a folder; story-gate only replaces a plain file there." % rel)
     fd, tmp = tempfile.mkstemp(dir=str(sd), prefix=".issue-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
@@ -180,8 +189,8 @@ def cli(gate, args):
     else:
         st_md.write_text(new, encoding="utf-8")
     found, problem = gate.linked_scenarios(rel)
-    print("Saved issue #%d as %s (%s) and linked it in story.md." % (
-        num, rel, "from GitHub" if meta["fetched_by"] == "github-api" else "pasted text, not verified against the issue"))
+    print("Saved %s as %s (%s) and linked it in story.md." % (
+        what, rel, "fetched from the source" if fetched else "pasted text, not verified against the source"))
     if problem:
         print("It can't be checked yet: " + problem)
         return 1

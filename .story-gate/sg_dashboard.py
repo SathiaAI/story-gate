@@ -231,7 +231,7 @@ def snapshot_paths(spec):
     for it in items:
         p = re.sub(r"/+", "/", str(it).strip().strip("'\"").replace("\\", "/")).lstrip("./") if str(it).strip() else ""
         p = ".story-gate/" + p[len("story-gate/"):] if p.startswith("story-gate/") else p
-        if re.fullmatch(r"\.story-gate/stories/[A-Za-z0-9._-]+/issue-[A-Za-z0-9_.-]*?[0-9]{1,9}\.md", p) and p not in out:
+        if re.fullmatch(r"\.story-gate/stories/[A-Za-z0-9._-]+/(?:issue-[A-Za-z0-9_.-]*?[0-9]{1,9}|linear-[A-Z][A-Z0-9]{0,9}-[0-9]{1,9})\.md", p) and p not in out:
             out.append(p)
     return out
 
