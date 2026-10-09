@@ -210,7 +210,7 @@ Keep the tool you plan with. These tools write a good plan, and Matt Pocock's sk
 | [Spec Kit](https://github.com/github/spec-kit) | `spec: specs/001-checkout/spec.md` (add `#US1` for one user story) | Each "Given … When … Then" scenario |
 | [OpenSpec](https://github.com/Fission-AI/OpenSpec) | `spec: openspec/changes/add-discount` | Each `#### Scenario:` |
 | [Matt Pocock's skills](https://github.com/mattpocock/skills) (`to-spec`, `to-tickets`, `implement`) | The ticket file: `spec: .scratch/refunds/issues/03-refund.md`. For a ticket on GitHub Issues: `story-gate spec-pull <story> #42` | Each `- [ ]` acceptance criterion, and each "As a …, I want …" user story |
-| [Linear](https://linear.app) or Jira Cloud tickets | `story-gate spec-pull <story> ENG-12` (or the ticket's link), once the tracker is set up | The ticket's `- [ ]` acceptance criteria and "As a …, I want …" lines |
+| [Linear](https://linear.app) or Jira Cloud tickets (experimental) | `story-gate spec-pull <story> ENG-12` (or the ticket's link), once the tracker is set up | The ticket's `- [ ]` acceptance criteria and "As a …, I want …" lines |
 | [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) | Not read yet (its file layout is changing). Copy the story's acceptance criteria into `story.md` | Your acceptance criteria, as usual |
 
 **Then, for every one of them:**
