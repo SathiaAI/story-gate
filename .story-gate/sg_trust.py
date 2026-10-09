@@ -579,7 +579,7 @@ def tighten(policy, local):
         lt, mine = local["trackers"], {}
         for k, v in (out.get("trackers") or {}).items():
             l = lt.get(k)
-            if isinstance(l, dict) and isinstance(v, dict) and _tracker_id(l) == _tracker_id(v):
+            if isinstance(l, dict) and isinstance(v, dict) and l.get("workspace") == v.get("workspace"):
                 mine[k] = dict(v, allow_in_public_repo=bool(v.get("allow_in_public_repo")) and l.get("allow_in_public_repo") is True)
         out["trackers"] = mine
     w, lw = dict(out.get("writing") or {}), local.get("writing") or {}
@@ -602,11 +602,6 @@ def tighten(policy, local):
     if isinstance(lv, dict) and lv.get("required") is True:
         out["validation"] = dict(out.get("validation") or {}, required=True)
     return out
-
-
-def _tracker_id(v):
-    """Which tracker a trackers.<kind> entry reads: the Linear workspace, or the Jira site and cloud id."""
-    return tuple(str(v.get(k)) for k in ("workspace", "site", "cloud_id")) if isinstance(v, dict) else None
 
 
 def weaker(old, new):
@@ -656,8 +651,8 @@ def weaker(old, new):
         v = v if isinstance(v, dict) else {}
         if old is None:
             out.append("tickets from %s can now be copied in and checked against (trackers)" % str(k)[:20])
-        elif _tracker_id(old) != _tracker_id(v):
-            out.append("trackers.%s now reads another workspace or site (%s)" % (str(k)[:20], str(v.get("workspace") or v.get("site"))[:60]))
+        elif old.get("workspace") != v.get("workspace"):
+            out.append("trackers.%s now reads another workspace (%s)" % (str(k)[:20], str(v.get("workspace"))[:60]))
         if v.get("allow_in_public_repo") is True and (old or {}).get("allow_in_public_repo") is not True:
             out.append("%s ticket text may now be copied into a public repository (allow_in_public_repo)" % str(k)[:20])
     if o.get("spec_source_check") == "block" and n.get("spec_source_check") != "block":

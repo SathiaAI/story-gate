@@ -462,20 +462,7 @@ Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket
 
 **What "verified" means:** the copy matched the ticket's title and description when CI checked that commit. An edit to the ticket afterwards shows up at the next check. Comments, attachments and linked tickets aren't read.
 
-#### Specs in Jira
-
-Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as Linear. Jira Server and Data Center come next.
-
-1. **Set it up.** Run `story-gate jira-setup your-site.atlassian.net "Acceptance criteria"` and paste what it prints into `.story-gate/config.json` in a pull request. It finds your site's cloud id (public) and, with your own token, the id of the field your team keeps acceptance criteria in (leave the name out if you keep them in the description). Reviewers see the new tracker as a weaker rule.
-2. **Your token.** Create an Atlassian API token **with scopes** and give it only `read:jira-work` (id.atlassian.com → Security → API tokens → Create API token with scopes). Set `JIRA_EMAIL` and `JIRA_API_TOKEN` on your computer. story-gate reads Jira only through Atlassian's API address for your site (`api.atlassian.com/ex/jira/<cloud id>`), which is where scoped tokens work.
-3. **Pull a ticket.** `story-gate spec-pull <story> ENG-12`, or paste its `/browse/` link. Using Linear too? Add `--tracker jira`, or paste the link. No token here? Paste the ticket with `--from-file`; it's marked "not verified" until CI compares it. The copy is saved as `jira-ENG-12.md`.
-4. **How the ticket is read.**
-   - The acceptance-criteria field: each item, or each line of a plain-text field, becomes a `- [ ]` criterion under `## Acceptance criteria`.
-   - The description: list items under a heading named "Acceptance criteria" become criteria; other lists stay as they are. Checklists (action items) keep their boxes.
-   - Tables, code, panels, mentions and links are kept as text; images show as `[attachment]`.
-   - Criteria in a table (under "Acceptance criteria", in the criteria field, or a checklist inside any table) stop the copy: they can't be read one by one, so write them as a list.
-   - Anything story-gate can't read yet (a macro, an extension, a synced block) stops the copy, with its name. Nothing is ever half-copied or called verified.
-5. **Let CI read it.** Create a second token the same way, ideally for an Atlassian **service account** so it doesn't depend on a person. In this repository add two secrets: `STORY_GATE_JIRA_EMAIL` (the account's email) and `STORY_GATE_JIRA_TOKEN`. Without both, or on a fork, Jira copies show **not checked**. Private tickets stay out of public repositories, exactly as with Linear.
+Jira Cloud and Jira Server/Data Center come next, the same way.
 
 ## F. The dashboard: how it's going
 
