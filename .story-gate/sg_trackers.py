@@ -650,7 +650,9 @@ def untrusted_server(gate, settings):
     """Your Jira Server token goes only to the address on the default branch's config (or one you name yourself in
     STORY_GATE_JIRA_SITE), so a branch can't point it at another server. None when the address is trusted."""
     site = settings.get("site")
-    if (os.environ.get("STORY_GATE_JIRA_SITE") or "").strip().rstrip("/") == site:
+    named = (os.environ.get("STORY_GATE_JIRA_SITE") or "").strip().rstrip("/")
+    named = named[len("https://"):] if named.startswith("https://") else named  # the same forms jira-setup takes
+    if named == site:
         return None
     base = gate.cfg().get("base_branch", "main")
     for ref in ("origin/" + base, base):

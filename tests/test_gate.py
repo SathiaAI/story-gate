@@ -6513,6 +6513,8 @@ class TestTrackerJiraServer(Base):
         with self.assertRaises(SystemExit) as e:
             self.pull(env={"JIRA_API_TOKEN": "pat"})
         self.assertIn("isn't the address on main's config", str(e.exception)); self.assertFalse(self.snap.exists())
+        self.assertEqual(self.pull(env={"JIRA_API_TOKEN": "pat", "STORY_GATE_JIRA_SITE": "https://jira.acme.com/jira/"}), 0)  # as jira-setup takes it
+        self.snap.unlink()
         self.assertEqual(TR.ci_token("jira", env={"STORY_GATE_JIRA_TOKEN": "p"}, settings=self.SETTINGS), ("p", []))
         self.assertEqual(TR.ci_token("jira", env={}, settings={"site": "a.atlassian.net"})[1], ["STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"])
         self.pull()
