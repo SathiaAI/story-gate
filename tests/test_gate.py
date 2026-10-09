@@ -5515,5 +5515,44 @@ class TestSpecPull(Base):
         self.assertIsNone(SP.link("no front matter", "b.md"))
 
 
+class TestStartBranch(Base):
+    """`start` warns on the base branch (refuses in enforce mode) and notes a branch name without the story id."""
+
+    def git(self, *a):
+        return subprocess.run(["git", *a], cwd=self.repo, capture_output=True, text=True)
+
+    def test_on_the_base_branch_it_warns_and_still_starts_in_warn_mode(self):
+        self.git("checkout", "-q", "main")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: you're on main, the base branch", r.stdout); self.assertIn("git switch -c feature/SAT-1", r.stdout)
+        self.assertTrue((self.repo / ".story-gate/stories/SAT-1/story.md").exists())
+
+    def test_enforce_mode_refuses_and_writes_nothing(self):
+        self.cfg(mode="enforce"); self.git("add", "-A"); self.git("commit", "-qm", "enforce")
+        self.git("checkout", "-q", "main"); self.git("merge", "-q", "feature/SAT-1-thing")
+        r = run(self.repo, "start", "SAT-2")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("not started: you're on main", r.stderr)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-2").exists())
+        self.assertFalse((self.repo / ".story-gate/.active").exists())
+
+    def test_branch_names_and_detached_head(self):
+        r = run(self.repo, "start", "SAT-1")
+        self.assertNotIn("WARNING", r.stdout); self.assertNotIn("note:", r.stdout)  # feature/SAT-1-thing is right
+        self.git("checkout", "-qb", "misc-work")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertIn("note: branch 'misc-work' doesn't contain SAT-1", r.stdout)
+        self.git("checkout", "-q", "--detach")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertEqual(r.returncode, 0); self.assertNotIn("WARNING", r.stdout); self.assertNotIn("note:", r.stdout)
+
+    def test_the_base_branch_comes_from_the_repository_not_a_fixed_name(self):
+        self.git("branch", "-m", "main", "trunk")
+        self.cfg(base_branch="trunk")
+        self.git("checkout", "-q", "trunk")
+        r = run(self.repo, "start", "SAT-1")
+        self.assertIn("you're on trunk, the base branch", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
