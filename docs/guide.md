@@ -447,6 +447,23 @@ The step's token lasts about an hour, is masked in logs, and goes straight into 
 
 Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-feature` script) and OpenSpec 1.14.1 (`openspec validate --strict` accepts the example change).
 
+#### Specs in Linear
+
+Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket like an issue. The gate checks the copy; CI checks the copy against the live ticket.
+
+1. **Set it up.** In `.story-gate/config.json`, add `"trackers": {"linear": {"workspace": "acme"}}` in a pull request (`acme` is the part after `linear.app/` in your ticket links). Reviewers see it as a weaker rule. `story-gate doctor` suggests this when your branch names look like Linear's.
+2. **Pull a ticket.** Run `story-gate spec-pull <story> ENG-12` (or paste the ticket's link). It reads the ticket with your own key: set `LINEAR_API_KEY` to a personal API key with **Read** permission only, limited to the teams whose tickets you pull if you can (Linear → Settings → Account → Security & access → Personal API keys). No key on this computer? Paste the ticket instead: `story-gate spec-pull <story> ENG-12 --from-file ticket.md`, for example from your AI tool's Linear connector. A pasted copy is marked "not verified" until CI compares it.
+   - The copy is saved as `linear-ENG-12.md` next to the story, holding the ticket's id, link and text, with a fingerprint that catches edits by hand.
+   - **Private tickets stay out of public repositories.** If this repository is public, nothing is copied unless the tracker's settings say `"allow_in_public_repo": true`.
+3. **Let CI read it.** Create another key the same way (Read only, limited to those teams), ideally for a separate member of your workspace kept for automation, so it doesn't stop working when a person leaves. In this repository: Settings → Secrets and variables → Actions → New repository secret: `STORY_GATE_LINEAR_KEY`. Only the story-gate job sees it. `story-gate doctor --repo owner/repo` (run as yourself) shows whether it's set.
+   - CI reads only `api.linear.app`, over HTTPS, with no redirects, a 20-second limit and a 1 MB answer limit. It checks the key belongs to the configured workspace and the ticket is the same one (by Linear's own id).
+   - Without the secret, or on a pull request from a fork, those copies show **not checked**. If Linear can't be reached, or answers something unexpected, they show **not checked** too; never **verified**.
+4. **Branch names.** Linear suggests branch names like `eng-12-refunds`. story-gate accepts them for a story that exists (`ENG-12`), so CI finds the story.
+
+**What "verified" means:** the copy matched the ticket's title and description when CI checked that commit. An edit to the ticket afterwards shows up at the next check. Comments, attachments and linked tickets aren't read.
+
+Jira Cloud and Jira Server/Data Center come next, the same way.
+
 ## F. The dashboard: how it's going
 
 Every repository with story-gate gets a **Story-gate dashboard** issue, pinned and kept current by `.github/workflows/story-gate-dashboard.yml`. It lives in your repository, so only people who can see the repository can see it. That keeps it private on private repos, on any plan.

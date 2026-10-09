@@ -272,7 +272,7 @@ def to_html(f):
                 ('<a href="%s">CI run</a>' % esc(s.get("run"), 300)) if re.fullmatch(r"https://[^\s\"'<>]{1,290}", str(s.get("run") or "")) else ""]
         return " · ".join(b for b in bits if b)
     src_rows = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td class="small">%s<div class="text-secondary">%s</div></td></tr>' % (
-        esc(s.get("path"), 200), "#%s" % esc(s.get("issue"), 12) if s.get("issue") else "—",
+        esc(s.get("path"), 200), (("#%s" if str(s.get("issue")).isdigit() else "%s") % esc(s.get("issue"), 24)) if s.get("issue") else "—",
         D.pill({"verified": "PASS", "changed": "FAIL"}.get(s.get("state"))) + " " + esc(s.get("state"), 20), esc(s.get("detail"), 400),
         src_when(s)) for s in f.get("sources") or [])
     card = lambda title, body, note="": ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">%s</h3>%s</div>%s</div>'
