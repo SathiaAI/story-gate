@@ -1,4 +1,4 @@
-"""Tickets kept in a tracker (Linear and Jira Cloud; Jira Server/Data Center plugs into the same shape next).
+"""Tickets kept in a tracker: Linear, Jira Cloud, and Jira Server / Data Center (8.14 or later).
 
 One contract per tracker: fetch(settings, ticket, token) -> {"id", "key", "title", "body", "url", "updated_at"} or raises
 TrackerError with plain words. Read-only, a fixed HTTPS endpoint built here (never taken from a copy or a ticket), no
@@ -18,6 +18,11 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 JIRA_SITE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net")
 JIRA_FIELD = re.compile(r"customfield_[0-9]{1,12}")
 # a Jira Cloud site's id: a UUID, sometimes with a suffix on older sites (e.g. '...-3c15c2bd8caa-ecosystem')
+# Jira Server / Data Center: host[:port][/context path], no scheme (always https), no query, no user info
+JIRA_SERVER = re.compile(r"(?!localhost\b)(?![0-9.]+(?:[:/]|$))"           # a name, never localhost or a bare IP address
+                         r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+"
+                         r"(?::(?:[1-9][0-9]{1,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?"
+                         r"(?:/(?!\.{1,2}(?:/|$))[A-Za-z0-9._~-]{1,64}){0,5}")
 CLOUD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[a-z0-9]{1,40})?")
 LABEL = {"linear": "Linear", "jira": "Jira"}
 # the CI secrets (read-only); every one must be set or the tickets show "not checked"
@@ -212,12 +217,14 @@ def adf_to_text(node, ac=False, _depth=0):
             text = inline(kids, depth)
             if text:
                 out.append(pad + text)
-                ctx["ac"] = ctx["ac_field"] or (ctx["ac"] and not text)
         elif t == "heading":
             text = inline(kids, depth)
             level = a.get("level") if isinstance(a.get("level"), int) and 1 <= a.get("level") <= 6 else 2
             out.append("\n%s %s\n" % ("#" * level, text))
-            ctx["ac"] = ctx["ac_field"] or _ac_heading(text)
+            if _ac_heading(text):
+                ctx["ac"], ctx["ac_level"] = True, level
+            elif not (ctx["ac"] and level > ctx.get("ac_level", 0)):  # a deeper heading stays inside the section
+                ctx["ac"] = ctx["ac_field"]
         elif t in ("bulletList", "orderedList"):
             for i, item in enumerate(kids, 1):
                 if not isinstance(item, dict) or item.get("type") != "listItem":
@@ -307,7 +314,7 @@ def jira_ac_text(value):
         return adf_to_text(value, ac=True)
     if isinstance(value, str):
         # only a real list marker followed by a space is dropped: '1.5 seconds' and '*Must* log out' stay whole
-        lines = [re.sub(r"^\s*(?:[-*•+]\s+|\d{1,3}[.)]\s+|\[[ xX]?\](?:\s+|$))", "", ln).strip() for ln in value.splitlines()]
+        lines = [re.sub(r"^\s*(?:[*#•+]+\s+|-\s+|\d{1,3}[.)]\s+|\[[ xX]?\](?:\s+|$))", "", ln).strip() for ln in value.splitlines()]
         return "\n".join("- [ ] " + ln for ln in lines if ln)
     raise TrackerError("Jira's acceptance-criteria field isn't text (it's a %s); pick a text field" % type(value).__name__)
 
@@ -344,14 +351,116 @@ def jira_fetch(settings, ticket, token, get=None):
             "url": "https://%s/browse/%s" % (settings["site"], key)}
 
 
+WIKI_CODE = re.compile(r"\{(code|noformat)(?::[^}]*)?\}(.*?)\{\1\}", re.S)
+WIKI_OPEN = re.compile(r"\{(?:code|noformat)(?::[^}]*)?\}")
+WIKI_TAG = re.compile(r"\{(?:quote|panel(?::[^}]*)?|color(?::[^}]*)?)\}")
+
+
+def wiki_to_text(text, ac=False):
+    """Jira Server / Data Center's wiki markup to markdown story-gate can read. Lists under an 'Acceptance criteria'
+    heading (or every list when ac=True) become '- [ ]' criteria; {code} and {noformat} blocks, wherever they open, are
+    kept as code on lines of their own; criteria in a table, or a code block that never closes, stop the copy (nothing is
+    half-read). Other text is kept as written."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        raise TrackerError("Jira's description isn't text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out, state = [], {"ac": ac, "level": 0}
+
+    def prose(chunk):
+        if WIKI_OPEN.search(chunk):
+            raise TrackerError("Jira's text has a {code} or {noformat} block that never closes")
+        for ln in chunk.split("\n"):
+            ln = WIKI_TAG.sub("", ln)
+            ln = re.sub(r"\{\{(.+?)\}\}", r"`\1`", ln)
+            s_ = ln.strip()
+            h = re.match(r"^h([1-6])\.\s*(.*)$", s_)
+            lm = re.match(r"^([*#]+|-)\s+(.*)$", s_)
+            if h:
+                lvl = int(h.group(1))
+                out.append("\n%s %s\n" % ("#" * lvl, h.group(2).strip()))
+                if _ac_heading(h.group(2)):
+                    state["ac"], state["level"] = True, lvl
+                elif not (state["ac"] and lvl > state["level"]):  # a deeper heading stays inside the section, as the gate reads it
+                    state["ac"] = ac
+            elif lm:
+                depth = len(lm.group(1)) if lm.group(1) != "-" else 1
+                mark = "- [ ] " if state["ac"] else ("1. " if lm.group(1).endswith("#") else "- ")
+                out.append("  " * (depth - 1) + mark + lm.group(2).strip())
+            elif s_.startswith("|"):
+                if state["ac"]:
+                    raise TrackerError("Jira's acceptance criteria are in a table, which story-gate can't read as criteria "
+                                       "yet; use a list")
+                out.append(s_)
+            elif s_ == "----":
+                out.append("---")
+            elif s_.startswith("bq."):
+                out.append("> " + s_[3:].strip())
+            else:
+                out.append(ln.rstrip())
+
+    pos = 0
+    for m in WIKI_CODE.finditer(text):  # each block is matched with its own closing tag, so a {code} inside {noformat} is text
+        prose(text[pos:m.start()])
+        code = m.group(2).strip("\n")
+        fence = "`" * max(3, 1 + max((len(r) for r in re.findall(r"`+", code)), default=0))
+        out.append(fence + "\n" + code + "\n" + fence)
+        pos = m.end()
+    prose(text[pos:])
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def jira_server_fetch(settings, ticket, token, get=None):
+    """Jira Server / Data Center (REST v2) with a personal access token (read-only account)."""
+    get = get or get_json
+    base = "https://%s/rest/api/2" % settings["site"]
+    fields = ["summary", "description", "updated"] + ([settings["ac_field"]] if settings.get("ac_field") else [])
+    st, data = get("%s/issue/%s?fields=%s" % (base, ticket, ",".join(fields)), {"Authorization": "Bearer " + token})
+    if st in (401, 403):
+        raise TrackerError("Jira refused the token (HTTP %s)" % st)
+    if st == 404:
+        raise NotFound("%s wasn't found in Jira (or this token can't see it)" % ticket)
+    if st != 200 or not isinstance(data, dict):
+        raise TrackerError("Jira answered HTTP %s" % st)
+    f = data.get("fields")
+    if not isinstance(f, dict) or not isinstance(data.get("key"), str) or not isinstance(data.get("id"), str):
+        raise TrackerError("Jira's answer isn't a ticket")
+    key, tid = data["key"], data["id"]
+    if not TICKET.fullmatch(key) or not re.fullmatch(r"[0-9]{1,18}", tid):
+        raise TrackerError("Jira's answer has an unexpected ticket id")
+    if not str(data.get("self") or "").startswith(base + "/issue/"):
+        raise TrackerError("Jira's answer points somewhere else")
+    if not isinstance(f.get("summary"), str) or not isinstance(f.get("updated"), str):
+        raise TrackerError("Jira's answer has no summary")
+    body = wiki_to_text(f.get("description"))
+    if settings.get("ac_field"):
+        if settings["ac_field"] not in f:
+            raise TrackerError("Jira's answer has no field %s (trackers.jira.ac_field); is it on this ticket's screen?" % settings["ac_field"])
+        v = f.get(settings["ac_field"])
+        ac = wiki_to_text(v, ac=True) if isinstance(v, str) and re.search(r"(?m)^\s*(?:[*#]+|-)\s", v) else jira_ac_text(v)
+        if ac:
+            body = (body + "\n\n" if body else "") + "## Acceptance criteria\n\n" + ac
+    return {"id": tid, "key": key, "title": f["summary"], "body": body, "updated_at": f["updated"][:40],
+            "url": "https://%s/browse/%s" % (settings["site"], key)}
+
+
+def jira_any_fetch(settings, ticket, token, get=None):
+    return (jira_server_fetch if settings.get("server") else jira_fetch)(settings, ticket, token, get=get)
+
+
 def jira_setup(args, env=os.environ):
     """story-gate jira-setup <site> ["field name"]: print the trackers.jira settings for a Jira Cloud site: its cloud id
     (public), and, with your read-only token, the id of the acceptance-criteria field found by its name."""
-    if not args or not JIRA_SITE.fullmatch(args[0]):
-        sys.exit("usage: jira-setup <your-site.atlassian.net> [\"Acceptance criteria field name\"]")
-    site = args[0]
+    site = (args[0] if args else "").strip().rstrip("/")
+    site = site[len("https://"):] if site.startswith("https://") else site
+    if not site or not (JIRA_SITE.fullmatch(site) or JIRA_SERVER.fullmatch(site)):
+        sys.exit("usage: jira-setup <your-site.atlassian.net | your Jira Server address, e.g. jira.acme.com> "
+                 "[\"Acceptance criteria field name\"]")
     if len(args) > 1 and not args[1].strip():
         sys.exit("story-gate: give the field's name, e.g. \"Acceptance criteria\".")
+    if not JIRA_SITE.fullmatch(site):
+        return jira_server_setup(site, args[1] if len(args) > 1 else None, env)
     st, info = get_json("https://%s/_edge/tenant_info" % site, {})
     cloud = (info or {}).get("cloudId") if isinstance(info, dict) else None
     if st != 200 or not isinstance(cloud, str) or not CLOUD_ID.fullmatch(cloud):
@@ -364,18 +473,39 @@ def jira_setup(args, env=os.environ):
         st, fields = get_json((JIRA_GATEWAY % cloud) + "/field", jira_auth(tok))
         if st != 200 or not isinstance(fields, list):
             sys.exit("story-gate: Jira answered HTTP %s when listing fields." % st)
-        want = args[1].strip().lower()
-        hits = [x for x in fields if isinstance(x, dict) and str(x.get("name", "")).strip().lower() == want
-                and JIRA_FIELD.fullmatch(str(x.get("id", "")))]
-        if len(hits) != 1:
-            names = sorted({str(x.get("name")) for x in fields if isinstance(x, dict) and want.split()[0] in str(x.get("name", "")).lower()})
-            sys.exit("story-gate: %s fields named '%s' found. Close matches: %s" % (len(hits) or "no", args[1], ", ".join(names[:10]) or "none"))
-        settings["ac_field"] = hits[0]["id"]
+        settings["ac_field"] = find_field(fields, args[1])
     print('Add this to .story-gate/config.json in a pull request:\n  "trackers": {"jira": %s}' % json.dumps(settings))
     return 0
 
 
-FETCH = {"linear": linear_fetch, "jira": jira_fetch}
+def find_field(fields, name):
+    """The id of the one custom field called `name` (any case); exits with close matches otherwise."""
+    if not isinstance(fields, list):
+        sys.exit("story-gate: Jira didn't list its fields.")
+    want = name.strip().lower()
+    hits = [x for x in fields if isinstance(x, dict) and str(x.get("name", "")).strip().lower() == want
+            and JIRA_FIELD.fullmatch(str(x.get("id", "")))]
+    if len(hits) != 1:
+        names = sorted({str(x.get("name")) for x in fields if isinstance(x, dict) and want.split()[0] in str(x.get("name", "")).lower()})
+        sys.exit("story-gate: %s fields named '%s' found. Close matches: %s" % (len(hits) or "no", name, ", ".join(names[:10]) or "none"))
+    return hits[0]["id"]
+
+
+def jira_server_setup(site, field_name, env):
+    settings = {"site": site, "server": True}
+    if field_name:
+        tok = _first(("STORY_GATE_JIRA_TOKEN", "JIRA_API_TOKEN"), env)
+        if not tok:
+            sys.exit("story-gate: to find the field, set JIRA_API_TOKEN to your own personal access token first.")
+        st, fields = get_json("https://%s/rest/api/2/field" % site, {"Authorization": "Bearer " + tok})
+        if st != 200:
+            sys.exit("story-gate: Jira answered HTTP %s when listing fields." % st)
+        settings["ac_field"] = find_field(fields, field_name)
+    print('Add this to .story-gate/config.json in a pull request:\n  "trackers": {"jira": %s}' % json.dumps(settings))
+    return 0
+
+
+FETCH = {"linear": linear_fetch, "jira": jira_any_fetch}
 
 
 def site_of(kind, settings):
@@ -396,7 +526,9 @@ def url_of(kind, site, key):
 
 
 def site_ok(kind, site):
-    return bool(WORKSPACE.fullmatch(site or "")) if kind == "linear" else bool(JIRA_SITE.fullmatch(site or ""))
+    if kind == "linear":
+        return bool(WORKSPACE.fullmatch(site or ""))
+    return bool(JIRA_SITE.fullmatch(site or "") or JIRA_SERVER.fullmatch(site or ""))
 
 
 def settings_problem(kind, v):
@@ -409,6 +541,14 @@ def settings_problem(kind, v):
         extra = set(v) - {"workspace", "allow_in_public_repo"}
         if extra or not isinstance(v.get("workspace"), str) or not WORKSPACE.fullmatch(v["workspace"]):
             return 'must look like {"workspace": "your-workspace"}'
+        return None
+    if kind == "jira" and "server" in v:
+        extra = set(v) - {"site", "server", "ac_field", "allow_in_public_repo"}
+        if extra or v.get("server") is not True or not isinstance(v.get("site"), str) or not JIRA_SERVER.fullmatch(v["site"]) \
+                or JIRA_SITE.fullmatch(v["site"]) \
+                or ("ac_field" in v and not (isinstance(v["ac_field"], str) and JIRA_FIELD.fullmatch(v["ac_field"]))):
+            return ('for Jira Server / Data Center must look like {"site": "jira.acme.com", "server": true, '
+                    '"ac_field": "customfield_10050" (optional)}')
         return None
     if kind == "jira":
         extra = set(v) - {"site", "cloud_id", "ac_field", "allow_in_public_repo"}
@@ -430,9 +570,9 @@ def parse_ticket_ref(ref):
     m = re.fullmatch(r"https://linear\.app/([a-z0-9-]{1,48})/issue/([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})(?:/[^\s]*)?", ref)
     if m:
         return "linear", m.group(2), m.group(1)
-    m = re.fullmatch(r"https://([a-z0-9-]{1,63}\.atlassian\.net)/browse/([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})/?(?:[?#][^\s]*)?", ref)
-    if m:
-        return "jira", m.group(2), m.group(1)
+    m = re.fullmatch(r"https://([^\s/?#@]+(?:/[A-Za-z0-9._~-]{1,64}){0,5})/browse/([A-Z][A-Z0-9]{0,9}-[0-9]{1,9})/?(?:[?#][^\s]*)?", ref)
+    if m and (JIRA_SITE.fullmatch(m.group(1)) or JIRA_SERVER.fullmatch(m.group(1))):
+        return "jira", m.group(2), m.group(1)  # the site must still be the one in config (spec-pull checks)
     return None
 
 
@@ -466,16 +606,26 @@ def _first(names, env):
     return ""
 
 
-def local_token(kind, env=os.environ):
-    """The credential for this computer: Linear's key, or Jira's 'email:token'; '' when anything is missing."""
-    vals = [_first(names, env) for names in LOCAL_ENV[kind]]
+def secrets_for(kind, settings=None):
+    """The CI secrets a tracker needs: Jira Server / Data Center takes a personal access token alone."""
+    if kind == "jira" and (settings or {}).get("server"):
+        return ("STORY_GATE_JIRA_TOKEN",)
+    return CI_SECRETS[kind]
+
+
+def local_token(kind, env=os.environ, settings=None):
+    """The credential for this computer: Linear's key, Jira Cloud's 'email:token', or Jira Server's personal access
+    token; '' when anything is missing."""
+    groups = LOCAL_ENV[kind][-1:] if kind == "jira" and (settings or {}).get("server") else LOCAL_ENV[kind]
+    vals = [_first(names, env) for names in groups]
     return ":".join(vals) if all(vals) else ""
 
 
-def ci_token(kind, env=os.environ):
+def ci_token(kind, env=os.environ, settings=None):
     """(credential or '', names of missing CI secrets)."""
-    vals = [(env.get(n) or "").strip() for n in CI_SECRETS[kind]]
-    missing = [n for n, v in zip(CI_SECRETS[kind], vals) if not v]
+    names = secrets_for(kind, settings)
+    vals = [(env.get(n) or "").strip() for n in names]
+    missing = [n for n, v in zip(names, vals) if not v]
     return ("" if missing else ":".join(vals)), missing
 
 
@@ -494,6 +644,27 @@ def public_repo_refused(gate, settings):
         return ("%s is public, so copying a ticket into it would publish the ticket. If that's intended, set "
                 "\"allow_in_public_repo\": true for this tracker in .story-gate/config.json (reviewers see it as a weaker rule)" % own)
     return None
+
+
+def untrusted_server(gate, settings):
+    """Your Jira Server token goes only to the address on the default branch's config (or one you name yourself in
+    STORY_GATE_JIRA_SITE), so a branch can't point it at another server. None when the address is trusted."""
+    site = settings.get("site")
+    if (os.environ.get("STORY_GATE_JIRA_SITE") or "").strip().rstrip("/") == site:
+        return None
+    base = gate.cfg().get("base_branch", "main")
+    for ref in ("origin/" + base, base):
+        raw = gate.git("show", "%s:.story-gate/config.json" % ref)
+        if raw:
+            try:
+                theirs = ((json.loads(raw).get("trackers") or {}).get("jira") or {})
+            except (ValueError, AttributeError):
+                theirs = {}
+            if isinstance(theirs, dict) and theirs.get("server") and theirs.get("site") == site:
+                return None
+            break
+    return ("this branch's config sends your Jira token to %s, which isn't the address on %s's config. If that's your "
+            "Jira, set STORY_GATE_JIRA_SITE=%s and run it again." % (site, base, site))
 
 
 def cli(gate, sid, ref_arg, kv, sd, write_and_link):
@@ -524,6 +695,10 @@ def cli(gate, sid, ref_arg, kv, sd, write_and_link):
     why = public_repo_refused(gate, settings)
     if why:
         sys.exit("story-gate: nothing was copied: " + why + ".")
+    if kind == "jira" and settings.get("server") and not kv.get("from-file"):
+        why = untrusted_server(gate, settings)
+        if why:
+            sys.exit("story-gate: nothing was fetched: " + why)
     if kv.get("from-file"):
         src = kv["from-file"]
         try:
@@ -535,11 +710,12 @@ def cli(gate, sid, ref_arg, kv, sd, write_and_link):
                 "ticket": key, "ticket_id": "unknown", "source_updated_at": "unknown", "fetched_at": gate.now(),
                 "fetched_by": "pasted", "format": FORMAT}
     else:
-        tok = local_token(kind)
+        tok = local_token(kind, settings=settings)
         if not tok:
+            groups = LOCAL_ENV[kind][-1:] if kind == "jira" and settings.get("server") else LOCAL_ENV[kind]
             sys.exit("story-gate: no %s key here. Set %s to your own read-only %s credentials, or paste the ticket with "
                      "--from-file (for example from your AI tool's %s connector; it's marked 'not verified' until CI "
-                     "checks it)." % (LABEL[kind], " and ".join(n[-1] for n in LOCAL_ENV[kind]), LABEL[kind], LABEL[kind]))
+                     "checks it)." % (LABEL[kind], " and ".join(n[-1] for n in groups), LABEL[kind], LABEL[kind]))
         try:
             t = FETCH[kind](settings, key, tok)
         except TrackerError as e:
