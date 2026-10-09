@@ -1395,14 +1395,20 @@ def start_branch_check(sid, c):
     """'' when the current branch suits a story; otherwise a plain warning. Raises SystemExit on the base branch in
     enforce mode: a story's work reaches the base branch through a pull request, where the gate checks it."""
     branch = current_branch()
-    if not branch or branch == "HEAD" or os.environ.get("GITHUB_ACTIONS"):
-        return ""  # detached HEAD or CI: nothing to advise
+    if os.environ.get("GITHUB_ACTIONS"):
+        return ""
+    enforce = c.get("mode") == "enforce" or "pre_edit" in (c.get("enforce_points") or [])
+    if not branch or branch == "HEAD":  # no branch: the work has nowhere to go but a later, unchecked commit
+        msg = "no branch is checked out (detached HEAD). Make one for the story first: git switch -c feature/%s" % sid
+        if enforce:
+            sys.exit("story-gate: not started: " + msg)
+        return "WARNING: " + msg
     ref = T.default_policy_ref(str(ROOT), c.get("base_branch", "main")) or c.get("base_branch", "main")
     base = ref.split("/", 1)[1] if ref.startswith("origin/") else ref
     if branch == base:
         msg = ("you're on %s, the base branch. A story's work should reach %s through a pull request, where story-gate "
                "checks it. Make a branch for it first: git switch -c feature/%s" % (base, base, sid))
-        if c.get("mode") == "enforce" or "pre_edit" in (c.get("enforce_points") or []):
+        if enforce:
             sys.exit("story-gate: not started: " + msg)
         return "WARNING: " + msg
     if sid.lower() not in branch.lower():
