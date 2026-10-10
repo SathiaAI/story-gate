@@ -56,7 +56,7 @@ Every client has different hooks and models, so until now there has been no sing
 
 You do this once per repository. The steps are the same as in the README:
 
-1. **Ask your AI:** `Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.`. It asks before installing, then installs the pinned release (`uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.8.0`) and runs `story-gate init`, which opens the setup page.
+1. **Ask your AI:** `Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.`. It asks before installing, then installs the pinned release (`uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.0`) and runs `story-gate init`, which opens the setup page.
 2. **Sign in to GitHub** on that page (click Authorize).
 3. **Give your AI its own login:** click Create, then Install. Your AI never uses your account.
 4. **Add the judge key:** paste an OpenRouter key once. It goes into a GitHub secret and your user folder, never the repository.
