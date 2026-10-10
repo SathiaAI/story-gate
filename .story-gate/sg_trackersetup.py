@@ -55,9 +55,9 @@ class SetupError(Exception):
 class FieldError(SetupError):
     """A problem with one field the person typed: shown next to that field, and the form stays as it is."""
 
-    def __init__(self, field, msg):
+    def __init__(self, field, msg, kind=None):
         SetupError.__init__(self, msg)
-        self.field = field
+        self.field, self.kind = field, kind  # kind: the tracker form the field belongs to, when both have one
 
 
 class Session:
@@ -126,7 +126,7 @@ class Session:
                 self.forget_key()
                 self.set("details")
                 with self.lock:
-                    self.field_error = {"field": e.field, "msg": msg}
+                    self.field_error = {"field": e.field, "msg": msg, "kind": e.kind}
             except Exception as e:  # every failure is a plain message on the page; the key is dropped
                 msg = self.scrub(e) if isinstance(e, (SetupError, TR.TrackerError, RuntimeError)) else type(e).__name__
                 self.forget_key()
@@ -200,7 +200,7 @@ class Session:
                 raise FieldError("workspace", "The workspace is the short name in your Linear links: linear.app/<workspace>/...")
             key = (form.get("key") or "").strip()
             if not re.fullmatch(r"lin_api_[A-Za-z0-9]{20,80}", key):
-                raise FieldError("key", key_problem(key, "a Linear personal API key", "It starts with lin_api_."))
+                raise FieldError("key", key_problem(key, "a Linear personal API key", "It starts with lin_api_."), "linear")
             settings, keys, dest = {"workspace": ws}, {"STORY_GATE_LINEAR_KEY": key}, DESTINATION["linear"]
         else:
             site = (form.get("site") or "").strip().lower()
@@ -215,7 +215,7 @@ class Session:
             key = (form.get("key") or "").strip()
             if len(key) < 100 or any(c.isspace() for c in key):
                 raise FieldError("key", key_problem(key, "an Atlassian API token", "Tokens with scopes are long (about 190 "
-                                                    "characters) and start with ATATT."))
+                                                    "characters) and start with ATATT."), "jira")
             st, tenant = TR.get_json("https://%s/_edge/tenant_info" % site, {})   # public: no credentials sent
             cloud = (tenant or {}).get("cloudId") if isinstance(tenant, dict) else None
             if st != 200 or not isinstance(cloud, str) or not TR.CLOUD_ID.fullmatch(cloud):
@@ -548,12 +548,12 @@ document.querySelector('#lin input[name=key]').disabled=j;document.querySelector
 async function post(a,body){const r=await fetch('/'+a,{method:'POST',headers:{'X-SG-Nonce':N},body:body||''});
 if(r.status==403){document.getElementById('msg').textContent='This page expired. Run story-gate tracker-setup again.';return}tick()}
 function send(a,f){dismissed='';clearErr();post(a,new URLSearchParams(new FormData(f)))}
-function fieldEl(n){return [...document.querySelectorAll('#det [name="'+n+'"]')].find(e=>!e.disabled&&e.offsetParent!==null)||document.querySelector('#det [name="'+n+'"]')}
+function fieldEl(n,kind){const scope=kind?(kind=='jira'?'#jir':'#lin'):'#det';const e=document.querySelector(scope+' [name="'+n+'"]');return e&&!e.disabled&&e.offsetParent!==null?e:null}
 function clearErr(){shownErr='';document.querySelectorAll('#det .bad').forEach(e=>e.classList.remove('bad'));document.querySelectorAll('#det .ferr').forEach(e=>e.remove());
-document.querySelectorAll('#det [aria-invalid]').forEach(e=>e.removeAttribute('aria-invalid'));document.getElementById('btnerr').textContent='';document.getElementById('rv').classList.remove('bad')}
+document.querySelectorAll('#det [aria-invalid]').forEach(e=>{e.removeAttribute('aria-invalid');e.removeAttribute('aria-describedby')});document.getElementById('btnerr').textContent='';document.getElementById('rv').classList.remove('bad')}
 let shownErr='',dismissed='';function showErr(fe){let k=fe?fe.field+'|'+fe.msg:'';if(k&&k===dismissed)k='';if(k===shownErr)return;clearErr();shownErr=k;
-if(!k)return;const f=fieldEl(fe.field);const fix=()=>{dismissed=k;clearErr()};const m=el('div',fe.msg);m.className='ferr';m.setAttribute('role','alert');
-if(f){f.classList.add('bad');f.setAttribute('aria-invalid','true');(f.closest('label')||f).after(m);f.focus();f.addEventListener('input',fix,{once:true});f.addEventListener('change',fix,{once:true})}
+if(!k)return;const f=fieldEl(fe.field,fe.kind);const fix=()=>{dismissed=k;clearErr()};const m=el('div',fe.msg);m.className='ferr';m.id='ferr';m.setAttribute('role','alert');
+if(f){f.classList.add('bad');f.setAttribute('aria-invalid','true');f.setAttribute('aria-describedby','ferr');(f.closest('label')||f).after(m);f.focus();f.addEventListener('input',fix,{once:true});f.addEventListener('change',fix,{once:true})}
 else document.getElementById('det').prepend(m);
 document.getElementById('btnerr').textContent='Fix the field marked in red, then press Review again.';document.getElementById('rv').classList.add('bad')}
 function el(t,txt){const e=document.createElement(t);e.textContent=txt;return e}

@@ -7178,7 +7178,7 @@ class TestTrackerSetup(Base):
             if ss.field_error:
                 break
             time.sleep(0.05)
-        self.assertEqual((ss.step, ss.field_error["field"]), ("details", "key"))  # back on the form, not "start again"
+        self.assertEqual((ss.step, ss.field_error["field"], ss.field_error["kind"]), ("details", "key", "jira"))  # back on the form
         self.assertIn("12 characters long", ss.field_error["msg"]); self.assertIn("saved password", ss.field_error["msg"])
         self.assertNotIn("MySavedPass1", json.dumps(ss.snapshot()))
         TS = self.TS
@@ -7189,6 +7189,7 @@ class TestTrackerSetup(Base):
         page = TS.page(ss)
         self.assertIn("autocomplete=new-password", page); self.assertIn("kindf();tick()", page)
         self.assertIn("id=btnerr", page)
+        self.assertIn("aria-describedby','ferr'", page); self.assertIn("kind=='jira'?'#jir':'#lin'", page)
 
     def test_public_repository_needs_an_explicit_yes(self):
         self.repo_info["private"] = False
