@@ -6642,6 +6642,11 @@ class TestReusableWorkflow(Base):
         import sg_github as GH
         self.assertEqual(GH.ci_check_name(self.repo), "story-gate")
         p = self.repo / ".github/workflows/story-gate.yml"
+        orig = p.read_text()  # a comment or a step that mentions the reusable workflow doesn't switch the mode
+        p.write_text(orig.replace("      # <<< your steps", "      # see SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA
+                                  + "\n      - uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n      # <<< your steps", 1))
+        self.assertEqual(GH.ci_check_name(self.repo), "story-gate")
+        p.write_text(orig)
         p.write_text(p.read_text().replace("      # <<< your steps", "      - run: echo mine\n      # <<< your steps", 1))
         r = run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         self.assertNotEqual(r.returncode, 0); self.assertIn("your own steps", r.stderr); self.assertIn("echo mine", p.read_text())
@@ -6684,7 +6689,9 @@ class TestReusableWorkflow(Base):
         self.assertIn("expects release key SHA256:ZZZ", run(self.repo, "doctor").stdout)
         g.write_text(t.replace("jobs:\n", "jobs:\n  # uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n", 1)
                      .replace("/.github/workflows/gate.yml@" + self.SHA + " #", "/.github/workflows/audit.yml@" + self.SHA + " #"))
-        self.assertIn("doesn't call story-gate's gate.yml", run(self.repo, "doctor").stdout)
+        out = run(self.repo, "doctor").stdout  # with no active call to gate.yml it's no longer a reusable install: it fails either way
+        self.assertTrue("doesn't call story-gate's gate.yml" in out or "story-gate.yml           OUTDATED" in out, out)
+        self.assertNotIn("story-gate.yml           ok", out)
         g.write_text(t + "  other:\n    uses: evil/repo/.github/workflows/x.yml@" + "c" * 40 + "\n")
         self.assertIn("has 2 `uses:` lines", run(self.repo, "doctor").stdout)
         g.write_text(t + "  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")

@@ -272,7 +272,9 @@ def ci_check_name(root):
     workflow calls story-gate's reusable workflow (GitHub names the check '<calling job> / <called job>')."""
     p = Path(root) / ".github" / "workflows" / "story-gate.yml"
     text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
-    return "story-gate / story-gate" if "/.github/workflows/gate.yml@" in text else "story-gate"
+    # only an active job-level `uses:` counts: not a comment, and not a step (`- uses:`) someone added to a copied workflow
+    call = re.search(r"^[ \t]*uses:[ \t]*[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/gate\.yml@", text, re.M)
+    return "story-gate / story-gate" if call else "story-gate"
 
 
 def ruleset_json(check="story-gate"):
