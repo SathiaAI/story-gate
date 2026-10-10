@@ -491,6 +491,17 @@ Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-f
 
 Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket like an issue. The gate checks the copy; CI checks the copy against the live ticket.
 
+**The easy way (Linear and Jira Cloud): `story-gate tracker-setup`.** Run it yourself in your project folder; your AI can't (its hooks refuse it). A page opens on this computer and does steps 1 and 3 below for you:
+
+- You sign in to GitHub by typing a short code on github.com, every time. It never uses a GitHub login already on this computer, so an AI there can't do this step for you. You need admin rights on the repository.
+- You type the workspace (or Jira site and email), a **read-only** key, and one ticket to test with. Nothing is sent with the key yet.
+- A review screen shows exactly where the key will go (`api.linear.app`, or `api.atlassian.com/ex/jira/<your site's cloud id>`), which GitHub secrets get written, and whether one already exists. Replacing a saved key needs its own tick, because CI uses the new one at once.
+- On **Confirm**, story-gate reads the test ticket with the key (the same code CI uses), encrypts the key into the repository's GitHub secrets, and opens a pull request that only adds the tracker to `.story-gate/config.json`. A code owner approves it, as with any weaker rule. Jira: it also finds the acceptance-criteria field by its name, and warns if the token can edit tickets.
+- The key is never written to the repository, the pull request, a log or the terminal, and it's dropped from memory once saved. Optional, off by default: tick **keep a copy on this computer** so `spec-pull` works here without environment variables. It's an owner-only file in your story-gate user folder; other programs running as you can still read it, as they can read environment variables. `story-gate doctor` checks its permissions.
+- The page's link works once, every action needs the page's own cookie and code, and it stops 10 minutes after you close it (30 minutes at most, never half-way through saving). It refuses to start in a shell with settings that would send your key or your GitHub sign-in elsewhere (another GitHub address or sign-in app, custom TLS certificates, `STORY_GATE_TEST_HTTP`); a proxy is fine, and shown on the review screen. In a public repository you must tick that ticket text may be copied into it. If the repository's story-gate workflow uses `pull_request_target`, it refuses to save, because a pull request's own code could then run next to the secrets.
+
+No browser on that computer? Do it by hand, as below.
+
 1. **Set it up.** In `.story-gate/config.json`, add `"trackers": {"linear": {"workspace": "acme"}}` in a pull request (`acme` is the part after `linear.app/` in your ticket links). Reviewers see it as a weaker rule. `story-gate doctor` suggests this when your branch names look like Linear's.
 2. **Pull a ticket.** Run `story-gate spec-pull <story> ENG-12` (or paste the ticket's link). It reads the ticket with your own key: set `LINEAR_API_KEY` to a personal API key with **Read** permission only, limited to the teams whose tickets you pull if you can (Linear → Settings → Account → Security & access → Personal API keys). No key on this computer? Paste the ticket instead: `story-gate spec-pull <story> ENG-12 --from-file ticket.md`, for example from your AI tool's Linear connector. A pasted copy is marked "not verified" until CI compares it.
    - The copy is saved as `linear-ENG-12.md` next to the story, holding the ticket's id, link and text, with a fingerprint that catches edits by hand.
@@ -505,6 +516,8 @@ Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket
 #### Specs in Jira
 
 Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as Linear. Jira Server and Data Center are below.
+
+`story-gate tracker-setup` (see [Specs in Linear](#specs-in-linear)) does steps 1, 2 and 5 for you, with the token typed into a page on your computer. By hand:
 
 1. **Set it up.** Run `story-gate jira-setup your-site.atlassian.net "Acceptance criteria"` and paste what it prints into `.story-gate/config.json` in a pull request. It finds your site's cloud id (public) and, with your own token, the id of the field your team keeps acceptance criteria in (leave the name out if you keep them in the description). Reviewers see the new tracker as a weaker rule.
 2. **Your token.** Create an Atlassian API token **with scopes** and give it only `read:jira-work` (id.atlassian.com → Security → API tokens → Create API token with scopes). Set `JIRA_EMAIL` and `JIRA_API_TOKEN` on your computer. story-gate reads Jira only through Atlassian's API address for your site (`api.atlassian.com/ex/jira/<cloud id>`), which is where scoped tokens work.
@@ -521,7 +534,7 @@ Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as
 
 ##### Jira Server and Data Center
 
-Jira on your own servers (version 8.14 or later) works the same way, with a personal access token.
+Jira on your own servers (version 8.14 or later) works the same way, with a personal access token. `tracker-setup` doesn't cover it yet: set it up by hand as below.
 
 1. **Set it up.** `story-gate jira-setup jira.acme.com "Acceptance criteria"` (add the context path if Jira lives under one, e.g. `jira.acme.com/jira`). It prints `{"site": "jira.acme.com", "server": true, "ac_field": "customfield_…"}` for your config. Use a read-only account: in Jira, Profile → Personal Access Tokens → Create token, and set `JIRA_API_TOKEN` on your computer. Use Jira's full name, not an IP address or `localhost`.
    - **Your token only goes to the address on the default branch's config.** Before that's merged, or if a branch changes it, `spec-pull` stops; name the address yourself with `STORY_GATE_JIRA_SITE=jira.acme.com` if it's right. (Jira Cloud and Linear always use their fixed addresses.)

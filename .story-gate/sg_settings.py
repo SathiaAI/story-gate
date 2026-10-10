@@ -45,7 +45,8 @@ SETTINGS = {
 }
 # Shown by `settings`, changed another way.
 ELSEWHERE = {
-    "trackers": "Linear and Jira tickets (`story-gate jira-setup` prints the Jira part); edit config.json in a pull request of its own",
+    "trackers": "Linear and Jira tickets: run `story-gate tracker-setup` yourself (Linear, Jira Cloud); for Jira Server, "
+                "`story-gate jira-setup` prints the part to add to config.json in a pull request of its own",
     "sources": "where specs come from; edit config.json in a pull request of its own",
     "sinks": "where verdicts and learnings are sent; edit config.json in a pull request of its own",
     "project_hooks_allowed": "your own AI-tool hooks allowed to run; edit config.json in a pull request of its own",
