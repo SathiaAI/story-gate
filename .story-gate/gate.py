@@ -2318,7 +2318,7 @@ def story_id(c, payload=None):
         m = pat.search(src or "")
         if m:
             return m.group(0)
-    if "linear" in (c.get("trackers") or {}):  # Linear names branches 'eng-12-title': accept it for a story that exists
+    if {"linear", "jira"} & set(c.get("trackers") or {}):  # 'eng-12-title' branches (Linear, some Jira tools): a story that exists
         low = re.compile(r"(?<![A-Za-z0-9])(?:%s)(?![0-9])" % c["story_id_pattern"], re.I)
         for src in (os.environ.get("SG_HEAD_REF") or os.environ.get("GITHUB_HEAD_REF", ""), git("rev-parse", "--abbrev-ref", "HEAD").strip()):
             for m in low.finditer(src or ""):
@@ -3094,7 +3094,8 @@ def cmd_ci(tests_dir=None):
             import sg_trackers as TR  # tickets copied in from a tracker set up in the default branch's config
             for rel, owner, kind, key in tracker_links(story_text):
                 settings = (c.get("trackers") or {}).get(kind)
-                token, missing = TR.ci_token(kind, settings=settings) if kind in TR.CI_SECRETS else ("", ["a key"])
+                # its own variable: `token` is the GitHub token the acceptance and branch-protection checks below use
+                tracker_token, missing = TR.ci_token(kind, settings=settings) if kind in TR.CI_SECRETS else ("", ["a key"])
                 try:
                     if not isinstance(settings, dict):
                         state, detail = "not checked", ("%s isn't set up in the default branch's config (trackers), so CI "
@@ -3102,11 +3103,11 @@ def cmd_ci(tests_dir=None):
                     elif SP.public_here() and settings.get("allow_in_public_repo") is not True:
                         state, detail = "not checked", ("this repository is public and trackers.%s doesn't allow ticket text "
                                                         "in a public repository, so CI doesn't read it" % kind)
-                    elif not token:
+                    elif not tracker_token:
                         state, detail = "not checked", ("no %s secret (or the pull request comes from a fork, which gets no "
                                                         "secrets), so CI can't read %s" % (" / ".join(missing), key))
                     else:
-                        state, detail = TR.live_status(sys.modules[__name__], owner, rel, kind, key, settings, token)
+                        state, detail = TR.live_status(sys.modules[__name__], owner, rel, kind, key, settings, tracker_token)
                 except Exception as e:  # never let the comparison itself crash CI or pass silently
                     state, detail = "not checked", "the comparison failed (%s)" % type(e).__name__
                 report_source(rel, "%s %s" % (TR.LABEL.get(kind, kind), key), key, state, detail)

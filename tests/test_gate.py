@@ -6086,6 +6086,33 @@ class TestTrackerLinear(Base):
         r = run(self.repo, "ci", env=dict(env, STORY_GATE_LINEAR_KEY="k"))
         self.assertIn("isn't set up in the default branch's config", r.stdout)
 
+    def test_ci_keeps_the_github_token_for_github_and_the_key_for_the_tracker(self):
+        self.pull()
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main"); (self.repo / "app.py").write_text("x = 3\n")
+        ev = self.repo.parent / (self.repo.name + "-event.json"); self.addCleanup(lambda: ev.unlink() if ev.exists() else None)
+        ev.write_text(json.dumps({"repository": {"private": True}}))
+        g = load_gate(self.repo)
+        sys.modules[g.__name__] = g; self.addCleanup(sys.modules.pop, g.__name__, None)  # the CI loop passes itself by name
+        self.addCleanup(lambda: os.environ.pop("STORY_GATE_ROOT", None))
+        import sg_github as G, sg_trackers as TR, io, contextlib
+        from unittest import mock
+        seen = {}
+        ctx = {"repo": "acme/shop", "number": 1, "head_sha": "abc1234", "author": "agent-bot[bot]", "base": "main", "fork": False}
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF",
+                                                                "GITHUB_STEP_SUMMARY", "STORY_GATE_TRUSTED_DIR", "PR_TITLE")}
+        env.update(GITHUB_TOKEN="gh-token", STORY_GATE_LINEAR_KEY="linear-key", GITHUB_REPOSITORY="acme/shop", GITHUB_EVENT_PATH=str(ev))
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf), \
+                mock.patch.object(G, "pr_context", return_value=ctx), \
+                mock.patch.object(G, "acceptance", side_effect=lambda c_, tok, o, a=(): seen.setdefault("acceptance", tok) and {"accepted": False, "why": "x"}), \
+                mock.patch.object(G, "protection", side_effect=lambda r, b, tok: seen.setdefault("protection", tok) and (True, [])), \
+                mock.patch.object(G, "label_added_by", return_value=None), \
+                mock.patch.object(TR, "live_status", side_effect=lambda *a: seen.setdefault("tracker", a[-1]) and ("unchanged", "same")):
+            g.cmd_ci()
+        self.assertEqual(seen, {"tracker": "linear-key", "acceptance": "gh-token", "protection": "gh-token"}, buf.getvalue())
+
     def test_settings_rules_branches_and_dashboard(self):
         import sg_trust as T
         for junk in ({"jira": {"workspace": "a"}}, {"linear": {"workspace": "Acme"}}, {"linear": {"workspace": "a", "x": 1}},
@@ -6114,6 +6141,8 @@ class TestTrackerLinear(Base):
             with mock.patch.dict(os.environ, {"SG_HEAD_REF": "eng-12-refunds"}), mock.patch.object(g, "git", return_value=""), \
                     mock.patch.object(g, "rd", return_value=""):
                 self.assertIsNone(g.story_id(dict(g.cfg(), trackers={})))  # only when Linear is set up
+                jira = {"site": "acme.atlassian.net", "cloud_id": "11111111-2222-3333-4444-555555555555"}
+                self.assertEqual(g.story_id(dict(g.cfg(), trackers={"jira": jira})), "ENG-12")  # or Jira
             self.assertEqual(g.tracker_hint({"trackers": {}}), "")
             with mock.patch.object(g, "git", return_value="eng-1-a\norigin/eng-2-b\nmain"):
                 self.assertIn("look like Linear's", g.tracker_hint({"trackers": {}}))
