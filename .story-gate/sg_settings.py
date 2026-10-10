@@ -250,7 +250,8 @@ def dump(doc):
 
 
 def write_local(p, before, doc):
-    """Replace config.json in one step, and only if nobody changed it since `before` was read."""
+    """Replace config.json in one step (never half-written), unless it changed since `before` was read. Best effort: a
+    write landing in the same instant as the replace can still be lost; nothing else writes this file automatically."""
     now = p.read_text(encoding="utf-8-sig") if p.is_file() else None
     if now != before:
         raise SettingsError("%s changed while this ran. Nothing was written: run the command again" % CONFIG)
