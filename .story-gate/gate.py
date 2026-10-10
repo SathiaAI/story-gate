@@ -38,6 +38,9 @@ Commands (run from the repo root):
   spec-pull <ID> <issue|ticket> [--from-file F] [--tracker linear|jira]   copy a GitHub issue (#42 or its URL), or a
                                       Linear or Jira ticket (ENG-12 or its link), into the story's folder
                                       as a checked snapshot and link it in story.md (the gate never reads the live issue)
+  settings [KEY] | settings set KEY VALUE [--pr] | settings unset KEY [--pr]
+                                      see every setting in plain English, or change one without editing config.json;
+                                      --pr opens the change as its own pull request for a code owner to approve
   jira-setup <site> ["field name"]   print the trackers.jira settings: the site's cloud id, and the id of the
                                       acceptance-criteria field found by its name (with your read-only Jira token)
   spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
@@ -358,6 +361,11 @@ def cfg():
                 c[k].update(v)
             else:
                 c[k] = v
+    return check_config(c)
+
+
+def check_config(c):
+    """Raise ConfigError for a merged config with an invalid value (the rules cfg() applies); return it unchanged."""
     if c.get("mode") not in ("warn", "enforce"):
         raise ConfigError('.story-gate/config.json: "mode" must be "warn" or "enforce" (got %r) - the gate fails closed until fixed' % c.get("mode"))
     if not isinstance(c.get("require_spec_link"), bool):
@@ -2888,7 +2896,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_settings.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -4060,6 +4068,13 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     hint = tracker_hint(c)
     if hint:
         print("  note: " + hint)
+    try:
+        import sg_settings as SET
+        raw = json.loads(rd(GATE / "config.json") or "{}")
+        for k in SET.unknown_keys(raw, DEFAULT_CONFIG):
+            print("  note: unknown setting %r in .story-gate/config.json: story-gate ignores it (a typo? `story-gate settings` lists them all)" % k)
+    except ValueError:
+        pass
     act = T.read_json(T.active_path())
     if act:
         rt = Path(act.get("dir", ""))
@@ -4332,6 +4347,9 @@ def main(argv):
     if cmd == "jira-setup":
         import sg_trackers as TR
         return TR.jira_setup(args)
+    if cmd == "settings":
+        import sg_settings as SET
+        return SET.cli(sys.modules[__name__], args)
     if cmd == "spec-pull":
         import sg_specpull as SP
         return SP.cli(sys.modules[__name__], args)

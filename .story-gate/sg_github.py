@@ -603,8 +603,9 @@ def device_flow(client_id, scope="repo workflow", on_code=None, sleep=time.sleep
 
 # ------------------------------------------------------------------ setup pull request (Git Data API)
 def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up story-gate",
-                  body="Adds story-gate files. Review and merge to turn the gate on.", base=None):
-    """One commit with every file in `files` ({posix path: bytes}) on a new branch, then a PR. -> {number, url, branch}."""
+                  body="Adds story-gate files. Review and merge to turn the gate on.", base=None, parent=None):
+    """One commit with every file in `files` ({posix path: bytes}) on a new branch, then a PR. -> {number, url, branch}.
+    `parent`: the base commit the files were computed from (default: the base branch's tip now)."""
     if not files:
         raise RuntimeError("nothing to commit: no files were given")
 
@@ -620,7 +621,7 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     if st == 200 and isinstance(open_prs, list) and open_prs:
         return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch}
     base = base or ok("GET", r)["default_branch"]
-    tip = ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
+    tip = parent or ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
     base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]
     entries = []
     for path, content in sorted(files.items()):

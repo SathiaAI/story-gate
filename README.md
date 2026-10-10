@@ -186,6 +186,7 @@ You ask for a feature. Your AI writes the story and the tests, and story-gate ch
 
 - **Your AI never uses your GitHub login.** It works through its own login (step 3), so it can't approve or merge its own work.
 - **Branches can't switch story-gate off.** The rules come from your main branch, and the checks run from a verified copy on your computer. See [security](docs/client-security.md).
+- **Change settings without editing files.** `story-gate settings` lists every setting in plain English; `settings set mode enforce --pr` opens the change as its own pull request for a code owner to approve ([how](docs/guide.md#e-turning-things-on-and-off)).
 - **Plain English.** Your AI writes replies, PR descriptions, story summaries and handoffs in short, plain sentences, with diagrams where a picture is clearer. story-gate scores this (an STE-style score, target 80%) and gives advice. See [plain writing](docs/guide.md#plain-writing).
 - **Pilot:** story-gate is pre-1.0, so commands and settings may still change between releases. Every release since v0.7.0 is signed, and story-gate checks that signature before it installs itself on your computer ([how](docs/guide.md#setup)).
 

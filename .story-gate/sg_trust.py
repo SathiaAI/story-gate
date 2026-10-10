@@ -684,6 +684,24 @@ def weaker(old, new):
     revs = sorted(norm(n.get("reviewers")) - norm(o.get("reviewers")))
     if revs:
         out.append("more reviewers count as independent review: %s" % ", ".join(revs[:5]))
+    try:
+        a = int((o.get("checkpoint") or {}).get("every_edits", 10) or 0)
+        b = int((n.get("checkpoint") or {}).get("every_edits", 10) or 0)
+        if a and (b <= 0 or b > a):
+            out.append("automatic checkpoints %s" % ("turned off" if b <= 0 else "run less often (every %s edits instead of %s)" % (b, a)))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    if o.get("junit_path") and o.get("junit_path") != (n.get("junit_path") or ""):  # each test's own result may no longer count
+        out.append("JUnit results file changed from %r to %r" % (o.get("junit_path") or "", n.get("junit_path") or ""))
+    strs = lambda v: {str(x) for x in v} if isinstance(v, list) else set()
+    gone = sorted(strs(o.get("spec_files")) - strs(n.get("spec_files")))
+    if gone:
+        out.append("spec files no longer fingerprinted at READY: %s" % ", ".join(gone[:5]))
+    if (o.get("base_branch") or "main") != (n.get("base_branch") or "main"):
+        out.append("pull requests are now checked against another branch (base_branch %r instead of %r)"
+                   % (n.get("base_branch") or "main", o.get("base_branch") or "main"))
+    if o.get("story_id_pattern") and o.get("story_id_pattern") != n.get("story_id_pattern"):  # a human checks it still finds real stories
+        out.append("story ID pattern changed from %r to %r" % (o.get("story_id_pattern"), n.get("story_id_pattern")))
     key = lambda e: json.dumps(e, sort_keys=True)
     added = sorted(set(map(key, n.get("project_hooks_allowed") or [])) - set(map(key, o.get("project_hooks_allowed") or [])))
     if added:
