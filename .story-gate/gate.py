@@ -155,7 +155,7 @@ sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE)
 import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 

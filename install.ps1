@@ -1,9 +1,9 @@
 # story-gate installer for Windows (PowerShell):
-#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.8.0/install.ps1 | iex"
+#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.0/install.ps1 | iex"
 # It installs uv (Astral's Python tool manager) if you don't have it, then story-gate at the pinned
 # release, puts it on your PATH, and runs nothing else. Read it before you run it: it's short.
 $ErrorActionPreference = "Stop"
-$ref = if ($env:STORY_GATE_REF) { $env:STORY_GATE_REF } else { "v0.8.0" }
+$ref = if ($env:STORY_GATE_REF) { $env:STORY_GATE_REF } else { "v0.9.0" }
 $src = "git+https://github.com/SathiaAI/story-gate@$ref"
 function Say($m) { Write-Host "story-gate install: $m" }
 
