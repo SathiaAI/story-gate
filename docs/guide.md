@@ -549,18 +549,29 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 
 - **On GitHub:** your repository → **Issues** → **Story-gate dashboard**, pinned at the top. `story-gate doctor` prints the link.
 - **If Issues are turned off** in the repository: open **Actions** → **story-gate-dashboard** → the latest run. The same dashboard is in the run's summary.
-- **On your own computer:** `story-gate dashboard --open` builds the full report and opens it in your browser.
+- **On your own computer:** `story-gate dashboard --open` builds the full report and opens it in your browser. For a page that keeps itself current, run `story-gate dashboard --serve` (see [a live page on your computer](#a-live-page-on-your-computer)).
+
+The pinned issue **is** the live dashboard. It shows when it was updated and when the next refresh is due, a pie chart and a pipeline chart (the tables under them are the full data), and long lists fold away. If the issue gets too long for GitHub (about 65,000 characters), it keeps the top of each list and says "N more: see the full report", linking to the HTML report.
 
 ### When it updates
 
 | Trigger | When |
 |---|---|
-| Schedule | Every 30 minutes (at :11 and :41) |
+| Schedule | Every 30 minutes (at :11 and :41), as a safety net |
 | A `story-gate` check finishes | After every check on a pull request |
 | A merge | After every push to the default branch |
 | By hand | **Actions** → **story-gate-dashboard** → **Run workflow** |
 
-The workflow runs only the default branch's copy of story-gate. It reads story records on other branches as data and never runs them. If a refresh fails, the issue keeps the last good snapshot and says so at the top, with a link to the failed run.
+The workflow runs only the default branch's copy of story-gate. It reads story records on other branches as data and never runs them. If a refresh fails, the issue keeps the last good snapshot and says **STALE** at the top, with a link to the failed run.
+
+**Permissions the dashboard workflow asks for** (nothing else):
+
+- `contents: read`: read the repository.
+- `issues: write`: update the dashboard issue.
+- `pull-requests: read`: find which pull request each story is on.
+- `checks: read`: read the story-gate check's result.
+
+It uses the repository's own `GITHUB_TOKEN`, so GitHub's normal API limits apply; a few requests per refresh are far below them.
 
 ### What it shows
 
@@ -614,7 +625,16 @@ Every number in the issue and the report says how it's calculated, and estimates
 
 - **The full report** is a branded HTML page with the pipeline chart, the agents, the features, the quality numbers and every story. Each dashboard run attaches one; repository members can download it from the **download the HTML dashboard** link in the issue. Each copy is kept for 30 days, and every refresh makes a new one.
 - **On your own computer:** `story-gate dashboard --open` builds the same page. It fetches from GitHub first, and it also includes this computer's local branches and anything not pushed, plus how well this computer is protected from hooks shipped inside branches. Add `--offline` to skip the fetch, or `--out <folder>` to choose where it writes `dashboard.html`, `dashboard.md` and `dashboard.json`.
+- **Downloaded files are snapshots.** The HTML report from a run, or a file from `--out`, shows a yellow banner once it is more than an hour old, and points to the issue and to `--serve`. Anyone you send the file to keeps that copy.
 - **A fixed issue:** to use an existing issue instead of the one setup creates, set `"dashboard_issue": <number>` in `.story-gate/config.json`.
+
+### A live page on your computer
+
+`story-gate dashboard --serve` opens a page that rebuilds itself every 5 minutes (`--every MIN`, at least 1) and reloads in your browser. It shows how long ago it was updated, and a red banner if a rebuild fails while it keeps the last good version.
+
+- **Private to you:** it listens on `127.0.0.1` only, on a random port, under a secret address that changes every run. Nothing is sent to anyone.
+- **Your own login:** it fetches from GitHub the same way `--open` does (your git login), about one fetch per rebuild.
+- **It cleans up:** built files live in a temporary folder that is deleted when you stop it (Ctrl-C). It also stops after 2 hours without a page visit (`--idle MIN`). Add `--no-browser` to skip opening the browser.
 
 ### Plan work before anyone starts it
 
