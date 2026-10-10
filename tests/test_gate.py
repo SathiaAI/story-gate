@@ -2480,6 +2480,16 @@ class TestReleaseSignatures(unittest.TestCase):
     def test_valid_release_verifies(self):
         self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
 
+    def test_release_json_is_written_with_lf_on_every_os(self):
+        # Simulate Windows text mode (CRLF). The repo stores LF, so the signed bytes must be LF too.
+        orig = Path.write_text
+        def crlf(p, data, *a, **k):
+            return orig(p, data.replace("\n", "\r\n"), *a, **k)
+        with patch.object(Path, "write_text", crlf):
+            self.T.sign_release(self.rel, self.d / "key", "9.9.9")
+        self.assertNotIn(b"\r", (self.rel / "release.json").read_bytes())
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
+
     def test_changed_file_fails(self):
         with open(self.rel / "gate.py", "a") as f:
             f.write("# evil\n")

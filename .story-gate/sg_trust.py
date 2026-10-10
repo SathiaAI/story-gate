@@ -188,7 +188,9 @@ def sign_release(src, key, version):
     """Maintainer only: write release.json and release.json.sig for the files in src."""
     src = Path(src)
     man = make_manifest(src, version)
-    (src / "release.json").write_text(json.dumps(man, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Bytes, not text: text mode on Windows writes CRLF, but the repo stores LF (.gitattributes), so a
+    # Windows-signed release.json would stop matching its signature once committed.
+    (src / "release.json").write_bytes((json.dumps(man, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     sig = src / "release.json.sig"
     if sig.exists():
         sig.unlink()
