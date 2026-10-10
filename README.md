@@ -16,7 +16,7 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 |---|---|
 | **Four checks on every story** | Plan first (READY), stay on course (CHECKPOINTS), prove it works (DONE), you approve (ACCEPTANCE) |
 | **An independent judge** | A separate AI scores the evidence. Your coding AI never grades its own work |
-| **Proof, not promises** | Your AI runs the feature for every goal. The pull request check runs it again on GitHub |
+| **Proof, not promises** | Your AI runs the feature for every goal. The pull request check runs those runs again on GitHub; one that can only run on your computer (it needs a device, say) is marked "reported" and flagged for you |
 | **A one-page validation report** | Each goal next to the run that shows it working, with screenshots and steps to try it yourself |
 | **Nothing merges without you** | A failing story blocks the pull request, and only you (or people you name) can approve |
 | **A live dashboard** | A pinned GitHub issue: what's in progress, what's blocked, and what needs you |
@@ -48,7 +48,7 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 |---|---|---|
 | **Before** any code | The plan is clear and every goal has a test (READY) | A short plain-English summary |
 | **While** it builds | It's still on course, with no scope creep (CHECKPOINTS) | % done on the dashboard |
-| **When** it says done | The tests pass, and the AI ran the feature for real for every goal (DONE). The pull request check runs them again | A one-page validation report |
+| **When** it says done | The tests pass, and the AI ran the feature for real for every goal (DONE). The pull request check runs them again; a run that can't work there is marked "reported" and flagged | A one-page validation report |
 | **Before** it merges | You approve it on GitHub | Nothing merges without you, where GitHub enforces branch rules |
 
 <p align="center"><img src="docs/assets/validation-page.png" alt="A validation page for a sample story: READY and DONE passed, 2 of 2 goals shown working, each scenario with its result, and a screenshot of the app running." width="100%"></p>
@@ -226,23 +226,6 @@ story-gate works alongside your tests and your review bot: it runs your tests it
 | Pull request (PR) | GitHub's page where a change waits for your approval before it joins your project |
 | CI | The checks GitHub runs on every pull request |
 | Drift | The work, the story and your product documents (PRD, TRD) no longer agree |
-| Code owner | A person allowed to approve changes. You, and anyone you add |
-
-</details>
-
-<details>
-<summary><b>Words used here</b></summary>
-
-| Word | Meaning |
-|---|---|
-| Story | One piece of work, small enough to build and check in one go |
-| Acceptance criteria (goals) | The things that must be true when the story is done |
-| Scenario | Your AI running the feature the way a person would, to show a goal working |
-| READY, CHECKPOINTS, DONE | The checks story-gate runs before, during and after the build |
-| Judge | An independent AI that scores the evidence. It is never your coding AI |
-| Pull request (PR) | GitHub's page where a change waits for your approval |
-| CI | The checks GitHub runs on every pull request |
-| Drift | The work, the story and your product documents no longer agree |
 | Code owner | A person allowed to approve changes. You, and anyone you add |
 
 </details>
