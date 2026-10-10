@@ -1,0 +1,29 @@
+{
+  "files": {
+    "PROTOCOL.md": "d032579bb00de7cd622614e9fe8b349a6c0ec67627ede9eb503d63cbec7126e4",
+    "SKILL.md": "63d3168b556b7171ea15db5744027562f9981be457852ee7022cc19326560f5c",
+    "gate.py": "921212dae273a0c91c5a0ce256790fe7109629b22fbd6372001c34005845c807",
+    "sg_dashboard.py": "f664dc7c1966f4fadf6ee66cfa1c71aa07cd8327793c0f1b5090d4f17e8279fa",
+    "sg_github.py": "d5cded8205683cada9ec5fa4eb3f59616e1f04e64484bf022d732c6f1e44d9b3",
+    "sg_guard.py": "49509cbea6789a1f33e689cd654d24537ccf769677e7454410b8cf64cb1c6617",
+    "sg_judges.py": "cba2df40ebc7ebde7129731791ad8f95e2f8cd50428961a70639441a5b17b7f5",
+    "sg_pin.py": "00e6386f2ba94f451539a5dd57a9a7682cbfb4baec5ca7c1d38aa202a90d692c",
+    "sg_report.py": "ad8935be8cb2e352f0968916ff24ae1be12282d5a690f6741cf81c6e7de8215e",
+    "sg_reusable.py": "751fe5dfca601c6c4d85093d6a898ff686ed5ef3e0d33db47c823e1494da3207",
+    "sg_settings.py": "72dc0a6fca9d33116e1153ba448a66b9d0211b669557b3c97f22780d3b106019",
+    "sg_setup.py": "f30d0f706b2952941a87006ba479abcbe243a0a227f3f3ff9114dbf6c6f8d215",
+    "sg_specpull.py": "8753b02cc23722df970b1e6198cf641274e01327addbdc045ab142ac8cfceb53",
+    "sg_trackers.py": "b974185f55a1f403b4a35fd15cbe03a61a1ca0efc4964905b5bfa4d95a17e0f0",
+    "sg_trust.py": "74684ea06bd1624bc758200455a0cb64b2706eb7c81d22fc1625deda94a2121b",
+    "sg_validation.py": "b7a059d8abb85dc275d582fc85e32762e05c27d9caad52f1e2e357455a8b2902",
+    "sg_writing.py": "d89816a47cd84b36e906b239803d4860ad523d07cd9be4d59ff36492c06b3bbd",
+    "vendor/ClashDisplay-600.woff2": "2d7c1c6da950bc14572a77b45ca7d8a80180e9ba0aa2aa90a5b3304dd6fb89e5",
+    "vendor/FONTS-LICENSE": "5ae41267001df152caabd001af9819fc28d3052b6502474462bc0da8203ba2f5",
+    "vendor/Switzer-400.woff2": "4c76d015843b66e89bafa13271056fa685ad50bd74c26335df2d29dfa17506e4",
+    "vendor/Switzer-600.woff2": "7d6dd0d988497db913de2d06e7dfcd6da3e5936f4fb1be0c46d9979c605e3730",
+    "vendor/TABLER-LICENSE": "4f88a82d13be3c5c63a12c5631eae914aa4381b6dc17641bf1ab85f3f8f6c8a5",
+    "vendor/tabler.min.css": "370a2d4e608ae518351d10528fc7dbe19b354ae5062c51b2a9cb294850d65403",
+    "vendor/viaknox-wordmark.svg": "ad84538aceb17894497e72f88a388e5acf53ce3d49a2f5064277efb7c86e04f6"
+  },
+  "version": "0.9.0"
+}
