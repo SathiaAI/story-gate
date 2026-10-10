@@ -74,6 +74,33 @@ def graphql(query, variables, token):
 
 
 # ------------------------------------------------------------------ CODEOWNERS
+CODEOWNERS_HEADER = "# Code owners: the humans who accept work. Bots and apps cannot be code owners."
+WILDCARDS = ("*", "/*", "/**", "**")
+
+
+def add_owners(text, owners):
+    """CODEOWNERS text with `owners` on the rule that covers everything, or None when they're already there.
+    GitHub applies only the LAST matching line to each file, so appending a '*' line would take later path rules'
+    files away from their owners. Instead: add the owners to the last '*' line in place (its owners stay); with no
+    '*' line, put one before the first rule, so the path rules after it still win for their paths."""
+    owners = ["@" + o.lstrip("@") for o in owners]
+    lines = text.splitlines()
+    rules = [i for i, l in enumerate(lines) if l.split("#", 1)[0].strip()]
+    star = [i for i in rules if lines[i].split("#", 1)[0].split()[0] in WILDCARDS]
+    if star:
+        i = star[-1]
+        rule, hash_, comment = lines[i].partition("#")
+        parts = rule.split()
+        add = [o for o in owners if o.lower() not in {p.lower() for p in parts[1:]}]
+        if not add:
+            return None
+        lines[i] = " ".join(parts + add) + ("  #" + comment if hash_ else "")
+    else:
+        at = rules[0] if rules else len(lines)
+        lines[at:at] = ([CODEOWNERS_HEADER] if not text.strip() else []) + ["* " + " ".join(owners)]
+    return "\n".join(lines) + "\n"
+
+
 def codeowners(text):
     """-> (users, teams) named on the '*' rule (the rule that covers everything, incl. CODEOWNERS itself)."""
     users, teams = [], []
@@ -358,12 +385,12 @@ def setup_repo(root, repo, owners, token, dry_run=False):
     co = Path(root) / ".github" / "CODEOWNERS"
     line = "* " + " ".join("@" + o.lstrip("@") for o in owners)
     text = co.read_text(encoding="utf-8") if co.exists() else ""
-    have = {u.lower() for u in codeowners(text)[0]}  # the effective (last) '*' rule, by exact name
-    if not all(o.lstrip("@").lower() in have for o in owners):
+    new = add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
+    if new is not None:
         co.parent.mkdir(parents=True, exist_ok=True)
         if not dry_run:
-            co.write_text((text.rstrip() + "\n" if text.strip() else "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n") + line + "\n", encoding="utf-8")
-        out.append("CODEOWNERS: added '%s' (commit and merge this file)" % line)
+            co.write_text(new, encoding="utf-8")
+        out.append("CODEOWNERS: added %s to the '*' rule (commit and merge this file)" % " ".join("@" + o.lstrip("@") for o in owners))
     else:
         out.append("CODEOWNERS: already lists %s" % ", ".join(owners))
     if dry_run:

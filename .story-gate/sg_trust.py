@@ -1159,6 +1159,8 @@ def is_our_hook_command(cmd):
     if not m:
         return False
     py, gate = m.group(1), m.group(2)
+    if any(ch in py + gate for ch in "$`%&|;<>!^\r\n"):  # a shell would expand or chain these, even inside the quotes
+        return False
     same = lambda a, b: os.path.normcase(os.path.abspath(a.replace("\\", "/"))) == os.path.normcase(os.path.abspath(b.replace("\\", "/")))
     if not same(gate, str(launcher_path())) or not (py.startswith("/") or re.match(r"[A-Za-z]:[\\/]", py)):
         return False
