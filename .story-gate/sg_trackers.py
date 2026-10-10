@@ -639,7 +639,8 @@ def local_token(kind, env=os.environ, settings=None):
     """The credential for this computer: Linear's key, Jira Cloud's 'email:token', or Jira Server's personal access
     token; '' when anything is missing."""
     groups = LOCAL_ENV[kind][-1:] if kind == "jira" and (settings or {}).get("server") else LOCAL_ENV[kind]
-    saved = saved_keys() if env is os.environ else {}
+    # the saved copy holds Linear or Jira Cloud keys only (tracker-setup): never send it to a Jira Server address
+    saved = saved_keys() if env is os.environ and not (kind == "jira" and (settings or {}).get("server")) else {}
     vals = [_first(names, env, saved) for names in groups]
     return ":".join(vals) if all(vals) else ""
 
@@ -738,10 +739,11 @@ def cli(gate, sid, ref_arg, kv, sd, write_and_link):
         tok = local_token(kind, settings=settings)
         if not tok:
             groups = LOCAL_ENV[kind][-1:] if kind == "jira" and settings.get("server") else LOCAL_ENV[kind]
-            sys.exit("story-gate: no %s key here. Run `story-gate tracker-setup` yourself (not your AI) and tick 'keep a "
-                     "copy on this computer', or set %s to your own read-only %s credentials, or paste the ticket with "
+            setup = ("" if kind == "jira" and settings.get("server") else
+                     "Run `story-gate tracker-setup` yourself (not your AI) and tick 'keep a copy on this computer', or ")
+            sys.exit("story-gate: no %s key here. " % LABEL[kind] + setup + "set %s to your own read-only %s credentials, or paste the ticket with "
                      "--from-file (for example from your AI tool's %s connector; it's marked 'not verified' until CI "
-                     "checks it)." % (LABEL[kind], " and ".join(n[-1] for n in groups), LABEL[kind], LABEL[kind]))
+                     "checks it)." % (" and ".join(n[-1] for n in groups), LABEL[kind], LABEL[kind]))
         try:
             t = FETCH[kind](settings, key, tok)
         except TrackerError as e:

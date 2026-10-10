@@ -5915,6 +5915,9 @@ class TestTrackerLinear(Base):
                 self.pull(args=args or ("SAT-1", "ENG-12"), env=env)
             self.assertIn(why, str(e.exception))
         with self.assertRaises(SystemExit) as e:
+            self.pull(env={})
+        self.assertIn("tracker-setup", str(e.exception)); self.assertIn("set LINEAR_API_KEY to your own read-only Linear", str(e.exception))
+        with self.assertRaises(SystemExit) as e:
             self.pull(fetch=lambda s, k, t: self.ticket(key="OPS-3"))
         self.assertIn("is now OPS-3", str(e.exception))
         def fails(s, k, t):
@@ -7272,6 +7275,7 @@ class TestTrackerSetup(Base):
             os.environ.pop(k, None)
         self.assertEqual(TR.local_token("jira"), "p@acme.com:" + self.JTOK)
         self.assertEqual(TR.local_token("jira", env={}), "")  # an explicit environment is used as given
+        self.assertEqual(TR.local_token("jira", settings={"site": "jira.acme.com", "server": True}), "")  # never to a Jira Server
         self.assertNotIn(self.JTOK, self.everything_seen(ss))
 
     def page_server(self, ss):
