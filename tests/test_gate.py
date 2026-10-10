@@ -6675,6 +6675,10 @@ class TestReusableWorkflow(Base):
         g.write_text(t.replace("jobs:\n", "jobs:\n  # uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n", 1)
                      .replace("/.github/workflows/gate.yml@" + self.SHA + " #", "/.github/workflows/audit.yml@" + self.SHA + " #"))
         self.assertIn("doesn't call story-gate's gate.yml", run(self.repo, "doctor").stdout)
+        g.write_text(t + "  other:\n    uses: evil/repo/.github/workflows/x.yml@" + "c" * 40 + "\n")
+        self.assertIn("has 2 `uses:` lines", run(self.repo, "doctor").stdout)
+        g.write_text(t + "  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")
+        self.assertIn("runs its own steps", run(self.repo, "doctor").stdout)
         g.write_text(t)
         r = run(self.repo, "install", "--ref", self.SHA)  # no --ci: stays reusable
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

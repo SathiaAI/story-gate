@@ -161,8 +161,9 @@ def check_callers(G):
                          (".github/workflows/story-gate-dashboard.yml", "dashboard")):
         raw = G.rd(G.ROOT / path)
         text = active(raw)
-        uses = pat.findall(text)
-        m = pat.search(text) if len(uses) == 1 else None
+        uses = re.findall(r"^\s*(?:-\s*)?uses:", text, re.M)  # every active `uses:`, story-gate's or anyone else's
+        extra = re.search(r"^\s*(?:-\s*)?(?:steps|run):", text, re.M)  # a job of its own next to the call
+        m = pat.search(text) if len(uses) == 1 and not extra else None
         fps = re.findall(r'^\s*release-key-fingerprint:\s*"([^"]*)"', text, re.M)
         fp = fps[0] if len(fps) == 1 else None
         if not raw:
@@ -170,7 +171,8 @@ def check_callers(G):
         elif not raw.startswith("# managed by story-gate"):
             st = "NOT MANAGED by story-gate"
         elif not m or m.group(2) != called:
-            st = ("calls more than one workflow (%d `uses:` lines)" % len(uses) if len(uses) > 1 else
+            st = ("has %d `uses:` lines; it must call only story-gate's %s.yml" % (len(uses), called) if len(uses) > 1 else
+                  "runs its own steps next to story-gate's; keep this file to the one call" if extra else
                   "doesn't call story-gate's %s.yml - run `story-gate install --ci reusable`" % called)
         elif not SHA.fullmatch(m.group(3)):
             st = "pinned to %r, not a full commit SHA (a tag or branch can be moved)" % m.group(3)[:50]
