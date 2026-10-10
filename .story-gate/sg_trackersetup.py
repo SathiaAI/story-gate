@@ -52,6 +52,14 @@ class SetupError(Exception):
     """A plain message for the page. Never carries a key."""
 
 
+class FieldError(SetupError):
+    """A problem with one field the person typed: shown next to that field, and the form stays as it is."""
+
+    def __init__(self, field, msg, kind=None):
+        SetupError.__init__(self, msg)
+        self.field, self.kind = field, kind  # kind: the tracker form the field belongs to, when both have one
+
+
 class Session:
     """One run of the page. Holds the typed key in memory only, and only until it's sent or the run ends."""
 
@@ -71,6 +79,7 @@ class Session:
         self.plan = None                             # what the person reviews; confirm must name this exact plan
         self._key = None                             # {secret name: value}, only between "review" and the send
         self.result = None
+        self.field_error = None                      # {"field", "msg"}: shown next to the field, until it's changed
         self._flow = False                           # a device sign-in is waiting for its code
         self.lock = threading.Lock()
 
@@ -101,17 +110,23 @@ class Session:
 
     def set(self, step, msg=""):
         with self.lock:
-            self.step, self.msg = step, self.scrub(msg)
+            self.step, self.msg, self.field_error = step, self.scrub(msg), None
 
     def snapshot(self):
         with self.lock:
             return {"step": self.step, "msg": self.msg, "login": self.login, "repo": self.repo, "device": self.device,
-                    "plan": self.plan, "result": self.result}
+                    "plan": self.plan, "result": self.result, "field_error": self.field_error}
 
     def background(self, fn):
         def run():
             try:
                 fn()
+            except FieldError as e:  # a typing mistake: back to the form, the message next to the field
+                msg = self.scrub(e)
+                self.forget_key()
+                self.set("details")
+                with self.lock:
+                    self.field_error = {"field": e.field, "msg": msg, "kind": e.kind}
             except Exception as e:  # every failure is a plain message on the page; the key is dropped
                 msg = self.scrub(e) if isinstance(e, (SetupError, TR.TrackerError, RuntimeError)) else type(e).__name__
                 self.forget_key()
@@ -166,44 +181,45 @@ class Session:
         with self.lock:
             if self.step not in ("details", "review", "error") or not self.token:
                 raise SetupError("Sign in to GitHub first." if not self.token else "Wait for the current step to finish.")
-            self.step, self.msg, self.plan, self._key = "checking", "Checking the details", None, None
+            self.step, self.msg, self.plan, self._key, self.field_error = "checking", "Checking the details", None, None, None
 
     def details(self, form):
         kind = (form.get("kind") or "").strip()
         if kind not in KINDS:
-            raise SetupError("Choose Linear or Jira Cloud.")
+            raise FieldError("kind", "Choose Linear or Jira Cloud.")
         ticket = (form.get("ticket") or "").strip().upper()
         if not TR.TICKET.fullmatch(ticket):
-            raise SetupError("Give one ticket you can see, like ENG-12, so story-gate can test the key.")
+            raise FieldError("ticket", "Give one ticket you can see, like ENG-12, so story-gate can test the key.")
         public_ok = form.get("public_ok") == "yes"
         if not self.private and not public_ok:
-            raise SetupError("%s is public. Tick the box that allows ticket text to be copied into it, or use a private "
+            raise FieldError("public_ok", "%s is public. Tick the box that allows ticket text to be copied into it, or use a private "
                              "repository." % self.repo)
         if kind == "linear":
             ws = (form.get("workspace") or "").strip().lower()
             if not TR.WORKSPACE.fullmatch(ws):
-                raise SetupError("The workspace is the short name in your Linear links: linear.app/<workspace>/...")
+                raise FieldError("workspace", "The workspace is the short name in your Linear links: linear.app/<workspace>/...")
             key = (form.get("key") or "").strip()
             if not re.fullmatch(r"lin_api_[A-Za-z0-9]{20,80}", key):
-                raise SetupError("That doesn't look like a Linear personal API key (it starts with lin_api_).")
+                raise FieldError("key", key_problem(key, "a Linear personal API key", "It starts with lin_api_."), "linear")
             settings, keys, dest = {"workspace": ws}, {"STORY_GATE_LINEAR_KEY": key}, DESTINATION["linear"]
         else:
             site = (form.get("site") or "").strip().lower()
             site = site[len("https://"):] if site.startswith("https://") else site
             site = site.rstrip("/")
             if not TR.JIRA_SITE.fullmatch(site):
-                raise SetupError("The site must look like your-company.atlassian.net (Jira Cloud). For Jira Server or Data "
+                raise FieldError("site", "The site must look like your-company.atlassian.net (Jira Cloud). For Jira Server or Data "
                                  "Center, use `story-gate jira-setup` and the guide.")
             email = (form.get("email") or "").strip()
             if not EMAIL.fullmatch(email):
-                raise SetupError("Give the email address of the Atlassian account that made the token.")
+                raise FieldError("email", "Give the email address of the Atlassian account that made the token.")
             key = (form.get("key") or "").strip()
-            if len(key) < 20 or any(c.isspace() for c in key):
-                raise SetupError("That doesn't look like an Atlassian API token.")
+            if len(key) < 100 or any(c.isspace() for c in key):
+                raise FieldError("key", key_problem(key, "an Atlassian API token", "Tokens with scopes are long (about 190 "
+                                                    "characters) and start with ATATT."), "jira")
             st, tenant = TR.get_json("https://%s/_edge/tenant_info" % site, {})   # public: no credentials sent
             cloud = (tenant or {}).get("cloudId") if isinstance(tenant, dict) else None
             if st != 200 or not isinstance(cloud, str) or not TR.CLOUD_ID.fullmatch(cloud):
-                raise SetupError("Couldn't find the Jira Cloud site %s (HTTP %s). Is the name right?" % (site, st))
+                raise FieldError("site", "Couldn't find the Jira Cloud site %s (HTTP %s). Is the name right?" % (site, st))
             settings = {"site": site, "cloud_id": cloud}
             keys = {"STORY_GATE_JIRA_EMAIL": email, "STORY_GATE_JIRA_TOKEN": key}
             dest = DESTINATION["jira"].format(cloud_id=cloud)
@@ -323,6 +339,16 @@ class Session:
                 raise SetupError("Too late to go back: this step is already running. Wait for it to finish.")
             self.plan, self._key = None, None
         self.set("details" if self.token else "signin", "Cancelled. Nothing was sent.")
+
+
+def key_problem(key, what, hint):
+    """Why a pasted key was refused, in words that say what to do. Never repeats the key."""
+    if not key:
+        return "Paste the key here: this box is empty."
+    if any(c.isspace() for c in key):
+        return "This has a space or line break in it, so it isn't %s. Copy it again with the Copy button." % what
+    return ("This isn't %s: it's %d characters long. %s Did your browser fill in a saved password, or did you copy the "
+            "key's name? Copy the key itself." % (what, len(key), hint))
 
 
 def save_local(keys):
@@ -491,29 +517,53 @@ def make_handler(ss):
 def page(ss):
     """The page: sign in, details, review, done. The state comes from /state; every POST carries this load's nonce."""
     pub = ("" if ss.private else
-           "<label class=tool><input type=checkbox name=public_ok value=yes> <b>%s is public.</b> I understand that ticket text "
-           "copied into it can be read by anyone.</label>" % html.escape(ss.repo))
+           "<label class=tool><input type=checkbox name=public_ok value=yes> <b>" + html.escape(ss.repo) + " is public.</b> "
+           "I understand that ticket text copied into it can be read by anyone." + S.info("public", "this choice", "story-gate copies each ticket's text into "
+           "the story's folder, so reviewers see exactly what was built against. In a public repository that text becomes "
+           "public. Tick only if your tickets contain nothing private.") + "</label>")
     form = (
         "<form id=det onsubmit=\"event.preventDefault();send('details',this)\">"
+        "<p class=lbl>Where your tickets live" + S.info("kind", "the tracker choice", "Pick where your team keeps its tickets. "
+        "<b>Jira Cloud</b> is Jira at an address like <code>acme.atlassian.net</code>. Jira on your own servers (Server or Data "
+        "Center) isn't covered here yet: use <code>story-gate jira-setup</code> and the guide.") + "</p>"
         "<label class=tool><input type=radio name=kind value=linear checked onchange=kindf()> Linear</label>"
         "<label class=tool><input type=radio name=kind value=jira onchange=kindf()> Jira Cloud</label>"
-        "<div id=lin><label class=lbl>Workspace<span>The short name in your Linear links: linear.app/<b>workspace</b>/...</span>"
+        "<div id=lin><label class=lbl>Workspace" + S.info("workspace", "the workspace", "The short name of your Linear account. "
+        "Open any ticket and look at the address: in <code>linear.app/acme/issue/ENG-12</code> the workspace is <code>acme</code>. "
+        "It isn't secret.") + "<span>The short name in your Linear links: linear.app/<b>workspace</b>/...</span>"
         "<input name=workspace autocomplete=off></label>"
-        "<label class=lbl>Read-only API key<span>Linear: Settings &gt; Security &amp; access &gt; Personal API keys. "
-        "Choose read-only access.</span><input name=key type=password autocomplete=off placeholder='lin_api_...'></label></div>"
-        "<div id=jir style=display:none><label class=lbl>Site<span>Like your-company.atlassian.net</span>"
+        "<label class=lbl>Read-only API key" + S.info("linkey", "the Linear key", "A Linear personal API key with "
+        "<b>Read</b> access only. Linear: Settings &gt; Security &amp; access &gt; Personal API keys &gt; New key. It starts with "
+        "<code>lin_api_</code>. Linear shows it once, so copy it before you close that window. It goes into an encrypted GitHub "
+        "secret, never into your repository.") + "<span>Linear: Settings &gt; Security &amp; access &gt; Personal API keys. "
+        "Choose read-only access.</span><input name=key type=password autocomplete=new-password placeholder='lin_api_...'></label></div>"
+        "<div id=jir style=display:none><label class=lbl>Site" + S.info("site", "the Jira site", "Your Jira Cloud "
+        "address, from any ticket link: in <code>acme.atlassian.net/browse/ENG-12</code> the site is <code>acme.atlassian.net</code>. "
+        "Leave out <code>https://</code> and anything after the name.") + "<span>Like your-company.atlassian.net</span>"
         "<input name=site autocomplete=off></label>"
-        "<label class=lbl>Email<span>The Atlassian account that made the token</span><input name=email autocomplete=off></label>"
-        "<label class=lbl>Read-only API token<span>id.atlassian.com &gt; Security &gt; API tokens &gt; "
+        "<label class=lbl>Email" + S.info("email", "the email", "The email you sign in to Atlassian with: the account "
+        "that made the token below. Jira needs the two together.") + "<span>The Atlassian account that made the token</span><input name=email autocomplete=off></label>"
+        "<label class=lbl>Read-only API token" + S.info("jiratoken", "the Jira token", "An Atlassian API token "
+        "<b>with scopes</b>: id.atlassian.com &gt; Security &gt; API tokens &gt; Create API token with scopes &gt; Jira &gt; tick "
+        "only <code>read:jira-work</code>. It's about 190 characters and starts with <code>ATATT</code>. Atlassian shows it once.") + "<span>id.atlassian.com &gt; Security &gt; API tokens &gt; "
         "<b>Create API token with scopes</b>, read-only Jira scopes.</span>"
-        "<input name=key type=password autocomplete=off disabled></label>"
-        "<label class=lbl>Acceptance-criteria field <b class=opt>Optional</b><span>Its name in Jira, if you keep acceptance "
+        "<input name=key type=password autocomplete=new-password placeholder='ATATT...' disabled></label>"
+        "<label class=lbl>Acceptance-criteria field <b class=opt>Optional</b>" + S.info("acfield", "the acceptance-criteria field",
+        "Only if your team keeps acceptance criteria in a separate Jira field. Type that field's name exactly as Jira shows it, e.g. "
+        "<code>Acceptance criteria</code>. Leave it empty if they're in the description, under an <b>Acceptance criteria</b> "
+        "heading.") + "<span>Its name in Jira, if you keep acceptance "
         "criteria in their own field</span><input name=ac_field autocomplete=off></label></div>"
-        "<label class=lbl>A ticket to test with<span>Any ticket this key can see, like ENG-12</span>"
-        "<input name=ticket autocomplete=off></label>%s"
+        "<label class=lbl>A ticket to test with" + S.info("ticket", "the test ticket", "Any ticket this key can open, "
+        "e.g. <code>ENG-12</code>. story-gate reads it once to prove the key works, the same way CI will. Nothing in the ticket "
+        "is changed.") + "<span>Any ticket this key can see, like ENG-12</span>"
+        "<input name=ticket autocomplete=off></label>" + pub +
         "<label class=tool><input type=checkbox name=local_copy value=yes> Also keep a copy on this computer, so "
-        "<code>spec-pull</code> works here <em>(off by default; other programs running as you can read it)</em></label>"
-        "<button>Review</button></form>" % pub)
+        "<code>spec-pull</code> works here <em>(off by default; other programs running as you can read it)</em>"
+        + S.info("local", "the local copy", "Lets <code>story-gate spec-pull</code> read tickets on this computer without "
+                 "setting environment variables. It's saved in your story-gate user folder, readable only by your user account, "
+                 "but other programs you run (including AI tools) can read it too. CI doesn't need it. Leave it off if unsure.")
+        + "</label>"
+        "<button id=rv>Review</button> <span class=btnerr id=btnerr></span></form>")
     js = """<script>
 const N=%s;
 function kindf(){const j=document.querySelector('input[name=kind]:checked').value=='jira';
@@ -521,10 +571,18 @@ document.getElementById('lin').style.display=j?'none':'';document.getElementById
 document.querySelector('#lin input[name=key]').disabled=j;document.querySelector('#jir input[name=key]').disabled=!j}
 async function post(a,body){const r=await fetch('/'+a,{method:'POST',headers:{'X-SG-Nonce':N},body:body||''});
 if(r.status==403){document.getElementById('msg').textContent='This page expired. Run story-gate tracker-setup again.';return}tick()}
-function send(a,f){post(a,new URLSearchParams(new FormData(f)))}
+function send(a,f){dismissed='';clearErr();post(a,new URLSearchParams(new FormData(f)))}
+function fieldEl(n,kind){const scope=kind?(kind=='jira'?'#jir':'#lin'):'#det';const e=document.querySelector(scope+' [name="'+n+'"]');return e&&!e.disabled&&e.offsetParent!==null?e:null}
+function clearErr(){shownErr='';document.querySelectorAll('#det .bad').forEach(e=>e.classList.remove('bad'));document.querySelectorAll('#det .ferr').forEach(e=>e.remove());
+document.querySelectorAll('#det [aria-invalid]').forEach(e=>{e.removeAttribute('aria-invalid');e.removeAttribute('aria-describedby')});document.getElementById('btnerr').textContent='';document.getElementById('rv').classList.remove('bad')}
+let shownErr='',dismissed='';function showErr(fe){let k=fe?fe.field+'|'+fe.msg:'';if(k&&k===dismissed)k='';if(k===shownErr)return;clearErr();shownErr=k;
+if(!k)return;const f=fieldEl(fe.field,fe.kind);const fix=()=>{dismissed=k;clearErr()};const m=el('div',fe.msg);m.className='ferr';m.id='ferr';m.setAttribute('role','alert');
+if(f){f.classList.add('bad');f.setAttribute('aria-invalid','true');f.setAttribute('aria-describedby','ferr');(f.closest('label')||f).after(m);f.focus();f.addEventListener('input',fix,{once:true});f.addEventListener('change',fix,{once:true})}
+else document.getElementById('det').prepend(m);
+document.getElementById('btnerr').textContent='Fix the field marked in red, then press Review again.';document.getElementById('rv').classList.add('bad')}
 function el(t,txt){const e=document.createElement(t);e.textContent=txt;return e}
 async function tick(){const r=await fetch('/state');if(!r.ok){document.getElementById('msg').textContent='This page expired. Run story-gate tracker-setup again.';return}
-const s=await r.json();document.getElementById('msg').textContent=s.msg||'';
+const s=await r.json();document.getElementById('msg').textContent=s.msg||'';showErr(s.step=='details'?s.field_error:null);
 for(const k of ['signin','details','review','done'])document.getElementById('c-'+k).style.display='none';
 const show=s.step=='checking'||s.step=='error'?(s.login?'details':'signin'):s.step=='saving'?'review':s.step;
 document.getElementById('c-'+show).style.display='';
@@ -541,7 +599,7 @@ if(s.result&&show=='done'){const o=document.getElementById('out');o.textContent=
 if(s.result.pr&&s.result.pr.url){const a=document.createElement('a');a.className='btn';a.href=s.result.pr.url;a.target='_blank';a.rel='noopener';a.textContent='Review and merge on GitHub';o.append(a)}
 else o.append(el('p','The settings already say this, so no pull request was needed.'));
 for(const w of s.result.warn)o.append(el('p','Warning: '+w));if(s.result.local)o.append(el('p',s.result.local))}}
-tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
+kindf();tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
     cards = (
         "<section class=step id=c-signin><div><h2>1. Sign in to GitHub</h2><p>You'll type a short code on github.com. That "
         "step is yours alone: your AI can't do it for you.</p><button onclick=\"post('signin')\">Start</button><div id=dev></div></div></section>"
@@ -556,6 +614,7 @@ tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
         "pull request to turn it on. Then ask your AI to pull a ticket into a story.</p></div></section>" % form)
     return S.page_shell(
         "<div class=eyebrow>story-gate · connect a tracker · %s</div><h1>Connect Linear or Jira.</h1>"
+        "<style>.btnerr{color:var(--error);font-size:14px;font-weight:600;margin-left:8px}</style>"
         "<p class=lead>Your key goes straight into encrypted GitHub secrets. It's never written to your repository, and your "
         "AI never sees it. Tracker support is experimental.</p><p class=msg id=msg></p>%s"
         "<div class=foot>Runs only on this computer (127.0.0.1). This page stops 10 minutes after you close it (30 minutes at most).</div>%s"

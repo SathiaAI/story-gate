@@ -7056,7 +7056,7 @@ def base64_of(b):
 class TestTrackerSetup(Base):
     """`story-gate tracker-setup`: connect Linear or Jira Cloud in the browser. GitHub and the trackers are faked."""
     LKEY = "lin_api_" + "Q7" * 20
-    JTOK = "ATATT3x" + "z9" * 20
+    JTOK = "ATATT3x" + "z9" * 92
 
     def setUp(self):
         super().setUp()
@@ -7168,6 +7168,38 @@ class TestTrackerSetup(Base):
                           ({"kind": "jira", "site": "acme.atlassian.net", "email": "nope", "key": self.JTOK, "ticket": "ENG-1"}, "email")):
             with self.subTest(why=why), self.assertRaisesRegex(self.TS.SetupError, why):
                 ss.details(form)
+
+    def test_a_typing_mistake_is_shown_next_to_its_field_and_keeps_the_form(self):
+        ss = self.session()
+        ss.details_start()
+        ss.background(lambda: ss.details({"kind": "jira", "site": "acme.atlassian.net", "email": "p@acme.com",
+                                          "key": "MySavedPass1", "ticket": "ENG-1"}))
+        for _ in range(100):
+            if ss.field_error:
+                break
+            time.sleep(0.05)
+        self.assertEqual((ss.step, ss.field_error["field"], ss.field_error["kind"]), ("details", "key", "jira"))  # back on the form
+        self.assertIn("12 characters long", ss.field_error["msg"]); self.assertIn("saved password", ss.field_error["msg"])
+        self.assertNotIn("MySavedPass1", json.dumps(ss.snapshot()))
+        TS = self.TS
+        self.assertIn("space or line break", TS.key_problem("ATATT3x abc", "an Atlassian API token", ""))
+        self.assertIn("empty", TS.key_problem("", "an Atlassian API token", ""))
+        ss.details_start()
+        self.assertIsNone(ss.field_error)  # cleared as soon as the person tries again
+        page = TS.page(ss)
+        self.assertIn("autocomplete=new-password", page); self.assertIn("kindf();tick()", page)
+        self.assertIn("id=btnerr", page)
+        self.assertIn("aria-describedby','ferr'", page); self.assertIn("kind=='jira'?'#jir':'#lin'", page)
+        # every field has an (i) explaining what it means and what to type; keyboard and screen readers reach it
+        for tid in ("kind", "workspace", "linkey", "site", "email", "jiratoken", "acfield", "ticket", "local"):
+            self.assertIn("aria-controls=tip-%s" % tid, page); self.assertIn("id=tip-%s" % tid, page)
+        self.assertIn("role=tooltip", page); self.assertIn("Escape", page)
+        import sg_setup as S
+        wz = S.Wizard(self.repo, "me/proj", sys.executable, open_browser=False)
+        init = S.page(wz)
+        for tid in ("judgekey", "approvers", "tools"):
+            self.assertIn("aria-controls=tip-%s" % tid, init)
+        self.assertIn("ferr-'+k", init)  # init's key and approver errors show under their field too
 
     def test_public_repository_needs_an_explicit_yes(self):
         self.repo_info["private"] = False

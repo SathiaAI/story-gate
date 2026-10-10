@@ -550,7 +550,7 @@ def make_handler(wz):
 
 def page_shell(inner):
     return ("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>story-gate setup</title><style>" + CSS + "</style><body><main>" + inner + "</main></body></html>")
+            "<title>story-gate setup</title><style>" + CSS + HELP_CSS + "</style><body><main>" + inner + HELP_JS + "</main></body></html>")
 
 
 FONTS = ("ClashDisplay-600.woff2", "Switzer-400.woff2", "Switzer-600.woff2")
@@ -584,6 +584,42 @@ button.link{background:none;border:0;padding:0;margin:0;font-size:inherit;text-d
 """
 
 
+HELP_CSS = """
+.help{position:relative;display:inline-block!important;margin-left:6px;vertical-align:-3px}
+.help .info{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--muted);background:#fff;color:var(--muted);font:600 12px/1 Georgia,serif;
+padding:0;margin:0;display:inline-flex;align-items:center;justify-content:center;cursor:help}
+.help .info:hover,.help .info:focus-visible,.help .info[aria-expanded=true]{border-color:var(--graphite);color:var(--graphite);outline:2px solid var(--yellow)}
+.help .tip{display:none;position:absolute;left:-10px;top:28px;z-index:10;width:min(340px,80vw);background:var(--graphite);color:#fff;
+font:400 14px/1.45 Switzer,system-ui,sans-serif;padding:10px 12px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.18);text-align:left;
+pointer-events:none;white-space:normal;letter-spacing:normal;text-transform:none}
+.help .tip code{color:var(--yellow);background:none;font-size:13px}.help .tip b{color:#fff;font-weight:600}
+.help:hover .tip,.help .info:focus-visible+.tip,.help .tip.open{display:block}
+.help .tip.open{pointer-events:auto}.help.hush .tip{display:none!important}
+.bad{border-color:var(--error)!important;outline:2px solid var(--error)}
+.ferr{color:var(--error);font-size:14px;margin:4px 0 0;font-weight:600}
+"""
+HELP_JS = """<script>
+document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.info');
+document.querySelectorAll('.tip.open').forEach(function(t){if(!b||t.id!==b.getAttribute('aria-controls')){t.classList.remove('open');
+var o=document.querySelector('[aria-controls="'+t.id+'"]');if(o)o.setAttribute('aria-expanded','false')}});
+if(b){e.preventDefault();var t=document.getElementById(b.getAttribute('aria-controls'));var open=!t.classList.contains('open');
+t.classList.toggle('open',open);b.setAttribute('aria-expanded',String(open))}});
+document.addEventListener('keydown',function(e){if(e.key!=='Escape')return;document.querySelectorAll('.tip.open').forEach(function(t){t.classList.remove('open')});
+document.querySelectorAll('.info[aria-expanded=true]').forEach(function(b){b.setAttribute('aria-expanded','false')});
+document.querySelectorAll('.help:hover,.help:focus-within').forEach(function(h){h.classList.add('hush')});
+var a=document.activeElement;if(a&&a.classList&&a.classList.contains('info'))a.blur()});
+document.addEventListener('mouseout',function(e){var h=e.target.closest&&e.target.closest('.help');if(h&&!h.contains(e.relatedTarget))h.classList.remove('hush')});
+document.addEventListener('focusin',function(e){var h=e.target.closest&&e.target.closest('.help');if(h)h.classList.remove('hush')});
+</script>"""
+
+
+def info(tid, field, text):
+    """An (i) button with a short explanation: shown on hover, on keyboard focus, or with a tap (phones), and read out by
+    screen readers. `text` is trusted HTML written here, never anything a person typed."""
+    return ("<span class=help><button type=button class=info aria-label='What is %s?' aria-expanded=false aria-controls=tip-%s>i</button>"
+            "<span class=tip role=tooltip id=tip-%s>%s</span></span>" % (html.escape(field, quote=True), tid, tid, text))
+
+
 def tools_html(wz):
     """Tickboxes for the tools story-gate can check live (found ones pre-ticked), then the ones covered another way."""
     rows = "".join("<label class=tool><input type=checkbox name=c value=%s%s> %s%s</label>"
@@ -605,28 +641,43 @@ def page(wz):
          "<a class=btn id=agentbtn href='/agent/start?t=%s' target=_blank>Open GitHub</a>" % t),
         ("key", "Add the judge key", "Make a key at <a href='https://openrouter.ai/keys' target=_blank>openrouter.ai/keys</a> and paste it here. "
          "It goes straight into a GitHub secret; your AI never sees it.",
-         "<form onsubmit=\"event.preventDefault();go('key',new URLSearchParams(new FormData(this)))\"><input name=key type=password "
-         "autocomplete=off placeholder='sk-or-...'> <button>Save</button></form>"
+         "<form onsubmit=\"event.preventDefault();go('key',new URLSearchParams(new FormData(this)))\"><label class=lbl>Judge key"
+         + info("judgekey", "the judge key", "An <b>OpenRouter</b> API key. It starts with <code>sk-or-</code>. story-gate's AI judge "
+                "uses it to check that the code really does what the story asks. Make one at openrouter.ai/keys and copy it right "
+                "away. It's encrypted into a GitHub secret and saved only on this computer; your AI never sees it.")
+         + "<input name=key type=password autocomplete=new-password placeholder='sk-or-...' aria-describedby=msg-key></label> <button>Save</button></form>"
          "<p class=hint>No key? <button class=link onclick=\"go('nokey')\">Skip for now</button> and story-gate runs without an AI "
          "judge: it still checks the plan, runs your tests and needs your approval, but nothing checks that the code really does "
          "what the story asks. To turn the judge on later: add a key, then set <code>\"judge_mode\": \"full\"</code> in a pull request.</p>"),
         ("merge", "Approve the setup", "We open a pull request with everything story-gate needs. You merge it on GitHub.",
          "<form onsubmit=\"event.preventDefault();go('merge',new URLSearchParams(new FormData(this)))\">"
-         "<label class=lbl>Who else can approve work? <b class=opt>Optional</b><span>GitHub usernames with write access to this repository. "
+         "<label class=lbl>Who else can approve work? <b class=opt>Optional</b>"
+         + info("approvers", "who can approve work", "GitHub usernames of other people who may accept your AI's work, separated "
+                "by commas, e.g. <code>alex, sam</code>. Each needs <b>write</b> access to this repository (Settings &gt; "
+                "Collaborators). Any one of you can approve. Leave it empty if it's only you.")
+         + "<span>GitHub usernames with write access to this repository. "
          "Any one of you can approve. Leave it empty if it's just you.</span>"
-         "<input name=approvers autocomplete=off placeholder='Optional, e.g. alex, sam'></label>"
+         "<input name=approvers autocomplete=off placeholder='Optional, e.g. alex, sam' aria-describedby=msg-merge></label>"
          "<button>Open the pull request</button></form><div id=pr></div>"),
-        ("done", "Protect your AI tools", "Live checks turn on for the tools ticked below, then story-gate checks itself. "
+        ("done", "Protect your AI tools" + info("tools", "the AI tools list", "The AI tools on this computer that story-gate "
+                  "should watch while they work. Ticked ones get live checks as they edit: missing story, missing tests, edits "
+                  "outside the plan. Tools found on this computer are ticked for you."),
+         "Live checks turn on for the tools ticked below, then story-gate checks itself. "
          "Change the ticks before you merge.", tools_html(wz)),
     ]
-    cards = "".join("<section class=step id=s-%s><div class=n>%s</div><div><h2>%s</h2><p>%s</p><div class=act>%s</div><div class=msg></div></div></section>"
-                    % (k, i + 2, h, p, a) for i, (k, h, p, a) in enumerate(steps))
+    cards = "".join("<section class=step id=s-%s><div class=n>%s</div><div><h2>%s</h2><p>%s</p><div class=act>%s</div><div class=msg id=msg-%s role=status></div></div></section>"
+                    % (k, i + 2, h, p, a, k) for i, (k, h, p, a) in enumerate(steps))
     js = """<script>
 const T=%s;async function go(a,body){await fetch('/'+a+'?t='+T,{method:'POST',body:body||''});tick()}
 async function tools(f){const c=[...f.querySelectorAll('input:checked')].map(i=>i.value).join(',');const r=await fetch('/tools?t='+T,{method:'POST',body:new URLSearchParams({clients:c})});
 document.getElementById('toolmsg').textContent=r.ok?'':'Tick at least one tool.'}
 async function tick(){const s=await (await fetch('/state?t='+T)).json();
-for(const [k,v] of Object.entries(s.steps)){const e=document.getElementById('s-'+k);if(!e)continue;e.className='step '+v.status;e.querySelector('.msg').textContent=v.status=='ok'?'✓ '+v.msg:v.msg}
+for(const [k,v] of Object.entries(s.steps)){const e=document.getElementById('s-'+k);if(!e)continue;e.className='step '+v.status;e.querySelector('.msg').textContent=v.status=='ok'?'✓ '+v.msg:v.msg;
+const f={key:'input[name=key]',merge:'input[name=approvers]'}[k];const fi=f&&e.querySelector(f);if(fi){const bad=v.status=='error'&&(k=='key'||/Fix the list/.test(v.msg));
+fi.classList.toggle('bad',bad);if(bad)fi.setAttribute('aria-invalid','true');else fi.removeAttribute('aria-invalid');
+let fe=document.getElementById('ferr-'+k);if(bad&&!fe){fe=document.createElement('div');fe.id='ferr-'+k;fe.className='ferr';fe.setAttribute('role','alert');fi.closest('label').after(fe)}
+if(fe){fe.textContent=bad?v.msg:'';fi.setAttribute('aria-describedby',bad?'ferr-'+k:'msg-'+k)}if(bad)e.querySelector('.msg').textContent='';
+e.querySelector('.msg').classList.toggle('ferr',v.status=='error'&&!bad)}}
 const d=document.getElementById('dev');if(s.device&&s.steps.signin.status!='ok'){if(d.dataset.code!==s.device.code){d.dataset.code=s.device.code;d.innerHTML='Enter this code at <a target=_blank rel=noopener></a><br><span class=code></span>';const a=d.querySelector('a');a.href=a.textContent=s.device.uri;d.querySelector('.code').textContent=s.device.code}}else{d.innerHTML='';d.dataset.code=''}
 const p=document.getElementById('pr');if(s.pr&&p.dataset.url!==s.pr.url){p.dataset.url=s.pr.url;p.innerHTML='<a class=btn target=_blank rel=noopener>Review and merge on GitHub</a><p class=hint>Opens GitHub in a new tab. Click the green <b>Merge pull request</b> button there, then come back to this page.</p>';p.querySelector('a').href=s.pr.url;p.previousElementSibling.style.display='none'}
 const n=document.getElementById('next');if(s.steps.done.status=='ok'&&!n.dataset.on){n.dataset.on=1;n.style.display='block';if(s.dashboard){n.querySelector('a').href=s.dashboard}else{n.querySelector('.dash').style.display='none';n.querySelector('.noissues').style.display='block'}}
