@@ -5952,6 +5952,16 @@ class TestTrackerLinear(Base):
         self.cfg(trackers={})
         self.assertIn("isn't set up", self.problem()[1])
 
+    def test_local_validation_page_lists_ticket_copies_as_not_checked(self):
+        self.pull()
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            facts = self.g.report_facts("SAT-1")
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        rows = [s for s in facts["sources"] if s["path"] == self.rel]
+        self.assertEqual([(r["issue"], r["state"]) for r in rows], [("ENG-12", "not checked")])  # off CI: never verified
+
     def test_new_ticket_text_reopens_ready_even_if_the_requirements_are_the_same(self):
         self.pull()
         os.environ["STORY_GATE_ROOT"] = str(self.repo)

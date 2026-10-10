@@ -449,6 +449,8 @@ Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-f
 
 #### Specs in Linear
 
+> **Experimental.** Linear and Jira support is tested against recorded and public data, but not yet end to end against a real private workspace. Treat a "verified" here as a strong hint, not proof, until that test passes.
+
 Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket like an issue. The gate checks the copy; CI checks the copy against the live ticket.
 
 1. **Set it up.** In `.story-gate/config.json`, add `"trackers": {"linear": {"workspace": "acme"}}` in a pull request (`acme` is the part after `linear.app/` in your ticket links). Reviewers see it as a weaker rule. `story-gate doctor` suggests this when your branch names look like Linear's.

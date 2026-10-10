@@ -1805,7 +1805,9 @@ def report_facts(sid, in_ci=False):
             "fingerprint": fp, "spec_hash": V.spec_hash, "validation_md": rd(sd / "validation.md"), "images": images, "images_skipped": skipped,
             "sources": CI_SOURCES.get(sid) if in_ci else [  # off CI nothing is compared: say so, never "verified"
                 {"path": rel, "issue": num, "state": "not checked", "detail": "CI compares it with the live issue on each pull request"}
-                for rel, _, num, _ in snapshot_links(story)[0]],
+                for rel, _, num, _ in snapshot_links(story)[0]] + [
+                {"path": rel, "issue": key, "state": "not checked", "detail": "CI compares it with the live ticket on each pull request"}
+                for rel, _, _, key in tracker_links(story)],
             "source_legend": SOURCE_LEGEND}
 
 
