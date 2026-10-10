@@ -151,6 +151,39 @@ jobs:
             ".github/workflows/story-gate-dashboard.yml": dash}
 
 
+def check_callers(G):
+    """[(file, status)] for the three short workflows, for `doctor`. 'ok' or 'ok (...)' passes; anything else fails."""
+    out, pins = [], set()
+    pat = re.compile(r"uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/(gate|audit|dashboard)\.yml@(\S+)")
+    for path, called in ((".github/workflows/story-gate.yml", "gate"), (".github/workflows/story-gate-audit.yml", "audit"),
+                         (".github/workflows/story-gate-dashboard.yml", "dashboard")):
+        text = G.rd(G.ROOT / path)
+        m = pat.search(text)
+        fp = re.search(r'release-key-fingerprint:\s*"([^"]*)"', text)
+        if not text:
+            st = "missing - run `story-gate install --ci reusable`"
+        elif not text.startswith("# managed by story-gate"):
+            st = "NOT MANAGED by story-gate"
+        elif not m or m.group(2) != called:
+            st = "doesn't call story-gate's %s.yml - run `story-gate install --ci reusable`" % called
+        elif not SHA.fullmatch(m.group(3)):
+            st = "pinned to %r, not a full commit SHA (a tag or branch can be moved)" % m.group(3)[:50]
+        elif "secrets: inherit" in text:
+            st = "passes every secret (secrets: inherit); pass them by name"
+        elif not fp or fp.group(1) != G.T.key_fingerprint():
+            st = "expects release key %s, not story-gate's %s" % (fp.group(1) if fp else "(none)", G.T.key_fingerprint())
+        else:
+            pins.add((m.group(1), m.group(3)))
+            ver = re.search(r"@[0-9a-f]{40}\s*#\s*(\S+)", text)
+            st = "ok (%s at %s%s)" % (m.group(1), ver.group(1) if ver else m.group(3)[:12],
+                                     ", allows UNSIGNED copies" if re.search(r"allow-unsigned:\s*true", text) else "")
+        out.append((path, st))
+    if len(pins) > 1:
+        out.append(("story-gate workflows", "pinned to different commits (%s): pin all three to the same release"
+                    % ", ".join(sorted(p[1][:12] for p in pins))))
+    return out
+
+
 def resolve_tag(G, upstream, version):
     """The commit SHA of tag v<version> on upstream, through GitHub's API. RuntimeError when it can't be found."""
     import sg_github as GH

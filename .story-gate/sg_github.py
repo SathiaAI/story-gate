@@ -303,7 +303,8 @@ def require_check(repo, ruleset_id, token, check):
         return "Ruleset: it doesn't require any check. Add '%s' in Settings > Rules so a red story-gate check blocks merging" % check
     p = rsc[0].setdefault("parameters", {})
     have = [c.get("context") for c in p.get("required_status_checks") or [] if isinstance(c, dict)]
-    if check in have:
+    other = ({"story-gate", "story-gate / story-gate"} - {check}).pop()
+    if check in have and other not in have:  # the other name may never report again, so it can't stay required
         return "Ruleset: requires the check '%s'" % check
     p["required_status_checks"] = [c for c in p.get("required_status_checks") or []
                                    if not (isinstance(c, dict) and c.get("context") in ("story-gate", "story-gate / story-gate"))]

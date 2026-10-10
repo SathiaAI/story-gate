@@ -4147,8 +4147,14 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     if found:
         print("  WARNING: project hook files run story-gate code from the branch: %s (gate.py install --user removes them)" % ", ".join(found))
         fails.append("project-hooks")
-    for f, body in ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML),
-                    (".github/workflows/story-gate-dashboard.yml", dash_yml())):
+    import sg_reusable as R
+    reusable = G.ci_check_name(ROOT) == R.CHECK
+    for f, st in (R.check_callers(sys.modules[__name__]) if reusable else []):
+        print("  %-42s %s" % (f, st))
+        if st != "ok" and not st.startswith("ok "):
+            fails.append(f)
+    for f, body in (() if reusable else ((".github/workflows/story-gate.yml", CI_YML), (".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                    (".github/workflows/story-gate-dashboard.yml", dash_yml()))):
         cur = rd(ROOT / f)
         st = "ok" if cur == with_user_steps(cur, body) else ("OUTDATED - re-run install" if cur.startswith("# managed by story-gate") else ("missing" if not cur else "NOT MANAGED by story-gate"))
         print("  %-42s %s" % (f, st))
@@ -4358,7 +4364,13 @@ def main(argv):
     if cmd == "install" and "--user" in rest:
         return cmd_user("install", kv, rest)
     if cmd == "install":
-        ci = kv.get("ci", "copy")
+        import sg_github as G_
+        now_ci = "reusable" if G_.ci_check_name(ROOT) == "story-gate / story-gate" else "copy"
+        ci = kv.get("ci", now_ci)  # a plain re-install keeps the mode this repository uses
+        if now_ci == "reusable" and ci == "copy" and "--force" not in rest:
+            sys.exit("this repository calls story-gate's reusable workflow. --ci copy switches back to copied workflows, and "
+                     "the check's name changes to 'story-gate': run `story-gate setup-repo` afterwards so your branch rules "
+                     "require it. Run again with --force to switch.")
         if ci not in ("copy", "reusable"):
             sys.exit("--ci must be copy (story-gate's code and workflows copied into this repository) or reusable "
                      "(short workflows that call story-gate's own, pinned to a release)")

@@ -672,6 +672,8 @@ def call(G, method, path, token, body=None, tries=3):
 
 def ci_status(G, repo, token, data):
     """Mark each unmerged story with the result of the story-gate check on its open pull request (CI-verified or not)."""
+    # the check this installation runs: 'story-gate' (copied workflow) or 'story-gate / story-gate' (reusable workflow)
+    name = G.ci_check_name(os.environ.get("STORY_GATE_ROOT") or os.getcwd())
     prs, page = [], 1
     while page <= 5:  # up to 500 open pull requests
         st, chunk, _ = call(G, "GET", "/repos/%s/pulls?state=open&per_page=100&page=%d" % (repo, page), token)
@@ -688,11 +690,8 @@ def ci_status(G, repo, token, data):
         if s["merged"] or s["ref"] not in heads:
             continue
         sha, num = heads[s["ref"]]
-        for name in ("story-gate", "story-gate / story-gate"):  # copied workflow, or the reusable one
-            st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=%s" % (repo, sha, urllib.parse.quote(name)), token)
-            runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
-            if st == 200 and runs:
-                break
+        st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=%s" % (repo, sha, urllib.parse.quote(name, safe="")), token)
+        runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
         if st == 200 and runs:
             r = runs[0]
             s["ci"] = {"pr": num, "result": clean(r.get("conclusion") or r.get("status"), 20)}

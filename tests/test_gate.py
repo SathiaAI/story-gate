@@ -6650,6 +6650,51 @@ class TestReusableWorkflow(Base):
         self.assertEqual(sent, [{"context": "lint"}, {"context": "story-gate / story-gate"}])
         with mock.patch.object(GH, "call", return_value=(200, {"rules": sent and [{"type": "required_status_checks", "parameters": {"required_status_checks": sent}}]}, {})):
             self.assertIn("requires the check", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
+        both = {"rules": [{"type": "required_status_checks", "parameters": {"required_status_checks": [
+            {"context": "story-gate"}, {"context": "story-gate / story-gate"}]}}]}
+        with mock.patch.object(GH, "call", side_effect=[(200, both, {}), (200, {}, {})]) as c:
+            self.assertIn("now requires", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
+        self.assertEqual(c.call_args_list[1][0][3]["rules"][0]["parameters"]["required_status_checks"], [{"context": "story-gate / story-gate"}])
+
+    def test_doctor_checks_the_short_workflows_and_a_plain_install_keeps_the_mode(self):
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        r = run(self.repo, "doctor")
+        self.assertIn("ok (SathiaAI/story-gate at v", r.stdout); self.assertNotIn("OUTDATED", r.stdout)
+        p = self.repo / ".github/workflows/story-gate-audit.yml"
+        p.write_text(p.read_text().replace(self.SHA, "b" * 40))
+        self.assertIn("pinned to different commits", run(self.repo, "doctor").stdout)
+        p.write_text(p.read_text().replace("b" * 40, "v0.8.0"))
+        self.assertIn("not a full commit SHA", run(self.repo, "doctor").stdout)
+        g = self.repo / ".github/workflows/story-gate.yml"
+        g.write_text(_re_sub(r'release-key-fingerprint: "[^"]*"', 'release-key-fingerprint: "SHA256:' + "Z" * 43 + '"', g.read_text()))
+        self.assertIn("expects release key SHA256:ZZZ", run(self.repo, "doctor").stdout)
+        r = run(self.repo, "install", "--ref", self.SHA)  # no --ci: stays reusable
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("/.github/workflows/gate.yml@" + self.SHA, g.read_text())
+        r = run(self.repo, "install", "--ci", "copy")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("--force", r.stderr)
+        self.assertIn("/.github/workflows/gate.yml@", g.read_text())
+        r = run(self.repo, "install", "--ci", "copy", "--force")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertNotIn("/.github/workflows/gate.yml@", g.read_text())
+
+    def test_the_dashboard_reads_the_check_this_installation_runs(self):
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as GH, importlib
+        sys.modules.pop("sg_dashboard", None); D = importlib.import_module("sg_dashboard")
+        asked = []
+        def call(m, path, t=None, b=None):
+            if "/pulls?" in path:
+                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}}], {}
+            if "/check-runs" in path:
+                asked.append(path); return 200, {"check_runs": [{"conclusion": "failure" if "%2F" in path else "success"}]}, {}
+            return 404, {}, {}
+        data = {"stories": [{"id": "SAT-5", "ref": "origin/feat/SAT-5", "merged": False}]}
+        from unittest import mock
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        with mock.patch.object(GH, "call", side_effect=call), mock.patch.dict(os.environ, {"STORY_GATE_ROOT": str(self.repo)}):
+            D.ci_status(GH, "o/r", "t", data)
+        self.assertEqual(len(asked), 1); self.assertIn("check_name=story-gate%20%2F%20story-gate", asked[0])
+        self.assertEqual(data["stories"][0]["ci"]["result"], "failure")
 
     def test_release_tag_is_resolved_to_its_commit(self):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
@@ -6686,6 +6731,12 @@ class TestReusableWorkflow(Base):
         self.assertNotIn("secrets.", tests_job)  # the job that runs PR code never sees a secret
         declared = set(_re.findall(r"\n      ([A-Z_]+):\n        required: false", t))
         self.assertEqual(declared, set(R.SECRETS))
+
+
+
+def _re_sub(pat, rep, text):
+    import re
+    return re.sub(pat, lambda m: rep, text)
 
 
 if __name__ == "__main__":
