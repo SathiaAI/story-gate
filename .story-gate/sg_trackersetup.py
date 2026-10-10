@@ -517,29 +517,53 @@ def make_handler(ss):
 def page(ss):
     """The page: sign in, details, review, done. The state comes from /state; every POST carries this load's nonce."""
     pub = ("" if ss.private else
-           "<label class=tool><input type=checkbox name=public_ok value=yes> <b>%s is public.</b> I understand that ticket text "
-           "copied into it can be read by anyone.</label>" % html.escape(ss.repo))
+           "<label class=tool><input type=checkbox name=public_ok value=yes> <b>" + html.escape(ss.repo) + " is public.</b> "
+           "I understand that ticket text copied into it can be read by anyone." + S.info("public", "this choice", "story-gate copies each ticket's text into "
+           "the story's folder, so reviewers see exactly what was built against. In a public repository that text becomes "
+           "public. Tick only if your tickets contain nothing private.") + "</label>")
     form = (
         "<form id=det onsubmit=\"event.preventDefault();send('details',this)\">"
+        "<p class=lbl>Where your tickets live" + S.info("kind", "the tracker choice", "Pick where your team keeps its tickets. "
+        "<b>Jira Cloud</b> is Jira at an address like <code>acme.atlassian.net</code>. Jira on your own servers (Server or Data "
+        "Center) isn't covered here yet: use <code>story-gate jira-setup</code> and the guide.") + "</p>"
         "<label class=tool><input type=radio name=kind value=linear checked onchange=kindf()> Linear</label>"
         "<label class=tool><input type=radio name=kind value=jira onchange=kindf()> Jira Cloud</label>"
-        "<div id=lin><label class=lbl>Workspace<span>The short name in your Linear links: linear.app/<b>workspace</b>/...</span>"
+        "<div id=lin><label class=lbl>Workspace" + S.info("workspace", "the workspace", "The short name of your Linear account. "
+        "Open any ticket and look at the address: in <code>linear.app/acme/issue/ENG-12</code> the workspace is <code>acme</code>. "
+        "It isn't secret.") + "<span>The short name in your Linear links: linear.app/<b>workspace</b>/...</span>"
         "<input name=workspace autocomplete=off></label>"
-        "<label class=lbl>Read-only API key<span>Linear: Settings &gt; Security &amp; access &gt; Personal API keys. "
+        "<label class=lbl>Read-only API key" + S.info("linkey", "the Linear key", "A Linear personal API key with "
+        "<b>Read</b> access only. Linear: Settings &gt; Security &amp; access &gt; Personal API keys &gt; New key. It starts with "
+        "<code>lin_api_</code>. Linear shows it once, so copy it before you close that window. It goes into an encrypted GitHub "
+        "secret, never into your repository.") + "<span>Linear: Settings &gt; Security &amp; access &gt; Personal API keys. "
         "Choose read-only access.</span><input name=key type=password autocomplete=new-password placeholder='lin_api_...'></label></div>"
-        "<div id=jir style=display:none><label class=lbl>Site<span>Like your-company.atlassian.net</span>"
+        "<div id=jir style=display:none><label class=lbl>Site" + S.info("site", "the Jira site", "Your Jira Cloud "
+        "address, from any ticket link: in <code>acme.atlassian.net/browse/ENG-12</code> the site is <code>acme.atlassian.net</code>. "
+        "Leave out <code>https://</code> and anything after the name.") + "<span>Like your-company.atlassian.net</span>"
         "<input name=site autocomplete=off></label>"
-        "<label class=lbl>Email<span>The Atlassian account that made the token</span><input name=email autocomplete=off></label>"
-        "<label class=lbl>Read-only API token<span>id.atlassian.com &gt; Security &gt; API tokens &gt; "
+        "<label class=lbl>Email" + S.info("email", "the email", "The email you sign in to Atlassian with: the account "
+        "that made the token below. Jira needs the two together.") + "<span>The Atlassian account that made the token</span><input name=email autocomplete=off></label>"
+        "<label class=lbl>Read-only API token" + S.info("jiratoken", "the Jira token", "An Atlassian API token "
+        "<b>with scopes</b>: id.atlassian.com &gt; Security &gt; API tokens &gt; Create API token with scopes &gt; Jira &gt; tick "
+        "only <code>read:jira-work</code>. It's about 190 characters and starts with <code>ATATT</code>. Atlassian shows it once.") + "<span>id.atlassian.com &gt; Security &gt; API tokens &gt; "
         "<b>Create API token with scopes</b>, read-only Jira scopes.</span>"
         "<input name=key type=password autocomplete=new-password placeholder='ATATT...' disabled></label>"
-        "<label class=lbl>Acceptance-criteria field <b class=opt>Optional</b><span>Its name in Jira, if you keep acceptance "
+        "<label class=lbl>Acceptance-criteria field <b class=opt>Optional</b>" + S.info("acfield", "the acceptance-criteria field",
+        "Only if your team keeps acceptance criteria in a separate Jira field. Type that field's name exactly as Jira shows it, e.g. "
+        "<code>Acceptance criteria</code>. Leave it empty if they're in the description, under an <b>Acceptance criteria</b> "
+        "heading.") + "<span>Its name in Jira, if you keep acceptance "
         "criteria in their own field</span><input name=ac_field autocomplete=off></label></div>"
-        "<label class=lbl>A ticket to test with<span>Any ticket this key can see, like ENG-12</span>"
-        "<input name=ticket autocomplete=off></label>%s"
+        "<label class=lbl>A ticket to test with" + S.info("ticket", "the test ticket", "Any ticket this key can open, "
+        "e.g. <code>ENG-12</code>. story-gate reads it once to prove the key works, the same way CI will. Nothing in the ticket "
+        "is changed.") + "<span>Any ticket this key can see, like ENG-12</span>"
+        "<input name=ticket autocomplete=off></label>" + pub +
         "<label class=tool><input type=checkbox name=local_copy value=yes> Also keep a copy on this computer, so "
-        "<code>spec-pull</code> works here <em>(off by default; other programs running as you can read it)</em></label>"
-        "<button id=rv>Review</button> <span class=btnerr id=btnerr></span></form>" % pub)
+        "<code>spec-pull</code> works here <em>(off by default; other programs running as you can read it)</em>"
+        + S.info("local", "the local copy", "Lets <code>story-gate spec-pull</code> read tickets on this computer without "
+                 "setting environment variables. It's saved in your story-gate user folder, readable only by your user account, "
+                 "but other programs you run (including AI tools) can read it too. CI doesn't need it. Leave it off if unsure.")
+        + "</label>"
+        "<button id=rv>Review</button> <span class=btnerr id=btnerr></span></form>")
     js = """<script>
 const N=%s;
 function kindf(){const j=document.querySelector('input[name=kind]:checked').value=='jira';
@@ -590,8 +614,7 @@ kindf();tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
         "pull request to turn it on. Then ask your AI to pull a ticket into a story.</p></div></section>" % form)
     return S.page_shell(
         "<div class=eyebrow>story-gate · connect a tracker · %s</div><h1>Connect Linear or Jira.</h1>"
-        "<style>.bad{border-color:var(--error)!important;outline:2px solid var(--error)}.ferr{color:var(--error);font-size:14px;"
-        "margin:4px 0 0;font-weight:600}.btnerr{color:var(--error);font-size:14px;font-weight:600;margin-left:8px}</style>"
+        "<style>.btnerr{color:var(--error);font-size:14px;font-weight:600;margin-left:8px}</style>"
         "<p class=lead>Your key goes straight into encrypted GitHub secrets. It's never written to your repository, and your "
         "AI never sees it. Tracker support is experimental.</p><p class=msg id=msg></p>%s"
         "<div class=foot>Runs only on this computer (127.0.0.1). This page stops 10 minutes after you close it (30 minutes at most).</div>%s"

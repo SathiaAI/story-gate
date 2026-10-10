@@ -7190,6 +7190,16 @@ class TestTrackerSetup(Base):
         self.assertIn("autocomplete=new-password", page); self.assertIn("kindf();tick()", page)
         self.assertIn("id=btnerr", page)
         self.assertIn("aria-describedby','ferr'", page); self.assertIn("kind=='jira'?'#jir':'#lin'", page)
+        # every field has an (i) explaining what it means and what to type; keyboard and screen readers reach it
+        for tid in ("kind", "workspace", "linkey", "site", "email", "jiratoken", "acfield", "ticket", "local"):
+            self.assertIn("aria-controls=tip-%s" % tid, page); self.assertIn("id=tip-%s" % tid, page)
+        self.assertIn("role=tooltip", page); self.assertIn("Escape", page)
+        import sg_setup as S
+        wz = S.Wizard(self.repo, "me/proj", sys.executable, open_browser=False)
+        init = S.page(wz)
+        for tid in ("judgekey", "approvers", "tools"):
+            self.assertIn("aria-controls=tip-%s" % tid, init)
+        self.assertIn("ferr-'+k", init)  # init's key and approver errors show under their field too
 
     def test_public_repository_needs_an_explicit_yes(self):
         self.repo_info["private"] = False
