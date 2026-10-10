@@ -108,7 +108,9 @@ def sentences(paragraph):
     file names don't split because the dot isn't followed by a space."""
     p = paragraph
     for i, a in enumerate(ABBREVIATIONS):
-        p = re.sub(re.escape(a), "\x00%d\x00" % i, p, flags=re.I)
+        # whole words only ("items." isn't "ms."); "no." only as in "No. 5", so "the answer is no." still ends a sentence
+        pat = r"(?<![\w.])" + re.escape(a) + (r"(?=\s*\d)" if a == "no." else "")
+        p = re.sub(pat, "\x00%d\x00" % i, p, flags=re.I)
     parts = []
     for piece in re.split(r"(?<=[.!?])\s+", p):  # a new sentence starts with a capital (any script), digit, quote or bracket
         if parts and not (piece[:1].isupper() or piece[:1].isdigit() or piece[:1] in "\"'\u201c("):

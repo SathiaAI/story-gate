@@ -75,8 +75,18 @@ def setup_files(top, base, py):
         if r.returncode:
             raise RuntimeError("repository setup failed: %s" % (r.stderr or r.stdout)[-400:])
         out = {}
-        for line in git(wt, "status", "--porcelain", "--untracked-files=all").splitlines():
-            p = line[3:].strip().strip('"')
+        # Raw NUL-separated output: git() strips the whole text, which would eat the leading space of the first " M path"
+        # line, and the -z form never quotes odd file names.
+        st = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=str(wt), capture_output=True)
+        parts = st.stdout.decode("utf-8", "replace").split("\0")
+        i = 0
+        while i < len(parts):
+            entry, i = parts[i], i + 1
+            if len(entry) < 4:
+                continue
+            if "R" in entry[:2] or "C" in entry[:2]:
+                i += 1  # a rename or copy is followed by the old path
+            p = entry[3:]
             if p and (wt / p).is_file() and "__pycache__" not in p:
                 out[p] = (wt / p).read_bytes()
         cfgf = dest / "config.json"  # an unchanged, already-tracked config is still the one setup's choices go into
@@ -375,9 +385,10 @@ class Wizard:
         final = json.loads(files[".story-gate/config.json"].decode("utf-8")) if ".story-gate/config.json" in files else {}
         junit = final.get("junit_path") if final.get("test_command") else ""
         owners = [self.login] + self.approvers
-        co = (".github/CODEOWNERS", "# Code owners: the humans who accept work. Bots and apps cannot be code owners.\n* %s\n"
-              % " ".join("@" + o for o in owners))
-        files.setdefault(co[0], co[1].encode())
+        old = git(self.top, "show", "origin/%s:.github/CODEOWNERS" % base)  # keep the rules already on the default branch
+        new = G.add_owners(old, owners)  # the same merge setup_repo does
+        if new is not None:
+            files.setdefault(".github/CODEOWNERS", new.encode())
         body = ("This adds story-gate: the settings, the agent instructions and three workflows (the PR check, the audit and the "
                 "dashboard). It was prepared by `story-gate init`. Merge it to finish setup; branch rules are applied right after.\n\n"
                 + ("**Merges are blocked until the story-gate check passes**, because GitHub can enforce branch rules on this "
@@ -416,6 +427,11 @@ class Wizard:
         (tmp / ".github").mkdir()
         owners = [self.login] + self.approvers
         (tmp / ".github" / "CODEOWNERS").write_text("* %s\n" % " ".join("@" + o for o in owners), encoding="utf-8")
+        git(self.top, "fetch", "--quiet", "origin", base)
+        wf = git(self.top, "show", "origin/%s:.github/workflows/story-gate.yml" % base)  # so ci_check_name sees the merged workflow
+        if wf:
+            (tmp / ".github" / "workflows").mkdir()
+            (tmp / ".github" / "workflows" / "story-gate.yml").write_text(wf + "\n", encoding="utf-8")
         notes = G.setup_repo(tmp, self.repo, owners, self.token)  # CODEOWNERS already merged; this sets the rules
         shutil.rmtree(tmp, ignore_errors=True)
         if self.private and any(n.startswith("Ruleset: NOT created (HTTP 403") for n in notes):
