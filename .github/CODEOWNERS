@@ -1,0 +1,7 @@
+# Other repositories will run story-gate's workflows straight from this repository, so a change to the
+# workflows, to this file or to the release trust files needs a code owner's approval (ruleset "protect main").
+/.github/workflows/ @pjpoulose
+/.github/CODEOWNERS @pjpoulose
+/.story-gate/sg_trust.py @pjpoulose
+/.story-gate/release.json @pjpoulose
+/.story-gate/release.json.sig @pjpoulose
