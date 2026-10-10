@@ -3597,6 +3597,7 @@ jobs:
         env:
           SG_DEFAULT_BRANCH: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
           STORY_GATE_ROOT: ${{{{ github.workspace }}}}
+          GITHUB_TOKEN: ${{{{ github.token }}}}  # not exported by default; the dashboard reads CI results only when it has it
         run: python3 .story-gate/gate.py dashboard --out "$RUNNER_TEMP/sg-dashboard"
       - id: report
         uses: actions/upload-artifact@v4

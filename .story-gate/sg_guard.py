@@ -691,7 +691,7 @@ Source: https://code.claude.com/docs/en/managed-settings
 |---|---|
 | macOS (Jamf, Kandji, ...) | `/Library/Application Support/ClaudeCode/managed-settings.d/%s` |
 | Linux / WSL | `/etc/claude-code/managed-settings.d/%s` |
-| Windows (Intune, GPO, ...) | `C:\\\\Program Files\\\\ClaudeCode\\\\managed-settings.d\\\\%s` |
+| Windows (Intune, GPO, ...) | `C:\\Program Files\\ClaudeCode\\managed-settings.d\\%s` |
 
 If you deliver Claude Code settings through MDM profiles or the HKLM registry, those take precedence over files: put
 the same keys (`allowManagedHooksOnly`, `hooks`) in that channel instead.

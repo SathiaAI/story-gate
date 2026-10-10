@@ -1149,6 +1149,33 @@ def project_hook_findings(top, hook_files):
     return sorted(set(found))
 
 
+_OUR_HOOK = re.compile(r'"([^"]+)" -I "([^"]+)" hook --client ([a-z]+) --event ([a-z]+)')
+
+
+def is_our_hook_command(cmd):
+    """True only for exactly the command hook_entries() writes, run through this computer's launcher with an absolute
+    Python. A command that merely mentions `gate.py hook --client` (say, after a pipe or a comment) is not ours."""
+    m = _OUR_HOOK.fullmatch(cmd) if isinstance(cmd, str) else None
+    if not m:
+        return False
+    py, gate = m.group(1), m.group(2)
+    same = lambda a, b: os.path.normcase(os.path.abspath(a.replace("\\", "/"))) == os.path.normcase(os.path.abspath(b.replace("\\", "/")))
+    if not same(gate, str(launcher_path())) or not (py.startswith("/") or re.match(r"[A-Za-z]:[\\/]", py)):
+        return False
+    return any(c.get("command") == cmd for c in _all_commands(hook_entries(py, gate)))
+
+
+def _all_commands(x):
+    if isinstance(x, dict):
+        if isinstance(x.get("command"), str):
+            yield x
+        for v in x.values():
+            yield from _all_commands(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _all_commands(v)
+
+
 def other_project_hooks(top, hook_files):
     """Commands from the repository's own project hook files (not story-gate's). story-gate can't vouch for them."""
     cmds = []
@@ -1162,7 +1189,7 @@ def other_project_hooks(top, hook_files):
             continue
         def walk(x):
             if isinstance(x, dict):
-                if isinstance(x.get("command"), str) and not HOOK_SIGNATURE.search(x["command"]):
+                if isinstance(x.get("command"), str) and not is_our_hook_command(x["command"]):
                     cmds.append((p.relative_to(top).as_posix(), x["command"]))
                 for v in x.values():
                     walk(v)
