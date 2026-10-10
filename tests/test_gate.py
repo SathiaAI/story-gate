@@ -7368,6 +7368,14 @@ class TestTrackerSetup(Base):
 class TestReviewFixes(Base):
     """Fixes for code-review findings that belong to no single class above."""
 
+    def test_abbreviations_match_whole_words_only(self):
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_writing as W
+        W = importlib.reload(W)
+        self.assertEqual(len(W.sentences("We fixed the items. Then we ran the tests.")), 2)
+        self.assertEqual(len(W.sentences("The answer is no. We moved on.")), 2)
+        self.assertEqual(len(W.sentences("See e.g. the guide and item No. 5 there. Then go.")), 2)
+
     def test_dashboard_build_step_gets_the_token_so_ci_results_show(self):
         """GitHub doesn't export GITHUB_TOKEN to steps; the dashboard reads CI results only when it has one."""
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
