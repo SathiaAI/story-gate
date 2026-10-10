@@ -7197,6 +7197,48 @@ class TestTrackerSetup(Base):
         ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
         self.assertIn("isn't enforcing", self.prs[0]["body"])
 
+    def test_refuses_a_shell_that_would_send_the_key_or_sign_in_elsewhere(self):
+        TS = self.TS
+        self.assertEqual(TS.unsafe_environment({}), [])
+        for name in ("GITHUB_API_URL", "STORY_GATE_OAUTH_CLIENT_ID", "SSL_CERT_FILE", "STORY_GATE_TEST_HTTP"):
+            with self.subTest(name=name):
+                self.assertEqual(TS.unsafe_environment({name: "x"}), [name])
+        self.assertEqual(TS.proxy_in_use({"HTTPS_PROXY": "http://proxy:8080"}), "http://proxy:8080")
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/me/proj.git"], cwd=self.repo, check=True)
+        r = run(self.repo, "tracker-setup", "--no-browser", env={"SSL_CERT_FILE": "/tmp/evil.pem"})
+        self.assertEqual(r.returncode, 1); self.assertIn("refusing to run", r.stdout); self.assertIn("SSL_CERT_FILE", r.stdout)
+
+    def test_no_going_back_mid_save_and_only_one_device_sign_in_at_a_time(self):
+        ss = self.session()
+        ss.details(self.linear_form())
+        ss.confirm_start({"plan": ss.plan["id"]})
+        with self.assertRaisesRegex(self.TS.SetupError, "Too late"):
+            ss.cancel()
+        self.assertTrue(ss.busy()); ss.started -= self.TS.LIFETIME + 1
+        self.assertFalse(ss.expired())  # never stops half-way through saving
+        fresh = self.session(signed=False)
+        import threading
+        gate_, calls = threading.Event(), []
+        fresh.start_signin(flow=lambda cid, on_code: calls.append(1) or gate_.wait(5) and "dev-token")
+        fresh.start_signin(flow=lambda cid, on_code: calls.append(2) or "other")
+        gate_.set(); self.wait(fresh, "details")
+        self.assertEqual(calls, [1])
+
+    def test_reconnecting_the_same_site_keeps_its_other_settings(self):
+        conf = base64.b64encode(json.dumps({"trackers": {"linear": {"workspace": "acme", "allow_in_public_repo": True},
+                                                         "jira": {"site": "acme.atlassian.net", "cloud_id": "1234abcd-0000-4000-8000-0000000000ab"}}}).encode()).decode()
+        old = self.G.call
+        self.G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"encoding": "base64", "content": conf}, {}) \
+            if "/contents/.story-gate/config.json" in p else old(m, p, tok, body, accept)
+        ss = self.session()
+        ss.details(self.linear_form())
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual(ss.result["pr"].get("same"), True)  # nothing to change: no pull request
+        ss2 = self.session(); ss2.details(self.linear_form(workspace="other"))
+        ss2.confirm({"plan": ss2.plan["id"]}, fetch=self.ticket)
+        new = json.loads(self.prs[-1]["files"][".story-gate/config.json"].decode())["trackers"]
+        self.assertEqual(new["linear"], {"workspace": "other"}); self.assertIn("jira", new)
+
     def test_pull_request_target_workflow_blocks_the_save(self):
         self.workflow = "on:\n  pull_request_target:\n"
         ss = self.session()

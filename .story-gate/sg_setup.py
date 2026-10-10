@@ -20,7 +20,8 @@ sys.path.insert(0, str(HERE))
 import sg_github as G  # noqa: E402
 
 # story-gate's own OAuth app (SathiaAI, device flow only; a client ID is public, there is no secret). Empty: fall back to `gh`.
-OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", "Ov23liAhA19MDXrS9a4S")
+BUILTIN_OAUTH_CLIENT_ID = "Ov23liAhA19MDXrS9a4S"
+OAUTH_CLIENT_ID = os.environ.get("STORY_GATE_OAUTH_CLIENT_ID", BUILTIN_OAUTH_CLIENT_ID)
 STEPS = ("signin", "agent", "key", "merge", "done")
 # AI tools story-gate can check live on this computer (user-level hooks), in the order the page lists them.
 HOOKED_TOOLS = (("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("vscode", "VS Code (Copilot agent)"),

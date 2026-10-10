@@ -22,11 +22,30 @@ import sg_trackers as TR  # noqa: E402
 
 KINDS = ("linear", "jira")                 # Jira Cloud only here; Jira Server / Data Center: `story-gate jira-setup`
 ALLOWED_SECRETS = frozenset(("STORY_GATE_LINEAR_KEY", "STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"))
-IDLE = 600                                 # the page stops after 10 minutes without a request...
+IDLE = 600                                 # the page stops 10 minutes after it was closed (it asks every 2 s while open)...
 LIFETIME = 1800                            # ...and after 30 minutes in any case
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,63}")
 LOCAL_FILE = "trackers.env"                # the opt-in copy for spec-pull on this computer, in the story-gate user folder
 DESTINATION = {"linear": "https://api.linear.app/graphql", "jira": TR.JIRA_GATEWAY.replace("%s", "{cloud_id}")}
+
+
+# Settings that would send the sign-in, the secret write or the test read somewhere else, or let something else read them.
+# A same-user program can put these in a shell's startup file; tracker-setup refuses to run with them.
+REDIRECTING_ENV = ("GITHUB_API_URL", "GITHUB_SERVER_URL", "STORY_GATE_OAUTH_CLIENT_ID", "STORY_GATE_TEST_HTTP",
+                   "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PYTHONHTTPSVERIFY")
+
+
+def unsafe_environment(env=os.environ):
+    """Plain words for each setting that would change where the key or the GitHub sign-in goes; [] when none."""
+    found = [n for n in REDIRECTING_ENV if (env.get(n) or "").strip()]
+    if G.API != "https://api.github.com" or G.WEB != "https://github.com" or S.OAUTH_CLIENT_ID != S.BUILTIN_OAUTH_CLIENT_ID:
+        found.append("a GitHub address or sign-in app other than github.com's")
+    return sorted(set(found))
+
+
+def proxy_in_use(env=os.environ):
+    """A proxy only passes encrypted traffic along (TLS is still checked against the system's certificates); say so."""
+    return next(((env.get(n) or "").strip() for n in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy") if (env.get(n) or "").strip()), "")
 
 
 class SetupError(Exception):
@@ -52,10 +71,16 @@ class Session:
         self.plan = None                             # what the person reviews; confirm must name this exact plan
         self._key = None                             # {secret name: value}, only between "review" and the send
         self.result = None
+        self._flow = False                           # a device sign-in is waiting for its code
         self.lock = threading.Lock()
 
     # ---- lifetime
+    def busy(self):
+        return self.step in ("checking", "saving") or self._flow
+
     def expired(self):
+        if self.busy():  # never stop half-way through sending
+            return False
         now = self.clock()
         return now - self.last > IDLE or now - self.started > LIFETIME
 
@@ -96,13 +121,22 @@ class Session:
     # ---- 1. sign in: always a fresh device sign-in, so a person types a code on github.com
     def start_signin(self, flow=None):
         """Never uses a GitHub login already on this computer (gh, GH_TOKEN): an AI on this computer could use those."""
-        if self.token:
-            return
+        with self.lock:
+            if self.token or self._flow:
+                return
+            self._flow = True
         if not S.OAUTH_CLIENT_ID:
             raise SetupError("This copy of story-gate has no GitHub sign-in app configured.")
         self.set("signin", "Waiting for you to enter the code on GitHub")
         flow = flow or G.device_flow
-        self.background(lambda: self._signed_in(flow(S.OAUTH_CLIENT_ID, on_code=self._show_code)))
+
+        def go():
+            try:
+                self._signed_in(flow(S.OAUTH_CLIENT_ID, on_code=self._show_code))
+            finally:
+                with self.lock:
+                    self._flow = False
+        self.background(go)
 
     def _show_code(self, code, uri):
         with self.lock:
@@ -184,6 +218,7 @@ class Session:
                 "destination": dest, "secrets": sorted(keys), "replaces": existing,
                 "local_copy": form.get("local_copy") == "yes", "github": self.login, "repo": self.repo,
                 "public": not self.private, "branch": self.base, "warnings": self._workflow_warnings(),
+                "github_api": G.API, "proxy": proxy_in_use(),
                 "notes": [] if self._review_enforced() else [
                     "GitHub isn't enforcing story-gate's approval rule on %s (no active '%s' ruleset), so the settings pull "
                     "request could be merged without a code owner's review. Run `story-gate setup-repo` to turn it on."
@@ -283,9 +318,10 @@ class Session:
         return bool(isinstance(perm, dict) and perm.get("havePermission"))
 
     def cancel(self):
-        self.forget_key()
         with self.lock:
-            self.plan = None
+            if self.step in ("saving", "checking", "done"):
+                raise SetupError("Too late to go back: this step is already running. Wait for it to finish.")
+            self.plan, self._key = None, None
         self.set("details" if self.token else "signin", "Cancelled. Nothing was sent.")
 
 
@@ -322,6 +358,9 @@ def open_settings_pr(gate, token, repo, kind, settings, plan):
     text = base64.b64decode(f.get("content") or "").decode("utf-8-sig")
     doc = json.loads(text)
     trackers = dict(doc.get("trackers") or {})
+    old = trackers.get(kind) if isinstance(trackers.get(kind), dict) else {}
+    if TR.site_of(kind, old) == TR.site_of(kind, settings) and not old.get("server"):
+        settings = dict(old, **settings)  # same workspace or site: keep its other settings (e.g. ac_field)
     if trackers.get(kind) == settings:
         return {"url": None, "number": None, "same": True}
     trackers[kind] = settings
@@ -410,7 +449,8 @@ def make_handler(ss):
                 with ss.lock:
                     ss.nonce = secrets.token_urlsafe(18)
                 return self._send(200, page(ss))
-            if u.path == "/state":
+            if u.path == "/state":  # the open page asks every 2 seconds: that counts as use
+                ss.touch()
                 return self._send(200, json.dumps(ss.snapshot()), "application/json")
             return self._send(404, "not found")
 
@@ -492,7 +532,8 @@ const d=document.getElementById('dev');d.textContent='';if(s.device){d.append(el
 const a=document.createElement('a');a.href=a.textContent=s.device.uri;a.target='_blank';a.rel='noopener';d.firstChild.append(a);d.append(el('div',s.device.code));d.lastChild.className='code'}
 if(s.plan&&show=='review'){const p=s.plan,ul=document.getElementById('plan');ul.textContent='';
 for(const [k,v] of [['GitHub account',p.github],['Repository',p.repo],['Tracker',p.label+' - '+p.site],
-['Your key is sent only to',p.destination],['Test ticket',p.ticket],['GitHub secrets written',p.secrets.join(', ')],
+['Your key is sent only to',p.destination],['GitHub secrets are saved through',p.github_api],
+['Network proxy',p.proxy||'none'],['Test ticket',p.ticket],['GitHub secrets written',p.secrets.join(', ')],
 ['Copy on this computer',p.local_copy?'yes':'no'],['Ticket text in a public repository',p.public?'allowed':'no (private repository)']]){const li=el('li','');li.append(el('b',k+': '),el('span',v));ul.append(li)}
 document.getElementById('rep').style.display=p.replaces.length?'':'none';document.getElementById('repn').textContent=p.replaces.join(', ');
 document.getElementById('pid').value=p.id;for(const w of p.warnings||[])ul.append(el('li','Stop: '+w));for(const w of p.notes||[])ul.append(el('li','Note: '+w))}
@@ -517,14 +558,20 @@ tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
         "<div class=eyebrow>story-gate · connect a tracker · %s</div><h1>Connect Linear or Jira.</h1>"
         "<p class=lead>Your key goes straight into encrypted GitHub secrets. It's never written to your repository, and your "
         "AI never sees it. Tracker support is experimental.</p><p class=msg id=msg></p>%s"
-        "<div class=foot>Runs only on this computer (127.0.0.1). This page stops after 10 minutes without use.</div>%s"
+        "<div class=foot>Runs only on this computer (127.0.0.1). This page stops 10 minutes after you close it (30 minutes at most).</div>%s"
         % (html.escape(ss.repo), cards, js))
 
 
 def run(gate, top, open_browser=True, port=0, serve_seconds=LIFETIME):
     repo = S.github_repo(top)
-    if not repo:
+    if not repo or not gate.REPO_NAME.fullmatch(repo):
         print("story-gate tracker-setup: this folder's 'origin' isn't a GitHub repository. Run it in your project folder.")
+        return 1
+    bad = unsafe_environment()
+    if bad:
+        print("story-gate tracker-setup: refusing to run, because this shell has settings that would send your key or your "
+              "GitHub sign-in somewhere else, or let another program read them: %s. Open a new terminal without them (check "
+              "your shell's startup files if they come back), then run it again." % ", ".join(bad))
         return 1
     ss = Session(gate, top, repo, open_browser=open_browser)
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(ss))
@@ -537,8 +584,10 @@ def run(gate, top, open_browser=True, port=0, serve_seconds=LIFETIME):
           "  - add \"trackers\" to .story-gate/config.json in a pull request of its own"
           % (repo, url, G.WEB, repo))
     sys.stdout.flush()
-    if open_browser:
+    if open_browser and not os.environ.get("BROWSER"):  # BROWSER runs a command of its own choosing with the link
         webbrowser.open(url)
+    elif open_browser:
+        print("BROWSER is set in this shell, so the page wasn't opened for you: copy the link above into your browser.")
     srv.timeout = 1
     t0 = time.time()
     while time.time() - t0 < serve_seconds and not ss.expired() and ss.step != "done":
