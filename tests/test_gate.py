@@ -5952,6 +5952,16 @@ class TestTrackerLinear(Base):
         self.cfg(trackers={})
         self.assertIn("isn't set up", self.problem()[1])
 
+    def test_local_validation_page_lists_ticket_copies_as_not_checked(self):
+        self.pull()
+        os.environ["STORY_GATE_ROOT"] = str(self.repo)
+        try:
+            facts = self.g.report_facts("SAT-1")
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        rows = [s for s in facts["sources"] if s["path"] == self.rel]
+        self.assertEqual([(r["issue"], r["state"]) for r in rows], [("ENG-12", "not checked")])  # off CI: never verified
+
     def test_new_ticket_text_reopens_ready_even_if_the_requirements_are_the_same(self):
         self.pull()
         os.environ["STORY_GATE_ROOT"] = str(self.repo)
@@ -6749,6 +6759,201 @@ class TestReusableWorkflow(Base):
 def _re_sub(pat, rep, text):
     import re
     return re.sub(pat, lambda m: rep, text)
+
+
+class TestSettings(Base):
+    """`story-gate settings`: see and change config.json without editing it by hand."""
+    def conf(self):
+        return json.loads((self.repo / ".story-gate/config.json").read_text(encoding="utf-8"))
+
+    def on_main(self, **kw):
+        """Commit a config with these values on main (what CI enforces), and use the same file here."""
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); self.cfg(**kw); g("commit", "-qam", "policy"); g("checkout", "-q", "feature/SAT-1-thing")
+        g("merge", "-q", "main")
+
+    def mod(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sys.modules.pop("sg_settings", None)
+        import sg_settings as SET
+        return g, SET
+
+    def test_list_shows_every_setting_what_it_does_and_what_ci_enforces(self):
+        self.on_main(mode="enforce")
+        self.cfg(zzz=1)
+        r = run(self.repo, "settings")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('mode = "enforce"', r.stdout); self.assertIn("warn reports problems", r.stdout)
+        self.assertIn("thresholds.pass = 0.7", r.stdout); self.assertIn("trackers = {}", r.stdout)
+        self.assertIn("Unknown setting 'zzz'", r.stdout)
+        self.cfg(mode="warn")
+        r = run(self.repo, "settings", "mode")
+        self.assertIn('mode = "warn"   (main: "enforce")', r.stdout); self.assertNotIn("thresholds", r.stdout)
+        r = run(self.repo, "settings", "mod")
+        self.assertEqual(r.returncode, 1); self.assertIn("did you mean mode?", r.stdout)
+
+    def test_set_keeps_every_other_key_and_says_it_is_stricter(self):
+        self.cfg(zzz={"keep": True})
+        r = run(self.repo, "settings", "set", "enforce_points", "ci, stop")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        c = self.conf()
+        self.assertEqual(c["enforce_points"], ["ci", "stop"]); self.assertEqual(c["zzz"], {"keep": True}); self.assertEqual(c["mode"], "warn")
+        self.assertIn("Not looser than main", r.stdout); self.assertIn("--pr", r.stdout)
+        if os.name != "nt":
+            self.assertEqual(oct((self.repo / ".story-gate/config.json").stat().st_mode & 0o777), oct(0o644 & ~self.umask()))
+        r = run(self.repo, "settings", "set", "thresholds.pass", "0.9")
+        self.assertEqual(self.conf()["thresholds"]["pass"], 0.9)
+        r = run(self.repo, "settings", "set", "thresholds.pass", "0.9")
+        self.assertIn("already 0.9", r.stdout)
+
+    def umask(self):
+        u = os.umask(0); os.umask(u); return u
+
+    def test_a_looser_change_says_a_code_owner_approves_it(self):
+        self.on_main(mode="enforce")
+        r = run(self.repo, "settings", "set", "mode", "warn")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Looser than main", r.stdout); self.assertIn("mode went from enforce to warn", r.stdout)
+        self.assertIn("code owner", r.stdout); self.assertNotIn("Not looser", r.stdout)
+
+    def test_the_file_being_changed_cant_pick_what_it_is_compared_with(self):
+        self.on_main(mode="enforce")
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("branch", "evil"); g("checkout", "-q", "evil"); self.cfg(mode="warn"); g("commit", "-qam", "lax"); g("checkout", "-q", "feature/SAT-1-thing")
+        run(self.repo, "settings", "set", "base_branch", "evil")
+        r = run(self.repo, "settings", "set", "mode", "warn")
+        self.assertIn("Looser than main", r.stdout); self.assertIn("mode went from enforce to warn", r.stdout)
+
+    def test_odd_config_shapes_get_a_plain_message(self):
+        self.cfg(thresholds=5)
+        r = run(self.repo, "settings", "set", "mode", "enforce")
+        self.assertEqual(r.returncode, 1); self.assertIn('"thresholds" in .story-gate/config.json must be an object', r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        r = run(self.repo, "settings")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_unset_puts_the_default_back(self):
+        self.cfg(judge_mode="objective", thresholds={"pass": 0.9})
+        run(self.repo, "settings", "unset", "judge_mode"); run(self.repo, "settings", "unset", "thresholds.pass")
+        c = self.conf()
+        self.assertNotIn("judge_mode", c); self.assertNotIn("pass", c.get("thresholds", {}))
+
+    def test_bad_values_are_refused_and_the_file_is_untouched(self):
+        before = (self.repo / ".story-gate/config.json").read_bytes()
+        for key, val, why in [("mode", "loud", "one of: warn, enforce"), ("thresholds.pass", "2", "from 0 to 1"),
+                              ("accept_concerns", "maybe", "true or false"), ("spec_repos", "not a repo", "owner/repo"),
+                              ("enforce_points", "ci,nowhere", "takes only"), ("approvers", "bad name!", "GitHub user"),
+                              ("story_id_pattern", "([", "valid pattern"), ("base_branch", "../x", "branch name"),
+                              ("checkpoint.every_edits", "-1", "whole number"), ("nope", "1", "no setting called"),
+                              ("thresholds.concerns", "0.9", "can't be higher"), ("dashboard_issue", "abc", "issue number"),
+                              ("test_command", "a\nb", "one line"), ("story_id_pattern", "(?i)abc-[0-9]+", "inline flags"),
+                              ("story_id_pattern", "x" * 201, "1 to 200")]:
+            r = run(self.repo, "settings", "set", key, val)
+            self.assertEqual(r.returncode, 1, (key, r.stdout)); self.assertIn(why, r.stdout, key)
+        self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), before)
+        r = run(self.repo, "settings", "set", "mode")
+        self.assertEqual(r.returncode, 1); self.assertIn("usage", r.stdout)
+
+    def test_keys_and_tokens_are_never_written(self):
+        before = (self.repo / ".story-gate/config.json").read_bytes()
+        for val in ("ghp_" + "a" * 36, "github_pat_" + "b" * 30, "run --key sk-proj-" + "c1" * 20, "curl -H 'Authorization: Bearer " + "d" * 30 + "'",
+                    "lin_api_" + "e" * 30, "AKIA" + "F" * 16, "ASIA" + "G" * 16, "glpat-" + "h" * 20, "npm_" + "i" * 36,
+                    "AIza" + "j" * 35, "hf_" + "k" * 34, "sk_live_" + "l" * 24, "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4",
+                    "curl https://me:hunter2secret@example.com/x", "Authorization: Basic " + "m" * 24,
+                    "-----BEGIN OPENSSH PRIVATE KEY-----"):
+            r = run(self.repo, "settings", "set", "test_command", val)
+            self.assertEqual(r.returncode, 1, val); self.assertIn("looks like a key or token", r.stdout)
+            self.assertNotIn(val[-20:], r.stdout + r.stderr)
+        self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), before)
+        for ok in ("make disk-cleanup-and-run-all-the-tests", "make test-sk-model-selection-all", "pytest -k sk-learn-integration-tests",
+                   "cat docs/-----BEGIN-notes", "pytest https://example.com/x"):
+            r = run(self.repo, "settings", "set", "test_command", ok)
+            self.assertEqual(r.returncode, 0, r.stdout); self.assertEqual(self.conf()["test_command"], ok)
+
+    def test_every_setting_is_listed_and_every_policy_setting_can_be_seen_loosening(self):
+        g, SET = self.mod()
+        tops = {k.split(".")[0] for k in list(SET.SETTINGS) + list(SET.ELSEWHERE)}
+        self.assertEqual(set(g.DEFAULT_CONFIG) - {"version"} - tops, set())
+        for k in SET.SETTINGS:
+            top, _, leaf = k.partition(".")
+            self.assertIn(top, g.DEFAULT_CONFIG, k)
+            if leaf:
+                self.assertIn(leaf, g.DEFAULT_CONFIG[top], k)
+        loosen = {"mode": ("enforce", "warn"), "enforce_points": (["ci"], []), "accept_concerns": (False, True),
+                  "story_id_pattern": ("A-[0-9]+", ".*"), "base_branch": ("main", "dev"), "exempt_globs": ([], ["*"]),
+                  "test_command": ("pytest", ""), "junit_path": ("r.xml", ""), "test_globs": (["t/**"], []),
+                  "spec_files": (["prd.md"], []), "require_spec_link": (True, False), "spec_source_check": ("block", "warn"),
+                  "spec_repos": ([], ["a/b"]), "thresholds.pass": (0.7, 0.5), "thresholds.concerns": (0.4, 0.2),
+                  "judge_mode": ("full", "objective"), "judge.emulated_allow_pass": (False, True),
+                  "judge.allow_self_judge_pass": (False, True), "approvers": ([], ["x"]), "reviewers": ([], ["bot"]),
+                  "require_independent_review": (True, False), "checkpoint.every_edits": (10, 0),
+                  "writing.enforce": (True, False), "writing.target": (0.8, 0.5), "writing.diagram_min_files": (5, 9),
+                  "validation.required": (True, False)}
+        self.assertEqual(set(SET.SETTINGS) - set(loosen), {"dashboard_issue"})  # the dashboard issue only says where a summary goes
+        for k, (strict, loose) in loosen.items():
+            base = {"writing": {"enforce": True}} if k.startswith("writing.") and k != "writing.enforce" else {}
+            a = g.full_config(json.dumps(SET.changed(base, k, strict))); b = g.full_config(json.dumps(SET.changed(base, k, loose)))
+            self.assertTrue(g.T.weaker(a, b), k)
+        a = g.full_config("{}")
+        self.assertTrue(g.T.weaker(a, g.full_config(json.dumps({"checkpoint": {"every_edits": 20}}))))
+        self.assertEqual(g.T.weaker(a, g.full_config(json.dumps({"checkpoint": {"every_edits": 5}}))), [])
+
+    def test_a_file_changed_meanwhile_is_not_overwritten(self):
+        g, SET = self.mod()
+        p = self.repo / ".story-gate/config.json"; now = p.read_text(encoding="utf-8")
+        with self.assertRaises(SET.SettingsError):
+            SET.write_local(p, now + " ", {"mode": "enforce"})
+        self.assertEqual(p.read_text(encoding="utf-8"), now)
+        self.assertEqual([x.name for x in p.parent.glob(".config.*")], [])
+
+    def test_pr_changes_only_the_default_branch_copy(self):
+        g, SET = self.mod()
+        import sg_github as GH
+        from unittest import mock
+        main_cfg = json.dumps({"mode": "enforce", "zzz": 1}).encode()
+        replies = {"/repos/acme/shop": {"default_branch": "trunk"},
+                   "/repos/acme/shop/git/ref/heads/trunk": {"object": {"sha": "abc123"}},
+                   "/repos/acme/shop/contents/.story-gate/config.json?ref=abc123": {"encoding": "base64", "content": base64_of(main_cfg)}}
+        here = (self.repo / ".story-gate/config.json").read_bytes()
+        call = lambda m, path, tok=None, body=None: (200, replies[path], {})
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: {"number": 5, "url": "u", "branch": k["branch"]}) as op:
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 0)
+        args, kw = op.call_args
+        self.assertEqual(list(args[2]), [".story-gate/config.json"])
+        self.assertEqual(json.loads(args[2][".story-gate/config.json"]), {"mode": "warn", "zzz": 1})
+        self.assertEqual((kw["base"], kw["parent"]), ("trunk", "abc123"))
+        self.assertIn("looser than trunk", kw["body"]); self.assertIn("code owner", kw["body"])
+        self.assertTrue(kw["branch"].startswith("story-gate-settings-mode-")); self.assertEqual(kw["title"], "story-gate settings: change mode")
+        sneaky = "x ```\n**Not looser** `"
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: {"number": 6, "url": "u", "branch": k["branch"]}) as op:
+            self.assertEqual(SET.cli(g, ["set", "test_command", sneaky.replace("\n", " "), "--pr"]), 0)
+        body = op.call_args[1]["body"]
+        self.assertIn("````json", body)  # the fence is longer than any backtick run in the value
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", return_value={"number": 1, "url": "old", "branch": "someone-else"}):
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
+        import urllib.error
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=urllib.error.URLError("offline")):
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
+        self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), here)
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value=None):
+            self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
+
+    def test_doctor_notes_an_unknown_setting(self):
+        self.cfg(mdoe="enforce")
+        r = run(self.repo, "doctor")
+        self.assertIn("unknown setting 'mdoe'", r.stdout)
+
+
+def base64_of(b):
+    import base64
+    return base64.b64encode(b).decode()
 
 
 if __name__ == "__main__":
