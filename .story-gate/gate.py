@@ -12,7 +12,8 @@ Semantic checks are scored by TypeSafe Jev (OpenRouter /api/alpha/decisions) whe
 otherwise agent self-scores are used but can never reach PASS (allow_self_judge_pass=false).
 
 Commands (run from the repo root):
-  install                            set up this repository: config, instructions, skills, CI workflows (commit the result)
+  install [--ci copy|reusable [--ref SHA]]   set up this repository: config, instructions, skills, CI workflows (commit the result).
+                                     --ci reusable writes three short workflows that call story-gate's own, pinned to a release commit
   install --user [--clients claude,codex,cursor,gemini,windsurf] [--dry-run] [--unsigned]
                                      once per computer, as the human: install the trusted runtime + user-level hooks, enroll this repo
   uninstall --user [--dry-run]       remove the user-level hooks and the runtime
@@ -2886,7 +2887,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -3625,7 +3626,7 @@ def write_managed(rel, body):
     return "%s %s" % (rel, "updated" if old else "created")
 
 
-def cmd_install(py):
+def cmd_install(py, ci="copy", kv=None, rest=()):
     """Repository setup (commit the result). Hooks are NOT written into the repository any more: each person runs
     `gate.py install --user` once per computer, so a branch can never change what the hooks run."""
     GATE.mkdir(exist_ok=True)
@@ -3645,8 +3646,14 @@ def cmd_install(py):
         for d in (".agents/skills/story-gate", ".claude/skills/story-gate"):
             (ROOT / d).mkdir(parents=True, exist_ok=True)
             (ROOT / d / "SKILL.md").write_text(skill, encoding="utf-8")
-    wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML),
-                write_managed(".github/workflows/story-gate-dashboard.yml", dash_yml())]
+    if ci == "reusable":  # three short files that call story-gate's own workflows at a pinned release commit
+        import sg_reusable as R
+        wf_notes, sha = R.install(sys.modules[__name__], kv or {}, rest)
+        wf_notes.append("CI calls %s's workflows at %s (v%s). Your branch rules must require the check '%s'; "
+                        "`story-gate setup-repo` sets that." % (kv.get("upstream") or R.UPSTREAM, sha, VERSION, R.CHECK))
+    else:
+        wf_notes = [write_managed(".github/workflows/story-gate.yml", CI_YML), write_managed(".github/workflows/story-gate-audit.yml", AUDIT_YML),
+                    write_managed(".github/workflows/story-gate-dashboard.yml", dash_yml())]
     gi = rd(ROOT / ".gitignore")
     add = [x for x in (".story-gate/.active", ".story-gate/outbox.jsonl", ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/__pycache__/") if x not in gi]
     if add:
@@ -4249,7 +4256,7 @@ def cmd_setup(cmd, kv, rest):
         for line in G.setup_repo(ROOT, repo, owners, tok, dry_run="--dry-run" in rest):
             print("  " + line)
         if "--dry-run" not in rest:
-            wj(ROOT / "docs" / "story-gate-ruleset.json", G.ruleset_json())
+            wj(ROOT / "docs" / "story-gate-ruleset.json", G.ruleset_json(G.ci_check_name(ROOT)))
             print("  Ruleset JSON for manual import: docs/story-gate-ruleset.json")
         return 0
     if cmd == "setup-agent":
@@ -4294,7 +4301,7 @@ def flags(argv):
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
-                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove"):
+                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
             k = argv[i][2:]
@@ -4351,7 +4358,14 @@ def main(argv):
     if cmd == "install" and "--user" in rest:
         return cmd_user("install", kv, rest)
     if cmd == "install":
-        return cmd_install(kv.get("python", "python" if os.name == "nt" else "python3")) or 0
+        ci = kv.get("ci", "copy")
+        if ci not in ("copy", "reusable"):
+            sys.exit("--ci must be copy (story-gate's code and workflows copied into this repository) or reusable "
+                     "(short workflows that call story-gate's own, pinned to a release)")
+        return cmd_install(kv.get("python", "python" if os.name == "nt" else "python3"), ci, kv, rest) or 0
+    if cmd == "runtime-prepare":
+        import sg_reusable as R
+        return R.prepare(sys.modules[__name__], kv, rest)
     if cmd == "uninstall" and "--user" in rest:
         return cmd_user("uninstall", kv, rest)
     if cmd == "init":

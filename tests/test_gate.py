@@ -6552,5 +6552,141 @@ class TestTrackerJiraServer(Base):
         self.assertIn('"site": "jira.acme.com/jira"', buf.getvalue())
 
 
+class TestReusableWorkflow(Base):
+    """`install --ci reusable`: short workflows in the adopting repository that call story-gate's own, pinned to a release."""
+    SHA = "a" * 40
+    WF = SRC.parent / ".github" / "workflows"
+
+    def prep(self, *extra, env=None):
+        out = self.repo.parent / (self.repo.name + "-sg"); self.addCleanup(shutil.rmtree, out, True)
+        gho = self.repo.parent / (self.repo.name + "-gho"); gho.write_text(""); self.addCleanup(lambda: gho.unlink() if gho.exists() else None)
+        r = run(self.repo, "runtime-prepare", "--out", str(out), "--base", "main", *extra, env=dict(env or {}, GITHUB_OUTPUT=str(gho)))
+        return r, out, gho.read_text()
+
+    def test_prepare_refuses_an_unsigned_copy_unless_asked_and_takes_settings_from_the_base_branch(self):
+        self.cfg(mode="enforce")  # this branch's own edit must not reach CI
+        r, out, gho = self.prep()
+        if not (SRC / "release.json").exists():
+            self.assertEqual(r.returncode, 1, r.stdout); self.assertIn("isn't a signed release", r.stdout); self.assertEqual(gho, "")
+        r, out, gho = self.prep("--allow-unsigned", "true")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("ready=true", gho)
+        self.assertTrue((out / "gate.py").is_file()); self.assertTrue((out / "sg_reusable.py").is_file())
+        self.assertEqual(json.loads((out / "config.json").read_text())["mode"], "warn")
+
+    def test_prepare_says_not_ready_when_story_gate_is_not_on_the_base_branch(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); g("rm", "-q", ".story-gate/config.json"); g("commit", "-qm", "no gate"); g("checkout", "-q", "feature/SAT-1-thing")
+        r, out, gho = self.prep("--allow-unsigned", "true")
+        self.assertEqual(r.returncode, 0, r.stdout); self.assertIn("ready=false", gho); self.assertIn("not on the base branch", r.stdout)
+        self.assertFalse(out.exists())
+
+    def test_prepare_checks_the_release_key_the_caller_expects(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        r, _, _ = self.prep("--allow-unsigned", "true", "--fingerprint", g.T.key_fingerprint())
+        self.assertEqual(r.returncode, 0, r.stdout)
+        r, _, _ = self.prep("--allow-unsigned", "true", "--fingerprint", "SHA256:" + "B" * 43)
+        self.assertEqual(r.returncode, 1); self.assertIn("not the SHA256:BBB", r.stdout)
+        r, _, _ = self.prep("--allow-unsigned", "true", "--fingerprint", "md5:xx")
+        self.assertEqual(r.returncode, 1); self.assertIn("must look like SHA256", r.stdout)
+        r = run(self.repo, "runtime-prepare", "--base", "main")
+        self.assertEqual(r.returncode, 2); self.assertIn("usage", r.stdout)
+
+    def test_prepare_refuses_a_linked_story_gate_folder(self):
+        if os.name == "nt":
+            return
+        real = self.repo.parent / (self.repo.name + "-real"); shutil.move(str(self.repo / ".story-gate"), str(real))
+        self.addCleanup(shutil.rmtree, real, True)
+        os.symlink(real, self.repo / ".story-gate")
+        out = self.repo.parent / (self.repo.name + "-sg")
+        e = dict(os.environ, STORY_GATE_ROOT=str(self.repo), HOME=str(self.repo.parent / (self.repo.name + "-home")))
+        r = subprocess.run([PY, str(real / "gate.py"), "runtime-prepare", "--out", str(out), "--base", "main", "--allow-unsigned", "true"],
+                           cwd=self.repo, capture_output=True, text=True, env=e, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("symlink", r.stdout)
+
+    def test_install_writes_three_short_pinned_callers(self):
+        r = run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sys.modules.pop("sg_reusable", None)
+        import sg_reusable as R, sg_github as GH
+        for name, called in (("story-gate.yml", "gate.yml"), ("story-gate-audit.yml", "audit.yml"), ("story-gate-dashboard.yml", "dashboard.yml")):
+            t = (self.repo / ".github/workflows" / name).read_text()
+            self.assertIn("uses: SathiaAI/story-gate/.github/workflows/%s@%s # v%s" % (called, self.SHA, g.VERSION), t)
+            self.assertIn('release-key-fingerprint: "%s"' % g.T.key_fingerprint(), t)
+            self.assertNotIn("inherit", t); self.assertNotIn("gate.py", t); self.assertLess(len(t.splitlines()), 45, name)
+        t = (self.repo / ".github/workflows/story-gate.yml").read_text()
+        for s_ in R.SECRETS:
+            self.assertIn("%s: ${{ secrets.%s }}" % (s_, s_), t)
+        self.assertEqual(GH.ci_check_name(self.repo), "story-gate / story-gate")
+        self.assertEqual(GH.ruleset_json(GH.ci_check_name(self.repo))["rules"][-1]["parameters"]["required_status_checks"],
+                         [{"context": "story-gate / story-gate"}])
+        r = run(self.repo, "install", "--ci", "reusable", "--ref", "v0.8.0")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("40-character commit SHA", r.stderr)
+        r = run(self.repo, "install", "--ci", "sideways")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("--ci must be copy", r.stderr)
+
+    def test_copy_mode_keeps_the_old_check_name_and_your_steps_block_the_switch(self):
+        r = run(self.repo, "install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as GH
+        self.assertEqual(GH.ci_check_name(self.repo), "story-gate")
+        p = self.repo / ".github/workflows/story-gate.yml"
+        p.write_text(p.read_text().replace("      # <<< your steps", "      - run: echo mine\n      # <<< your steps", 1))
+        r = run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        self.assertNotEqual(r.returncode, 0); self.assertIn("your own steps", r.stderr); self.assertIn("echo mine", p.read_text())
+        r = run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA, "--force")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertNotIn("echo mine", p.read_text())
+
+    def test_an_existing_ruleset_is_switched_to_the_reusable_check_name(self):
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as GH
+        from unittest import mock
+        rs = {"rules": [{"type": "pull_request", "parameters": {}},
+                        {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "story-gate"}, {"context": "lint"}]}}]}
+        with mock.patch.object(GH, "call", side_effect=[(200, rs, {}), (200, {}, {})]) as c:
+            self.assertIn("now requires", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
+        sent = c.call_args_list[1][0][3]["rules"][1]["parameters"]["required_status_checks"]
+        self.assertEqual(sent, [{"context": "lint"}, {"context": "story-gate / story-gate"}])
+        with mock.patch.object(GH, "call", return_value=(200, {"rules": sent and [{"type": "required_status_checks", "parameters": {"required_status_checks": sent}}]}, {})):
+            self.assertIn("requires the check", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
+
+    def test_release_tag_is_resolved_to_its_commit(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sys.modules.pop("sg_reusable", None)
+        import sg_reusable as R, sg_github as GH
+        from unittest import mock
+        replies = {"/repos/SathiaAI/story-gate/git/ref/tags/v1.2.3": (200, {"object": {"type": "tag", "sha": "f" * 40}}, {}),
+                   "/repos/SathiaAI/story-gate/git/tags/" + "f" * 40: (200, {"object": {"type": "commit", "sha": "c" * 40}}, {})}
+        with mock.patch.object(GH, "human_token", return_value=None), \
+                mock.patch.object(GH, "call", side_effect=lambda m, p, t=None, b=None: replies.get(p, (404, {}, {}))):
+            self.assertEqual(R.resolve_tag(g, "SathiaAI/story-gate", "1.2.3"), "c" * 40)
+            with self.assertRaises(RuntimeError):
+                R.resolve_tag(g, "SathiaAI/story-gate", "9.9.9")
+
+    def test_the_published_workflows_are_pinned_and_keep_secrets_away_from_pr_code(self):
+        sys.modules.pop("sg_reusable", None)
+        sys.path.insert(0, str(SRC))
+        import sg_reusable as R
+        import re as _re
+        for name in ("gate.yml", "audit.yml", "dashboard.yml"):
+            t = (self.WF / name).read_text()
+            self.assertIn("workflow_call:", t); self.assertNotIn("inherit", t); self.assertNotIn("pull_request_target", t)
+            for u in _re.findall(r"uses:\s*(\S+)", t):
+                self.assertRegex(u, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", (name, u))  # third-party actions pinned to a full SHA
+            self.assertEqual(t.count("persist-credentials: false"), t.count("actions/checkout@"), name)
+            self.assertIn("ref: ${{ job.workflow_sha }}", t); self.assertIn("repository: ${{ job.workflow_repository }}", t)
+            self.assertIn("runtime-prepare", t)
+            jobs = t.split("\njobs:\n", 1)[1]
+            for job in _re.split(r"\n(?=  [a-z-]+:\n)", "\n" + jobs):
+                if job.strip():
+                    self.assertIn("permissions:", job, (name, job[:40]))
+        t = (self.WF / "gate.yml").read_text()
+        tests_job = t.split("\n  tests:\n", 1)[1].split("\n  story-gate:\n", 1)[0]
+        self.assertNotIn("secrets.", tests_job)  # the job that runs PR code never sees a secret
+        declared = set(_re.findall(r"\n      ([A-Z_]+):\n        required: false", t))
+        self.assertEqual(declared, set(R.SECRETS))
+
+
 if __name__ == "__main__":
     unittest.main()

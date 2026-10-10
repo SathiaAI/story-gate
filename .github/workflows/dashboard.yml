@@ -1,0 +1,79 @@
+# Reusable workflow: adopting repositories call it at a pinned commit SHA (story-gate install --ci reusable writes the caller).
+# Pull request code never runs in a job that holds secrets; settings and story-gate's own code never come from the pull request.
+name: story-gate-dashboard
+on:
+  workflow_call:
+    inputs:
+      release-key-fingerprint:
+        description: "The story-gate release key you trust (SHA256:...). story-gate install writes it; leave it set."
+        type: string
+        required: false
+        default: ""
+      allow-unsigned:
+        description: "Run a commit that isn't a signed release (development copies only)."
+        type: boolean
+        required: false
+        default: false
+jobs:
+  dashboard:
+    # Reads the default branch only; records on other branches are read as data, never executed.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: repo
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch || github.ref_name }}
+          persist-credentials: false
+      - name: get the pinned story-gate (the commit this workflow file comes from)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: sg-runtime
+          persist-credentials: false
+      - id: prep
+        name: check story-gate's signature and read the base branch's settings
+        env:
+          BASE: HEAD
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          SG_KEY: ${{ inputs.release-key-fingerprint }}
+          SG_UNSIGNED: ${{ inputs.allow-unsigned }}
+        working-directory: repo
+        run: python3 "$GITHUB_WORKSPACE/sg-runtime/.story-gate/gate.py" runtime-prepare --out "$RUNNER_TEMP/sg" --base "$BASE" --fingerprint "$SG_KEY" --allow-unsigned "$SG_UNSIGNED"
+      - name: build
+        if: steps.prep.outputs.ready == 'true'
+        env:
+          SG_DEFAULT_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" dashboard --out "$RUNNER_TEMP/sg-dashboard"
+      - id: report
+        if: steps.prep.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: story-gate-dashboard
+          path: ${{ runner.temp }}/sg-dashboard/dashboard.html
+          retention-days: 30
+      - name: publish
+        if: steps.prep.outputs.ready == 'true'
+        env:
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+          GITHUB_TOKEN: ${{ github.token }}
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "${{ steps.report.outputs.artifact-url }}" --out "$RUNNER_TEMP/sg-dashboard"
+      - name: say so if the refresh failed (the last good snapshot stays)
+        if: failure() && steps.prep.outputs.ready == 'true'
+        env:
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+          GITHUB_TOKEN: ${{ github.token }}
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" dashboard --report-failure

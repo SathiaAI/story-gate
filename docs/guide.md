@@ -118,6 +118,32 @@ python3 .story-gate/gate.py agent-env --repo you/your-repo   # paste the output 
 
 Cloud agents need no setup here, because they already have their own GitHub identity: Codex cloud, Cursor Cloud and Copilot.
 
+### Short workflows: call story-gate's own (reusable workflow)
+
+By default `install` copies three workflows (about 100 lines each) into your repository. With `story-gate install --ci reusable` it writes three short ones instead, and they call story-gate's own workflows:
+
+```yaml
+jobs:
+  story-gate:
+    uses: SathiaAI/story-gate/.github/workflows/gate.yml@<40-character commit SHA> # vX.Y.Z
+    with:
+      release-key-fingerprint: "SHA256:..."
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+| What | How |
+|---|---|
+| Which story-gate runs | The release commit you pinned: a full commit SHA, which can't be moved (a tag or branch name could). `install` looks up the SHA of your version's release tag, or takes `--ref <SHA>` |
+| Proof it's a real release | Before anything runs, it checks the release signature, and that the release key is the one your file names (`release-key-fingerprint`). A commit that isn't a signed release stops the check, unless you set `allow-unsigned: true` for a development copy |
+| Your rules | Always from your main branch's `.story-gate/config.json`, never from the pull request |
+| Secrets | Passed by name, one by one (never `secrets: inherit`). The job that runs the pull request's tests gets none |
+| The check's name | GitHub names it `story-gate / story-gate`. `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
+| Upgrading | Change the SHA and the version comment to a newer release, in a pull request of its own. A code owner approves it |
+| Your own steps | The reusable workflow can't run steps you added between the "your steps" markers. `install --ci reusable` stops if you have some; move them out first, or use `--force` to drop them |
+
+Use the copied workflows (`install --ci copy`, the default) if your organization only allows workflows from its own repositories, or runs GitHub Enterprise Server. The reusable workflow needs github.com.
+
 ### Prove it works
 1. Ask your AI to open a small test PR. The `story-gate` check should stay red until **you** approve the latest commit.
 2. Run `story-gate doctor --repo you/your-repo --strict`. It must finish without failures.

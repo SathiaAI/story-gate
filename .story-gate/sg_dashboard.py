@@ -12,7 +12,7 @@ Rules this module keeps:
     CI is what verifies them.
   - Stdlib only. No network except the GitHub API when publishing, with the workflow's own token.
 """
-import html, json, os, re, statistics, subprocess, tempfile, time
+import html, json, os, re, statistics, subprocess, tempfile, time, urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -688,8 +688,11 @@ def ci_status(G, repo, token, data):
         if s["merged"] or s["ref"] not in heads:
             continue
         sha, num = heads[s["ref"]]
-        st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=story-gate" % (repo, sha), token)
-        runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
+        for name in ("story-gate", "story-gate / story-gate"):  # copied workflow, or the reusable one
+            st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=%s" % (repo, sha, urllib.parse.quote(name)), token)
+            runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
+            if st == 200 and runs:
+                break
         if st == 200 and runs:
             r = runs[0]
             s["ci"] = {"pr": num, "result": clean(r.get("conclusion") or r.get("status"), 20)}
