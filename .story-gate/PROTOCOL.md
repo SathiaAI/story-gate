@@ -213,6 +213,6 @@ It is advice. It blocks only when the owner sets `writing.enforce` to `true`, af
 ## Rules
 - Fail closed. If the judge is unavailable, the verdict can't be PASS. Say so; don't work around it.
 - Never edit `.story-gate/` code, config or verdict files, CODEOWNERS or the story-gate workflows, with any tool, including the shell.
-- Never run the human-only commands (`install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown`, `hook-trust`), and never touch the story-gate runtime in the user folder, your tool's user-level hook settings, or git's filter settings (`.git/info/attributes`, `filter.storygate-hooks`).
+- Never run the human-only commands (`install`, `install --user`, `uninstall`, `enroll`, `unenroll`, `upgrade`, `rollback`, `release-sign`, `setup-repo`, `setup-agent`, `judge-calibrate`, `filter`, `lockdown`, `hook-trust`, `tracker-setup`), and never touch the story-gate runtime in the user folder, your tool's user-level hook settings, or git's filter settings (`.git/info/attributes`, `filter.storygate-hooks`).
 - Don't edit `ready.json` / `done.json` by hand. Don't delete `decisions.jsonl` or `learnings.jsonl` lines (append-only).
 - Quote the `gate.py` verdict line in your reply. Never paraphrase it into a pass.

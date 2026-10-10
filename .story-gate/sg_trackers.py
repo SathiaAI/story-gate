@@ -478,17 +478,28 @@ def jira_setup(args, env=os.environ):
     return 0
 
 
+def match_field(fields, name):
+    """(id of the one custom field called `name` (any case) or None, [close matches])."""
+    if not isinstance(fields, list):
+        return None, []
+    want = name.strip().lower()
+    hits = [x for x in fields if isinstance(x, dict) and str(x.get("name", "")).strip().lower() == want
+            and JIRA_FIELD.fullmatch(str(x.get("id", "")))]
+    if len(hits) == 1:
+        return hits[0]["id"], []
+    first = (want.split() or [""])[0]
+    return None, sorted({str(x.get("name"))[:60] for x in fields if isinstance(x, dict) and first in str(x.get("name", "")).lower()})[:10]
+
+
 def find_field(fields, name):
     """The id of the one custom field called `name` (any case); exits with close matches otherwise."""
     if not isinstance(fields, list):
         sys.exit("story-gate: Jira didn't list its fields.")
-    want = name.strip().lower()
-    hits = [x for x in fields if isinstance(x, dict) and str(x.get("name", "")).strip().lower() == want
-            and JIRA_FIELD.fullmatch(str(x.get("id", "")))]
-    if len(hits) != 1:
-        names = sorted({str(x.get("name")) for x in fields if isinstance(x, dict) and want.split()[0] in str(x.get("name", "")).lower()})
-        sys.exit("story-gate: %s fields named '%s' found. Close matches: %s" % (len(hits) or "no", name, ", ".join(names[:10]) or "none"))
-    return hits[0]["id"]
+    fid, names = match_field(fields, name)
+    if not fid:
+        n = sum(1 for x in fields if isinstance(x, dict) and str(x.get("name", "")).strip().lower() == name.strip().lower())
+        sys.exit("story-gate: %s fields named '%s' found. Close matches: %s" % (n or "no", name, ", ".join(names) or "none"))
+    return fid
 
 
 def jira_server_setup(site, field_name, env):
@@ -598,12 +609,23 @@ def snapshot_text(gate, sid, kind, settings, key, meta, title, body):
     return "---\n%s\n---\n%s" % ("\n".join("%s: %s" % kv for kv in fields.items()), text)
 
 
-def _first(names, env):
+def _first(names, env, saved=None):
+    """The first of these environment variables that is set; else the copy `story-gate tracker-setup` saved on this
+    computer when the person ticked that box (owner-only, in the story-gate user folder)."""
     for name in names:
         v = (env.get(name) or "").strip()
         if v:
             return v
-    return ""
+    return (saved or {}).get(names[0], "")
+
+
+def saved_keys():
+    """{STORY_GATE_* name: value} from tracker-setup's opt-in local copy; {} when there is none or it can't be read."""
+    try:
+        import sg_trackersetup as TS
+        return TS.read_local()
+    except Exception:
+        return {}
 
 
 def secrets_for(kind, settings=None):
@@ -617,7 +639,8 @@ def local_token(kind, env=os.environ, settings=None):
     """The credential for this computer: Linear's key, Jira Cloud's 'email:token', or Jira Server's personal access
     token; '' when anything is missing."""
     groups = LOCAL_ENV[kind][-1:] if kind == "jira" and (settings or {}).get("server") else LOCAL_ENV[kind]
-    vals = [_first(names, env) for names in groups]
+    saved = saved_keys() if env is os.environ else {}
+    vals = [_first(names, env, saved) for names in groups]
     return ":".join(vals) if all(vals) else ""
 
 
@@ -715,7 +738,8 @@ def cli(gate, sid, ref_arg, kv, sd, write_and_link):
         tok = local_token(kind, settings=settings)
         if not tok:
             groups = LOCAL_ENV[kind][-1:] if kind == "jira" and settings.get("server") else LOCAL_ENV[kind]
-            sys.exit("story-gate: no %s key here. Set %s to your own read-only %s credentials, or paste the ticket with "
+            sys.exit("story-gate: no %s key here. Run `story-gate tracker-setup` yourself (not your AI) and tick 'keep a "
+                     "copy on this computer', or set %s to your own read-only %s credentials, or paste the ticket with "
                      "--from-file (for example from your AI tool's %s connector; it's marked 'not verified' until CI "
                      "checks it)." % (LABEL[kind], " and ".join(n[-1] for n in groups), LABEL[kind], LABEL[kind]))
         try:

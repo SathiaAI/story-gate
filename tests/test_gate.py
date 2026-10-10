@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, time, unittest
+import base64, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7000,6 +7000,281 @@ class TestSettings(Base):
 def base64_of(b):
     import base64
     return base64.b64encode(b).decode()
+
+
+
+class TestTrackerSetup(Base):
+    """`story-gate tracker-setup`: connect Linear or Jira Cloud in the browser. GitHub and the trackers are faked."""
+    LKEY = "lin_api_" + "Q7" * 20
+    JTOK = "ATATT3x" + "z9" * 20
+
+    def setUp(self):
+        super().setUp()
+        self.gate = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        for m in ("sg_trackersetup", "sg_setup", "sg_trackers", "sg_settings"):
+            sys.modules.pop(m, None)
+        import sg_trackersetup as TS, sg_github as G, sg_trackers as TR
+        self.TS, self.G, self.TR = TS, G, TR
+        keep_github_fakes_local(self, G)
+        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token"):
+            self.addCleanup(setattr, G, n, getattr(G, n))
+        self.addCleanup(setattr, TR, "get_json", TR.get_json)
+        os.environ["STORY_GATE_HOME"] = str(self.repo.parent / (self.repo.name + "-home") / "sg")
+        self.calls, self.secrets, self.prs = [], {}, []
+        self.repo_info = {"permissions": {"admin": True}, "private": True, "default_branch": "main"}
+        self.user = {"login": "paul", "type": "User"}
+        self.have = set()       # secrets that already exist
+        self.workflow = ""
+        conf = base64.b64encode(json.dumps({"mode": "warn"}).encode()).decode()
+
+        def call(method, path, tok=None, body=None, accept=None):
+            self.calls.append((method, path, tok, json.dumps(body)))
+            if path == "/user":
+                return 200, self.user, {}
+            if path == "/repos/me/proj":
+                return 200, self.repo_info, {}
+            if "/actions/secrets/" in path:
+                return (200 if path.rsplit("/", 1)[1] in self.have else 404), {}, {}
+            if "/contents/.github/workflows/story-gate.yml" in path:
+                return (200, {"content": base64.b64encode(self.workflow.encode()).decode()}, {}) if self.workflow else (404, {}, {})
+            if "/git/ref/heads/main" in path:
+                return 200, {"object": {"sha": "a" * 40}}, {}
+            if "/contents/.story-gate/config.json" in path:
+                return 200, {"encoding": "base64", "content": conf}, {}
+            if path == "/repos/me/proj/rulesets":
+                return 200, self.rulesets, {}
+            return 404, {}, {}
+        self.rulesets = [{"name": G.RULESET_NAME, "enforcement": "active"}]
+        G.call = call
+        G.set_repo_secret = lambda tok, repo, name, value: self.secrets.update({name: (tok, repo, value)})
+
+        def open_pr(tok, repo, files, branch, title, body, base, parent):
+            self.prs.append({"files": files, "branch": branch, "title": title, "body": body, "tok": tok})
+            return {"number": 7, "url": "https://github.com/me/proj/pull/7", "branch": branch}
+        G.open_setup_pr = open_pr
+        G.human_token = lambda: self.fail("tracker-setup must never use a login already on this computer")
+        TR.get_json = lambda url, headers, tries=2, sleep=None: (
+            (200, {"cloudId": "1234abcd-0000-4000-8000-0000000000ab"}) if url.endswith("/_edge/tenant_info") else (404, None))
+
+    def session(self, signed=True):
+        ss = self.TS.Session(self.gate, self.repo, "me/proj", open_browser=False)
+        if signed:
+            ss._signed_in("human-oauth")
+        return ss
+
+    def wait(self, ss, *steps):
+        for _ in range(100):
+            if ss.step in steps:
+                return
+            time.sleep(0.05)
+        self.fail("still at %s: %s" % (ss.step, ss.msg))
+
+    def linear_form(self, **kw):
+        f = {"kind": "linear", "workspace": "acme", "key": self.LKEY, "ticket": "eng-12"}
+        f.update(kw)
+        return f
+
+    def ticket(self, settings, key, token):
+        self.fetched = (settings, key, token)
+        return {"id": "x", "key": key, "title": "Login page", "body": "b", "url": "u", "updated_at": "t"}
+
+    def everything_seen(self, ss):
+        return json.dumps([ss.snapshot(), self.calls, [p["body"] for p in self.prs],
+                           [p["files"][".story-gate/config.json"].decode() for p in self.prs]])
+
+    def test_signin_is_always_a_fresh_device_code_from_a_person_with_admin_rights(self):
+        ss = self.session(signed=False)
+        used = []
+        ss.start_signin(flow=lambda cid, on_code: used.append(cid) or "dev-token")
+        self.wait(ss, "details")
+        self.assertEqual(used, [self.TS.S.OAUTH_CLIENT_ID]); self.assertEqual(ss.token, "dev-token")
+        self.user = {"login": "story-gate-agent[bot]", "type": "Bot"}
+        with self.assertRaises(self.TS.SetupError):
+            self.session()
+        self.user = {"login": "paul", "type": "User"}; self.repo_info["permissions"] = {"admin": False}
+        with self.assertRaisesRegex(self.TS.SetupError, "isn't an admin"):
+            self.session()
+
+    def test_details_send_nothing_with_the_key_and_show_where_it_will_go(self):
+        ss = self.session()
+        ss.details(self.linear_form())
+        self.assertEqual(ss.step, "review")
+        p = ss.plan
+        self.assertEqual((p["destination"], p["secrets"], p["replaces"], p["site"]),
+                         ("https://api.linear.app/graphql", ["STORY_GATE_LINEAR_KEY"], [], "acme"))
+        self.assertNotIn(self.LKEY, self.everything_seen(ss))  # nothing sent or shown yet
+        ss.details_start(); ss.details({"kind": "jira", "site": "https://Acme.atlassian.net/", "email": "p@acme.com",
+                                        "key": self.JTOK, "ticket": "ENG-12"})
+        self.assertEqual(ss.plan["destination"], "https://api.atlassian.com/ex/jira/1234abcd-0000-4000-8000-0000000000ab/rest/api/3")
+        self.assertEqual(ss.plan["secrets"], ["STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"])
+        self.assertNotIn(self.JTOK, self.everything_seen(ss))
+
+    def test_bad_details_are_refused(self):
+        ss = self.session()
+        for form, why in ((self.linear_form(kind="gitlab"), "Linear or Jira"), (self.linear_form(ticket="x"), "ticket"),
+                          (self.linear_form(workspace="Not A Name!"), "workspace"), (self.linear_form(key="sk-123"), "lin_api_"),
+                          ({"kind": "jira", "site": "jira.acme.com", "email": "p@acme.com", "key": self.JTOK, "ticket": "ENG-1"},
+                           "jira-setup"),  # Jira Server keeps the manual setup
+                          ({"kind": "jira", "site": "acme.atlassian.net", "email": "nope", "key": self.JTOK, "ticket": "ENG-1"}, "email")):
+            with self.subTest(why=why), self.assertRaisesRegex(self.TS.SetupError, why):
+                ss.details(form)
+
+    def test_public_repository_needs_an_explicit_yes(self):
+        self.repo_info["private"] = False
+        ss = self.session()
+        with self.assertRaisesRegex(self.TS.SetupError, "public"):
+            ss.details(self.linear_form())
+        ss.details(self.linear_form(public_ok="yes"))
+        self.assertTrue(ss.plan["public"]); self.assertIs(ss.plan["settings"]["allow_in_public_repo"], True)
+
+    def test_confirm_tests_the_key_saves_secrets_and_opens_the_settings_pr_without_leaking_it(self):
+        ss = self.session()
+        ss.details(self.linear_form())
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual(ss.step, "done", ss.msg)
+        self.assertEqual(self.fetched, ({"workspace": "acme"}, "ENG-12", self.LKEY))
+        self.assertEqual(self.secrets, {"STORY_GATE_LINEAR_KEY": ("human-oauth", "me/proj", self.LKEY)})
+        pr = self.prs[0]
+        self.assertEqual(list(pr["files"]), [".story-gate/config.json"])
+        new = json.loads(pr["files"][".story-gate/config.json"].decode())
+        self.assertEqual(new["trackers"], {"linear": {"workspace": "acme"}}); self.assertEqual(new["mode"], "warn")
+        self.assertIn("experimental", pr["body"]); self.assertIn("STORY_GATE_LINEAR_KEY", pr["body"])
+        self.assertIn("api.linear.app", pr["body"]); self.assertIn("looser", pr["body"])
+        self.assertEqual(pr["tok"], "human-oauth")
+        self.assertNotIn(self.LKEY, self.everything_seen(ss))
+        self.assertIsNone(ss._key)  # dropped once sent
+        self.assertFalse((Path(os.environ["STORY_GATE_HOME"]) / "trackers.env").exists())  # local copy is opt-in
+
+    def test_confirm_must_name_the_reviewed_plan_and_replacing_needs_its_own_tick(self):
+        self.have = {"STORY_GATE_LINEAR_KEY"}
+        ss = self.session()
+        ss.details(self.linear_form())
+        self.assertEqual(ss.plan["replaces"], ["STORY_GATE_LINEAR_KEY"])
+        with self.assertRaisesRegex(self.TS.SetupError, "changed or expired"):
+            ss.confirm({"plan": "another"}, fetch=self.ticket)
+        with self.assertRaisesRegex(self.TS.SetupError, "replace"):
+            ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual((self.secrets, ss.step), ({}, "review"))
+        ss.confirm({"plan": ss.plan["id"], "replace_ok": "yes"}, fetch=self.ticket)
+        self.assertEqual(ss.step, "done", ss.msg)
+        with self.assertRaisesRegex(self.TS.SetupError, "changed or expired"):  # a second click can't save twice
+            ss.confirm({"plan": ss.plan["id"], "replace_ok": "yes"}, fetch=self.ticket)
+
+    def test_a_failed_test_read_saves_nothing_and_never_echoes_the_key(self):
+        ss = self.session()
+        ss.details(self.linear_form())
+        plan = ss.confirm_start({"plan": ss.plan["id"]})
+
+        def bad(settings, key, token):
+            raise self.TR.TrackerError("upstream said: bad key %s" % token)  # even a third party's echo is scrubbed
+        ss.background(lambda: ss.save(plan, fetch=bad))
+        self.wait(ss, "error")
+        self.assertIn("***", ss.msg); self.assertNotIn(self.LKEY, self.everything_seen(ss))
+        self.assertEqual((self.secrets, self.prs, ss._key), ({}, [], None))
+
+    def test_cancel_and_unexpected_errors_drop_the_key_and_say_nothing_about_it(self):
+        ss = self.session()
+        ss.details(self.linear_form())
+        ss.cancel()
+        self.assertEqual((ss.step, ss.plan, ss._key), ("details", None, None))
+        with self.assertRaisesRegex(self.TS.SetupError, "changed or expired"):
+            ss.confirm({"plan": "x"}, fetch=self.ticket)
+        ss.details(self.linear_form())
+        plan = ss.confirm_start({"plan": ss.plan["id"]})
+
+        def timeout(settings, key, token):
+            raise TimeoutError("read timed out for %s" % token)  # an unexpected error: only its type is shown
+        ss.background(lambda: ss.save(plan, fetch=timeout))
+        self.wait(ss, "error")
+        self.assertIn("TimeoutError", ss.msg); self.assertNotIn(self.LKEY, self.everything_seen(ss))
+        self.assertEqual((self.secrets, ss._key), ({}, None))
+
+    def test_unenforced_review_is_said_on_the_review_screen_and_in_the_pull_request(self):
+        self.rulesets = []
+        ss = self.session()
+        ss.details(self.linear_form())
+        self.assertIn("isn't enforcing", ss.plan["notes"][0])
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertIn("isn't enforcing", self.prs[0]["body"])
+
+    def test_pull_request_target_workflow_blocks_the_save(self):
+        self.workflow = "on:\n  pull_request_target:\n"
+        ss = self.session()
+        ss.details(self.linear_form())
+        self.assertIn("pull_request_target", ss.plan["warnings"][0])
+        with self.assertRaisesRegex(self.TS.SetupError, "pull_request_target"):
+            ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual(self.secrets, {})
+
+    def test_jira_finds_the_ac_field_and_warns_when_the_token_can_edit(self):
+        TR = self.TR
+        TR.get_json = lambda url, headers, tries=2, sleep=None: (
+            (200, {"cloudId": "1234abcd-0000-4000-8000-0000000000ab"}) if url.endswith("/_edge/tenant_info") else
+            (200, {"permissions": {"EDIT_ISSUES": {"havePermission": True}}}) if "/mypermissions?" in url else (404, None))
+        ss = self.session()
+        ss.details({"kind": "jira", "site": "acme.atlassian.net", "email": "p@acme.com", "key": self.JTOK,
+                    "ticket": "ENG-12", "ac_field": "Acceptance criteria", "local_copy": "yes"})
+        fields = (200, [{"id": "customfield_10050", "name": "Acceptance Criteria"}, {"id": "summary", "name": "Summary"}])
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket, field_list=fields)
+        self.assertEqual(ss.step, "done", ss.msg)
+        self.assertEqual(self.fetched[2], "p@acme.com:" + self.JTOK)
+        new = json.loads(self.prs[0]["files"][".story-gate/config.json"].decode())
+        self.assertEqual(new["trackers"]["jira"], {"site": "acme.atlassian.net", "cloud_id": "1234abcd-0000-4000-8000-0000000000ab",
+                                                   "ac_field": "customfield_10050"})
+        self.assertIn("can edit", ss.result["warn"][0])
+        self.assertEqual(set(self.secrets), {"STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN"})
+        # the opt-in local copy: owner-only, and spec-pull on this computer finds it
+        saved = Path(os.environ["STORY_GATE_HOME"]) / "trackers.env"
+        self.assertTrue(self.G.key_access(saved)[0])
+        for k in ("STORY_GATE_JIRA_EMAIL", "STORY_GATE_JIRA_TOKEN", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+            os.environ.pop(k, None)
+        self.assertEqual(TR.local_token("jira"), "p@acme.com:" + self.JTOK)
+        self.assertEqual(TR.local_token("jira", env={}), "")  # an explicit environment is used as given
+        self.assertNotIn(self.JTOK, self.everything_seen(ss))
+
+    def page_server(self, ss):
+        import http.server, threading
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self.TS.make_handler(ss))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close); self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
+    def http(self, port, method, path, body=None, headers=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request(method, path, body=body, headers=dict({"Host": "127.0.0.1:%d" % port}, **(headers or {})))
+        r = c.getresponse()
+        out = (r.status, dict(r.getheaders()), r.read().decode())
+        c.close()
+        return out
+
+    def test_page_link_works_once_and_every_post_needs_the_cookie_origin_and_nonce(self):
+        ss = self.session(signed=False)
+        port = self.page_server(ss)
+        self.assertEqual(self.http(port, "GET", "/state")[0], 403)
+        st, hd, _ = self.http(port, "GET", "/?t=" + ss.url_token)
+        self.assertEqual(st, 303); self.assertEqual(hd["Location"], "/")
+        cookie = hd["Set-Cookie"].split(";")[0]
+        self.assertIn("HttpOnly", hd["Set-Cookie"]); self.assertIn("SameSite=Strict", hd["Set-Cookie"])
+        self.assertEqual(self.http(port, "GET", "/?t=" + ss.url_token)[0], 403)  # the link works once
+        st, _, page = self.http(port, "GET", "/", headers={"Cookie": cookie})
+        self.assertEqual(st, 200); self.assertIn(ss.nonce, page); self.assertIn("Connect Linear or Jira", page)
+        self.assertEqual(self.http(port, "GET", "/", headers={"Cookie": cookie, "Host": "evil.example:%d" % port})[0], 403)
+        good = {"Cookie": cookie, "Origin": "http://127.0.0.1:%d" % port, "X-SG-Nonce": ss.nonce}
+        for drop in ("Cookie", "Origin", "X-SG-Nonce"):
+            with self.subTest(missing=drop):
+                self.assertEqual(self.http(port, "POST", "/cancel", "", {k: v for k, v in good.items() if k != drop})[0], 403)
+        self.assertEqual(self.http(port, "POST", "/cancel", "", dict(good, Origin="https://evil.example"))[0], 403)
+        self.assertEqual(self.http(port, "POST", "/cancel", "", good)[0], 200)
+        self.assertEqual(self.http(port, "GET", "/state", headers={"Cookie": cookie})[0], 200)
+        ss.started -= self.TS.LIFETIME + 1  # the page stops on its own
+        self.assertEqual(self.http(port, "GET", "/state", headers={"Cookie": cookie})[0], 403)
+
+    def test_command_line_takes_no_keys_and_ai_tools_may_not_run_it(self):
+        r = run(self.repo, "tracker-setup", "--key", "lin_api_x")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("never on the command line", r.stdout + r.stderr)
+        self.assertIn("tracker-setup", self.gate.ADMIN_COMMANDS)
+        self.assertTrue(self.gate.ADMIN_CALL.search("story-gate tracker-setup"))
 
 
 if __name__ == "__main__":

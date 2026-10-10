@@ -42,6 +42,9 @@ Commands (run from the repo root):
   settings [KEY] | settings set KEY VALUE [--pr] | settings unset KEY [--pr]
                                       see every setting in plain English, or change one without editing config.json;
                                       --pr opens the change as its own pull request for a code owner to approve
+  tracker-setup                      you, not your AI: connect Linear or Jira Cloud in your browser (experimental). Signs
+                                      in with a code on github.com, tests a read-only key on one ticket, saves it as
+                                      GitHub secrets (never in the repository) and opens the settings pull request
   jira-setup <site> ["field name"]   print the trackers.jira settings: the site's cloud id, and the id of the
                                       acceptance-criteria field found by its name (with your read-only Jira token)
   spec-scenarios <spec>[#US1]        list the requirements in a linked spec or ticket (Spec Kit, OpenSpec, Matt Pocock's
@@ -2539,7 +2542,7 @@ def shell_writes(cmd):
 
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
-                  "judge-calibrate", "lockdown", "filter", "hook-trust", "init"}
+                  "judge-calibrate", "lockdown", "filter", "hook-trust", "init", "tracker-setup"}
 # Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
 # Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
 # itself on every call (sg_guard.tampered), because text matching can't see every spelling.
@@ -2897,7 +2900,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -4241,6 +4244,13 @@ def cmd_doctor(repo=None, strict=False, prove=False):
                 fails.append("human-token-in-agent-env")
         else:
             print("  branch rules: could not check (no GitHub token in this shell)")
+    saved = G.config_dir() / "trackers.env"
+    if saved.is_file():  # tracker-setup's opt-in copy for spec-pull on this computer
+        private, detail = G.key_access(saved)
+        print("  tracker keys on this computer: %s (%s)" % (saved, "owner-only" if private else "TOO OPEN (%s): delete it, "
+              "or run tracker-setup again" % detail))
+        if not private:
+            fails.append("tracker-keys-file-open")
     try:
         rec = G.agent_record()
         print("  agent App: %s (key %s)" % (rec["slug"], "private" if G.key_is_private(rec["key"]) else "TOO OPEN - chmod 600"))
@@ -4361,6 +4371,14 @@ def main(argv):
     if cmd == "jira-setup":
         import sg_trackers as TR
         return TR.jira_setup(args)
+    if cmd == "tracker-setup":
+        if [a for a in args if a != "--no-browser"]:
+            sys.exit("usage: tracker-setup [--no-browser]   (everything else is typed into the page, never on the command line)")
+        top = T.repo_identity(os.getcwd())[0]
+        if not top:
+            sys.exit("story-gate tracker-setup: run this inside your project folder (a git repository connected to GitHub).")
+        import sg_trackersetup as TS
+        return TS.run(sys.modules[__name__], top, open_browser="--no-browser" not in args)
     if cmd == "settings":
         import sg_settings as SET
         return SET.cli(sys.modules[__name__], args)
