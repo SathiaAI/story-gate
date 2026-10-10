@@ -3,7 +3,7 @@
 Where it shows up (all inside the repository, so it follows the repository's own permissions):
   - a pinned "Story-gate dashboard" issue, refreshed by .github/workflows/story-gate-dashboard.yml
   - a full report (self-contained HTML, Tabler styles, Viaknox colours) attached to each run as an artifact
-  - `gate.py dashboard --open` on your computer
+  - `gate.py dashboard --open` on your computer, or `gate.py dashboard --serve` for a page that keeps itself current
 
 Rules this module keeps:
   - Branch content is DATA. Records are read as git blobs (`git cat-file`), never checked out or executed, and every
@@ -12,14 +12,14 @@ Rules this module keeps:
     CI is what verifies them.
   - Stdlib only. No network except the GitHub API when publishing, with the workflow's own token.
 """
-import html, json, os, re, statistics, subprocess, tempfile, time, urllib.parse
-from datetime import datetime, timezone
+import base64, hashlib, html, http.server, json, os, re, secrets, signal, statistics, subprocess, tempfile, threading, time, urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = 1
 MAX_BLOB = 1_000_000          # bytes per record file
 MAX_STORIES = 2000            # stories per snapshot
-ISSUE_LIMIT = 55_000          # characters (GitHub's issue body limit is about 65,536)
+ISSUE_LIMIT = 60_000          # characters (GitHub's issue body limit is 65,536; the rest is headroom)
 LABEL = "story-gate-dashboard"
 
 
@@ -442,12 +442,34 @@ def ci_cell(s):
     return "#%s %s%s" % (ci.get("pr"), md(ci.get("result"), 20), " · source %s" % md(ci["source"], 12) if ci.get("source") else "")
 
 
+def mm(s, n=30):
+    """A label safe inside a Mermaid "..." string: letters, digits, spaces and . , : / # + - only. Quotes, brackets, backticks,
+    ">", "%", ";", "<" and line breaks can't get through, so a label can't close its string, start an arrow or add HTML."""
+    return re.sub(r"-{2,}", "-", re.sub(r"\s+", " ", re.sub(r"[^\w .,:/#+-]", " ", clean(s, n)))).strip() or "?"
+
+
+def next_refresh(iso):
+    """When the schedule (minutes 11 and 41 of every hour) next fires after `iso`, as 'YYYY-MM-DD HH:MM'; None if `iso` can't be read."""
+    try:
+        t = datetime.strptime(str(iso), "%Y-%m-%dT%H:%M:%SZ").replace(second=0)
+    except ValueError:
+        return None
+    t += timedelta(minutes=1)
+    while t.minute not in (11, 41):
+        t += timedelta(minutes=1)
+    return t.strftime("%Y-%m-%d %H:%M")
+
+
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     M = {m["key"]: m for m in d.get("metrics", [])}
+    nxt = next_refresh(d.get("generated_at"))
     head = ["<!-- story-gate-dashboard generated_at=%s schema=%s -->" % (d.get("generated_at"), d.get("schema")),
             "# Story-gate dashboard", "",
-            "Updated **%s** from `%s` at `%s` and %d other branch(es)." % (md(d.get("generated_at"), 30), md(d.get("default_ref"), 60),
-                                                                        md((d.get("default_sha") or "")[:12], 12), max(0, len(d.get("refs_scanned", [])) - 1))]
+            "Updated **%s (UTC)** from `%s` at `%s` and %d other branch(es)." % (md(d.get("generated_at"), 30), md(d.get("default_ref"), 60),
+                                                                              md((d.get("default_sha") or "")[:12], 12), max(0, len(d.get("refs_scanned", [])) - 1))]
+    if nxt:
+        head.append("Next refresh: by **%s (UTC)**. It refreshes after merges and pull request checks, and at least every 30 minutes." % nxt)
+    head.append("Live view on your own computer: `story-gate dashboard --serve`")
     if artifact_url:
         head.append("Full report: [download the HTML dashboard](%s) (repository members only; kept 30 days, a new one comes with every refresh)." % artifact_url)
     head += ["", "| | |", "|---|---|"]
@@ -455,29 +477,26 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
         if k in M:
             head.append("| %s | **%s** |" % (M[k]["label"], fmt(M[k])))
     counts = [(lab, len([s for s in d["stories"] if s["status"] == k])) for k, lab, _ in STATUSES]
-    chart = ["", "```mermaid", "pie showData", "    title Stories by stage"] + ['    "%s" : %d' % (lab, n) for lab, n in counts if n] + ["```"]
-    agents = ["", "## Who is working on what", "", "| Story | Agent | Model | Status | Done | Drift | CI check | Last report |", "|---|---|---|---|---|---|---|---|"]
+    stage = dict((k, l) for k, l, _ in STATUSES)
+    # the tables below are the data; the charts are a picture of the same counts (labels pass through mm())
+    chart = ["", "```mermaid", "pie showData", "    title Stories by status"] + ['    "%s" : %d' % (mm(lab), n) for lab, n in counts if n] + ["```"] if any(n for _, n in counts) else []
+    chart += ["", "```mermaid", "flowchart LR", "    " + " --> ".join('s%d["%s: %d"]' % (i, mm(lab), n) for i, (lab, n) in enumerate(counts)), "```"]
     act = [s for s in d["stories"] if s["status"] in ("in_progress", "blocked", "in_review")]
-    for s in act:
-        c, cp = s.get("coder") or {}, s.get("checkpoint") or {}
-        agents.append("| %s %s | %s | %s | %s%s | %s | %s | %s | %s%s |" % (
-            md(s["id"], 40), md(s["title"], 50), md(c.get("client") or "?", 20), md(c.get("model") or "?", 30), dict((k, l) for k, l, _ in STATUSES)[s["status"]],
-            " (%s)" % md(cp.get("status"), 12) if cp.get("status") else "",
-            "%s%% (estimate)" % cp["percent"] if isinstance(cp.get("percent"), int) else "—",
-            md(cp.get("drift") or (s.get("ready") or {}).get("drift") or "none", 25), ci_cell(s), md((s.get("last_reported") or "—")[:16], 16), " ⚠ stale" if s.get("stale") else ""))
-    if not act:
-        agents.append("| — | | | | | | | |")
-    queued = ["", "## Queued to start", ""] + ["- %s %s%s" % (md(s["id"], 40), md(s["title"], 70), " · feature %s" % md(s["feature"], 30) if s["feature"] else "")
-                                               for s in d["stories"] if s["status"] == "queued"] or ["- none"]
-    if queued[-1:] == [""]:
-        queued.append("- none")
-    feats = ["", "## Features", "", "| Feature | Stories | Done | Ready | Acceptance criteria proven |", "|---|---|---|---|---|"]
+    arows = ["| %s %s | %s | %s | %s%s | %s | %s | %s | %s%s |" % (
+        md(s["id"], 40), md(s["title"], 50), md((s.get("coder") or {}).get("client") or "?", 20), md((s.get("coder") or {}).get("model") or "?", 30), stage[s["status"]],
+        " (%s)" % md((s.get("checkpoint") or {}).get("status"), 12) if (s.get("checkpoint") or {}).get("status") else "",
+        "%s%% (estimate)" % s["checkpoint"]["percent"] if isinstance((s.get("checkpoint") or {}).get("percent"), int) else "—",
+        md((s.get("checkpoint") or {}).get("drift") or (s.get("ready") or {}).get("drift") or "none", 25), ci_cell(s), md((s.get("last_reported") or "—")[:16], 16),
+        " ⚠ stale" if s.get("stale") else "") for s in act] or ["| — | | | | | | | |"]
+    qrows = ["- %s %s%s" % (md(s["id"], 40), md(s["title"], 70), " · feature %s" % md(s["feature"], 30) if s["feature"] else "")
+             for s in d["stories"] if s["status"] == "queued"] or ["- none"]
+    frows = []
     for f in d.get("features", []):
         ss = [s for s in d["stories"] if s["feature"] == f["id"]]
         tr = [ok for s in ss if s["status"] in ("done", "in_review") for _, ok in s["trace"]]
-        feats.append("| %s %s | %d | %d | %d | %s |" % (md(f["id"], 40), md(f["title"], 60) if f["title"] != f["id"] else "", len(ss),
-                                                    sum(s["status"] == "done" for s in ss), sum((s.get("ready") or {}).get("overall") == "PASS" for s in ss),
-                                                    "%d%%" % pct(sum(1 for x in tr if x), len(tr)) if tr else "—"))
+        frows.append("| %s %s | %d | %d | %d | %s |" % (md(f["id"], 40), md(f["title"], 60) if f["title"] != f["id"] else "", len(ss),
+                                                      sum(s["status"] == "done" for s in ss), sum((s.get("ready") or {}).get("overall") == "PASS" for s in ss),
+                                                      "%d%%" % pct(sum(1 for x in tr if x), len(tr)) if tr else "—"))
     defs = ["", "<details><summary>How each number is calculated</summary>", ""] + \
            ["- **%s**: %s." % (m["label"], md(m["formula"], 200)) for m in d.get("metrics", [])] + \
            ["", "Verdicts are recorded by the coding agents. The `story-gate` check in CI re-checks them on every pull request.", "</details>"]
@@ -488,37 +507,51 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
         notes += ["", "**Ownership conflicts:** " + "; ".join("%s on %s" % (md(c["story"], 40), ", ".join(md(b, 60) for b in c["branches"])) for c in d["conflicts"][:20])]
     if d.get("omissions"):
         notes += ["", "**Not shown:** " + "; ".join(md(o, 160) for o in d["omissions"][:10])]
-    stories = ["", "## All stories", "", "| Story | Feature | Stage | READY | DONE | Branch |", "|---|---|---|---|---|---|"]
-    for s in d["stories"]:
-        stories.append("| %s %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), dict((k, l) for k, l, _ in STATUSES)[s["status"]],
-                                                         (s.get("ready") or {}).get("overall", "—") + no_judge(s.get("ready")) + (" (out of date)" if s.get("ready_fresh") is False else ""),
-                                                         (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60) + (" · " + ci_cell(s) if s.get("ci") else "")))
+    srows = ["| %s %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), stage[s["status"]],
+                                                   (s.get("ready") or {}).get("overall", "—") + no_judge(s.get("ready")) + (" (out of date)" if s.get("ready_fresh") is False else ""),
+                                                   (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60) + (" · " + ci_cell(s) if s.get("ci") else ""))
+             for s in d["stories"]]
+    fold = lambda title, summary: ["", "## " + title, "", "<details><summary>%s</summary>" % summary, ""]
     footer = ["", "_Managed by story-gate. Edits to this issue are overwritten._"]
     table_chart = ["", "| Stage | Stories |", "|---|---|"] + ["| %s | %d |" % (lab, n) for lab, n in counts]
     # Fixed order on the page; when space runs out, sections are kept by priority (deterministic):
-    # summary > features > who is working > queued > chart (falls back to a table) > notes > definitions > all stories.
+    # summary > chart (small; falls back to a table) > features > who is working > queued > notes > definitions > all stories.
+    # Each part is (lines before the rows, rows, lines after); a long list keeps as many rows as fit (at most half of what is left,
+    # so the lists after it still get room) and says how many it left out.
     order = ["head", "chart", "agents", "queued", "feats", "notes", "defs", "stories"]
-    sections = {"head": head, "chart": chart, "agents": agents, "queued": queued, "feats": feats, "notes": notes, "defs": defs, "stories": stories}
-    priority = ["head", "feats", "agents", "queued", "chart", "notes", "defs", "stories"]
+    parts = {"head": (head, [], []), "chart": (chart, [], []),
+             "agents": (["", "## Who is working on what", "", "| Story | Agent | Model | Status | Done | Drift | CI check | Last report |", "|---|---|---|---|---|---|---|---|"], arows, []),
+             "queued": (fold("Queued to start", "%d queued" % len([s for s in d["stories"] if s["status"] == "queued"])), qrows, ["", "</details>"]),
+             "feats": (fold("Features", "%d features" % len(frows)) + ["| Feature | Stories | Done | Ready | Acceptance criteria proven |", "|---|---|---|---|---|"], frows, ["", "</details>"]),
+             "notes": (notes, [], []), "defs": (defs, [], []),
+             "stories": (fold("All stories", "%d stories" % len(srows)) + ["| Story | Feature | Stage | READY | DONE | Branch |", "|---|---|---|---|---|---|"], srows, ["", "</details>"])}
+    priority = ["head", "chart", "feats", "agents", "queued", "notes", "defs", "stories"]
+    lists = ("stories", "agents", "feats", "queued")
+    full = "[see the full report](%s)" % artifact_url if artifact_url else "see the full report"
+    more = lambda n: "… %d more: %s" % (n, full)
+    size = lambda ls: sum(len(x) + 1 for x in ls)
     budget = limit - len("\n".join(footer)) - 300
-    kept, used = {}, 0
+    kept, used, short = {}, 0, []
     for name in priority:
-        lines = sections[name]
-        size = len("\n".join(lines)) + 1
-        if used + size <= budget:
-            kept[name] = lines; used += size; continue
-        if name == "chart" and used + len("\n".join(table_chart)) + 1 <= budget:
-            kept[name] = table_chart; used += len("\n".join(table_chart)) + 1; continue
-        if name in ("stories", "agents", "feats", "queued"):  # long lists: keep as many rows as fit
-            part, room = [], budget - used
-            for line in lines:
-                if room - len(line) - 1 < 120:
-                    part.append("| … %d more rows in the full report |" % (len(lines) - len(part)) if line.startswith("|") else "- … more in the full report")
-                    break
-                part.append(line); room -= len(line) + 1
-            kept[name] = part; used = budget - room
-    body = "\n".join(sum((kept[n] for n in order if n in kept), []))
-    return body + "\n" + "\n".join(footer)
+        pre, rows, post = parts[name]
+        if used + size(pre + rows + post) <= budget:
+            kept[name] = pre + rows + post
+        elif name == "chart" and used + size(table_chart) <= budget:
+            kept[name] = table_chart
+        else:
+            room = (budget - used) // 2 - size(pre) - size(post) - 200  # 200: the "more" line
+            if name not in lists or room < 0:
+                short.append(name)
+                continue
+            k = 0
+            while k < len(rows) and room >= len(rows[k]) + 1:
+                room -= len(rows[k]) + 1; k += 1
+            kept[name] = pre + rows[:k] + ["", more(len(rows) - k)] + post
+        used += size(kept[name])
+    out = sum((kept[n] for n in order if n in kept), [])
+    if short:
+        out += ["", "Left out to stay under GitHub's size limit: %s (%s)." % (", ".join(short), full)]
+    return "\n".join(out) + "\n" + "\n".join(footer)
 
 
 # ------------------------------------------------------------------ HTML (the full report)
@@ -562,6 +595,8 @@ h1,h2,h3,.h1,.card-title,strong{color:var(--sg-ink)} .card-header{border-color:v
 .sg-axis,.sg-value{fill:var(--sg-ink);font-size:14px} .sg-value{font-weight:600}
 .sg-pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;border:1px solid var(--sg-line);font-size:.8rem;white-space:nowrap}
 .sg-pill.pass{border-color:#2E7D4F} .sg-pill.fail{border-color:var(--sg-critical)} .sg-est{color:var(--sg-muted);font-size:.8rem}
+[hidden]{display:none!important} #sg-stale{background:#FFF3C4;color:#1F2327;border:1px solid #E0B400;border-radius:6px;padding:.6rem 1rem}
+@media (prefers-color-scheme: dark){#sg-stale{background:#4A3B00;color:#F1F5F2;border-color:#B38F00}}
 .sg-brand{color:var(--sg-ink);display:inline-flex;align-items:center;gap:.4rem} .sg-brand svg{height:14px;width:auto;color:var(--sg-wordmark)}
 header.sg-head{border-bottom:3px solid var(--sg-accent)}
 @media (max-width:640px){.container-xl{padding-left:16px;padding-right:16px}}
@@ -581,7 +616,12 @@ def pill_level(text):
     return '<span class="sg-pill %s">%s</span>' % (kind, h(text, 120))
 
 
-def to_html(d, artifact_note=""):
+# Shown only on a saved copy (artifact download or --out file) that is over an hour old; a page served by --serve is fresh and leaves it out.
+STALE_JS = ('(function(){var b=document.getElementById("sg-stale"),m=(Date.now()-Date.parse(b.getAttribute("data-generated")))/60000;if(!(m>60))return;'
+            'var n=m<2880?Math.round(m/60):Math.round(m/1440),u=m<2880?"hour":"day";b.querySelector("b").textContent=n+" "+u+(n==1?"":"s");b.hidden=false})()')
+
+
+def to_html(d, artifact_note="", live=False, issue=None):
     M = d.get("metrics", [])
     label = dict((k, l) for k, l, _ in STATUSES)
     counts = [(k, l, len([s for s in d["stories"] if s["status"] == k]), hint) for k, l, hint in STATUSES]
@@ -626,9 +666,14 @@ def to_html(d, artifact_note=""):
                   'story-gate\'s checkout filter removes unapproved hook commands in the repositories it covers. Prove it: gate.py doctor --prove</div></div>'
                   % "".join('<tr><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (h(r["tool"], 20), pill_level(r["protection"]), h(r["next"], 200))
                             for r in d["computer"]))
+    stale = "" if live else (
+        '<div class="container-xl pt-3"><div id="sg-stale" role="status" data-generated="%s" hidden>This is a snapshot from <b></b> ago. Live view: the %s or <code>story-gate dashboard --serve</code>. '
+        'Anyone you sent this file to keeps this copy.</div></div><script>%s</script>'
+        % (h(d.get("generated_at"), 30), ('<a href="%s">pinned \'Story-gate dashboard\' issue</a>' % h(issue, 300)) if issue else "pinned 'Story-gate dashboard' issue", STALE_JS))
+    script_src = "" if live else "; script-src 'sha256-%s'" % base64.b64encode(hashlib.sha256(STALE_JS.encode("utf-8")).digest()).decode()
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
-<title>Story-gate dashboard</title><style>%s</style><style>%s</style></head><body>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:%s">
+<title>Story-gate dashboard</title><style>%s</style><style>%s</style></head><body>%s
 <header class="sg-head py-3 mb-3"><div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-2">
 <div><h1 class="m-0">Story-gate dashboard</h1><div class="text-secondary">Updated %s · %s at %s · %d branches scanned%s</div></div>
 </div></header>
@@ -649,7 +694,7 @@ def to_html(d, artifact_note=""):
 <p class="text-secondary small my-3">Verdicts are recorded by the coding agents; the story-gate check in CI re-checks them on every pull request. Estimates are marked. %s</p>
 </main>
 <footer class="container-xl py-3"><span class="sg-brand text-secondary">story-gate · by <span aria-label="Viaknox">%s</span></span></footer>
-</body></html>""" % (css, BRAND_CSS, h(d.get("generated_at"), 30), h(d.get("default_ref"), 60), h((d.get("default_sha") or "")[:12], 12),
+</body></html>""" % (script_src, css, BRAND_CSS, stale, h(d.get("generated_at"), 30), h(d.get("default_ref"), 60), h((d.get("default_sha") or "")[:12], 12),
                       len(d.get("refs_scanned", [])), (" · " + h(artifact_note, 200)) if artifact_note else "", notes, kpi, bar_chart(counts), agents, feats,
                       quality, rows, h("Snapshot of: " + ", ".join(r["ref"] for r in d.get("refs_scanned", [])[:30]), 2000), mark)
 
@@ -778,7 +823,7 @@ def report_failure(G, repo, token, when, run_url="", issue_number=None):
         return "no dashboard issue to annotate"
     issue = issues[0]
     body = re.sub(r"\n?%s[^\n]*\n" % re.escape(FAIL_MARK), "\n", issue.get("body") or "")
-    note = "%s **The last refresh failed at %s**%s. This shows the last good snapshot.\n" % (
+    note = "%s **⚠ STALE: the last refresh failed at %s**%s. Everything below is the last good snapshot, not the current state.\n" % (
         FAIL_MARK, md(when, 30), (" ([run log](%s))" % run_url) if run_url.startswith("https://") else "")
     body = body.replace("# Story-gate dashboard\n", "# Story-gate dashboard\n\n" + note, 1) if "# Story-gate dashboard\n" in body else note + body
     st, _, _ = call(G, "PATCH", "/repos/%s/issues/%s" % (repo, issue["number"]), token, {"body": body})
@@ -800,12 +845,197 @@ def pin(G, token, repo, node_id):
         return "not pinned (the workflow token may not be allowed to pin)"
 
 
+# ------------------------------------------------------------------ the live page on this computer (--serve)
+SERVE_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'"
+
+
+def ago(t):
+    n = int(time.time() - t)
+    return "just now" if n < 60 else ("%d min ago" % (n // 60) if n < 3600 else "%d h ago" % (n // 3600))
+
+
+def reason(e):
+    """One short line for the banner: no line breaks, and no password or token from a URL in the message."""
+    return re.sub(r"//[^/@\s]*@", "//", re.sub(r"\s+", " ", str(e) or type(e).__name__)).strip()[:200]
+
+
+class Live:
+    """`dashboard --serve`: the page on 127.0.0.1 only, under a secret path, rebuilt every few minutes into a temporary folder.
+    `build(folder)` returns the page's HTML or raises; if it raises, the last good page stays up under a red banner."""
+
+    def __init__(self, build, every=300, idle=7200):
+        self.build, self.every, self.idle = build, every, idle
+        self.tmp = tempfile.TemporaryDirectory(prefix="story-gate-live-")
+        self.path = "/s/%s/" % secrets.token_urlsafe(24)
+        self.lock, self.stop = threading.Lock(), threading.Event()
+        self.page, self.ok_at, self.error, self.last_hit = None, None, "", time.time()
+        self.serving = self.closed = False
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d%s" % (self.httpd.server_address[1], self.path)
+
+    def refresh(self):
+        try:
+            page = self.build(self.tmp.name)
+        except (Exception, SystemExit) as e:  # a failed rebuild never stops the server
+            with self.lock:
+                self.error = reason(e)
+            return False
+        with self.lock:
+            self.page, self.ok_at, self.error = page, time.time(), ""
+        return True
+
+    def render(self):
+        with self.lock:
+            page, ok_at, err = self.page, self.ok_at, self.error
+        if err:
+            bar = ('<div role="alert" style="background:#B42318;color:#fff;padding:.6rem 1rem;font:600 14px sans-serif">Couldn\'t refresh: %s. %s</div>'
+                   % (h(err, 300), "Showing the last good version (from %s)." % ago(ok_at) if page else "Trying again soon."))
+        else:
+            bar = ('<div style="padding:.4rem 1rem;font:13px sans-serif;opacity:.8">Live view on this computer. %s</div>'
+                   % ("Updated %s; rebuilds every %d min." % (ago(ok_at), self.every // 60) if page else "Building the dashboard..."))
+        if page is None:
+            return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Story-gate dashboard</title></head><body>%s</body></html>' % bar).encode("utf-8")
+        return page.replace("<head>", '<head><meta http-equiv="refresh" content="60">', 1).replace("<body>", "<body>" + bar, 1).encode("utf-8")
+
+    def _handler(self):
+        live = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # nothing is logged: the address holds the session secret
+                pass
+
+            def _send(self, code, data, ctype="text/plain; charset=utf-8", allow=None):
+                data = data if isinstance(data, bytes) else data.encode("utf-8")
+                self.send_response(code)
+                for k, v in (("Content-Type", ctype), ("Cache-Control", "no-store"), ("Content-Security-Policy", SERVE_CSP), ("X-Frame-Options", "DENY"),
+                             ("Referrer-Policy", "no-referrer"), ("X-Content-Type-Options", "nosniff"), ("Allow", allow), ("Content-Length", str(len(data)))):
+                    if v:
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _host_ok(self):  # DNS-rebinding guard: only our own loopback address and port
+                return self.headers.get("Host", "") == "127.0.0.1:%d" % self.server.server_address[1]
+
+            def do_GET(self):
+                if not self._host_ok():
+                    return self._send(403, "forbidden")
+                if not secrets.compare_digest(urllib.parse.urlparse(self.path).path.encode("utf-8", "replace"), live.path.encode("utf-8")):
+                    return self._send(404, "not found")
+                live.last_hit = time.time()
+                self._send(200, live.render(), "text/html; charset=utf-8")
+
+            def _other(self):  # GET only
+                self._send(405 if self._host_ok() else 403, "method not allowed" if self._host_ok() else "forbidden", allow="GET")
+
+            do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _other
+
+        return H
+
+    def serve_thread(self):
+        self.serving = True
+        threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+
+    def start(self):
+        """Start the server and the rebuild loop (the first build begins at once); returns the address to open."""
+        self.serve_thread()
+
+        def loop():
+            self.refresh()
+            while not self.stop.wait(self.every):
+                self.refresh()
+        threading.Thread(target=loop, daemon=True).start()
+        return self.url
+
+    def wait(self):
+        """Block until Ctrl-C or until nobody has asked for the page for `idle` seconds; then clean up."""
+        try:
+            try:
+                signal.signal(signal.SIGTERM, signal.default_int_handler)  # a plain `kill` stops it cleanly too
+            except ValueError:  # not the main thread (tests)
+                pass
+            while not self.stop.wait(1):
+                if time.time() - self.last_hit > self.idle:
+                    print("story-gate dashboard: stopped, nobody opened the page for %d minutes." % (self.idle // 60))
+                    break
+        except KeyboardInterrupt:
+            print("story-gate dashboard: stopped.")
+        finally:
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop.set()
+        if self.serving:
+            self.httpd.shutdown()
+        self.httpd.server_close()
+        self.tmp.cleanup()  # the fetched data and built files go with it
+
+
 # ------------------------------------------------------------------ command line
+def snapshot(gate, c, offline):
+    """The data for this run: in CI from the checked-out repository; on a computer after a fetch (unless offline), with local branches
+    and this computer's hook protection. Nothing is published."""
+    import sg_github as G
+    root, in_ci, local_note = gate.ROOT, bool(os.environ.get("GITHUB_ACTIONS")), ""
+    if not in_ci and not offline:
+        r = subprocess.run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=str(root), capture_output=True, text=True)
+        local_note = "" if r.returncode == 0 else "could not fetch from origin (%s); this snapshot may be out of date" % (r.stderr.strip()[:120] or "offline")
+    default = os.environ.get("SG_DEFAULT_BRANCH")
+    ref = ("origin/" + default) if default else (gate.T.default_policy_ref(root, c.get("base_branch", "main")) or c.get("base_branch", "main"))
+    data = build(root, ref, c["story_id_pattern"], include_local=not in_ci, gate=gate)
+    if in_ci and os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
+        ci_status(G, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], data)
+    if not in_ci:
+        import sg_guard as SG
+        data["computer"] = [{"tool": t, "protection": p, "next": n} for t, p, n in SG.client_matrix(str(root))]
+        data["omissions"] = ([local_note] if local_note else []) + ["local snapshot: includes this computer's local branches and anything not pushed"] + data["omissions"]
+    return data
+
+
+def write_files(data, out, artifact_url=None, issue=None, live=False):
+    """dashboard.json, dashboard.md and dashboard.html in `out`; returns the Markdown."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "dashboard.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+    body = to_markdown(data, artifact_url)
+    (out / "dashboard.md").write_text(body, encoding="utf-8")
+    (out / "dashboard.html").write_text(to_html(data, live=live, issue=issue), encoding="utf-8")
+    return body
+
+
+def serve(gate, c, kv, rest, issue):
+    """`dashboard --serve [--every MIN] [--idle MIN] [--no-browser]`: uses the same GitHub access as --open (your own git login)."""
+    try:
+        every, idle = max(1, int(kv.get("every", 5))), max(1, int(kv.get("idle", 120)))
+    except ValueError:
+        print("story-gate dashboard: --every and --idle are whole numbers of minutes.")
+        return 2
+
+    def build_page(tmp):
+        write_files(snapshot(gate, c, False), Path(tmp), issue=issue, live=True)
+        return (Path(tmp) / "dashboard.html").read_text(encoding="utf-8")
+    live = Live(build_page, every * 60, idle * 60)
+    url = live.start()
+    print("story-gate dashboard: live view at\n  %s\nIt rebuilds every %d min, stops after %d min without a visit, and Ctrl-C stops it now. Built files live in a temporary folder that is removed when it stops." % (url, every, idle))
+    if "--no-browser" not in rest:
+        import webbrowser
+        webbrowser.open(url)
+    live.wait()
+    return 0
+
+
 def cli(gate, kv, rest):
     import sg_github as G
     c = gate.cfg()
     root = gate.ROOT
     offline = "--offline" in rest
+    repo = os.environ.get("GITHUB_REPOSITORY") or gate.origin_repo()
+    issue = issue_url(repo, G.WEB) if repo else None
     if "--report-failure" in rest:
         token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
         if not token or not repo:
@@ -813,29 +1043,14 @@ def cli(gate, kv, rest):
         run_url = "%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"), repo, os.environ.get("GITHUB_RUN_ID", ""))
         print(report_failure(G, repo, token, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), run_url, c.get("dashboard_issue")))
         return 0
-    in_ci = bool(os.environ.get("GITHUB_ACTIONS"))
+    if "--serve" in rest:
+        return serve(gate, c, kv, rest, issue)
     if kv.get("from-json"):
         data = json.loads(Path(kv["from-json"]).read_text(encoding="utf-8"))
     else:
-        local_note = ""
-        if not in_ci and not offline:
-            r = subprocess.run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=str(root), capture_output=True, text=True)
-            local_note = "" if r.returncode == 0 else "could not fetch from origin (%s); this snapshot may be out of date" % (r.stderr.strip()[:120] or "offline")
-        default = os.environ.get("SG_DEFAULT_BRANCH")
-        ref = ("origin/" + default) if default else (gate.T.default_policy_ref(root, c.get("base_branch", "main")) or c.get("base_branch", "main"))
-        data = build(root, ref, c["story_id_pattern"], include_local=not in_ci, gate=gate)
-        if in_ci and os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
-            ci_status(G, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], data)
-        if not in_ci:
-            import sg_guard as SG
-            data["computer"] = [{"tool": t, "protection": p, "next": n} for t, p, n in SG.client_matrix(str(root))]
-            data["omissions"] = ([local_note] if local_note else []) + ["local snapshot: includes this computer's local branches and anything not pushed"] + data["omissions"]
+        data = snapshot(gate, c, offline)
     out = Path(kv.get("out") or tempfile.mkdtemp(prefix="story-gate-dashboard-"))
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "dashboard.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
-    body = to_markdown(data, kv.get("artifact-url"))
-    (out / "dashboard.md").write_text(body, encoding="utf-8")
-    (out / "dashboard.html").write_text(to_html(data), encoding="utf-8")
+    body = write_files(data, out, kv.get("artifact-url"), issue)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary and "--publish" in rest:
         with open(summary, "a", encoding="utf-8") as f:
