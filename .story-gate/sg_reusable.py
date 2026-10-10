@@ -154,24 +154,30 @@ jobs:
 def check_callers(G):
     """[(file, status)] for the three short workflows, for `doctor`. 'ok' or 'ok (...)' passes; anything else fails."""
     out, pins = [], set()
-    pat = re.compile(r"uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/(gate|audit|dashboard)\.yml@(\S+)")
+    pat = re.compile(r"^\s*uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/\.github/workflows/(gate|audit|dashboard)\.yml@(\S+)", re.M)
+    # only active lines count: a commented-out `uses:` or fingerprint must never satisfy the check
+    active = lambda t: "\n".join(l for l in t.splitlines() if not l.lstrip().startswith("#"))
     for path, called in ((".github/workflows/story-gate.yml", "gate"), (".github/workflows/story-gate-audit.yml", "audit"),
                          (".github/workflows/story-gate-dashboard.yml", "dashboard")):
-        text = G.rd(G.ROOT / path)
-        m = pat.search(text)
-        fp = re.search(r'release-key-fingerprint:\s*"([^"]*)"', text)
-        if not text:
+        raw = G.rd(G.ROOT / path)
+        text = active(raw)
+        uses = pat.findall(text)
+        m = pat.search(text) if len(uses) == 1 else None
+        fps = re.findall(r'^\s*release-key-fingerprint:\s*"([^"]*)"', text, re.M)
+        fp = fps[0] if len(fps) == 1 else None
+        if not raw:
             st = "missing - run `story-gate install --ci reusable`"
-        elif not text.startswith("# managed by story-gate"):
+        elif not raw.startswith("# managed by story-gate"):
             st = "NOT MANAGED by story-gate"
         elif not m or m.group(2) != called:
-            st = "doesn't call story-gate's %s.yml - run `story-gate install --ci reusable`" % called
+            st = ("calls more than one workflow (%d `uses:` lines)" % len(uses) if len(uses) > 1 else
+                  "doesn't call story-gate's %s.yml - run `story-gate install --ci reusable`" % called)
         elif not SHA.fullmatch(m.group(3)):
             st = "pinned to %r, not a full commit SHA (a tag or branch can be moved)" % m.group(3)[:50]
         elif "secrets: inherit" in text:
             st = "passes every secret (secrets: inherit); pass them by name"
-        elif not fp or fp.group(1) != G.T.key_fingerprint():
-            st = "expects release key %s, not story-gate's %s" % (fp.group(1) if fp else "(none)", G.T.key_fingerprint())
+        elif fp != G.T.key_fingerprint():
+            st = "expects release key %s, not story-gate's %s" % (fp or ("(%d keys)" % len(fps) if fps else "(none)"), G.T.key_fingerprint())
         else:
             pins.add((m.group(1), m.group(3)))
             ver = re.search(r"@[0-9a-f]{40}\s*#\s*(\S+)", text)

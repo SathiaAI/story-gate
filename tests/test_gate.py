@@ -6668,6 +6668,14 @@ class TestReusableWorkflow(Base):
         g = self.repo / ".github/workflows/story-gate.yml"
         g.write_text(_re_sub(r'release-key-fingerprint: "[^"]*"', 'release-key-fingerprint: "SHA256:' + "Z" * 43 + '"', g.read_text()))
         self.assertIn("expects release key SHA256:ZZZ", run(self.repo, "doctor").stdout)
+        t = g.read_text()  # a commented-out line can't stand in for the active one
+        good = '      release-key-fingerprint: "%s"' % load_gate(self.repo).T.key_fingerprint(); os.environ.pop("STORY_GATE_ROOT")
+        g.write_text(t.replace("    with:\n", "    with:\n      #" + good.strip() + "\n", 1))
+        self.assertIn("expects release key SHA256:ZZZ", run(self.repo, "doctor").stdout)
+        g.write_text(t.replace("jobs:\n", "jobs:\n  # uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n", 1)
+                     .replace("/.github/workflows/gate.yml@" + self.SHA + " #", "/.github/workflows/audit.yml@" + self.SHA + " #"))
+        self.assertIn("doesn't call story-gate's gate.yml", run(self.repo, "doctor").stdout)
+        g.write_text(t)
         r = run(self.repo, "install", "--ref", self.SHA)  # no --ci: stays reusable
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("/.github/workflows/gate.yml@" + self.SHA, g.read_text())
