@@ -1,0 +1,140 @@
+# Reusable workflow: adopting repositories call it at a pinned commit SHA (story-gate install --ci reusable writes the caller).
+# Pull request code never runs in a job that holds secrets; settings and story-gate's own code never come from the pull request.
+name: story-gate
+on:
+  workflow_call:
+    inputs:
+      release-key-fingerprint:
+        description: "The story-gate release key you trust (SHA256:...). story-gate install writes it; leave it set."
+        type: string
+        required: false
+        default: ""
+      allow-unsigned:
+        description: "Run a commit that isn't a signed release (development copies only)."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      OPENROUTER_API_KEY:
+        required: false
+      TYPESAFE_API_KEY:
+        required: false
+      JUDGE_API_KEY:
+        required: false
+      STORY_GATE_SPECS_TOKEN:
+        required: false
+      STORY_GATE_LINEAR_KEY:
+        required: false
+      STORY_GATE_JIRA_EMAIL:
+        required: false
+      STORY_GATE_JIRA_TOKEN:
+        required: false
+jobs:
+  tests:
+    # Runs the PR's code with the BASE branch's pinned test command. No secrets here.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: get the pinned story-gate (the commit this workflow file comes from)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: sg-runtime
+          persist-credentials: false
+      - id: prep
+        name: check story-gate's signature and read the base branch's settings
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          SG_KEY: ${{ inputs.release-key-fingerprint }}
+          SG_UNSIGNED: ${{ inputs.allow-unsigned }}
+        working-directory: repo
+        run: python3 "$GITHUB_WORKSPACE/sg-runtime/.story-gate/gate.py" runtime-prepare --out "$RUNNER_TEMP/sg" --base "$BASE" --fingerprint "$SG_KEY" --allow-unsigned "$SG_UNSIGNED"
+      - name: run pinned tests
+        if: steps.prep.outputs.ready == 'true'
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" ci-tests "$RUNNER_TEMP/sg-tests"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.prep.outputs.ready == 'true'
+        with:
+          name: sg-tests
+          path: ${{ runner.temp }}/sg-tests
+          retention-days: 7
+  story-gate:
+    # Has the secrets; runs the pinned story-gate with the BASE branch's settings and never executes PR code.
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: get the pinned story-gate (the commit this workflow file comes from)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: sg-runtime
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sg-tests
+          path: ${{ runner.temp }}/sg-tests
+        continue-on-error: true
+      - id: prep
+        name: check story-gate's signature and read the base branch's settings
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          SG_KEY: ${{ inputs.release-key-fingerprint }}
+          SG_UNSIGNED: ${{ inputs.allow-unsigned }}
+        working-directory: repo
+        run: python3 "$GITHUB_WORKSPACE/sg-runtime/.story-gate/gate.py" runtime-prepare --out "$RUNNER_TEMP/sg" --base "$BASE" --fingerprint "$SG_KEY" --allow-unsigned "$SG_UNSIGNED"
+      - name: story gate
+        if: steps.prep.outputs.ready == 'true'
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+          STORY_GATE_SPECS_TOKEN: ${{ secrets.STORY_GATE_SPECS_TOKEN }}
+          STORY_GATE_LINEAR_KEY: ${{ secrets.STORY_GATE_LINEAR_KEY }}
+          STORY_GATE_JIRA_EMAIL: ${{ secrets.STORY_GATE_JIRA_EMAIL }}
+          STORY_GATE_JIRA_TOKEN: ${{ secrets.STORY_GATE_JIRA_TOKEN }}
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: story-gate-validation
+          path: ${{ runner.temp }}/sg-report
+          if-no-files-found: ignore
+          retention-days: 14

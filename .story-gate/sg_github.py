@@ -267,7 +267,17 @@ RULESET_NAME = "story-gate: human acceptance"
 UNATTRIBUTED = "require_extra_approval_for_unattributed_changes"
 
 
-def ruleset_json():
+def ci_check_name(root):
+    """The name of story-gate's pull request check: 'story-gate', or 'story-gate / story-gate' when the repository's
+    workflow calls story-gate's reusable workflow (GitHub names the check '<calling job> / <called job>')."""
+    p = Path(root) / ".github" / "workflows" / "story-gate.yml"
+    text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+    # only an active job-level `uses:` counts: not a comment, and not a step (`- uses:`) someone added to a copied workflow
+    call = re.search(r"^[ \t]*uses:[ \t]*[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/gate\.yml@", text, re.M)
+    return "story-gate / story-gate" if call else "story-gate"
+
+
+def ruleset_json(check="story-gate"):
     """Return the default branch ruleset requiring human acceptance without extra AI approval."""
     return {"name": RULESET_NAME, "target": "branch", "enforcement": "active",
             "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
@@ -281,7 +291,30 @@ def ruleset_json():
                                                               # owner can never give. A code owner's approval of the latest push is the gate.
                                                               UNATTRIBUTED: False}},
                       {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": False,
-                                                                        "required_status_checks": [{"context": "story-gate"}]}}]}
+                                                                        "required_status_checks": [{"context": check}]}}]}
+
+
+def require_check(repo, ruleset_id, token, check):
+    """Make story-gate's own ruleset require `check` in place of the other name of story-gate's check (only that)."""
+    st, rs, _ = call("GET", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token)
+    if st != 200 or not isinstance(rs, dict):
+        return "Ruleset: could not read it (HTTP %s) to check which story-gate check it requires" % st
+    rules = rs.get("rules") or []
+    rsc = [r for r in rules if r.get("type") == "required_status_checks"]
+    if not rsc:
+        return "Ruleset: it doesn't require any check. Add '%s' in Settings > Rules so a red story-gate check blocks merging" % check
+    p = rsc[0].setdefault("parameters", {})
+    have = [c.get("context") for c in p.get("required_status_checks") or [] if isinstance(c, dict)]
+    other = ({"story-gate", "story-gate / story-gate"} - {check}).pop()
+    if check in have and other not in have:  # the other name may never report again, so it can't stay required
+        return "Ruleset: requires the check '%s'" % check
+    p["required_status_checks"] = [c for c in p.get("required_status_checks") or []
+                                   if not (isinstance(c, dict) and c.get("context") in ("story-gate", "story-gate / story-gate"))]
+    p["required_status_checks"].append({"context": check})
+    st, r, _ = call("PUT", "/repos/%s/rulesets/%s" % (repo, ruleset_id), token, {"rules": rules})
+    if st in (200, 201):
+        return "Ruleset: now requires the check '%s'" % check
+    return "Ruleset: could not change the required check to '%s' (HTTP %s %s); change it in Settings > Rules" % (check, st, (r or {}).get("message", ""))
 
 
 def allow_ai_prs(repo, ruleset_id, token):
@@ -342,8 +375,9 @@ def setup_repo(root, repo, owners, token, dry_run=False):
     if mine:
         out.append("Ruleset: '%s' already exists" % RULESET_NAME)
         out.append(allow_ai_prs(repo, mine[0].get("id"), token))
+        out.append(require_check(repo, mine[0].get("id"), token, ci_check_name(root)))
     else:
-        st, r, _ = call("POST", "/repos/%s/rulesets" % repo, token, ruleset_json())
+        st, r, _ = call("POST", "/repos/%s/rulesets" % repo, token, ruleset_json(ci_check_name(root)))
         out.append("Ruleset: %s" % ("created" if st in (200, 201) else "NOT created (HTTP %s %s). Import docs/story-gate-ruleset.json in Settings > Rules instead." % (st, (r or {}).get("message", ""))))
     st, _, _ = call("PUT", "/repos/%s/actions/permissions/workflow" % repo, token,
                     {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False})

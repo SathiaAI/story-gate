@@ -1,0 +1,56 @@
+# Reusable workflow: adopting repositories call it at a pinned commit SHA (story-gate install --ci reusable writes the caller).
+# Pull request code never runs in a job that holds secrets; settings and story-gate's own code never come from the pull request.
+name: story-gate-audit
+on:
+  workflow_call:
+    inputs:
+      release-key-fingerprint:
+        description: "The story-gate release key you trust (SHA256:...). story-gate install writes it; leave it set."
+        type: string
+        required: false
+        default: ""
+      allow-unsigned:
+        description: "Run a commit that isn't a signed release (development copies only)."
+        type: boolean
+        required: false
+        default: false
+jobs:
+  audit:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: get the pinned story-gate (the commit this workflow file comes from)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: sg-runtime
+          persist-credentials: false
+      - id: prep
+        name: check story-gate's signature and read the base branch's settings
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          SG_KEY: ${{ inputs.release-key-fingerprint }}
+          SG_UNSIGNED: ${{ inputs.allow-unsigned }}
+        working-directory: repo
+        run: python3 "$GITHUB_WORKSPACE/sg-runtime/.story-gate/gate.py" runtime-prepare --out "$RUNNER_TEMP/sg" --base "$BASE" --fingerprint "$SG_KEY" --allow-unsigned "$SG_UNSIGNED"
+      - name: who merged, and was it accepted?
+        if: steps.prep.outputs.ready == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          STORY_GATE_ROOT: ${{ github.workspace }}/repo
+          STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
+          GITHUB_TOKEN: ${{ github.token }}
+        working-directory: repo
+        run: python3 "$RUNNER_TEMP/sg/gate.py" audit

@@ -12,7 +12,7 @@ Rules this module keeps:
     CI is what verifies them.
   - Stdlib only. No network except the GitHub API when publishing, with the workflow's own token.
 """
-import html, json, os, re, statistics, subprocess, tempfile, time
+import html, json, os, re, statistics, subprocess, tempfile, time, urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -672,6 +672,8 @@ def call(G, method, path, token, body=None, tries=3):
 
 def ci_status(G, repo, token, data):
     """Mark each unmerged story with the result of the story-gate check on its open pull request (CI-verified or not)."""
+    # the check this installation runs: 'story-gate' (copied workflow) or 'story-gate / story-gate' (reusable workflow)
+    name = G.ci_check_name(os.environ.get("STORY_GATE_ROOT") or os.getcwd())
     prs, page = [], 1
     while page <= 5:  # up to 500 open pull requests
         st, chunk, _ = call(G, "GET", "/repos/%s/pulls?state=open&per_page=100&page=%d" % (repo, page), token)
@@ -688,7 +690,7 @@ def ci_status(G, repo, token, data):
         if s["merged"] or s["ref"] not in heads:
             continue
         sha, num = heads[s["ref"]]
-        st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=story-gate" % (repo, sha), token)
+        st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=%s" % (repo, sha, urllib.parse.quote(name, safe="")), token)
         runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
         if st == 200 and runs:
             r = runs[0]
