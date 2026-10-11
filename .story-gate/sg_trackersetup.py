@@ -1,4 +1,4 @@
-"""story-gate tracker-setup: connect Linear or Jira Cloud once, in the browser (experimental, like tracker support).
+"""story-gate tracker-setup: connect Linear or Jira Cloud once, in the browser.
 
 The person runs `story-gate tracker-setup` in their project folder (the AI's hooks refuse it: it's an admin command). A
 page opens on this computer (127.0.0.1 only) and walks them through:
@@ -410,7 +410,7 @@ def open_settings_pr(gate, token, repo, kind, settings, plan):
     except SET.SettingsError as e:
         raise SetupError(str(e))
     looser = SET.looser_than(gate, gate.full_config(text), new_full)
-    body = ["story-gate tracker-setup: connect %s (`%s`). Tracker support is **experimental**." % (plan["label"], plan["site"]),
+    body = ["story-gate tracker-setup: connect %s (`%s`)." % (plan["label"], plan["site"]),
             "", "Settings change (only `trackers.%s` in `%s`):" % (kind, cfgp), SET.fence(json.dumps(settings, indent=1), "json"),
             "Read-only key saved as GitHub secrets: %s. Their values are never shown here or anywhere else."
             % ", ".join("`%s`" % n for n in plan["secrets"]),
@@ -630,7 +630,7 @@ kindf();tick();setInterval(tick,2000)</script>""" % json.dumps(ss.nonce)
         "<div class=eyebrow>story-gate · connect a tracker · %s</div><h1>Connect Linear or Jira.</h1>"
         "<style>.btnerr{color:var(--error);font-size:14px;font-weight:600;margin-left:8px}</style>"
         "<p class=lead>Your key goes straight into encrypted GitHub secrets. It's never written to your repository, and your "
-        "AI never sees it. Tracker support is experimental.</p><p class=msg id=msg></p>%s"
+        "AI never sees it.</p><p class=msg id=msg></p>%s"
         "<div class=foot>Runs only on this computer (127.0.0.1). This page stops 10 minutes after you close it (30 minutes at most).</div>%s"
         % (html.escape(ss.repo), cards, js))
 
@@ -649,7 +649,7 @@ def run(gate, top, open_browser=True, port=0, serve_seconds=LIFETIME):
     ss = Session(gate, top, repo, open_browser=open_browser)
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(ss))
     url = "http://127.0.0.1:%d/?t=%s" % (srv.server_address[1], ss.url_token)
-    print("story-gate tracker-setup for %s (experimental)\nOpen this page (it should open by itself). The link works once:\n  %s\n"
+    print("story-gate tracker-setup for %s\nOpen this page (it should open by itself). The link works once:\n  %s\n"
           "No browser here? Do it by hand instead (see the guide, 'Specs in Linear' and 'Specs in Jira'):\n"
           "  - for CI, add the secret STORY_GATE_LINEAR_KEY (Linear) or STORY_GATE_JIRA_EMAIL and STORY_GATE_JIRA_TOKEN "
           "(Jira) at %s/%s/settings/secrets/actions/new\n"

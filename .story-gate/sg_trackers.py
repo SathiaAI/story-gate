@@ -215,7 +215,10 @@ def adf_to_text(node, ac=False, _depth=0):
                 block(k, depth + 1, indent, ctx)
         elif t == "paragraph":
             text = inline(kids, depth)
-            if text:
+            if indent == 0 and _ac_heading(text):  # 'Acceptance criteria' (plain or bold) on its own line acts as a heading
+                out.append("\n**{}**\n".format(text.strip().rstrip(":").strip()))  # the gate reads this as a label to the next heading
+                ctx["ac"], ctx["ac_level"] = True, 7
+            elif text:
                 out.append(pad + text)
         elif t == "heading":
             text = inline(kids, depth)
@@ -393,6 +396,9 @@ def wiki_to_text(text, ac=False):
                     raise TrackerError("Jira's acceptance criteria are in a table, which story-gate can't read as criteria "
                                        "yet; use a list")
                 out.append(s_)
+            elif _ac_heading(re.sub(r"^\*(.+)\*$", r"\1", s_)):  # '*Acceptance criteria*' or a plain line: a label to the next heading
+                out.append("\n**{}**\n".format(re.sub(r"^\*(.+)\*$", r"\1", s_).strip().rstrip(":").strip()))
+                state["ac"], state["level"] = True, 7
             elif s_ == "----":
                 out.append("---")
             elif s_.startswith("bq."):

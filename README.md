@@ -20,14 +20,14 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **A one-page validation report** | Each goal next to the run that shows it working, with screenshots and steps to try it yourself |
 | **Nothing merges without you** | A failing story blocks the pull request, and only you (or people you name) can approve |
 | **A live dashboard** | A pinned GitHub issue: what's in progress, what's blocked, and what needs you |
-| **Works with your plans** | Reads Spec Kit, OpenSpec, Matt Pocock's skills, GitHub issues, and Linear or Jira tickets (new, experimental) |
+| **Works with your plans** | Reads Spec Kit, OpenSpec, Matt Pocock's skills, GitHub issues, and Linear or Jira tickets |
 | **Settings without editing files** | `story-gate settings` explains every setting and changes it safely (new) |
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
 
 ## New in v0.9.0
 
-- **Linear and Jira tickets** (Cloud, Server, Data Center): `story-gate spec-pull <story> ENG-12` copies the ticket into the story, and every pull request check compares it with the live ticket. Experimental until our live test with real accounts.
+- **Linear and Jira tickets** (Cloud, Server, Data Center): `story-gate spec-pull <story> ENG-12` copies the ticket into the story, and every pull request check compares it with the live ticket. Linear and Jira Cloud passed our live test with real accounts (October 2026); Jira Server and Data Center are still experimental.
 - **`story-gate settings`**: see every setting in plain English, and change one without editing `config.json`. Add `--pr` to open the change as its own pull request.
 - **Short workflows**: `story-gate install --ci reusable` replaces three long workflow files with short ones that call story-gate's own workflows, pinned to a signed release. Upgrading is a one-line change.
 - **Security fix**: a Linear or Jira key could reach GitHub's API during the pull request check. Fixed before any release included trackers.
@@ -172,7 +172,7 @@ Keep the tool you plan with. These tools write a good plan, but none of them blo
 | [OpenSpec](https://github.com/Fission-AI/OpenSpec) | `spec: openspec/changes/add-discount` | Each `#### Scenario:` |
 | [Matt Pocock's skills](https://github.com/mattpocock/skills) | The ticket file, e.g. `spec: .scratch/refunds/issues/03-refund.md` | Each `- [ ]` criterion and "As a …, I want …" user story |
 | GitHub Issues | `story-gate spec-pull <story> #42` | The issue's criteria and user stories |
-| [Linear](https://linear.app) or Jira (Cloud, Server, Data Center), experimental | `story-gate spec-pull <story> ENG-12`, once the tracker is set up ([Linear](docs/guide.md#specs-in-linear), [Jira](docs/guide.md#specs-in-jira)) | The ticket's criteria and user stories |
+| [Linear](https://linear.app) or Jira (Cloud, Server, Data Center; Server and Data Center experimental) | `story-gate spec-pull <story> ENG-12`, once the tracker is set up ([Linear](docs/guide.md#specs-in-linear), [Jira](docs/guide.md#specs-in-jira)) | The ticket's criteria and user stories |
 | [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) | Not read yet (its file layout is changing). Copy its acceptance criteria into `story.md` | Your acceptance criteria |
 
 **For every one of them:** each requirement must be covered by an acceptance criterion with passing tests, a recorded run and your approval. A dropped or hidden requirement blocks the check. A ticked box is not proof; only a passing test is. Copied issues and tickets are compared with the live version on every pull request ([how](docs/guide.md#spec-kit-openspec-and-bmad); specs in [another repository](docs/guide.md#specs-in-another-repository)).
