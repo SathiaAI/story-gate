@@ -235,6 +235,27 @@ def protection(repo, branch, token):
 RANK = {"passed": 0, "skipped": 1, "failed": 2}
 
 
+def _parse_xml_without_dtd(raw):
+    """Parse XML with the standard library's expat, refusing any DTD, entity declaration or external entity at the
+    parser itself (what defusedxml does), so no entity expansion or external fetch can happen whatever the bytes are."""
+    import xml.parsers.expat
+    builder = ET.TreeBuilder()
+    p = xml.parsers.expat.ParserCreate()
+
+    def refuse(*_):
+        raise ValueError("JUnit report rejected (it declares a DTD or an entity)")
+    p.StartDoctypeDeclHandler = p.EntityDeclHandler = p.UnparsedEntityDeclHandler = refuse
+    p.ExternalEntityRefHandler = refuse
+    p.StartElementHandler = builder.start
+    p.EndElementHandler = builder.end
+    p.CharacterDataHandler = builder.data
+    try:
+        p.Parse(raw, True)
+    except xml.parsers.expat.ExpatError as e:
+        raise ET.ParseError(str(e))
+    return builder.close()
+
+
 def junit(path, max_bytes=5_000_000):
     """-> {test_name: outcome} with outcome in passed|failed|skipped. Rejects oversized files and DTDs."""
     p = Path(path)
@@ -243,7 +264,7 @@ def junit(path, max_bytes=5_000_000):
     raw = p.read_bytes()
     if len(raw) > max_bytes or b"<!DOCTYPE" in raw[:2000].upper() or b"<!ENTITY" in raw:
         raise ValueError("JUnit report rejected (too large or contains a DTD/entity)")
-    root = ET.fromstring(raw)
+    root = _parse_xml_without_dtd(raw)
     out = {}
     for tc in root.iter("testcase"):
         name, cls = tc.get("name") or "", tc.get("classname") or ""

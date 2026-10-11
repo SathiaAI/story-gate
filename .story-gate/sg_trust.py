@@ -10,7 +10,7 @@
 
 Stdlib only. Nothing here talks to the network.
 """
-import difflib, hashlib, json, os, re, shutil, subprocess, tempfile, time
+import difflib, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.request
 from pathlib import Path
 
 
@@ -201,13 +201,23 @@ def sign_release(src, key, version):
     return man
 
 
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https:// address."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not str(newurl).startswith("https://"):
+            raise TrustError("the release download redirected to a non-https address")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch_release(url, dest):
     """Download a release archive over HTTPS (zip or tar.gz) and return the folder that holds its signed .story-gate files.
     Nothing in it is trusted until verify_release() has checked the signature."""
     import io, tarfile, urllib.request, zipfile
     if not url.startswith("https://"):
         raise TrustError("upgrades are only downloaded over https://")
-    data = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "story-gate"}), timeout=60).read()
+    opener = urllib.request.build_opener(_HttpsOnlyRedirect)  # release downloads redirect to a CDN: allowed, but only to https
+    data = opener.open(urllib.request.Request(url, headers={"User-Agent": "story-gate"}), timeout=60).read()
     if len(data) > 50_000_000:
         raise TrustError("release archive is unexpectedly large")
     dest = Path(dest)

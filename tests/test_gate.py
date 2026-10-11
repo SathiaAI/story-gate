@@ -2652,15 +2652,31 @@ class TestReleaseSignatures(unittest.TestCase):
         with tarfile.open(fileobj=buf, mode="w:gz") as t:
             info = tarfile.TarInfo("../../evil.txt"); payload = b"x"; info.size = len(payload)
             t.addfile(info, io.BytesIO(payload))
-        orig = urllib.request.urlopen
-        urllib.request.urlopen = lambda *a, **k: io.BytesIO(buf.getvalue())
+        handlers = []
+
+        class FakeOpener:
+            """Stands in for the download: returns the archive above."""
+            def open(self, *a, **k):
+                return io.BytesIO(buf.getvalue())
+        orig = urllib.request.build_opener
+        urllib.request.build_opener = lambda *h: handlers.extend(h) or FakeOpener()
         try:
             with self.assertRaises(self.T.TrustError):
                 self.T.fetch_release("https://example.invalid/r.tgz", self.d / "dl")
             with self.assertRaises(self.T.TrustError):
                 self.T.fetch_release("http://example.invalid/r.tgz", self.d / "dl")
         finally:
-            urllib.request.urlopen = orig
+            urllib.request.build_opener = orig
+        self.assertIn(self.T._HttpsOnlyRedirect, handlers)  # downloads follow redirects only to https
+
+    def test_release_download_follows_redirects_only_to_https(self):
+        """A release download may be redirected (GitHub sends it to a CDN), but never to a plain http:// address."""
+        import urllib.request
+        h = self.T._HttpsOnlyRedirect()
+        req = urllib.request.Request("https://github.com/o/r/releases/download/v1/r.tgz")
+        self.assertIsNotNone(h.redirect_request(req, None, 302, "Found", {}, "https://objects.githubusercontent.com/x"))
+        with self.assertRaises(self.T.TrustError):
+            h.redirect_request(req, None, 302, "Found", {}, "http://evil.example/x")
 
     def test_fingerprint_matches_ssh_keygen(self):
         out = subprocess.run(["ssh-keygen", "-lf", str(self.d / "key.pub")], capture_output=True, text=True).stdout
@@ -8131,6 +8147,51 @@ class TestReviewFixes(Base):
             self.assertRegex(ref, r"^[0-9a-f]{40}$", name)
             self.assertIn(ref, pinned.get(name, set()), name)
 
+    def test_junit_parser_refuses_dtds_and_entities_wherever_they_are(self):
+        """The JUnit reader refuses a DTD even when it sits after 2,000 bytes of comment (past the quick byte check), and
+        an entity bomb; an ordinary report still parses."""
+        import importlib, xml.etree.ElementTree as ET
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        d = Path(tempfile.mkdtemp())
+        late = b"<?xml version='1.0'?><!--" + b"x" * 3000 + b'--><!DOCTYPE t SYSTEM "http://169.254.169.254/x"><testsuite/>'
+        bomb = b'<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><testsuite><testcase name="&b;"/></testsuite>'
+        for name, raw in (("late", late), ("bomb", bomb)):
+            with self.subTest(name=name):
+                (d / "r.xml").write_bytes(raw)
+                with self.assertRaises((ValueError, ET.ParseError)):
+                    G.junit(d / "r.xml")
+                with self.assertRaises(ValueError):
+                    G._parse_xml_without_dtd(raw)  # the parser itself refuses, not only the byte check
+        (d / "ok.xml").write_bytes(b'<testsuite><testcase classname="m" name="t1"/><testcase name="t2"><failure/></testcase></testsuite>')
+        self.assertEqual(G.junit(d / "ok.xml"), {"t1": "passed", "m.t1": "passed", "m::t1": "passed", "t2": "failed"})
+
+    def test_keys_go_only_to_https_or_localhost_and_never_follow_a_redirect(self):
+        """A judge, webhook or control-hub address must be https:// (or http:// on this computer); a redirect is never
+        followed, since urllib would resend the key with it."""
+        import importlib, urllib.request
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        for url in ("https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:9/x"):
+            self.assertIsNone(J.endpoint_error(url), url)
+        for url in ("http://169.254.169.254/latest/meta-data", "http://judge.example.com/v1", "file:///etc/passwd", "ftp://x/y", "", "https://"):
+            self.assertIsNotNone(J.endpoint_error(url), url)
+        sent = []
+        orig = J.open_url
+        J.open_url = lambda *a, **k: sent.append(a)
+        try:
+            out = J._post("http://169.254.169.254/latest", "secret-key", {"x": 1}, 5)
+        finally:
+            J.open_url = orig
+        self.assertIn("refused", out["error"]); self.assertEqual(sent, [])  # nothing was sent
+        req = urllib.request.Request("https://judge.example/v1", headers={"Authorization": "Bearer k"})
+        self.assertIsNone(J._NoRedirect().redirect_request(req, None, 302, "Found", {}, "https://elsewhere.example/"))
+        g = load_gate(SRC.parent)
+        os.environ["SG_HUB_URL"], os.environ["SG_HUB_KEY"] = "http://hub.example.com", "k"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "refused"):
+                g.publish_control_hub({"url_env": "SG_HUB_URL", "key_env": "SG_HUB_KEY"}, ['{"event_type": "x"}'])
+        finally:
+            os.environ.pop("SG_HUB_URL"); os.environ.pop("SG_HUB_KEY")
+
     def test_dashboard_build_step_gets_the_token_so_ci_results_show(self):
         """GitHub doesn't export GITHUB_TOKEN to steps; the dashboard reads CI results only when it has one."""
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
@@ -8219,6 +8280,14 @@ class TestReviewLessons(unittest.TestCase):
         for text, phrase in checks:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+    def test_lesson_10_no_assert_for_checks(self):
+        """story-gate's code never uses assert for a check: python -O skips asserts, so the check would vanish."""
+        import ast
+        found = []
+        for f in sorted(SRC.glob("*.py")):
+            found += ["%s:%d" % (f.name, n.lineno) for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
+        self.assertEqual(found, [])
 
     def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
         """Values GitHub fills in from the event, inputs or earlier steps reach the shell through `env:`, never inline in `run:`."""
