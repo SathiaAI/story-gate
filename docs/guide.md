@@ -487,7 +487,7 @@ Tested in October 2026 with Spec Kit 1.1 (`specify init`, then its `create-new-f
 
 #### Specs in Linear
 
-> **Experimental.** Linear and Jira support is tested against recorded and public data, but not yet end to end against a real private workspace. Treat a "verified" here as a strong hint, not proof, until that test passes.
+> **Tested live.** Linear and Jira Cloud passed an end-to-end test against real private workspaces in October 2026. Jira Server and Data Center are still **experimental**: tested only against recorded data, so treat a "verified" there as a strong hint, not proof.
 
 Keep tickets in [Linear](https://linear.app)? Set it up once, then pull a ticket like an issue. The gate checks the copy; CI checks the copy against the live ticket.
 
@@ -524,7 +524,7 @@ Keep tickets in Jira Cloud (`your-site.atlassian.net`)? It works the same way as
 3. **Pull a ticket.** `story-gate spec-pull <story> ENG-12`, or paste its `/browse/` link. Using Linear too? Add `--tracker jira`, or paste the link. No token here? Paste the ticket with `--from-file`; it's marked "not verified" until CI compares it. The copy is saved as `jira-ENG-12.md`.
 4. **How the ticket is read.**
    - The acceptance-criteria field: each item, or each line of a plain-text field, becomes a `- [ ]` criterion under `## Acceptance criteria`.
-   - The description: list items under a heading named "Acceptance criteria" become criteria; other lists stay as they are. Checklists (action items) keep their boxes.
+   - The description: list items under a heading named "Acceptance criteria" become criteria; other lists stay as they are. A line that says only "Acceptance criteria" (plain or bold) counts as that heading, up to the next real heading. Checklists (action items) keep their boxes.
    - Tables, code, panels, mentions and links are kept as text; images show as `[attachment]`.
    - Criteria in a table (under "Acceptance criteria", in the criteria field, or a checklist inside any table) stop the copy: they can't be read one by one, so write them as a list.
    - Under an "Acceptance criteria" heading, keep only the list. A sentence or a table there is something story-gate can't read as a criterion, so the check stops and says which line.

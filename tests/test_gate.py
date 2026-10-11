@@ -6643,6 +6643,24 @@ class TestTrackerJira(Base):
             finally:
                 os.environ.pop("STORY_GATE_ROOT", None)
 
+    def test_a_plain_or_bold_acceptance_criteria_line_works_like_a_heading(self):
+        """Jira users often write 'Acceptance criteria' as a plain or bold line, not a heading: its list becomes criteria
+        up to the next heading, in Jira Cloud and Server/Data Center, and the gate reads the result the same way."""
+        TR, g = self.TR, self.g
+        notes = {"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Notes"}]}
+        bold = {"type": "paragraph", "content": [{"type": "text", "text": "Acceptance criteria:", "marks": [{"type": "strong"}]}]}
+        texts = [TR.adf_to_text(adf(para("Intro"), label, bullets("Login works"), notes, bullets("not a criterion")))
+                 for label in (para("Acceptance criteria"), bold)]
+        texts += [TR.wiki_to_text("Intro\n%s\n* Login works\nh3. Notes\n* not a criterion" % label)
+                  for label in ("Acceptance criteria", "*Acceptance criteria:*")]
+        for text in texts:
+            with self.subTest(text=text[:40]):
+                self.assertIn("**Acceptance criteria**", text)
+                self.assertIn("- [ ] Login works", text); self.assertIn("\n- not a criterion", text)
+                unread = []
+                self.assertEqual([s for _, s in g.spec_scenarios(text, unread)], ["Login works"]); self.assertEqual(unread, [])
+        self.assertIn("\n- point", TR.adf_to_text(adf(para("Acceptance criteria are below"), bullets("point"))))  # only the whole line counts
+
     def test_adf_reads_the_common_parts_and_fails_closed_on_the_rest(self):
         TR = self.TR
         doc = adf({"type": "heading", "attrs": {"level": 3}, "content": [{"type": "text", "text": "Notes"}]},
@@ -7584,7 +7602,7 @@ class TestTrackerSetup(Base):
         self.assertEqual(list(pr["files"]), [".story-gate/config.json"])
         new = json.loads(pr["files"][".story-gate/config.json"].decode())
         self.assertEqual(new["trackers"], {"linear": {"workspace": "acme"}}); self.assertEqual(new["mode"], "warn")
-        self.assertIn("experimental", pr["body"]); self.assertIn("STORY_GATE_LINEAR_KEY", pr["body"])
+        self.assertNotIn("experimental", pr["body"]); self.assertIn("STORY_GATE_LINEAR_KEY", pr["body"])
         self.assertIn("api.linear.app", pr["body"]); self.assertIn("looser", pr["body"])
         self.assertEqual(pr["tok"], "human-oauth")
         self.assertNotIn(self.LKEY, self.everything_seen(ss))
@@ -7776,6 +7794,21 @@ class TestReviewFixes(Base):
         self.assertEqual(len(W.sentences("We fixed the items. Then we ran the tests.")), 2)
         self.assertEqual(len(W.sentences("The answer is no. We moved on.")), 2)
         self.assertEqual(len(W.sentences("See e.g. the guide and item No. 5 there. Then go.")), 2)
+
+    def test_copy_mode_workflows_pin_the_same_actions_as_the_reusable_ones(self):
+        """Copied workflows use each action at a full commit SHA, the same one the reusable workflows pin (Node 24
+        versions), never a moving tag like @v4."""
+        import re
+        g = load_gate(SRC.parent)
+        pinned = {}
+        for f in (SRC.parent / ".github/workflows").glob("*.yml"):
+            for name, sha in re.findall(r"uses: (actions/[\w-]+)@([0-9a-f]{40})", f.read_text()):
+                pinned.setdefault(name, set()).add(sha)
+        used = re.findall(r"uses: (actions/[\w-]+)@(\S+)", g.CI_YML + g.AUDIT_YML + g.DASH_YML)
+        self.assertTrue(used)
+        for name, ref in used:
+            self.assertRegex(ref, r"^[0-9a-f]{40}$", name)
+            self.assertIn(ref, pinned.get(name, set()), name)
 
     def test_dashboard_build_step_gets_the_token_so_ci_results_show(self):
         """GitHub doesn't export GITHUB_TOKEN to steps; the dashboard reads CI results only when it has one."""

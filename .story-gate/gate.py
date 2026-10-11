@@ -43,7 +43,7 @@ Commands (run from the repo root):
   settings [KEY] | settings set KEY VALUE [--pr] | settings unset KEY [--pr]
                                       see every setting in plain English, or change one without editing config.json;
                                       --pr opens the change as its own pull request for a code owner to approve
-  tracker-setup                      you, not your AI: connect Linear or Jira Cloud in your browser (experimental). Signs
+  tracker-setup                      you, not your AI: connect Linear or Jira Cloud in your browser. Signs
                                       in with a code on github.com, tests a read-only key on one ticket, saves it as
                                       GitHub secrets (never in the repository) and opens the settings pull request
   jira-setup <site> ["field name"]   print the trackers.jira settings: the site's cloud id, and the id of the
@@ -3467,7 +3467,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
@@ -3482,7 +3482,7 @@ jobs:
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci-tests "$RUNNER_TEMP/sg-tests"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sg-tests
           path: ${{ runner.temp }}/sg-tests
@@ -3497,12 +3497,12 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: sg-tests
           path: ${{ runner.temp }}/sg-tests
@@ -3527,7 +3527,7 @@ jobs:
         run: |
 """ + TRUSTED_COPY + """
           python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         with:
           name: story-gate-validation
@@ -3549,7 +3549,7 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -3589,7 +3589,7 @@ jobs:
   dashboard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{{{ github.event.repository.default_branch || github.ref_name }}}}
           fetch-depth: 0
@@ -3601,7 +3601,7 @@ jobs:
           GITHUB_TOKEN: ${{{{ github.token }}}}  # not exported by default; the dashboard reads CI results only when it has it
         run: python3 .story-gate/gate.py dashboard --out "$RUNNER_TEMP/sg-dashboard"
       - id: report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: story-gate-dashboard
           path: ${{{{ runner.temp }}}}/sg-dashboard/dashboard.html
