@@ -811,8 +811,10 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
                   update_existing=False):
     """One commit with every file in `files` ({posix path: bytes}) on a new branch, then a PR. -> {number, url, branch}.
     `parent`: the base commit the files were computed from (default: the base branch's tip now).
-    When a PR from `branch` is already open it is returned with `existing: True`. With `update_existing`, that branch
-    first gets one more commit making `files` match (none when they already do), and `updated` says whether it did."""
+    When a PR from `branch` into `base` is already open it is returned with `existing: True`. With `update_existing`,
+    that branch first gets one commit on top of its tip whose content is exactly the base branch now plus `files`
+    (anything else pushed to the branch is undone; no commit when it already matches), and `updated` says whether it
+    did. An open PR from `branch` into another base is an error, never updated."""
     if not files:
         raise RuntimeError("nothing to commit: no files were given")
 
@@ -825,20 +827,22 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     r = "/repos/%s" % repo
     owner = repo.split("/", 1)[0]
     st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), token)
-    if st == 200 and isinstance(open_prs, list) and open_prs:  # `existing`: the files were NOT written; the caller decides
-        res = {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch, "existing": True}
-        if update_existing:
-            res["updated"] = _commit_files(ok, r, branch, files, title)
-        return res
+    found = open_prs[0] if st == 200 and isinstance(open_prs, list) and open_prs else None
+    if found and not update_existing:  # `existing`: the files were NOT written; the caller decides
+        return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True}
     base = base or ok("GET", r)["default_branch"]
     tip = parent or ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
     base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]
-    entries = []
-    for path, content in sorted(files.items()):
-        blob = ok("POST", r + "/git/blobs", {"content": base64.b64encode(content).decode(), "encoding": "base64"})
-        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
-    tree = ok("POST", r + "/git/trees", {"base_tree": base_tree, "tree": entries})
-    commit = ok("POST", r + "/git/commits", {"message": title, "tree": tree["sha"], "parents": [tip]})
+    if found:
+        into = (found.get("base") or {}).get("ref")
+        if into != base:
+            raise RuntimeError("pull request #%s from '%s' goes into '%s', not '%s'. Close it, then run this again."
+                               % (found["number"], branch, into, base))
+        res = {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True}
+        res["updated"] = _update_branch(ok, r, branch, _tree_with(ok, r, base_tree, files), title)
+        return res
+    tree = _tree_with(ok, r, base_tree, files)
+    commit = ok("POST", r + "/git/commits", {"message": title, "tree": tree, "parents": [tip]})
     st, ref, _ = call("POST", r + "/git/refs", token, {"ref": "refs/heads/" + branch, "sha": commit["sha"]})
     if st == 422:
         raise RuntimeError("the branch '%s' already exists on %s. Merge or delete it on GitHub, then run this again." % (branch, repo))
@@ -848,20 +852,24 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
 
 
-def _commit_files(ok, r, branch, files, message):
-    """Make `files` ({posix path: bytes}) on `branch` match, in one commit on top of its tip. -> True if a commit was
-    made, False when they already matched. `ok` is open_setup_pr's checked GitHub call."""
-    tip = ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(branch)))["object"]["sha"]
-    head_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]
+def _tree_with(ok, r, base_tree, files):
+    """A tree: `base_tree` with every file in `files` ({posix path: bytes}) written over it. -> its sha.
+    `ok` is open_setup_pr's checked GitHub call."""
     entries = []
     for path, content in sorted(files.items()):
         blob = ok("POST", r + "/git/blobs", {"content": base64.b64encode(content).decode(), "encoding": "base64"})
         entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
-    tree = ok("POST", r + "/git/trees", {"base_tree": head_tree, "tree": entries})
-    if tree["sha"] == head_tree:
+    return ok("POST", r + "/git/trees", {"base_tree": base_tree, "tree": entries})["sha"]
+
+
+def _update_branch(ok, r, branch, tree, message):
+    """Give `branch` the content `tree` in one commit on top of its tip (a fast-forward: if the branch moves meanwhile,
+    GitHub refuses and the error is raised). -> True if a commit was made, False when it already had that content."""
+    tip = ok("GET", f"{r}/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
+    if ok("GET", f"{r}/git/commits/{tip}")["tree"]["sha"] == tree:
         return False
-    commit = ok("POST", r + "/git/commits", {"message": message, "tree": tree["sha"], "parents": [tip]})
-    ok("PATCH", "%s/git/refs/heads/%s" % (r, urllib.parse.quote(branch)), {"sha": commit["sha"]})
+    commit = ok("POST", r + "/git/commits", {"message": message, "tree": tree, "parents": [tip]})
+    ok("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": commit["sha"]})
     return True
 
 
