@@ -349,6 +349,12 @@ def open_pr(G, key, value, remove):
     if not ref:
         raise SettingsError("%s has no branch %s" % (repo, base))
     tip = ref["object"]["sha"]
+    try:  # decided before anything is written; see sg_github.pr_author
+        who, pr_tok, why = GH.pr_author(repo, base, tok, GH.whoami(tok))
+    except GH.NoAuthor as e:
+        raise SettingsError(str(e))
+    except RuntimeError as e:
+        raise SettingsError("couldn't tell who should open the pull request: %s" % e)
     f = ok("/repos/%s/contents/%s?ref=%s" % (repo, CONFIG, tip))
     if not f or f.get("encoding") != "base64":
         raise SettingsError("%s has no %s on %s yet. Set story-gate up first (`story-gate init`)" % (repo, CONFIG, base))
@@ -372,20 +378,21 @@ def open_pr(G, key, value, remove):
         body += ["**This makes the rules looser than %s:**" % base, fence("\n".join("- " + x for x in looser), "text")]
     else:
         body += ["Not looser than %s." % base]
+    body += ["", "Opened by: %s." % why]
     body += ["", "Only `%s` changes. A code owner approves this pull request; GitHub doesn't count an approval from "
                  "whoever opened it or pushed its latest commit (or a code owner adds the label `%s`)."
              % (CONFIG, getattr(G, "CHANGE_LABEL", "story-gate-change"))]
     branch = "story-gate-settings-%s-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-"),
                                                 time.strftime("%Y%m%d%H%M%S", time.gmtime()), secrets.token_hex(3))
     try:
-        res = GH.open_setup_pr(tok, repo, {CONFIG: dump(new).encode("utf-8")}, branch=branch,
+        res = GH.open_setup_pr(pr_tok, repo, {CONFIG: dump(new).encode("utf-8")}, branch=branch,
                                title="story-gate settings: %s %s" % ("reset" if remove else "change", key),
                                body="\n".join(body), base=base, parent=tip)
     except RuntimeError as e:
         raise SettingsError(str(e))
     if res.get("branch") != branch:
         raise SettingsError("GitHub returned another pull request (%s) instead of a new one. Check it before running this again" % res.get("url"))
-    print("Opened pull request #%s to %s: %s" % (res["number"], what, res["url"]))
+    print("Opened pull request #%s to %s: %s (%s)" % (res["number"], what, res["url"], why))
     for line in strictness(looser, base):
         print(line)
     print("Nothing changed in this folder. A code owner approves the pull request; it takes effect when it's merged.")

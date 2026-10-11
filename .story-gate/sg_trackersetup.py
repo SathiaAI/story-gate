@@ -185,6 +185,7 @@ class Session:
             self.step, self.msg, self.plan, self._key, self.field_error = "checking", "Checking the details", None, None, None
 
     def details(self, form):
+        """Check the first form (tracker, site, ticket, key) and build the plan the person reviews. Raises FieldError per field."""
         kind = (form.get("kind") or "").strip()
         if kind not in KINDS:
             raise FieldError("kind", "Choose Linear or Jira Cloud.")
@@ -229,17 +230,18 @@ class Session:
             settings["allow_in_public_repo"] = True
         if not set(keys) <= ALLOWED_SECRETS or set(keys) != set(TR.secrets_for(kind, settings)):
             raise SetupError("Refusing to write an unexpected secret.")
+        who, _, why = self._author()
         existing = [n for n in sorted(keys) if self._secret_exists(n)]
         plan = {"id": secrets.token_urlsafe(12), "kind": kind, "label": "Linear" if kind == "linear" else "Jira Cloud",
                 "site": TR.site_of(kind, settings), "settings": settings, "ac_field_name": ac_name, "ticket": ticket,
                 "destination": dest, "secrets": sorted(keys), "replaces": existing,
                 "local_copy": form.get("local_copy") == "yes", "github": self.login, "repo": self.repo,
                 "public": not self.private, "branch": self.base, "warnings": self._workflow_warnings(),
-                "github_api": G.API, "proxy": proxy_in_use(),
-                "notes": [] if self._review_enforced() else [
+                "github_api": G.API, "proxy": proxy_in_use(), "author": who,
+                "notes": ["Who opens the settings pull request: %s." % why] + ([] if self._review_enforced() else [
                     "GitHub isn't enforcing story-gate's approval rule on %s (no active '%s' ruleset), so the settings pull "
                     "request could be merged without a code owner's review. Run `story-gate setup-repo` to turn it on."
-                    % (self.repo, G.RULESET_NAME)]}
+                    % (self.repo, G.RULESET_NAME)])}
         with self.lock:
             self._key, self.plan = keys, plan
         self.set("review", "Check these details, then confirm. Nothing has been sent with your key yet.")
@@ -253,6 +255,13 @@ class Session:
             return ["story-gate.yml uses pull_request_target. Pull requests' own code could run next to these secrets: "
                     "change it back to pull_request before connecting a tracker."]
         return []
+
+    def _author(self):
+        """Who opens the settings pull request (sg_github.pr_author); when nobody can, the page says what to do."""
+        try:
+            return G.pr_author(self.repo, self.base, self.token, self.login)
+        except G.NoAuthor as e:
+            raise SetupError(str(e))
 
     def _review_enforced(self):
         st, rules, _ = G.call("GET", "/repos/%s/rulesets" % self.repo, self.token)
@@ -284,6 +293,7 @@ class Session:
         self.save(plan, fetch, field_list)
 
     def save(self, plan, fetch=None, field_list=None):
+        """Test the key on the plan's ticket, then save the secrets and open the settings pull request; the outcome goes in self.result."""
         with self.lock:
             keys = dict(self._key or {})
         kind, settings = plan["kind"], dict(plan["settings"])
@@ -299,6 +309,9 @@ class Session:
                 settings["ac_field"] = self._ac_field(settings, token, plan["ac_field_name"], field_list)
             if self._can_edit(settings, token, t):
                 warn.append("This Jira token can edit tickets. story-gate only reads them: a read-only token is safer.")
+        who, pr_token, why = self._author()   # checked again before anything is written
+        if who != plan.get("author"):
+            raise SetupError("Who opens the settings pull request changed since you reviewed it (now: %s). Start again." % why)
         self.set("saving", "Saving the key as GitHub secrets")
         for name in plan["secrets"]:
             if name not in ALLOWED_SECRETS:
@@ -310,7 +323,7 @@ class Session:
             local = "A copy is saved on this computer for spec-pull (readable by programs running as you)."
         self.forget_key()
         self.set("saving", "Opening the settings pull request")
-        pr = open_settings_pr(self.gate, self.token, self.repo, kind, settings, plan)
+        pr = open_settings_pr(self.gate, pr_token, self.repo, kind, settings, plan)
         self.result = {"pr": pr, "warn": warn, "local": local, "title": t.get("title", "")[:120]}
         self.set("done", "Connected. Merge the pull request to turn it on.")
 

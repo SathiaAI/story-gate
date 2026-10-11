@@ -391,18 +391,69 @@ def owners_on_default_branch(repo, token):
     return []
 
 
-def setup_repo(root, repo, owners, token, dry_run=False):
-    """Human-run, one time: CODEOWNERS, ruleset, Actions cannot approve PRs. Returns a list of plain-English results."""
+def codeowners_change(co, new, repo, token, login, added):
+    """Put the new CODEOWNERS text where it can be approved: a pull request from the agent App, or the local file for you
+    to commit. -> one line for setup-repo's report."""
+    st, info, _ = call("GET", "/repos/%s" % repo, token)
+    base = (info.get("default_branch") if st == 200 and isinstance(info, dict) else None) or "main"
+    try:
+        who, tok, why = pr_author(repo, base, token, login)
+    except NoAuthor as e:
+        return "CODEOWNERS: not changed. %s" % e
+    except RuntimeError as e:
+        return "CODEOWNERS: not changed: couldn't tell who should open the pull request (%s)" % e
+    if who == "app":
+        try:  # one fixed branch: running setup-repo again before that pull request is merged finds it instead of opening another
+            res = open_setup_pr(tok, repo, {".github/CODEOWNERS": new.encode("utf-8")},
+                                branch="story-gate-codeowners", title="story-gate: code owners",
+                                body="Names the people who accept story-gate's work (`.github/CODEOWNERS`).\n\nOpened by: %s." % why,
+                                base=base)
+        except RuntimeError as e:  # report it and let setup-repo go on with the ruleset and Actions steps
+            return "CODEOWNERS: not changed: couldn't open the pull request (%s)" % e
+        if res.get("existing"):
+            err = update_branch_file(tok, repo, res["branch"], ".github/CODEOWNERS", new, "story-gate: code owners")
+            if err:
+                return ("CODEOWNERS: not changed: pull request #%s is already open with other code owners and couldn't be "
+                        "updated (%s). Close it, then run setup-repo again." % (res.get("number"), err))
+        return "%s in pull request #%s (%s). Approve and merge it, then run setup-repo again." % (added, res.get("number"), why)
+    co.parent.mkdir(parents=True, exist_ok=True)
+    co.write_text(new, encoding="utf-8")
+    return "%s (commit and merge this file: %s)" % (added, why)
+
+
+def update_branch_file(token, repo, branch, path, text, message):
+    """Make `path` on `branch` read exactly `text` (one commit, only when it differs). -> None, or why it couldn't."""
+    ref = "?ref=" + urllib.parse.quote(branch)
+    st, f, _ = call("GET", "/repos/%s/contents/%s%s" % (repo, path, ref), token)
+    if st == 200 and isinstance(f, dict) and f.get("encoding") == "base64":
+        if base64.b64decode(f.get("content") or "") == text.encode("utf-8"):
+            return None
+        sha = f.get("sha")
+    elif st == 404:
+        sha = None
+    else:
+        return "couldn't read %s on %s (HTTP %s)" % (path, branch, st)
+    body = {"message": message, "content": base64.b64encode(text.encode("utf-8")).decode(), "branch": branch}
+    if sha:
+        body["sha"] = sha
+    st, _, _ = call("PUT", "/repos/%s/contents/%s" % (repo, path), token, body)
+    return None if st in (200, 201) else "GitHub refused the update (HTTP %s)" % st
+
+
+def setup_repo(root, repo, owners, token, dry_run=False, login=None):
+    """Human-run, one time: CODEOWNERS, ruleset, Actions cannot approve PRs. Returns a list of plain-English results.
+    A CODEOWNERS change goes in a pull request the agent App opens when it is installed; otherwise in the local file for
+    you to commit, when that pull request can be approved (pr_author decides)."""
     out = []
     co = Path(root) / ".github" / "CODEOWNERS"
-    line = "* " + " ".join("@" + o.lstrip("@") for o in owners)
     text = co.read_text(encoding="utf-8") if co.exists() else ""
     new = add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
     if new is not None:
-        co.parent.mkdir(parents=True, exist_ok=True)
-        if not dry_run:
-            co.write_text(new, encoding="utf-8")
-        out.append("CODEOWNERS: added %s to the '*' rule (commit and merge this file)" % " ".join("@" + o.lstrip("@") for o in owners))
+        added = "CODEOWNERS: added %s to the '*' rule" % " ".join("@" + o.lstrip("@") for o in owners)
+        if dry_run:
+            out.append(added + " (dry run: nothing written)")
+        else:
+            out.append(codeowners_change(co, new, repo, token, login or (owners[0] if owners else None), added))
     else:
         out.append("CODEOWNERS: already lists %s" % ", ".join(owners))
     if dry_run:
@@ -575,15 +626,83 @@ def setup_agent(owner=None, org=False, code=None, open_browser=True):
 
 
 def page(inner):
+    """Wrap `inner` HTML in the small styled page the setup flows show in the browser."""
     return ("<!doctype html><meta charset=utf-8><title>story-gate setup</title><style>body{font:16px/1.5 system-ui,sans-serif;"
             "background:#FFF8F2;color:#1F2327;max-width:640px;margin:10vh auto;padding:0 24px}button{background:#FFD84D;color:#1F2327;"
             "border:2px solid #1F2327;border-radius:10px;padding:12px 18px;font-weight:600}</style>" + inner)
 
 
+class AgentMissing(RuntimeError):
+    """This computer has no agent App, or it isn't installed on the repository. Any other agent error is a plain RuntimeError."""
+
+
+class NoAuthor(RuntimeError):
+    """Nobody can open the pull request so that someone else can approve it; the message says what to do."""
+
+
+def approval_required(repo, branch, token):
+    """True when GitHub needs an approval to merge into `branch`, False when it doesn't, None when it can't tell.
+    Branch protection without readable rules counts as True: when unsure, assume an approval is needed."""
+    q = urllib.parse.quote(branch, safe="")
+    st, rules, _ = call("GET", "/repos/%s/rules/branches/%s" % (repo, q), token)
+    if st != 200 or not isinstance(rules, list):
+        return None
+    for r in rules:
+        if not (isinstance(r, dict) and r.get("type") == "pull_request"):
+            continue
+        p = r.get("parameters") or {}
+        if not isinstance(p, dict):
+            return True  # a pull-request rule we can't read: assume it needs an approval
+        try:
+            count = int(p.get("required_approving_review_count") or 0)
+        except (TypeError, ValueError):
+            return True
+        if count >= 1 or p.get("require_code_owner_review"):
+            return True
+    st, b, _ = call("GET", "/repos/%s/branches/%s" % (repo, q), token)
+    if st != 200 or not isinstance(b, dict):
+        return None
+    return bool(b.get("protected"))
+
+
+def pr_author(repo, branch, token, login, touches_workflows=False):
+    """Who opens a pull request story-gate makes, decided before anything is written. GitHub never counts an approval
+    from whoever opened a pull request, so:
+      1. the agent App, when it is installed on the repository (it opens, you approve);
+      2. otherwise you, when `branch` needs no approval yet or another code owner on it can approve;
+      3. otherwise NoAuthor, with the next step. An agent error other than "not set up" is raised, never swallowed.
+    The App can't change workflow files, so `touches_workflows` skips step 1. -> (who, token, why) with who 'app' or 'human'."""
+    if not touches_workflows:
+        try:
+            tok, _, rec = agent_token(repo)
+            perms = rec.get("permissions") or {}
+            short = [p for p in ("contents", "pull_requests") if perms.get(p) != "write"]
+            if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
+                raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
+                                   "and accept them on the installation, then try again." % (repo, " and ".join(short)))
+            return "app", tok, "the agent App (%s[bot]) opens it, so a code owner's approval counts" % rec.get("slug", "story-gate-agent")
+        except AgentMissing:
+            pass
+    need = approval_required(repo, branch, token)
+    if need is False:
+        return "human", token, "you open it: %s doesn't require an approval yet" % branch
+    others = sorted(o for o in (owners_on_default_branch(repo, token) or []) if o.lower() != (login or "").lower())
+    if others:
+        return "human", token, "you open it and another code owner (%s) approves it" % ", ".join("@" + o for o in others)
+    why = ("GitHub doesn't count your approval of your own pull request, and nobody else is a code owner on %s" % branch
+           if need else "story-gate couldn't read the rules on %s, and nobody else is a code owner there" % branch)
+    raise NoAuthor("%s. Do one, then try again: run `story-gate setup-agent` and install the agent App on %s (the App opens "
+                   "story-gate's pull requests and you approve them), or add a second code owner to .github/CODEOWNERS."
+                   % (why, repo) if not touches_workflows else
+                   "%s, and this pull request changes workflow files, which the agent App can't do. Add a second code owner "
+                   "to .github/CODEOWNERS, then try again." % why)
+
+
 def agent_record():
+    """The saved agent App record (agent.json). Raises AgentMissing when setup-agent has not run."""
     p = config_dir() / "agent.json"
     if not p.exists():
-        raise RuntimeError("no agent App yet. Run: gate.py setup-agent")
+        raise AgentMissing("no agent App yet. Run: gate.py setup-agent")
     rec = json.loads(p.read_text(encoding="utf-8"))
     if not os.path.isfile(rec.get("key", "")):  # same folder seen from another OS (e.g. a Windows drive seen from a Linux sandbox)
         rec["key"] = str(config_dir() / Path(rec.get("key", "").replace("\\", "/")).name)
@@ -591,6 +710,7 @@ def agent_record():
 
 
 def openssl():
+    """Path to an openssl binary (PATH, or Git for Windows' copy). Raises RuntimeError when there is none."""
     cands = [shutil.which("openssl")]
     if os.name == "nt":
         cands += [r"C:\Program Files\Git\usr\bin\openssl.exe", r"C:\Program Files\Git\mingw64\bin\openssl.exe"]
@@ -601,10 +721,12 @@ def openssl():
 
 
 def b64u(b):
+    """Base64url without padding, as JWTs use it."""
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
 def app_jwt(rec):
+    """A 9-minute RS256 JWT for the agent App, signed with its private key by openssl (refuses a key others can read)."""
     ok, detail = key_access(rec["key"])
     if not ok:
         raise RuntimeError("the agent key %s is readable by other users (%s). Re-run `gate.py setup-agent`, or on Mac/Linux run chmod 600 on it" % (rec["key"], detail))
@@ -621,12 +743,14 @@ def agent_token(repo):
     rec = agent_record()
     jwt = app_jwt(rec)
     st, inst, _ = call("GET", "/repos/%s/installation" % repo, jwt)
+    if st == 404:
+        raise AgentMissing("the agent App is not installed on %s. Install it: %s" % (repo, rec["install_url"]))
     if st != 200:
-        raise RuntimeError("the agent App is not installed on %s. Install it: %s" % (repo, rec["install_url"]))
+        raise RuntimeError("GitHub didn't say whether the agent App is installed on %s (HTTP %s)" % (repo, st))
     st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt, {"repositories": [repo.split("/", 1)[1]]})
     if st not in (200, 201):
         raise RuntimeError("GitHub refused an agent token (HTTP %s)" % st)
-    return tok["token"], tok.get("expires_at"), rec
+    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {})
 
 
 def bot_identity(rec):
@@ -698,8 +822,8 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     r = "/repos/%s" % repo
     owner = repo.split("/", 1)[0]
     st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), token)
-    if st == 200 and isinstance(open_prs, list) and open_prs:
-        return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch}
+    if st == 200 and isinstance(open_prs, list) and open_prs:  # `existing`: the files were NOT written; the caller decides
+        return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch, "existing": True}
     base = base or ok("GET", r)["default_branch"]
     tip = parent or ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
     base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]

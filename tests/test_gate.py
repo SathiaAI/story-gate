@@ -1256,6 +1256,99 @@ class TestRound4Fixes(Base):
         out, posts = run_with({"docs/CODEOWNERS": "* @paul\n"})  # case-insensitive, any of GitHub's three places
         self.assertEqual(len(posts), 1); self.assertIn("Ruleset: created", out)
 
+    def test_setup_repo_puts_codeowners_where_it_can_be_approved(self):
+        """The CODEOWNERS change goes in a pull request from the agent App when it's installed, in the local file when
+        the policy lets the person open it, and nowhere (with the next step) when nobody can."""
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        for n in ("pr_author", "open_setup_pr"):
+            self.addCleanup(setattr, G, n, getattr(G, n))
+        G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
+                                                              (200, {"default_branch": "trunk", "private": False}, {}) if path == "/repos/o/r"
+                                                              else (204, {}, {}))
+        prs = []
+        G.open_setup_pr = lambda tok, repo, files, **kw: prs.append((tok, files, kw)) or {"number": 9, "url": "u", "branch": kw["branch"]}
+        cases = {"app": lambda *a, **k: ("app", "app-tok", "the agent App opens it"),
+                 "human": lambda *a, **k: ("human", "t", "you open it: trunk doesn't require an approval yet")}
+        def nobody(*a, **k):
+            """Fake author policy: nobody can open the pull request."""
+            raise G.NoAuthor("nobody else is a code owner on trunk. Do one, then try again: run `story-gate setup-agent`")
+        cases["none"] = nobody
+        for who, policy in cases.items():
+            with self.subTest(who=who):
+                root = Path(tempfile.mkdtemp()); prs.clear(); G.pr_author = policy
+                out = " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul"))
+                written = (root / ".github/CODEOWNERS").exists()
+                if who == "app":
+                    self.assertEqual(prs[0][0], "app-tok"); self.assertEqual(prs[0][2]["base"], "trunk")
+                    self.assertEqual(prs[0][2]["branch"], "story-gate-codeowners")  # same branch every run: no second PR
+                    self.assertIn("* @Paul", prs[0][1][".github/CODEOWNERS"].decode()); self.assertFalse(written)
+                    self.assertIn("pull request #9", out)
+                elif who == "human":
+                    self.assertEqual(prs, []); self.assertTrue(written); self.assertIn("doesn't require an approval yet", out)
+                else:
+                    self.assertEqual(prs, []); self.assertFalse(written); self.assertIn("not changed", out); self.assertIn("setup-agent", out)
+
+    def setup_repo_with(self, G, existing_pr=None, branch_file=None, put_status=200):
+        """Run setup-repo as the agent App against a fake GitHub that has no CODEOWNERS on the default branch.
+        -> (report lines, [(method, path, body)] of every request)."""
+        import base64 as b64
+        calls = []
+        def call(m, path, t=None, b=None, accept=None):
+            """Fake GitHub API: records every request; no CODEOWNERS on the default branch, optional open-PR branch file."""
+            calls.append((m, path, b))
+            if path == "/repos/o/r":
+                return 200, {"default_branch": "trunk", "private": False}, {}
+            if path.endswith("/rulesets") and m == "GET":
+                return 200, [], {}
+            if "/contents/" in path and m == "GET":
+                if "ref=story-gate-codeowners" in path and branch_file is not None:
+                    return 200, {"encoding": "base64", "content": b64.b64encode(branch_file.encode()).decode(), "sha": "s1"}, {}
+                return 404, {}, {}
+            if "/contents/" in path and m == "PUT":
+                return put_status, {}, {}
+            return 204, {}, {}
+        G.call = call
+        G.pr_author = lambda *a, **k: ("app", "app-tok", "the agent App opens it")
+        if existing_pr:
+            G.open_setup_pr = lambda *a, **k: {"number": existing_pr, "url": "u", "branch": k["branch"], "existing": True}
+        return G.setup_repo(Path(tempfile.mkdtemp()), "o/r", ["Paul"], "t", login="paul"), calls
+
+    def test_setup_repo_goes_on_when_the_codeowners_pr_fails(self):
+        """A refused CODEOWNERS pull request is reported; setup-repo then holds the ruleset back (CODEOWNERS isn't on the
+        default branch) and still makes the Actions token read-only."""
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        for n in ("pr_author", "open_setup_pr"):
+            self.addCleanup(setattr, G, n, getattr(G, n))
+        def refused(*a, **k):
+            """Fake open_setup_pr: GitHub refuses the branch."""
+            raise RuntimeError("GitHub refused to create the branch (HTTP 403 )")
+        G.open_setup_pr = refused
+        out, calls = self.setup_repo_with(G)
+        self.assertIn("couldn't open the pull request", out[0]); self.assertIn("HTTP 403", out[0])
+        self.assertFalse([c for c in calls if c[0] == "POST" and c[1].endswith("/rulesets")])  # no ruleset that would block
+        self.assertIn("Ruleset: not turned on yet", " ".join(out))
+        actions = [c for c in calls if c[0] == "PUT" and c[1].endswith("/actions/permissions/workflow")]
+        self.assertEqual([c[2] for c in actions], [{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}])
+        self.assertIn("Actions: default token is read-only and cannot approve PRs", out)
+
+    def test_setup_repo_updates_an_open_codeowners_pr_with_other_owners(self):
+        """Run again with other owners before the first CODEOWNERS pull request is merged: that pull request's file is
+        updated, not left stale; an unchanged one isn't touched; a refused update says so instead of claiming success."""
+        import importlib, base64 as b64
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        for n in ("pr_author", "open_setup_pr"):
+            self.addCleanup(setattr, G, n, getattr(G, n))
+        out, calls = self.setup_repo_with(G, existing_pr=4, branch_file="* @someone-else\n")
+        puts = [c for c in calls if c[0] == "PUT" and "/contents/" in c[1]]
+        self.assertEqual(len(puts), 1); self.assertEqual(puts[0][2]["branch"], "story-gate-codeowners"); self.assertEqual(puts[0][2]["sha"], "s1")
+        self.assertIn("* @Paul", b64.b64decode(puts[0][2]["content"]).decode()); self.assertIn("pull request #4", out[0])
+        out, calls = self.setup_repo_with(G, existing_pr=4, branch_file=G.add_owners("", ["Paul"]))  # what this run would write
+        self.assertFalse([c for c in calls if c[0] == "PUT" and "/contents/" in c[1]]); self.assertIn("pull request #4", out[0])
+        out, _ = self.setup_repo_with(G, existing_pr=4, branch_file="* @someone-else\n", put_status=409)
+        self.assertIn("not changed", out[0]); self.assertIn("HTTP 409", out[0]); self.assertNotIn("added", out[0])
+
     def test_setup_repo_matches_owner_exactly(self):
         import importlib
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
@@ -3282,6 +3375,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         return sk, self.G.x25519(sk, (9).to_bytes(32, "little")), base64.b64encode
 
     def test_seal_box_decrypts_with_nacl(self):
+        """The sealed box story-gate builds for Actions secrets opens with libsodium (PyNaCl), when installed."""
         try:
             from nacl.public import PrivateKey, SealedBox
         except ImportError:
@@ -3292,6 +3386,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
             self.assertEqual(SealedBox(sk).decrypt(sealed), msg)
 
     def test_set_repo_secret_body(self):
+        """set_repo_secret sends the encrypted value with the repository key's id, never the plain text."""
         import base64
         sk, pk, _ = self.make_key()
         self.fake_api({("GET", "/repos/o/r/actions/secrets/public-key"): (200, {"key": base64.b64encode(pk).decode(), "key_id": "kid9"}),
@@ -3311,6 +3406,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
             pass
 
     def test_set_repo_secret_errors(self):
+        """set_repo_secret fails with a plain message when GitHub won't give the key or refuses the secret."""
         import base64
         _, pk, _ = self.make_key()
         self.fake_api({("GET", "/repos/o/r/actions/secrets/public-key"): (403, {})})
@@ -3324,16 +3420,139 @@ class TestGitHubSetupHelpers(unittest.TestCase):
 
 
 
+class TestAuthorPolicy(unittest.TestCase):
+    """sg_github.pr_author: who opens a pull request story-gate makes, so that a code owner's approval can count."""
+
+    def setUp(self):
+        """A fake GitHub (rules, branch, CODEOWNERS on the default branch) and a fake agent App."""
+        sys.path.insert(0, str(SRC))
+        import importlib, base64 as b64
+        self.G = G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        self.addCleanup(setattr, G, "agent_token", G.agent_token)
+        self.real_agent_token = G.agent_token
+        self.rules, self.protected, self.owners, self.rules_status = [], False, "* @paul\n", 200
+        def call(m, path, t=None, b=None, accept=None):
+            """Answer only what pr_author reads."""
+            if "/rules/branches/" in path:
+                return self.rules_status, self.rules, {}
+            if "/branches/" in path:
+                return 200, {"protected": self.protected}, {}
+            if path.endswith("/contents/.github/CODEOWNERS"):
+                return 200, {"encoding": "base64", "content": b64.b64encode(self.owners.encode()).decode()}, {}
+            return 404, {}, {}
+        G.call = call
+        self.agent = None  # None: no agent App; a string: its token; an exception: what agent_token raises
+        self.perms = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+        def agent_token(repo):
+            """The fake agent App."""
+            if self.agent is None:
+                raise G.AgentMissing("no agent App yet")
+            if isinstance(self.agent, Exception):
+                raise self.agent
+            return self.agent, "later", {"slug": "sg-agent", "permissions": self.perms}
+        G.agent_token = agent_token
+
+    def author(self, **kw):
+        """pr_author for o/r, branch main, signed in as paul."""
+        return self.G.pr_author("o/r", "main", "human-tok", "paul", **kw)
+
+
+    def test_unreadable_approval_rule_counts_as_needing_an_approval(self):
+        """A pull-request rule with an odd approval count or odd parameters means "approval needed", never a crash."""
+        for params in ({"required_approving_review_count": "two"}, {"required_approving_review_count": [1]}, ["x"], "x"):
+            with self.subTest(params=params):
+                self.rules = [{"type": "pull_request", "parameters": params}]
+                self.assertIs(self.G.approval_required("o/r", "main", "t"), True)
+        self.rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": "0"}}, "junk"]
+        self.assertIs(self.G.approval_required("o/r", "main", "t"), False)  # a readable 0 still falls through to the branch
+    def test_the_agent_app_opens_it_when_installed(self):
+        """Installed agent App: it opens the PR with its own token."""
+        self.agent = "app-tok"; self.rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]
+        who, tok, why = self.author()
+        self.assertEqual((who, tok), ("app", "app-tok")); self.assertIn("sg-agent[bot]", why)
+
+    def test_the_person_opens_it_when_no_approval_is_needed_yet(self):
+        """No agent App and an unprotected branch: the person opens it."""
+        who, tok, why = self.author()
+        self.assertEqual((who, tok), ("human", "human-tok")); self.assertIn("doesn't require an approval", why)
+
+    def test_the_person_opens_it_when_another_code_owner_can_approve(self):
+        """No agent App, a protected branch, and a second code owner: the person opens it, the other approves."""
+        self.rules = [{"type": "pull_request", "parameters": {"require_code_owner_review": True}}]
+        self.owners = "* @Paul @sam\n"
+        who, _, why = self.author()
+        self.assertEqual(who, "human"); self.assertIn("@sam", why); self.assertNotIn("@Paul", why)
+
+    def test_nobody_when_the_only_code_owner_would_open_it(self):
+        """No agent App, a protected branch, and the person is the only code owner: stop with the next step."""
+        self.protected = True  # classic branch protection counts as needing an approval
+        with self.assertRaisesRegex(self.G.NoAuthor, "setup-agent.*second code owner"):
+            self.author()
+
+    def test_unreadable_rules_are_not_treated_as_unprotected(self):
+        """If the branch rules can't be read, the person may open it only when another code owner can approve."""
+        self.rules_status = 403
+        with self.assertRaisesRegex(self.G.NoAuthor, "couldn't read the rules"):
+            self.author()
+
+    def test_an_agent_error_is_raised_not_swallowed(self):
+        """Only 'no agent App' falls through to the person; any other agent error stops the flow."""
+        self.agent = RuntimeError("GitHub refused an agent token (HTTP 500)")
+        with self.assertRaisesRegex(RuntimeError, "HTTP 500") as cm:
+            self.author()
+        self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
+
+    def test_an_app_without_write_access_stops_instead_of_falling_back(self):
+        """An installed App that can't push or open pull requests is an error, not a reason to use the person's login."""
+        self.agent = "app-tok"; self.perms = {"contents": "read", "pull_requests": "write"}
+        with self.assertRaisesRegex(RuntimeError, "lacks write access to contents") as cm:
+            self.author()
+        self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
+
+    def test_the_ruleset_never_lets_anyone_bypass_it(self):
+        """The rule story-gate creates has no bypass actors, so neither the agent App nor an admin can skip approval."""
+        self.assertEqual(self.G.ruleset_json("story-gate")["bypass_actors"], [])
+
+    def test_workflow_changes_skip_the_agent_app(self):
+        """The agent App can't change workflow files, so such a PR never uses it."""
+        self.agent = "app-tok"
+        who, tok, _ = self.author(touches_workflows=True)
+        self.assertEqual((who, tok), ("human", "human-tok"))
+        self.protected = True
+        with self.assertRaisesRegex(self.G.NoAuthor, "workflow files"):
+            self.author(touches_workflows=True)
+
+    def test_agent_missing_is_only_for_a_missing_or_uninstalled_app(self):
+        """agent_token raises AgentMissing for 'not set up here' and 'not installed on the repo'; other failures stay errors."""
+        from unittest import mock
+        G = self.G
+        home = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"STORY_GATE_HOME": str(home)}):
+            with self.assertRaises(G.AgentMissing):
+                self.real_agent_token("o/r")
+            (home / "agent.json").write_text(json.dumps({"key": str(home / "k.pem"), "install_url": "https://x"}))
+            with mock.patch.object(G, "app_jwt", return_value="jwt"):
+                for status, missing in ((404, True), (500, False)):
+                    with mock.patch.object(G, "call", return_value=(status, {}, {})), self.subTest(status=status):
+                        with self.assertRaises(RuntimeError) as cm:
+                            self.real_agent_token("o/r")
+                        self.assertEqual(isinstance(cm.exception, G.AgentMissing), missing)
+
+
 class TestGuidedSetup(unittest.TestCase):
     """story-gate init: the browser page and the setup pull request (GitHub calls are faked; no network)."""
 
     def setUp(self):
+        """Load sg_github and sg_setup with GitHub faked out, so no test touches the network."""
         sys.path.insert(0, str(SRC))
         import importlib, sg_github as G, sg_setup as S
         self.G, self.S = G, importlib.reload(S)
         keep_github_fakes_local(self, G)
-        saved = {n: getattr(G, n) for n in ("set_repo_secret", "open_setup_pr", "pr_merged", "setup_repo", "whoami", "human_token", "device_flow")}
+        saved = {n: getattr(G, n) for n in ("set_repo_secret", "open_setup_pr", "pr_merged", "setup_repo", "whoami", "human_token", "device_flow", "pr_author")}
         self.addCleanup(lambda: [setattr(G, n, f) for n, f in saved.items()])
+        self.authors = []  # the setup pull request's author check, recorded; tests replace it to say "nobody"
+        G.pr_author = lambda repo, base, tok, login, touches_workflows=False: self.authors.append(touches_workflows) or (
+            "human", tok, "you open it: %s doesn't require an approval yet" % base)
         self.tmp = Path(tempfile.mkdtemp())
         self.home = self.tmp / "home"; self.home.mkdir()
         self.old_env = dict(os.environ)
@@ -3460,6 +3679,7 @@ class TestGuidedSetup(unittest.TestCase):
                 self.assertIn(expect, wz.agent_form(1234))
 
     def test_judge_key_goes_to_a_secret_and_never_back_to_the_page(self):
+        """The judge key is saved as an Actions secret and never shown on the page again."""
         G, S = self.G, self.S
         sent = {}
         G.set_repo_secret = lambda tok, repo, name, value: sent.update(tok=tok, repo=repo, name=name, value=value)
@@ -3496,6 +3716,7 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual((wz.st["key"]["status"], wz.st["merge"]["status"]), ("ok", "ok"))
 
     def test_setup_pr_then_rules_after_the_merge(self):
+        """init opens the setup pull request first and turns the rules on only after it is merged."""
         G, S = self.G, self.S
         calls = []
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
@@ -3511,6 +3732,7 @@ class TestGuidedSetup(unittest.TestCase):
             time.sleep(0.1)
         self.assertEqual([c[0] for c in calls], ["pr", "rules"])
         self.assertIn(".github/CODEOWNERS", calls[0][1]); self.assertIn(".story-gate/gate.py", calls[0][1])
+        self.assertEqual(self.authors[:1], [True])  # the setup PR adds workflows, so the author check skips the agent App
         self.assertEqual(calls[1][1], ["me"])
         self.assertEqual(wz.st["merge"]["status"], "ok")
         self.assertFalse(wz.private_free)
@@ -3644,6 +3866,22 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertFalse(T.leads_to_runtime(str(bad))); self.assertFalse(T.leads_to_runtime(str(sneaky)))
         self.assertFalse(T.leads_to_runtime(str(self.tmp / "missing")))
         self.assertFalse(marker.exists())  # inspected, never executed
+
+    def test_setup_pr_stops_when_nobody_can_open_it(self):
+        """When the author policy finds nobody who can open an approvable setup PR, init says what to do and opens nothing."""
+        G, S = self.G, self.S
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        opened = []
+        G.open_setup_pr = lambda *a, **k: opened.append(1)
+        def nobody(*a, **k):
+            """Fake author policy: nobody can open a pull request that changes workflow files."""
+            raise G.NoAuthor("nobody else is a code owner on main, and this pull request changes workflow files")
+        G.pr_author = nobody
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        with self.assertRaisesRegex(RuntimeError, "changes workflow files"):
+            wz.open_pr()
+        self.assertEqual(opened, [])
 
     def test_setup_pr_stops_when_the_repo_lookup_fails(self):
         self.G.call = lambda m, p, tok=None, body=None, accept=None: (404, {"message": "Not Found"}, {})
@@ -7285,6 +7523,7 @@ class TestSettings(Base):
         self.assertIn("Looser than main", r.stdout); self.assertIn("mode went from enforce to warn", r.stdout)
 
     def test_odd_config_shapes_get_a_plain_message(self):
+        """A config.json with the wrong shape gets a plain message, not a traceback."""
         self.cfg(thresholds=5)
         r = run(self.repo, "settings", "set", "mode", "enforce")
         self.assertEqual(r.returncode, 1); self.assertIn('"thresholds" in .story-gate/config.json must be an object', r.stdout)
@@ -7315,6 +7554,7 @@ class TestSettings(Base):
         self.assertEqual(r.returncode, 1); self.assertIn("usage", r.stdout)
 
     def test_keys_and_tokens_are_never_written(self):
+        """Values that look like keys or tokens are refused and config.json stays unchanged."""
         before = (self.repo / ".story-gate/config.json").read_bytes()
         for val in ("ghp_" + "a" * 36, "github_pat_" + "b" * 30, "run --key sk-proj-" + "c1" * 20, "curl -H 'Authorization: Bearer " + "d" * 30 + "'",
                     "lin_api_" + "e" * 30, "AKIA" + "F" * 16, "ASIA" + "G" * 16, "glpat-" + "h" * 20, "npm_" + "i" * 36,
@@ -7331,6 +7571,7 @@ class TestSettings(Base):
             self.assertEqual(r.returncode, 0, r.stdout); self.assertEqual(self.conf()["test_command"], ok)
 
     def test_every_setting_is_listed_and_every_policy_setting_can_be_seen_loosening(self):
+        """Every setting appears in `settings`, and loosening any policy setting is called out."""
         g, SET = self.mod()
         tops = {k.split(".")[0] for k in list(SET.SETTINGS) + list(SET.ELSEWHERE)}
         self.assertEqual(set(g.DEFAULT_CONFIG) - {"version"} - tops, set())
@@ -7367,9 +7608,13 @@ class TestSettings(Base):
         self.assertEqual([x.name for x in p.parent.glob(".config.*")], [])
 
     def test_pr_changes_only_the_default_branch_copy(self):
+        """`settings --pr` changes only config.json on the default branch, says who opened it, and never touches the folder."""
         g, SET = self.mod()
         import sg_github as GH
         from unittest import mock
+        self.addCleanup(setattr, GH, "pr_author", GH.pr_author); self.addCleanup(setattr, GH, "whoami", GH.whoami)
+        GH.whoami = lambda tok: "paul"
+        GH.pr_author = lambda repo, base, tok, login, touches_workflows=False: ("app", "app-tok", "the agent App opens it")
         main_cfg = json.dumps({"mode": "enforce", "zzz": 1}).encode()
         replies = {"/repos/acme/shop": {"default_branch": "trunk"},
                    "/repos/acme/shop/git/ref/heads/trunk": {"object": {"sha": "abc123"}},
@@ -7386,6 +7631,7 @@ class TestSettings(Base):
         self.assertEqual((kw["base"], kw["parent"]), ("trunk", "abc123"))
         self.assertIn("looser than trunk", kw["body"]); self.assertIn("code owner", kw["body"])
         self.assertTrue(kw["branch"].startswith("story-gate-settings-mode-")); self.assertEqual(kw["title"], "story-gate settings: change mode")
+        self.assertEqual(args[0], "app-tok"); self.assertIn("Opened by: the agent App opens it.", kw["body"])
         sneaky = "x ```\n**Not looser** `"
         with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
                 mock.patch.object(GH, "call", side_effect=call), \
@@ -7404,6 +7650,23 @@ class TestSettings(Base):
         self.assertEqual((self.repo / ".story-gate/config.json").read_bytes(), here)
         with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value=None):
             self.assertEqual(SET.cli(g, ["set", "mode", "warn", "--pr"]), 1)
+
+    def test_pr_stops_when_nobody_can_open_it(self):
+        """No agent App and no other code owner: `settings --pr` explains what to do and opens nothing."""
+        g, SET = self.mod()
+        import sg_github as GH
+        from unittest import mock
+        replies = {"/repos/acme/shop": {"default_branch": "main"}, "/repos/acme/shop/git/ref/heads/main": {"object": {"sha": "abc"}}}
+        def none(*a, **k):
+            """Fake author policy: nobody can open the settings pull request."""
+            raise GH.NoAuthor("nobody else is a code owner on main. Do one, then try again: run `story-gate setup-agent`")
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "whoami", return_value="paul"), mock.patch.object(GH, "pr_author", side_effect=none), \
+                mock.patch.object(GH, "call", side_effect=lambda m, p, t=None, b=None: (200, replies[p], {})), \
+                mock.patch.object(GH, "open_setup_pr") as op:
+            with self.assertRaisesRegex(SET.SettingsError, "setup-agent"):
+                SET.open_pr(g, "mode", "warn", False)
+        op.assert_not_called()
 
     def test_doctor_notes_an_unknown_setting(self):
         self.cfg(mdoe="enforce")
@@ -7431,9 +7694,11 @@ class TestTrackerSetup(Base):
         import sg_trackersetup as TS, sg_github as G, sg_trackers as TR
         self.TS, self.G, self.TR = TS, G, TR
         keep_github_fakes_local(self, G)
-        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token"):
+        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token", "pr_author"):
             self.addCleanup(setattr, G, n, getattr(G, n))
         self.addCleanup(setattr, TR, "get_json", TR.get_json)
+        self.author = lambda tok: ("human", tok, "you open it: main doesn't require an approval yet")
+        G.pr_author = lambda repo, branch, tok, login, touches_workflows=False: self.author(tok)
         os.environ["STORY_GATE_HOME"] = str(self.repo.parent / (self.repo.name + "-home") / "sg")
         self.calls, self.secrets, self.prs = [], {}, []
         self.repo_info = {"permissions": {"admin": True}, "private": True, "default_branch": "main"}
@@ -7443,6 +7708,7 @@ class TestTrackerSetup(Base):
         conf = base64.b64encode(json.dumps({"mode": "warn"}).encode()).decode()
 
         def call(method, path, tok=None, body=None, accept=None):
+            """Fake GitHub API for the setup page: records each request and answers from fixed replies."""
             self.calls.append((method, path, tok, json.dumps(body)))
             if path == "/user":
                 return 200, self.user, {}
@@ -7485,6 +7751,7 @@ class TestTrackerSetup(Base):
         self.fail("still at %s: %s" % (ss.step, ss.msg))
 
     def linear_form(self, **kw):
+        """A valid Linear form for the details step; keyword arguments override fields."""
         f = {"kind": "linear", "workspace": "acme", "key": self.LKEY, "ticket": "eng-12"}
         f.update(kw)
         return f
@@ -7568,6 +7835,7 @@ class TestTrackerSetup(Base):
         self.assertIn("ferr-'+k", init)  # init's key and approver errors show under their field too
 
     def test_public_repository_needs_an_explicit_yes(self):
+        """Setting up a tracker on a public repository needs an explicit yes."""
         self.repo_info["private"] = False
         ss = self.session()
         with self.assertRaisesRegex(self.TS.SetupError, "public"):
@@ -7576,6 +7844,7 @@ class TestTrackerSetup(Base):
         self.assertTrue(ss.plan["public"]); self.assertIs(ss.plan["settings"]["allow_in_public_repo"], True)
 
     def test_confirm_tests_the_key_saves_secrets_and_opens_the_settings_pr_without_leaking_it(self):
+        """Confirm tests the key, saves the secrets and opens the settings pull request, and the key appears nowhere else."""
         ss = self.session()
         ss.details(self.linear_form())
         ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
@@ -7594,6 +7863,7 @@ class TestTrackerSetup(Base):
         self.assertFalse((Path(os.environ["STORY_GATE_HOME"]) / "trackers.env").exists())  # local copy is opt-in
 
     def test_confirm_must_name_the_reviewed_plan_and_replacing_needs_its_own_tick(self):
+        """Confirm only works for the plan the person reviewed, and replacing an existing secret needs its own tick."""
         self.have = {"STORY_GATE_LINEAR_KEY"}
         ss = self.session()
         ss.details(self.linear_form())
@@ -7607,6 +7877,39 @@ class TestTrackerSetup(Base):
         self.assertEqual(ss.step, "done", ss.msg)
         with self.assertRaisesRegex(self.TS.SetupError, "changed or expired"):  # a second click can't save twice
             ss.confirm({"plan": ss.plan["id"], "replace_ok": "yes"}, fetch=self.ticket)
+
+    def test_the_review_says_who_opens_the_pr_and_that_identity_opens_it(self):
+        """The author policy's choice is shown before confirming; the agent App's token opens the PR, secrets stay the person's."""
+        self.author = lambda tok: ("app", "app-tok", "the agent App (story-gate-agent[bot]) opens it, so a code owner's approval counts")
+        ss = self.session()
+        ss.details(self.linear_form())
+        self.assertIn("Who opens the settings pull request: the agent App", " ".join(ss.plan["notes"]))
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual(ss.step, "done", ss.msg)
+        self.assertEqual(self.prs[0]["tok"], "app-tok"); self.assertIn("the agent App", self.prs[0]["body"])
+        self.assertEqual(self.secrets["STORY_GATE_LINEAR_KEY"][0], "human-oauth")
+
+    def test_nobody_able_to_open_the_pr_stops_before_the_review(self):
+        """When the policy finds no author, the details step says what to do and nothing is written."""
+        def none(tok):
+            """Fake author policy: nobody can open the tracker settings pull request."""
+            raise self.G.NoAuthor("nobody else is a code owner on main. Do one, then try again: run `story-gate setup-agent`")
+        self.author = none
+        ss = self.session()
+        with self.assertRaisesRegex(self.TS.SetupError, "setup-agent"):
+            ss.details(self.linear_form())
+        self.assertEqual((self.secrets, self.prs), ({}, []))
+
+    def test_a_changed_author_between_review_and_save_writes_nothing(self):
+        """The author is checked again before secrets are written; if it changed, the person starts again."""
+        ss = self.session()
+        ss.details(self.linear_form())
+        plan = ss.confirm_start({"plan": ss.plan["id"]})
+        self.author = lambda tok: ("app", "app-tok", "the agent App opens it")
+        ss.background(lambda: ss.save(plan, fetch=self.ticket))
+        self.wait(ss, "error")
+        self.assertIn("changed since you reviewed it", ss.msg)
+        self.assertEqual((self.secrets, self.prs), ({}, []))
 
     def test_a_failed_test_read_saves_nothing_and_never_echoes_the_key(self):
         ss = self.session()
@@ -7638,10 +7941,11 @@ class TestTrackerSetup(Base):
         self.assertEqual((self.secrets, ss._key), ({}, None))
 
     def test_unenforced_review_is_said_on_the_review_screen_and_in_the_pull_request(self):
+        """When GitHub won't enforce the review (no ruleset), the review screen and the pull request both say so."""
         self.rulesets = []
         ss = self.session()
         ss.details(self.linear_form())
-        self.assertIn("isn't enforcing", ss.plan["notes"][0])
+        self.assertIn("isn't enforcing", ss.plan["notes"][-1])
         ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
         self.assertIn("isn't enforcing", self.prs[0]["body"])
 
