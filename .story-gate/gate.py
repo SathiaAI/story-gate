@@ -4334,14 +4334,22 @@ def cmd_setup(cmd, kv, rest):
     return 2
 
 
+# Flags that take no value. Every flag a command looks for in `rest` must be listed here (a test checks), or flags()
+# would read the next argument as its value.
+BOOL_FLAGS = ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--serve", "--publish",
+              "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force", "--revoke")
+
+
 def flags(argv):
-    """Split argv into (--key value / --flag) pairs and the remaining positional arguments."""
+    """Split argv into (--key value / --flag) pairs and the remaining positional arguments. A --key with no value after
+    it, or followed by a flag that takes none, stops with a usage message instead of being quietly ignored."""
     kv, rest, i = {}, [], 0
     while i < len(argv):
-        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--serve", "--publish",
-                       "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force"):
+        if argv[i] in BOOL_FLAGS:
             rest.append(argv[i]); i += 1
-        elif argv[i].startswith("--") and i + 1 < len(argv):
+        elif argv[i].startswith("--") and len(argv[i]) > 2:
+            if i + 1 >= len(argv) or argv[i + 1] in BOOL_FLAGS:
+                sys.exit("story-gate: %s needs a value (e.g. %s VALUE)" % (argv[i], argv[i]))
             k = argv[i][2:]
             kv[k] = (kv[k] + "\n" + argv[i + 1]) if k == "keep-project-hook" and k in kv else argv[i + 1]  # repeatable
             i += 2

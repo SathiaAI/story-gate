@@ -8108,5 +8108,92 @@ class TestReviewFixes(Base):
         self.assertEqual(got, [sneaky, ours + " ; curl x", elsewhere, expands])  # ours alone passes
 
 
+class TestReviewLessons(unittest.TestCase):
+    """Checks for mistakes that kept coming back in pull request reviews (docs/review-lessons.md). Each test names its lesson."""
+
+    SRC_MISSING_DOCSTRINGS = 281    # lesson 1: may only go down. Lower it when you add docstrings.
+    TEST_MISSING_DOCSTRINGS = 575
+    # lesson 6: run lines known to put a GitHub value straight into the shell. Only remove entries; never add.
+    KNOWN_RUN_INTERPOLATIONS = {
+        (".story-gate/gate.py", "steps.report.outputs.artifact-url"),          # fixed by #73; remove once it is on main
+        (".github/workflows/dashboard.yml", "steps.report.outputs.artifact-url"),  # needs a workflow-file push (#2b)
+    }
+
+    def gate(self):
+        """story-gate's own gate.py, loaded the way the tests load a repository's copy."""
+        g = load_gate(SRC.parent); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        return g
+
+    def missing_docstrings(self, files):
+        """How many functions in these files have no docstring."""
+        import ast
+        n = 0
+        for f in files:
+            for nd in ast.walk(ast.parse(Path(f).read_text(encoding="utf-8"))):
+                if isinstance(nd, (ast.FunctionDef, ast.AsyncFunctionDef)) and not ast.get_docstring(nd):
+                    n += 1
+        return n
+
+    def test_lesson_1_new_functions_have_docstrings(self):
+        """The number of functions without a docstring never grows (reviewers flag every undocumented function a PR touches)."""
+        src = self.missing_docstrings(sorted(SRC.glob("*.py")))
+        tests = self.missing_docstrings([Path(__file__)])
+        self.assertLessEqual(src, self.SRC_MISSING_DOCSTRINGS, "add docstrings to the new functions in .story-gate/")
+        self.assertLessEqual(tests, self.TEST_MISSING_DOCSTRINGS, "add docstrings to the new test functions")
+
+    def test_lesson_2_every_flag_looked_up_in_rest_takes_no_value(self):
+        """A flag a command looks for in `rest` must be in BOOL_FLAGS, or flags() reads the next argument as its value."""
+        import re
+        g = self.gate()
+        used = set()
+        for f in SRC.glob("*.py"):
+            used |= set(re.findall(r'"(--[a-z][a-z-]*)" (?:not )?in rest_?\b', f.read_text(encoding="utf-8")))
+        self.assertTrue(used)
+        self.assertEqual(sorted(used - set(g.BOOL_FLAGS)), [])
+
+    def test_lesson_2_a_flag_without_its_value_is_refused(self):
+        """`--every` given last, or followed by a flag that takes no value, stops with a message instead of being ignored."""
+        g = self.gate()
+        for argv in (["--repo"], ["--repo", "--dry-run"], ["dashboard", "--out"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(SystemExit, "needs a value"):
+                g.flags(argv)
+        self.assertEqual(g.flags(["--repo", "o/r", "--dry-run", "x"]), ({"repo": "o/r"}, ["--dry-run", "x"]))
+        self.assertEqual(g.flags(["--revoke", "my hook"]), ({}, ["--revoke", "my hook"]))  # any order, as documented
+
+    def test_lesson_5_docs_quote_the_limits_the_code_uses(self):
+        """Numbers the docs promise match the constants that enforce them."""
+        sys.path.insert(0, str(SRC))
+        import importlib; R = importlib.import_module("sg_report")
+        guide = (SRC.parent / "docs/guide.md").read_text(encoding="utf-8")
+        usage = (SRC / "gate.py").read_text(encoding="utf-8")
+        checks = [(guide, "%d KB each" % (R.MAX_IMAGE // 1000)), (guide, "%d MB and %d images per story" % (R.MAX_IMAGES_TOTAL // 1000000, R.MAX_IMAGES)),
+                  (usage, "%d KB max" % (R.MAX_IMAGE // 1000))]
+        for text, phrase in checks:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
+        """Values GitHub fills in from the event, inputs or earlier steps reach the shell through `env:`, never inline in `run:`."""
+        import re
+        risky = re.compile(r"\$\{\{+\s*(github\.event\.[\w.]+|github\.head_ref|github\.ref_name|inputs\.[\w-]+|steps\.[\w-]+\.outputs\.[\w-]+)")
+        found = set()
+        for f in [SRC / "gate.py"] + sorted((SRC.parent / ".github/workflows").glob("*.yml")):
+            lines, block = f.read_text(encoding="utf-8").splitlines(), None
+            for line in lines:
+                ind = len(line) - len(line.lstrip())
+                m = re.match(r"\s*(?:-\s*)?run:\s*(.*)$", line)
+                if m:
+                    block = ind if m.group(1).strip() in ("|", ">", "|-", ">-") else None
+                    text = m.group(1)
+                elif block is not None and (ind > block or not line.strip()):
+                    text = line
+                else:
+                    block, text = None, ""
+                for r in risky.findall(text):
+                    found.add((f.relative_to(SRC.parent).as_posix(), r))
+        self.assertEqual(sorted(found - self.KNOWN_RUN_INTERPOLATIONS), [])
+        self.assertEqual(sorted(self.KNOWN_RUN_INTERPOLATIONS - found), [], "fixed: remove it from KNOWN_RUN_INTERPOLATIONS")
+
+
 if __name__ == "__main__":
     unittest.main()
