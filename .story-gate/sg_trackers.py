@@ -216,7 +216,7 @@ def adf_to_text(node, ac=False, _depth=0):
         elif t == "paragraph":
             text = inline(kids, depth)
             if indent == 0 and _ac_heading(text):  # 'Acceptance criteria' (plain or bold) on its own line acts as a heading
-                out.append("\n**%s**\n" % text.strip().rstrip(":").strip())  # the gate reads this as a label to the next heading
+                out.append("\n**{}**\n".format(text.strip().rstrip(":").strip()))  # the gate reads this as a label to the next heading
                 ctx["ac"], ctx["ac_level"] = True, 7
             elif text:
                 out.append(pad + text)
@@ -397,7 +397,7 @@ def wiki_to_text(text, ac=False):
                                        "yet; use a list")
                 out.append(s_)
             elif _ac_heading(re.sub(r"^\*(.+)\*$", r"\1", s_)):  # '*Acceptance criteria*' or a plain line: a label to the next heading
-                out.append("\n**%s**\n" % re.sub(r"^\*(.+)\*$", r"\1", s_).strip().rstrip(":").strip())
+                out.append("\n**{}**\n".format(re.sub(r"^\*(.+)\*$", r"\1", s_).strip().rstrip(":").strip()))
                 state["ac"], state["level"] = True, 7
             elif s_ == "----":
                 out.append("---")

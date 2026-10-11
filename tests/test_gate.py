@@ -6651,7 +6651,7 @@ class TestTrackerJira(Base):
         bold = {"type": "paragraph", "content": [{"type": "text", "text": "Acceptance criteria:", "marks": [{"type": "strong"}]}]}
         texts = [TR.adf_to_text(adf(para("Intro"), label, bullets("Login works"), notes, bullets("not a criterion")))
                  for label in (para("Acceptance criteria"), bold)]
-        texts += [TR.wiki_to_text("Intro\n%s\n* Login works\nh3. Notes\n* not a criterion" % label)
+        texts += [TR.wiki_to_text(f"Intro\n{label}\n* Login works\nh3. Notes\n* not a criterion")
                   for label in ("Acceptance criteria", "*Acceptance criteria:*")]
         for text in texts:
             with self.subTest(text=text[:40]):
