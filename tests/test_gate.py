@@ -263,6 +263,27 @@ class TestInstallCI(Base):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("webhook address refused", r.stdout); self.assertIn("sink webhook FAILED", r.stdout)
 
+    def test_publish_webhook_that_redirects_counts_as_failed(self):
+        """A webhook that answers with a redirect is not followed and the sink FAILS, so its events are sent again later."""
+        import http.server
+        import threading
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            """Answers every POST with a redirect to another host."""
+            def do_POST(self):
+                """Redirect instead of accepting the event."""
+                self.send_response(302); self.send_header("Location", "http://evil.example/steal"); self.end_headers()
+
+            def log_message(self, *a):
+                """Stay quiet in test output."""
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        run(self.repo, "start", "SAT-1")
+        self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
+        r = run(self.repo, "publish", env={"SG_TEST_HOOK": f"http://127.0.0.1:{srv.server_port}/hook"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("sink webhook FAILED", r.stdout)
+
 
 class TestHardening(Base):
     def test_traversal_and_gate_files_not_exempt(self):
@@ -2685,8 +2706,9 @@ class TestReleaseSignatures(unittest.TestCase):
         h = self.T._HttpsOnlyRedirect()
         req = urllib.request.Request("https://github.com/o/r/releases/download/v1/r.tgz")
         self.assertIsNotNone(h.redirect_request(req, None, 302, "Found", {}, "https://objects.githubusercontent.com/x"))
-        with self.assertRaises(self.T.TrustError):
-            h.redirect_request(req, None, 302, "Found", {}, "http://evil.example/x")
+        for bad in ("http://evil.example/x", "https:/evil.example/x", "httpsx://evil.example/x", "https:///x"):
+            with self.subTest(to=bad), self.assertRaises(self.T.TrustError):
+                h.redirect_request(req, None, 302, "Found", {}, bad)
 
     def test_fingerprint_matches_ssh_keygen(self):
         out = subprocess.run(["ssh-keygen", "-lf", str(self.d / "key.pub")], capture_output=True, text=True).stdout
@@ -8184,7 +8206,8 @@ class TestReviewFixes(Base):
         sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
         for url in ("https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:9/x"):
             self.assertIsNone(J.endpoint_error(url), url)
-        for url in ("http://169.254.169.254/latest/meta-data", "http://judge.example.com/v1", "file:///etc/passwd", "ftp://x/y", "", "https://"):
+        for url in ("http://169.254.169.254/latest/meta-data", "http://judge.example.com/v1", "file:///etc/passwd", "ftp://x/y", "", "https://",
+                    "http://127.0.0.1:9@evil.example/", "http://localhost@evil.example/", "https://user:pw@judge.example/"):
             self.assertIsNotNone(J.endpoint_error(url), url)
         sent = []
         orig = J.open_url

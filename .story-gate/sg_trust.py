@@ -11,6 +11,7 @@
 Stdlib only. Nothing here talks to the network.
 """
 import difflib, hashlib, json, os, re, shutil, subprocess, tempfile, time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -207,7 +208,8 @@ class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         """Allow the redirect only when it points to another https:// address."""
-        if not str(newurl).startswith("https://"):
+        u = urllib.parse.urlsplit(str(newurl))
+        if u.scheme != "https" or not u.hostname:
             raise TrustError("the release download redirected to a non-https address")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -216,7 +218,7 @@ def fetch_release(url, dest):
     """Download a release archive over HTTPS (zip or tar.gz) and return the folder that holds its signed .story-gate files.
     Nothing in it is trusted until verify_release() has checked the signature."""
     import io, tarfile, urllib.request, zipfile
-    if not url.startswith("https://"):
+    if urllib.parse.urlsplit(url).scheme != "https" or not urllib.parse.urlsplit(url).hostname:
         raise TrustError("upgrades are only downloaded over https://")
     opener = urllib.request.build_opener(_HttpsOnlyRedirect)  # release downloads redirect to a CDN: allowed, but only to https
     data = opener.open(urllib.request.Request(url, headers={"User-Agent": "story-gate"}), timeout=60).read()

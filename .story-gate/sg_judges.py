@@ -97,6 +97,8 @@ def endpoint_error(url):
         host = u.hostname
     except ValueError:
         return "it isn't a valid address"
+    if u.username is not None or u.password is not None:  # user@host hides the real host from a quick read
+        return "addresses with a user name or password in them aren't allowed"
     if u.scheme == "https" and host:
         return None
     if u.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
