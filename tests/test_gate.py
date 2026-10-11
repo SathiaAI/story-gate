@@ -3066,9 +3066,12 @@ class TestLiveDashboard(Base):
         self.assertLess(time.time() - t0, 10); self.assertFalse(tmp.exists())
 
     def test_serve_rejects_a_non_numeric_interval_and_help_lists_it(self):
-        """`--serve --every soon` is refused with a plain message, and the help text lists --serve."""
+        """`--serve --every soon` or a trailing `--every`/`--idle` is refused with a plain message; help lists --serve."""
         r = run(self.repo, "dashboard", "--serve", "--every", "soon", "--no-browser")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
+        for args in (("--no-browser", "--every"), ("--no-browser", "--idle")):  # a flag given last with no number
+            r = run(self.repo, "dashboard", "--serve", *args)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
         self.assertIn("--serve", run(self.repo, "help").stdout)
 
     # ---- the saved copy
