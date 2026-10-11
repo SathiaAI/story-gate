@@ -8114,9 +8114,7 @@ class TestReviewLessons(unittest.TestCase):
     SRC_MISSING_DOCSTRINGS = 281    # lesson 1: may only go down. Lower it when you add docstrings.
     TEST_MISSING_DOCSTRINGS = 575
     # lesson 6: run lines known to put a GitHub value straight into the shell. Only remove entries; never add.
-    KNOWN_RUN_INTERPOLATIONS = {
-        (".story-gate/gate.py", "steps.report.outputs.artifact-url"),          # fixed by #73; remove once it is on main
-    }
+    KNOWN_RUN_INTERPOLATIONS = frozenset()  # (file, expression) pairs still inline in run:; may only shrink
 
     def gate(self):
         """story-gate's own gate.py, loaded the way the tests load a repository's copy."""
