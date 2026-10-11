@@ -8134,7 +8134,8 @@ class TestReviewLessons(unittest.TestCase):
         return n
 
     def test_lesson_1_new_functions_have_docstrings(self):
-        """The number of functions without a docstring never grows (reviewers flag every undocumented function a PR touches)."""
+        """Repository-wide ratchet: the count of functions without a docstring never grows. It can't see a PR that adds
+        one undocumented function and documents an old one; the per-function check is the pre-PR checklist."""
         src = self.missing_docstrings(sorted(SRC.glob("*.py")))
         tests = self.missing_docstrings([Path(__file__)])
         self.assertLessEqual(src, self.SRC_MISSING_DOCSTRINGS, "add docstrings to the new functions in .story-gate/")
@@ -8151,9 +8152,10 @@ class TestReviewLessons(unittest.TestCase):
         self.assertEqual(sorted(used - set(g.BOOL_FLAGS)), [])
 
     def test_lesson_2_a_flag_without_its_value_is_refused(self):
-        """`--every` given last, or followed by a flag that takes no value, stops with a message instead of being ignored."""
+        """A value-taking option given last, or followed by any other option, stops with a message instead of being
+        ignored or swallowing that option (`--repo --every 5` must not make `--every` the repository)."""
         g = self.gate()
-        for argv in (["--repo"], ["--repo", "--dry-run"], ["dashboard", "--out"]):
+        for argv in (["--repo"], ["--repo", "--dry-run"], ["dashboard", "--out"], ["--repo", "--every", "5"], ["--out", "--"]):
             with self.subTest(argv=argv), self.assertRaisesRegex(SystemExit, "needs a value"):
                 g.flags(argv)
         self.assertEqual(g.flags(["--repo", "o/r", "--dry-run", "x"]), ({"repo": "o/r"}, ["--dry-run", "x"]))
@@ -8167,6 +8169,8 @@ class TestReviewLessons(unittest.TestCase):
         usage = (SRC / "gate.py").read_text(encoding="utf-8")
         checks = [(guide, "%d KB each" % (R.MAX_IMAGE // 1000)), (guide, "%d MB and %d images per story" % (R.MAX_IMAGES_TOTAL // 1000000, R.MAX_IMAGES)),
                   (usage, "%d KB max" % (R.MAX_IMAGE // 1000))]
+        D = importlib.import_module("sg_dashboard")
+        checks.append((guide, "would pass {:,} characters (GitHub allows 65,536)".format(D.ISSUE_LIMIT)))  # the 65,000-vs-60,000 slip
         for text, phrase in checks:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)

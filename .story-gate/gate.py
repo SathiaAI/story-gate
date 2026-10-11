@@ -4342,13 +4342,15 @@ BOOL_FLAGS = ("--strict", "--dry-run", "--no-browser", "--git-credential", "--us
 
 def flags(argv):
     """Split argv into (--key value / --flag) pairs and the remaining positional arguments. A --key with no value after
-    it, or followed by a flag that takes none, stops with a usage message instead of being quietly ignored."""
+    it, or followed by another option (anything starting with --), stops with a usage message instead of being quietly
+    ignored or swallowing that option. No value story-gate takes starts with --; commands that pass on arguments split
+    them off at a bare -- first."""
     kv, rest, i = {}, [], 0
     while i < len(argv):
         if argv[i] in BOOL_FLAGS:
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and len(argv[i]) > 2:
-            if i + 1 >= len(argv) or argv[i + 1] in BOOL_FLAGS:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
                 sys.exit("story-gate: %s needs a value (e.g. %s VALUE)" % (argv[i], argv[i]))
             k = argv[i][2:]
             kv[k] = (kv[k] + "\n" + argv[i + 1]) if k == "keep-project-hook" and k in kv else argv[i + 1]  # repeatable
