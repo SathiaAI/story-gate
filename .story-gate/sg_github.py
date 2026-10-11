@@ -403,10 +403,13 @@ def codeowners_change(co, new, repo, token, login, added):
     except RuntimeError as e:
         return "CODEOWNERS: not changed: couldn't tell who should open the pull request (%s)" % e
     if who == "app":
-        res = open_setup_pr(tok, repo, {".github/CODEOWNERS": new.encode("utf-8")},
-                            branch="story-gate-codeowners-%s" % secrets.token_hex(3), title="story-gate: code owners",
-                            body="Names the people who accept story-gate's work (`.github/CODEOWNERS`).\n\nOpened by: %s." % why,
-                            base=base)
+        try:  # one fixed branch: running setup-repo again before that pull request is merged finds it instead of opening another
+            res = open_setup_pr(tok, repo, {".github/CODEOWNERS": new.encode("utf-8")},
+                                branch="story-gate-codeowners", title="story-gate: code owners",
+                                body="Names the people who accept story-gate's work (`.github/CODEOWNERS`).\n\nOpened by: %s." % why,
+                                base=base)
+        except RuntimeError as e:  # report it and let setup-repo go on with the ruleset and Actions steps
+            return "CODEOWNERS: not changed: couldn't open the pull request (%s)" % e
         return "%s in pull request #%s (%s). Approve and merge it, then run setup-repo again." % (added, res.get("number"), why)
     co.parent.mkdir(parents=True, exist_ok=True)
     co.write_text(new, encoding="utf-8")

@@ -1280,12 +1280,30 @@ class TestRound4Fixes(Base):
                 written = (root / ".github/CODEOWNERS").exists()
                 if who == "app":
                     self.assertEqual(prs[0][0], "app-tok"); self.assertEqual(prs[0][2]["base"], "trunk")
+                    self.assertEqual(prs[0][2]["branch"], "story-gate-codeowners")  # same branch every run: no second PR
                     self.assertIn("* @Paul", prs[0][1][".github/CODEOWNERS"].decode()); self.assertFalse(written)
                     self.assertIn("pull request #9", out)
                 elif who == "human":
                     self.assertEqual(prs, []); self.assertTrue(written); self.assertIn("doesn't require an approval yet", out)
                 else:
                     self.assertEqual(prs, []); self.assertFalse(written); self.assertIn("not changed", out); self.assertIn("setup-agent", out)
+
+    def test_setup_repo_goes_on_when_the_codeowners_pr_fails(self):
+        """A refused CODEOWNERS pull request is reported, and setup-repo still does the ruleset and Actions steps."""
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        for n in ("pr_author", "open_setup_pr"):
+            self.addCleanup(setattr, G, n, getattr(G, n))
+        G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
+                                                              (200, {"default_branch": "trunk", "private": False}, {}) if path == "/repos/o/r"
+                                                              else (204, {}, {}))
+        G.pr_author = lambda *a, **k: ("app", "app-tok", "the agent App opens it")
+        def refused(*a, **k):
+            raise RuntimeError("GitHub refused to create the branch (HTTP 403 )")
+        G.open_setup_pr = refused
+        out = G.setup_repo(Path(tempfile.mkdtemp()), "o/r", ["Paul"], "t", login="paul")
+        self.assertIn("couldn't open the pull request", out[0]); self.assertIn("HTTP 403", out[0])
+        self.assertTrue(any(x.startswith("Ruleset:") for x in out)); self.assertTrue(any(x.startswith("Actions:") for x in out))
 
     def test_setup_repo_matches_owner_exactly(self):
         import importlib
