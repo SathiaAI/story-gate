@@ -410,10 +410,34 @@ def codeowners_change(co, new, repo, token, login, added):
                                 base=base)
         except RuntimeError as e:  # report it and let setup-repo go on with the ruleset and Actions steps
             return "CODEOWNERS: not changed: couldn't open the pull request (%s)" % e
+        if res.get("existing"):
+            err = update_branch_file(tok, repo, res["branch"], ".github/CODEOWNERS", new, "story-gate: code owners")
+            if err:
+                return ("CODEOWNERS: not changed: pull request #%s is already open with other code owners and couldn't be "
+                        "updated (%s). Close it, then run setup-repo again." % (res.get("number"), err))
         return "%s in pull request #%s (%s). Approve and merge it, then run setup-repo again." % (added, res.get("number"), why)
     co.parent.mkdir(parents=True, exist_ok=True)
     co.write_text(new, encoding="utf-8")
     return "%s (commit and merge this file: %s)" % (added, why)
+
+
+def update_branch_file(token, repo, branch, path, text, message):
+    """Make `path` on `branch` read exactly `text` (one commit, only when it differs). -> None, or why it couldn't."""
+    ref = "?ref=" + urllib.parse.quote(branch)
+    st, f, _ = call("GET", "/repos/%s/contents/%s%s" % (repo, path, ref), token)
+    if st == 200 and isinstance(f, dict) and f.get("encoding") == "base64":
+        if base64.b64decode(f.get("content") or "") == text.encode("utf-8"):
+            return None
+        sha = f.get("sha")
+    elif st == 404:
+        sha = None
+    else:
+        return "couldn't read %s on %s (HTTP %s)" % (path, branch, st)
+    body = {"message": message, "content": base64.b64encode(text.encode("utf-8")).decode(), "branch": branch}
+    if sha:
+        body["sha"] = sha
+    st, _, _ = call("PUT", "/repos/%s/contents/%s" % (repo, path), token, body)
+    return None if st in (200, 201) else "GitHub refused the update (HTTP %s)" % st
 
 
 def setup_repo(root, repo, owners, token, dry_run=False, login=None):
@@ -602,6 +626,7 @@ def setup_agent(owner=None, org=False, code=None, open_browser=True):
 
 
 def page(inner):
+    """Wrap `inner` HTML in the small styled page the setup flows show in the browser."""
     return ("<!doctype html><meta charset=utf-8><title>story-gate setup</title><style>body{font:16px/1.5 system-ui,sans-serif;"
             "background:#FFF8F2;color:#1F2327;max-width:640px;margin:10vh auto;padding:0 24px}button{background:#FFD84D;color:#1F2327;"
             "border:2px solid #1F2327;border-radius:10px;padding:12px 18px;font-weight:600}</style>" + inner)
@@ -676,6 +701,7 @@ def agent_record():
 
 
 def openssl():
+    """Path to an openssl binary (PATH, or Git for Windows' copy). Raises RuntimeError when there is none."""
     cands = [shutil.which("openssl")]
     if os.name == "nt":
         cands += [r"C:\Program Files\Git\usr\bin\openssl.exe", r"C:\Program Files\Git\mingw64\bin\openssl.exe"]
@@ -686,10 +712,12 @@ def openssl():
 
 
 def b64u(b):
+    """Base64url without padding, as JWTs use it."""
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
 def app_jwt(rec):
+    """A 9-minute RS256 JWT for the agent App, signed with its private key by openssl (refuses a key others can read)."""
     ok, detail = key_access(rec["key"])
     if not ok:
         raise RuntimeError("the agent key %s is readable by other users (%s). Re-run `gate.py setup-agent`, or on Mac/Linux run chmod 600 on it" % (rec["key"], detail))
@@ -785,8 +813,8 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     r = "/repos/%s" % repo
     owner = repo.split("/", 1)[0]
     st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), token)
-    if st == 200 and isinstance(open_prs, list) and open_prs:
-        return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch}
+    if st == 200 and isinstance(open_prs, list) and open_prs:  # `existing`: the files were NOT written; the caller decides
+        return {"number": open_prs[0]["number"], "url": open_prs[0]["html_url"], "branch": branch, "existing": True}
     base = base or ok("GET", r)["default_branch"]
     tip = parent or ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
     base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]

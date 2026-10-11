@@ -368,6 +368,7 @@ class Wizard:
         return names
 
     def open_pr(self, approvers_text=""):
+        """Open the setup pull request with the author pr_author picks, after checking the approvers named on the page."""
         self.set("merge", "working", "Preparing the setup pull request")
         self.approvers = self.check_approvers(approvers_text)
         st, info, _ = G.call("GET", "/repos/%s" % self.repo, self.token)

@@ -4280,6 +4280,7 @@ def origin_repo():
 
 
 def cmd_setup(cmd, kv, rest):
+    """`setup-repo` / `setup-agent`: one-time GitHub setup, run by you with your own login (never the AI)."""
     import sg_github as G
     repo = kv.get("repo") or origin_repo()
     if cmd == "setup-repo":

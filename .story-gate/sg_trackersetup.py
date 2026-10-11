@@ -185,6 +185,7 @@ class Session:
             self.step, self.msg, self.plan, self._key, self.field_error = "checking", "Checking the details", None, None, None
 
     def details(self, form):
+        """Check the first form (tracker, site, ticket, key) and build the plan the person reviews. Raises FieldError per field."""
         kind = (form.get("kind") or "").strip()
         if kind not in KINDS:
             raise FieldError("kind", "Choose Linear or Jira Cloud.")
@@ -292,6 +293,7 @@ class Session:
         self.save(plan, fetch, field_list)
 
     def save(self, plan, fetch=None, field_list=None):
+        """Test the key on the plan's ticket, then save the secrets and open the settings pull request; the outcome goes in self.result."""
         with self.lock:
             keys = dict(self._key or {})
         kind, settings = plan["kind"], dict(plan["settings"])
