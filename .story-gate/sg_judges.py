@@ -84,7 +84,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, *args, **kwargs):
         """Refuse every redirect (return None), so urllib raises instead of following it."""
-        return None
+        return
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
@@ -113,7 +113,7 @@ def _post(url, key, body, timeout):
     """POST JSON to the judge with its key, only to an allowed address and without following redirects. -> parsed reply, or {error}."""
     why = endpoint_error(url)
     if why:  # the key never goes to an address that isn't encrypted or that we can't name
-        return {"error": "judge address refused: %s" % why}
+        return {"error": f"judge address refused: {why}"}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
         "Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "story-gate"})
     try:

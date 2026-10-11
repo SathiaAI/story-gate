@@ -347,7 +347,7 @@ def cfg():
         try:
             user = json.loads(text)
             if not isinstance(user, dict):  # not assert: python -O would skip it
-                raise ValueError("not a JSON object")
+                raise TypeError("not a JSON object")
         except Exception as ex:
             raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % ex.__class__.__name__)
         if e:  # the working tree may only tighten the default branch's policy
@@ -3316,7 +3316,7 @@ def cmd_publish():
             elif t == "webhook" and os.environ.get(s.get("url_env", "")):
                 hook = os.environ[s["url_env"]]
                 if J.endpoint_error(hook):
-                    raise RuntimeError("webhook address refused: %s" % J.endpoint_error(hook))
+                    raise RuntimeError(f"webhook address refused: {J.endpoint_error(hook)}")
                 for l in todo:
                     J.open_url(urllib.request.Request(hook, data=l.encode(), headers={"Content-Type": "application/json"}), 30)
                 ok = True
@@ -3341,7 +3341,7 @@ def publish_control_hub(s, todo):
     """Send events to a control-hub (Supabase REST) endpoint over https with its key; never follows a redirect. -> True on success."""
     url, key = os.environ[s["url_env"]].rstrip("/"), os.environ[s["key_env"]]
     if J.endpoint_error(url):  # the key goes in the headers: never to an unencrypted or redirected address
-        raise RuntimeError("control-hub address refused: %s" % J.endpoint_error(url))
+        raise RuntimeError(f"control-hub address refused: {J.endpoint_error(url)}")
     h = {"apikey": key, "Authorization": "Bearer " + key, "Content-Type": "application/json"}
     pid = None
     if s.get("project_slug"):

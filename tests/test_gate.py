@@ -255,6 +255,14 @@ class TestInstallCI(Base):
         self.assertIn("nothing new delivered", run(self.repo, "publish").stdout)
         self.assertEqual(out.read_text().count("story_gate.started"), 1)  # no duplicates
 
+    def test_publish_webhook_refuses_an_unencrypted_address(self):
+        """A webhook sink pointed at plain http:// on another host fails (nothing sent) and is retried later, not skipped."""
+        run(self.repo, "start", "SAT-1")
+        self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
+        r = run(self.repo, "publish", env={"SG_TEST_HOOK": "http://169.254.169.254/latest/meta-data"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("webhook address refused", r.stdout); self.assertIn("sink webhook FAILED", r.stdout)
+
 
 class TestHardening(Base):
     def test_traversal_and_gate_files_not_exempt(self):
@@ -8152,7 +8160,8 @@ class TestReviewFixes(Base):
     def test_junit_parser_refuses_dtds_and_entities_wherever_they_are(self):
         """The JUnit reader refuses a DTD even when it sits after 2,000 bytes of comment (past the quick byte check), and
         an entity bomb; an ordinary report still parses."""
-        import importlib, xml.etree.ElementTree as ET
+        import importlib
+        import xml.etree.ElementTree as ET
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
         d = Path(tempfile.mkdtemp())
         late = b"<?xml version='1.0'?><!--" + b"x" * 3000 + b'--><!DOCTYPE t SYSTEM "http://169.254.169.254/x"><testsuite/>'
@@ -8170,7 +8179,8 @@ class TestReviewFixes(Base):
     def test_keys_go_only_to_https_or_localhost_and_never_follow_a_redirect(self):
         """A judge, webhook or control-hub address must be https:// (or http:// on this computer); a redirect is never
         followed, since urllib would resend the key with it."""
-        import importlib, urllib.request
+        import importlib
+        import urllib.request
         sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
         for url in ("https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:9/x"):
             self.assertIsNone(J.endpoint_error(url), url)
@@ -8288,7 +8298,7 @@ class TestReviewLessons(unittest.TestCase):
         import ast
         found = []
         for f in sorted(SRC.glob("*.py")):
-            found += ["%s:%d" % (f.name, n.lineno) for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
+            found += [f"{f.name}:{n.lineno}" for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
         self.assertEqual(found, [])
 
     def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
