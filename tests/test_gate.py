@@ -2699,6 +2699,18 @@ class TestDashboard(Base):
         self.assertEqual(prs[0]["run"], {"id": 4, "status": "in_progress", "conclusion": None})
         self.assertIsNone(prs[1]["run"]); self.assertEqual(prs[1]["sha"], "s2")
 
+    def test_graphql_rate_limit_inside_a_200_is_waited_out(self):
+        """GitHub's GraphQL API can report a rate limit with HTTP 200; that is retried like a 429."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        replies = [(200, {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}, {"Retry-After": "2"}),
+                   (200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(7, "COMPLETED", "SUCCESS")])]), {})]
+        waits = []
+        with mock.patch.object(G, "call", side_effect=lambda *a, **k: replies.pop(0)), \
+                mock.patch.object(self.D.time, "sleep", side_effect=waits.append):
+            prs = self.D.open_prs(G, "o/r", "t", "story-gate")
+        self.assertEqual(waits, [2]); self.assertEqual(prs[0]["run"]["conclusion"], "success")
+
     def test_graphql_errors_become_an_omission_not_a_crash(self):
         """A GraphQL error or a missing permission leaves a note and no CI results; it is not retried."""
         from unittest import mock
@@ -2720,6 +2732,10 @@ class TestDashboard(Base):
         self.assertTrue(D.rate_limited(403, {"message": "You have exceeded a secondary rate limit"}, {}))
         self.assertFalse(D.rate_limited(403, {"message": "Resource not accessible by integration"}, {"X-RateLimit-Remaining": "4000"}))
         self.assertFalse(D.rate_limited(500, {}, {}))
+        self.assertTrue(D.rate_limited(200, {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}, {}))
+        self.assertTrue(D.rate_limited(200, {"errors": [{"message": "You have exceeded a secondary rate limit"}]}, {}))
+        self.assertFalse(D.rate_limited(200, {"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}]}, {}))
+        self.assertFalse(D.rate_limited(200, {"data": {}}, {"X-RateLimit-Remaining": "0"}))  # an answer, not an error
         self.assertEqual(D.backoff({"Retry-After": "7"}, 0), 7)
         self.assertEqual(D.backoff({"Retry-After": "900"}, 0), 60)
         self.assertEqual(D.backoff({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1030"}, 0, now=1000), 30)

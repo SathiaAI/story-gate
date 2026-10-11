@@ -551,7 +551,7 @@ Every repository with story-gate gets a **Story-gate dashboard** issue, pinned a
 - **If Issues are turned off** in the repository: open **Actions** → **story-gate-dashboard** → the latest run. The same dashboard is in the run's summary.
 - **On your own computer:** `story-gate dashboard --open` builds the full report and opens it in your browser. For a page that keeps itself current, run `story-gate dashboard --serve` (see [a live page on your computer](#a-live-page-on-your-computer)).
 
-The pinned issue **is** the live dashboard. It shows when it was updated and when the next refresh is due, a pie chart and a pipeline chart (the tables under them are the full data), and long lists fold away. If the issue gets too long for GitHub (about 65,000 characters), it keeps the top of each list and says "N more: see the full report", linking to the HTML report.
+The pinned issue **is** the live dashboard. It shows when it was updated and when the next refresh is due, a pie chart and a pipeline chart (the tables under them are the full data), and long lists fold away. If the issue would pass 60,000 characters (GitHub allows 65,536), it keeps the top of each list and says "N more: see the full report", linking to the HTML report.
 
 ### When it updates
 

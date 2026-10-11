@@ -706,9 +706,13 @@ def rate_limited(st, data, hdr):
     """True when GitHub refused because of a rate limit (worth waiting for), not because a permission is missing."""
     if st == 429:
         return True
+    h = hdr or {}
+    if st == 200 and isinstance(data, dict) and isinstance(data.get("errors"), list):  # GraphQL reports a limit inside a 200
+        errs = [e for e in data["errors"] if isinstance(e, dict)]
+        msg = " ".join(str(e.get("message", "")) for e in errs).lower()
+        return any(e.get("type") == "RATE_LIMITED" for e in errs) or "rate limit" in msg or str(h.get("X-RateLimit-Remaining", "")) == "0"
     if st != 403:
         return False
-    h = hdr or {}
     msg = str(data.get("message", "")).lower() if isinstance(data, dict) else ""
     return bool(h.get("Retry-After")) or str(h.get("X-RateLimit-Remaining", "")) == "0" or "rate limit" in msg
 
