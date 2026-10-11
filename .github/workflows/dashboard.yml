@@ -68,8 +68,9 @@ jobs:
           STORY_GATE_ROOT: ${{ github.workspace }}/repo
           STORY_GATE_TRUSTED_DIR: ${{ runner.temp }}/sg
           GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_URL: ${{ steps.report.outputs.artifact-url }}  # through env:, never inline in run: (review lesson 6)
         working-directory: repo
-        run: python3 "$RUNNER_TEMP/sg/gate.py" dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "${{ steps.report.outputs.artifact-url }}" --out "$RUNNER_TEMP/sg-dashboard"
+        run: python3 "$RUNNER_TEMP/sg/gate.py" dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "$ARTIFACT_URL" --out "$RUNNER_TEMP/sg-dashboard"
       - name: say so if the refresh failed (the last good snapshot stays)
         if: failure() && steps.prep.outputs.ready == 'true'
         env:

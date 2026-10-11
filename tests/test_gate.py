@@ -8116,7 +8116,6 @@ class TestReviewLessons(unittest.TestCase):
     # lesson 6: run lines known to put a GitHub value straight into the shell. Only remove entries; never add.
     KNOWN_RUN_INTERPOLATIONS = {
         (".story-gate/gate.py", "steps.report.outputs.artifact-url"),          # fixed by #73; remove once it is on main
-        (".github/workflows/dashboard.yml", "steps.report.outputs.artifact-url"),  # needs a workflow-file push (#2b)
     }
 
     def gate(self):
