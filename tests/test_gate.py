@@ -8179,7 +8179,7 @@ class TestReviewFixes(Base):
         same SHA everywhere an action is used; only local ./ actions need no pin."""
         import re
         seen = {}
-        uses = re.compile(r"""^\s*(?:-\s*)?uses:\s*["']?([^\s"'#]+)""", re.M)
+        uses = re.compile(r"""^\s*(?:-\s*)?uses:\s*["']?([^\s"'#]+)""", re.MULTILINE)
         for f in sorted((SRC.parent / ".github/workflows").glob("*.yml")):
             for target in uses.findall(f.read_text()):
                 if target.startswith("./"):

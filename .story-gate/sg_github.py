@@ -836,8 +836,8 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     if found:
         into = (found.get("base") or {}).get("ref")
         if into != base:
-            raise RuntimeError("pull request #%s from '%s' goes into '%s', not '%s'. Close it, then run this again."
-                               % (found["number"], branch, into, base))
+            raise RuntimeError(f"pull request #{found['number']} from '{branch}' goes into '{into}', not '{base}'. "
+                               "Close it, then run this again.")
         res = {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True}
         res["updated"] = _update_branch(ok, r, branch, _tree_with(ok, r, base_tree, files), title)
         return res
