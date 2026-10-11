@@ -699,6 +699,7 @@ def pr_author(repo, branch, token, login, touches_workflows=False):
 
 
 def agent_record():
+    """The saved agent App record (agent.json). Raises AgentMissing when setup-agent has not run."""
     p = config_dir() / "agent.json"
     if not p.exists():
         raise AgentMissing("no agent App yet. Run: gate.py setup-agent")

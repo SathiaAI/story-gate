@@ -1322,6 +1322,7 @@ class TestRound4Fixes(Base):
         for n in ("pr_author", "open_setup_pr"):
             self.addCleanup(setattr, G, n, getattr(G, n))
         def refused(*a, **k):
+            """Fake open_setup_pr: GitHub refuses the branch."""
             raise RuntimeError("GitHub refused to create the branch (HTTP 403 )")
         G.open_setup_pr = refused
         out, calls = self.setup_repo_with(G)
@@ -3542,6 +3543,7 @@ class TestGuidedSetup(unittest.TestCase):
     """story-gate init: the browser page and the setup pull request (GitHub calls are faked; no network)."""
 
     def setUp(self):
+        """Load sg_github and sg_setup with GitHub faked out, so no test touches the network."""
         sys.path.insert(0, str(SRC))
         import importlib, sg_github as G, sg_setup as S
         self.G, self.S = G, importlib.reload(S)
@@ -3714,6 +3716,7 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual((wz.st["key"]["status"], wz.st["merge"]["status"]), ("ok", "ok"))
 
     def test_setup_pr_then_rules_after_the_merge(self):
+        """init opens the setup pull request first and turns the rules on only after it is merged."""
         G, S = self.G, self.S
         calls = []
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
@@ -3871,6 +3874,7 @@ class TestGuidedSetup(unittest.TestCase):
         opened = []
         G.open_setup_pr = lambda *a, **k: opened.append(1)
         def nobody(*a, **k):
+            """Fake author policy: nobody can open a pull request that changes workflow files."""
             raise G.NoAuthor("nobody else is a code owner on main, and this pull request changes workflow files")
         G.pr_author = nobody
         wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
@@ -7654,6 +7658,7 @@ class TestSettings(Base):
         from unittest import mock
         replies = {"/repos/acme/shop": {"default_branch": "main"}, "/repos/acme/shop/git/ref/heads/main": {"object": {"sha": "abc"}}}
         def none(*a, **k):
+            """Fake author policy: nobody can open the settings pull request."""
             raise GH.NoAuthor("nobody else is a code owner on main. Do one, then try again: run `story-gate setup-agent`")
         with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
                 mock.patch.object(GH, "whoami", return_value="paul"), mock.patch.object(GH, "pr_author", side_effect=none), \
@@ -7887,6 +7892,7 @@ class TestTrackerSetup(Base):
     def test_nobody_able_to_open_the_pr_stops_before_the_review(self):
         """When the policy finds no author, the details step says what to do and nothing is written."""
         def none(tok):
+            """Fake author policy: nobody can open the tracker settings pull request."""
             raise self.G.NoAuthor("nobody else is a code owner on main. Do one, then try again: run `story-gate setup-agent`")
         self.author = none
         ss = self.session()
@@ -7935,6 +7941,7 @@ class TestTrackerSetup(Base):
         self.assertEqual((self.secrets, ss._key), ({}, None))
 
     def test_unenforced_review_is_said_on_the_review_screen_and_in_the_pull_request(self):
+        """When GitHub won't enforce the review (no ruleset), the review screen and the pull request both say so."""
         self.rulesets = []
         ss = self.session()
         ss.details(self.linear_form())
