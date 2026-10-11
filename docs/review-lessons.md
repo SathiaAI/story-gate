@@ -11,6 +11,7 @@ Mistakes that reviewers kept finding in story-gate's own pull requests, and how 
 | 5 | **Docs quote the numbers the code enforces.** The guide said 65,000 characters; the code trims at 60,000. | Automatic: limits in the docs are compared with the constants. Add a row when the docs quote a new limit. |
 | 6 | **GitHub values reach the shell through `env:`, never inline in `run:`.** Event fields, inputs and step outputs inside `run:` can carry shell code. | Automatic: workflow templates and story-gate's workflows are scanned. Known exceptions may only be removed. |
 | 7 | **A one-person repository must be able to finish every flow.** GitHub never counts an approval from whoever opened a pull request. | Fixed: setup-repo waits for CODEOWNERS before the ruleset (#75); one author policy for every pull request story-gate opens (#76). |
+| 8 | **Running a setup command twice is safe, and one failed step doesn't stop the rest.** A random branch name opened a second CODEOWNERS pull request on a re-run; a refused pull request skipped the ruleset and Actions steps. | Pre-PR checklist; setup-repo uses one fixed branch and reports a failed step (#76). |
 
 Also learned the hard way:
 
