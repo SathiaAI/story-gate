@@ -6643,6 +6643,14 @@ class TestTrackerJira(Base):
             finally:
                 os.environ.pop("STORY_GATE_ROOT", None)
 
+    def test_only_jira_server_and_data_center_are_still_called_experimental(self):
+        """Linear and Jira Cloud passed the live test; the README and guide still mark Jira Server/Data Center experimental."""
+        readme = (SRC.parent / "README.md").read_text(encoding="utf-8")
+        guide = (SRC.parent / "docs/guide.md").read_text(encoding="utf-8")
+        self.assertIn("Jira Server and Data Center are still experimental", readme)
+        self.assertIn("Jira Server and Data Center are still **experimental**", guide)
+        self.assertNotIn("Linear and Jira support is tested against recorded and public data", guide)
+
     def test_a_plain_or_bold_acceptance_criteria_line_works_like_a_heading(self):
         """Jira users often write 'Acceptance criteria' as a plain or bold line, not a heading: its list becomes criteria
         up to the next heading, in Jira Cloud and Server/Data Center, and the gate reads the result the same way."""
@@ -6660,6 +6668,9 @@ class TestTrackerJira(Base):
                 unread = []
                 self.assertEqual([s for _, s in g.spec_scenarios(text, unread)], ["Login works"]); self.assertEqual(unread, [])
         self.assertIn("\n- point", TR.adf_to_text(adf(para("Acceptance criteria are below"), bullets("point"))))  # only the whole line counts
+        prose = TR.adf_to_text(adf(para("Acceptance criteria"), para("Some prose"), bullets("item")))
+        unread = []  # a sentence under the label doesn't end the section: the gate reports it, so the check stops
+        self.assertEqual([s for _, s in g.spec_scenarios(prose, unread)], ["item"]); self.assertEqual(unread, ["Some prose"])
         item = {"type": "listItem", "content": [para("Intro"), para("Acceptance criteria")]}  # a label inside a list item
         nested = TR.adf_to_text(adf({"type": "bulletList", "content": [item]}, bullets("y")))  # is not a label
         self.assertNotIn("**Acceptance criteria**", nested); self.assertIn("\n- y", nested); self.assertNotIn("[ ] y", nested)
