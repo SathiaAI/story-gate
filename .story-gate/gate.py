@@ -3325,7 +3325,9 @@ def cmd_publish():
             else:
                 print("story-gate: sink %s not configured here, skipped" % t); continue
         except Exception as e:
-            print("story-gate: sink %s FAILED %r" % (t, e)); ok = False
+            # no addresses in the log: a webhook URL often carries its own secret (e.g. chat-app incoming webhooks)
+            reason = re.sub(r"[a-z][a-z0-9+.-]*://\S+", "<address>", str(e), flags=re.I)[:200]
+            print(f"story-gate: sink {t} FAILED ({type(e).__name__}: {reason})"); ok = False
         print("story-gate: sink %s %s (%d events)" % (t, "OK" if ok else "FAILED", len(todo)))
         if ok:
             sent[key] = len(lines); delivered += 1

