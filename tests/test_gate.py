@@ -899,6 +899,22 @@ class TestSignedSetup(unittest.TestCase):
             S.signed_or_not(d)
 
 
+def run_node(i, status, conclusion):
+    """A GraphQL check run as GitHub returns it (upper-case status and conclusion)."""
+    return {"databaseId": i, "status": status, "conclusion": conclusion}
+
+
+def pr_node(number, ref, sha, repo, runs):
+    """A GraphQL open pull request whose head commit has these check runs (all in one suite)."""
+    return {"number": number, "headRefName": ref, "headRefOid": sha, "headRepository": {"nameWithOwner": repo},
+            "commits": {"nodes": [{"commit": {"oid": sha, "checkSuites": {"nodes": [{"checkRuns": {"nodes": runs}}]}}}]}}
+
+
+def gql_prs(nodes, cursor=None):
+    """The GraphQL reply for one page of open pull requests."""
+    return {"data": {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": bool(cursor), "endCursor": cursor}, "nodes": nodes}}}}
+
+
 def keep_github_fakes_local(test, G):
     """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
     saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
@@ -2608,9 +2624,11 @@ class TestDashboard(Base):
         self.assertLessEqual(len(self.D.to_markdown(many)), self.D.ISSUE_LIMIT + 100)
 
     def test_html_is_self_contained_escaped_and_branded(self):
+        """The HTML report has no outside resources, escapes story text and carries the story-gate look."""
         page = self.D.to_html(self.data)
         self.assertNotIn("<script>alert", page); self.assertIn("default-src 'none'", page)
-        self.assertNotIn("http", page.split("</style>")[-1].replace('xmlns="http://www.w3.org/2000/svg"', "")); self.assertNotRegex(page, r"<(script|link|img|iframe)[\s>]")
+        self.assertNotIn("http", page.split("</style>")[-1].replace('xmlns="http://www.w3.org/2000/svg"', "")); self.assertNotRegex(page, r"<(link|img|iframe)[\s>]")
+        self.assertEqual(__import__("re").findall(r"<script>(.*?)</script>", page, __import__("re").S), [self.D.STALE_JS])  # the one hash-pinned stale-banner script
         self.assertIn("Tabler", page); self.assertIn("#FFD84D", page); self.assertIn('aria-label="Viaknox"', page)
 
     def test_record_folders_with_bad_names_and_huge_files_are_skipped(self):
@@ -2645,24 +2663,85 @@ class TestDashboard(Base):
         self.assertIn("```mermaid\npie showData\n", md)
 
     def test_ci_status_and_rate_limit_backoff(self):
+        """One GraphQL request lists open pull requests with their check; a rate limit is waited out and a fork's same-named branch ignored."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         seen = {"n": 0}
         def call(m, path, t=None, b=None, accept=None):
-            if "/pulls?" in path:
+            if path == "/graphql":
                 seen["n"] += 1
                 if seen["n"] == 1: return 429, {}, {"Retry-After": "1"}
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}},
-                             {"number": 9, "head": {"ref": "feat/SAT-5", "sha": "fff", "repo": {"full_name": "fork/r"}}}], {}  # a fork's same-named branch
-            if "/check-runs" in path: return 200, {"check_runs": [{"conclusion": "success"}]}, {}
+                return 200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(7, "COMPLETED", "SUCCESS")]),
+                                     pr_node(9, "feat/SAT-5", "fff", "fork/r", [run_node(8, "COMPLETED", "FAILURE")])]), {}  # a fork's same-named branch
             return 404, {}, {}
         G.call = call
-        orig = self.D.time.sleep; self.D.time.sleep = lambda s: None
+        waits = []
+        orig = self.D.time.sleep; self.D.time.sleep = waits.append
         try:
             self.D.ci_status(G, "o/r", "t", self.data)
         finally:
             self.D.time.sleep = orig
+        self.assertEqual(waits, [1]); self.assertEqual(seen["n"], 2)
         self.assertEqual(self.st("SAT-5")["ci"], {"pr": 5, "result": "success"})
         self.assertIn("#5 success", self.D.to_markdown(self.data))
+
+    def test_open_prs_pages_and_picks_the_newest_run(self):
+        """Pages through every open pull request and uses the newest run of the check (a re-run), in lower case like REST."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        pages = [gql_prs([pr_node(1, "a", "s1", "o/r", [run_node(3, "COMPLETED", "FAILURE"), run_node(4, "IN_PROGRESS", None)])], "c1"),
+                 gql_prs([pr_node(2, "b", "s2", "o/r", [])])]
+        asked = []
+        def call(m, path, t=None, b=None, accept=None):
+            asked.append(b["variables"]); return 200, pages[len(asked) - 1], {}
+        with mock.patch.object(G, "call", side_effect=call):
+            prs = self.D.open_prs(G, "o/r", "t", "story-gate")
+        self.assertEqual([a["after"] for a in asked], [None, "c1"]); self.assertEqual(asked[0]["check"], "story-gate")
+        self.assertEqual(prs[0]["run"], {"id": 4, "status": "in_progress", "conclusion": None})
+        self.assertIsNone(prs[1]["run"]); self.assertEqual(prs[1]["sha"], "s2")
+
+    def test_graphql_rate_limit_inside_a_200_is_waited_out(self):
+        """GitHub's GraphQL API can report a rate limit with HTTP 200; that is retried like a 429."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        replies = [(200, {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}, {"Retry-After": "2"}),
+                   (200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(7, "COMPLETED", "SUCCESS")])]), {})]
+        waits = []
+        with mock.patch.object(G, "call", side_effect=lambda *a, **k: replies.pop(0)), \
+                mock.patch.object(self.D.time, "sleep", side_effect=waits.append):
+            prs = self.D.open_prs(G, "o/r", "t", "story-gate")
+        self.assertEqual(waits, [2]); self.assertEqual(prs[0]["run"]["conclusion"], "success")
+
+    def test_graphql_errors_become_an_omission_not_a_crash(self):
+        """A GraphQL error or a missing permission leaves a note and no CI results; it is not retried."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        for reply in ((200, {"errors": [{"message": "Resource not accessible by integration"}]}, {}),
+                      (403, {"message": "Resource not accessible by integration"}, {}), (200, [], {})):
+            calls = []
+            data = {"stories": [], "omissions": []}
+            with mock.patch.object(G, "call", side_effect=lambda *a, **k: calls.append(1) or reply), \
+                    mock.patch.object(self.D.time, "sleep", side_effect=AssertionError("must not wait")):
+                self.D.ci_status(G, "o/r", "t", data)
+            self.assertEqual(len(calls), 1); self.assertIn("could not read open pull requests", data["omissions"][0])
+
+    def test_rate_limit_backoff_rules(self):
+        """Only rate limits are retried: Retry-After first, then the reset time if it is within a minute, else 5, 10, 20 s."""
+        D = self.D
+        self.assertTrue(D.rate_limited(429, {}, {}))
+        self.assertTrue(D.rate_limited(403, {}, {"X-RateLimit-Remaining": "0"}))
+        self.assertTrue(D.rate_limited(403, {"message": "You have exceeded a secondary rate limit"}, {}))
+        self.assertFalse(D.rate_limited(403, {"message": "Resource not accessible by integration"}, {"X-RateLimit-Remaining": "4000"}))
+        self.assertFalse(D.rate_limited(500, {}, {}))
+        self.assertTrue(D.rate_limited(200, {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}, {}))
+        self.assertTrue(D.rate_limited(200, {"errors": [{"message": "You have exceeded a secondary rate limit"}]}, {}))
+        self.assertFalse(D.rate_limited(200, {"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by integration"}]}, {}))
+        self.assertFalse(D.rate_limited(200, {"data": {}}, {"X-RateLimit-Remaining": "0"}))  # an answer, not an error
+        self.assertEqual(D.backoff({"Retry-After": "7"}, 0), 7)
+        self.assertEqual(D.backoff({"Retry-After": "900"}, 0), 60)
+        self.assertEqual(D.backoff({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1030"}, 0, now=1000), 30)
+        self.assertIsNone(D.backoff({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4600"}, 0, now=1000))  # an hour away: give up
+        self.assertEqual([D.backoff({}, i) for i in range(5)], [5, 10, 20, 40, 60])
+        self.assertEqual(D.backoff({"Retry-After": "soon"}, 1), 10)
 
     def test_ready_verdicts_are_checked_against_the_story(self):
         self.g("checkout", "-q", "-b", "feat/SAT-7")
@@ -2771,6 +2850,265 @@ class TestDashboard(Base):
         self.assertIn("issues: write", y); self.assertIn("persist-credentials: false", y)
         self.assertNotIn("pull_request_target", y); self.assertIn('branches: ["main"]', y)
         self.assertIn("default_branch || github.ref_name", y)
+
+
+class TestLiveDashboard(Base):
+    """Option A: the pinned issue is the live dashboard (charts, freshness, size budget), it refreshes on events, and
+    `dashboard --serve` shows a live page on this computer only."""
+    HOSTILE = '"]) --> X[<img src=x onerror=alert(1)>`\n%%{init}%%; ```'
+    URL = "https://github.com/o/r/actions/runs/1/artifacts/9"
+
+    def setUp(self):
+        """Load sg_dashboard from the source tree."""
+        super().setUp()
+        sys.path.insert(0, str(SRC))
+        import importlib; self.D = importlib.import_module("sg_dashboard")
+
+    def story(self, i, status="draft", title="T", feature="", ref="origin/main"):
+        """A minimal story row for building dashboard data."""
+        return {"id": "SAT-%d" % i, "title": title, "feature": feature, "status": status, "ready": None, "done": None, "checkpoint": None, "coder": None,
+                "trace": [], "ref": ref, "merged": True, "acs": 0, "stale": False, "last_reported": None}
+
+    def data(self, stories, **kw):
+        """Dashboard data around the given stories."""
+        return dict({"schema": 1, "generated_at": "2026-10-02T00:20:00Z", "default_ref": "origin/main", "default_sha": "abc", "refs_scanned": [{"ref": "origin/main", "sha": "abc"}],
+                     "omissions": [], "conflicts": [], "features": [], "stories": stories, "metrics": []}, **kw)
+
+    def get(self, live, path=None, method="GET", host=None):
+        """Send one request to a running live server; returns status, response and body."""
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", live.httpd.server_address[1], timeout=10)
+        c.request(method, path if path is not None else live.path, headers={"Host": host or "127.0.0.1:%d" % live.httpd.server_address[1]})
+        r = c.getresponse(); body = r.read().decode("utf-8"); c.close()
+        return r.status, r, body
+
+    def live(self, build=None, **kw):
+        """A live server on a random port (stopped after the test), serving `build`'s page."""
+        live = self.D.Live(build or (lambda tmp: self.D.to_html(self.data([self.story(1)]), live=True)), **kw)
+        live.serve_thread(); self.addCleanup(live.close)
+        return live
+
+    # ---- the pinned issue
+    def test_mermaid_labels_cannot_break_out(self):
+        """Story titles in Mermaid charts can't close the label or inject chart code."""
+        import re
+        bad = self.HOSTILE
+        lab = self.D.mm(bad)
+        for ch in '"[]()<>`%;\n{}|':
+            self.assertNotIn(ch, lab)
+        self.assertNotIn("-->", lab); self.assertEqual(self.D.mm("   "), "?")
+        # hostile story titles, features and branches never reach a chart, and every chart line is one of two strict shapes
+        d = self.data([self.story(1, "queued", bad, bad, bad), self.story(2, "done", bad, bad, bad)], features=[{"id": "F", "title": bad}])
+        body = self.D.to_markdown(d)
+        blocks = re.findall(r"```mermaid\n(.*?)```", body, re.S)
+        self.assertEqual(len(blocks), 2); self.assertTrue(blocks[0].startswith("pie showData")); self.assertTrue(blocks[1].startswith("flowchart LR"))
+        lab_re = r'"[\w .,:/#+-]+"'
+        for line in blocks[0].splitlines()[1:]:
+            self.assertRegex(line, r'^    (title Stories by status|%s : \d+)$' % lab_re)
+        node = r's\d\["[\w .,:/#+-]+: \d+"\]'
+        self.assertRegex(blocks[1].splitlines()[1], r"^    %s(?: --> %s)*$" % (node, node))
+        self.assertNotIn("X[", "".join(blocks)); self.assertNotIn("onerror", "".join(blocks))
+        self.assertIn("Queued: 1", blocks[1]); self.assertIn('"Done" : 1', blocks[0])
+
+    def test_issue_has_details_and_both_charts_next_to_the_tables(self):
+        """The pinned issue shows per-story details and both charts beside their tables."""
+        body = self.D.to_markdown(self.data([self.story(1, "queued")]))
+        self.assertEqual(body.count("<details>"), body.count("</details>"))
+        for t in ("All stories", "Features", "Queued to start", "How each number is calculated"):
+            self.assertIn(t, body)
+        self.assertRegex(body, r"<details><summary>1 stories</summary>\n\n\| Story \|")  # the accessible table stays inside
+        self.assertIn("| Story | Feature | Stage | READY | DONE | Branch |", body)
+
+    def test_issue_stays_under_the_size_budget_and_links_the_full_report(self):
+        """A large dashboard is trimmed under GitHub's issue size and links to the full report."""
+        many = self.data([self.story(i, ["draft", "queued", "in_progress", "done"][i % 4], "x" * 50, "F%d" % (i % 9)) for i in range(2000)],
+                         features=[{"id": "F%d" % i, "title": "t" * 60} for i in range(9)])
+        body = self.D.to_markdown(many, self.URL)
+        self.assertLess(len(body), 60_000); self.assertLess(len(body), 65_536)
+        self.assertRegex(body, r"… \d+ more: \[see the full report\]\(%s\)" % self.URL.replace(".", r"\."))
+        self.assertEqual(body.count("<details>"), body.count("</details>")); self.assertEqual(body.count("```"), 4)  # nothing left half open
+        self.assertIn("Next refresh", body)  # the summary survives the trimming
+        self.assertIn("see the full report", self.D.to_markdown(many))  # no link known: still says so
+        self.assertEqual(self.D.ISSUE_LIMIT, 60_000)
+        tiny = self.D.to_markdown(many, self.URL, limit=3000)
+        self.assertLess(len(tiny), 3000); self.assertIn("Left out to stay under GitHub's size limit", tiny)
+
+    def test_issue_says_when_it_was_updated_and_when_it_refreshes_next(self):
+        """The pinned issue states its build time and the next scheduled refresh."""
+        body = self.D.to_markdown(self.data([self.story(1)]))
+        self.assertIn("Updated **2026-10-02T00:20:00Z (UTC)**", body)
+        self.assertIn("Next refresh: by **2026-10-02 00:41 (UTC)**", body); self.assertIn("at least every 30 minutes", body)
+        self.assertIn("`story-gate dashboard --serve`", body)
+        self.assertEqual(self.D.next_refresh("2026-10-02T00:41:00Z"), "2026-10-02 01:11")  # strictly after
+        self.assertEqual(self.D.next_refresh("2026-10-02T23:50:09Z"), "2026-10-03 00:11")
+        self.assertIsNone(self.D.next_refresh("soon"))
+        self.assertNotIn("Next refresh", self.D.to_markdown(self.data([], generated_at="soon")))
+
+    def test_failed_refresh_marker_sits_at_the_top_and_says_stale(self):
+        """A failed refresh puts a stale warning at the top of the issue and keeps the last snapshot."""
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        issue = {"number": 3, "body": self.D.to_markdown(self.data([self.story(1)]))}
+        def call(m, path, t=None, b=None, accept=None):
+            """Fake GitHub: GET returns the issue, PATCH updates it."""
+            if m == "GET": return 200, [issue], {}
+            issue.update(b); return 200, {}, {}
+        G.call = call
+        self.D.report_failure(G, "o/r", "t", "2026-10-02T05:00:00Z", "https://github.com/o/r/actions/runs/1")
+        top = issue["body"].split("Updated **")[0]
+        self.assertIn("STALE: the last refresh failed at 2026-10-02T05:00:00Z", top); self.assertIn("[run log]", top)
+        self.assertLess(issue["body"].index("STALE"), issue["body"].index("Updated **"))
+
+    def test_publish_never_overwrites_a_newer_snapshot(self):
+        """Publishing an older snapshot leaves a newer one in the issue untouched."""
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        issue = {"number": 3, "state": "open", "body": "<!-- story-gate-dashboard generated_at=2026-10-02T09:00:00Z schema=1 -->"}
+        G.call = lambda m, path, t=None, b=None, accept=None: (200, [issue], {}) if m == "GET" and "/issues?" in path else (200, {}, {})
+        self.assertIn("Skipped", self.D.publish_issue(G, "o/r", "t", "new", "2026-10-02T08:00:00Z"))
+
+    # ---- refresh on events
+    def test_dashboard_workflows_refresh_on_events_and_stay_least_privilege(self):
+        """Both dashboard workflows run on events and ask only for the permissions they use."""
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sys.modules.pop("sg_reusable", None)
+        import re, sg_reusable as R
+        ci_name = re.search(r"^name: (.+)$", g.CI_YML, re.M).group(1)
+        caller = R.caller_files("SathiaAI/story-gate", "a" * 40, "0", "SHA256:x", "main", "# managed by story-gate\n")[".github/workflows/story-gate-dashboard.yml"]
+        for y in (g.dash_yml(), caller):
+            self.assertIn("workflow_run:\n    workflows: [%s]\n    types: [completed]" % ci_name, y)
+            self.assertIn("push:\n    branches: [\"main\"]", y); self.assertIn('cron: "11,41 * * * *"', y); self.assertIn("workflow_dispatch:", y)
+            self.assertIn("concurrency:\n  group: story-gate-dashboard\n  cancel-in-progress: false", y)
+            self.assertNotIn("pull_request_target", y); self.assertNotIn("pull_request:", y); self.assertNotIn("workflow_run.head", y)
+            perms = y.split("permissions:\n", 1)[1].split("\n", 6)[:5]
+            self.assertEqual(sorted(p.split("#")[0].strip() for p in perms if p.startswith("  ")),
+                             ["checks: read", "contents: read", "issues: write", "pull-requests: read"])
+        reusable = (SRC.parent / ".github/workflows/dashboard.yml").read_text()  # its triggers are the caller's: it is only workflow_call
+        self.assertIn("workflow_call:", reusable); self.assertNotIn("pull_request_target", reusable); self.assertNotIn("actions: read", reusable)
+
+    # ---- the live page on this computer
+    def test_serve_answers_only_the_secret_path_host_and_get(self):
+        """The live server answers only GET on the secret path with our own Host header."""
+        live = self.live()
+        self.assertRegex(live.path, r"^/s/[A-Za-z0-9_-]{32}/$"); self.assertTrue(live.url.startswith("http://127.0.0.1:"))
+        self.assertEqual(live.httpd.server_address[0], "127.0.0.1")
+        self.assertTrue(live.refresh())
+        st, r, body = self.get(live)
+        self.assertEqual(st, 200); self.assertIn("Story-gate dashboard", body); self.assertIn('http-equiv="refresh"', body)
+        self.assertEqual(r.getheader("Cache-Control"), "no-store")
+        self.assertEqual(r.getheader("Content-Security-Policy"), "default-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'")
+        self.assertEqual(r.getheader("X-Frame-Options"), "DENY"); self.assertEqual(r.getheader("Referrer-Policy"), "no-referrer")
+        for path in ("/", "/s/", "/s/wrong/", live.path[:-1], live.path + "x", "/?t=" + live.path, "/s/%s/../" % live.path.split("/")[2]):
+            self.assertEqual(self.get(live, path)[0], 404, path)
+        self.assertEqual(self.get(live, host="localhost:%d" % live.httpd.server_address[1])[0], 403)
+        self.assertEqual(self.get(live, host="evil.example")[0], 403)
+        self.assertEqual(self.get(live, live.path + "?x=1")[0], 200)  # a query string is ignored, the path is the secret
+        for m in ("POST", "PUT", "DELETE", "HEAD"):
+            st, r, _ = self.get(live, method=m); self.assertEqual(st, 405, m); self.assertEqual(r.getheader("Allow"), "GET")
+            self.assertEqual(r.getheader("Cache-Control"), "no-store")
+        self.assertEqual(self.get(live, method="POST", host="evil.example")[0], 403)
+        self.assertEqual(self.get(live, "/nope")[2], "not found"); self.assertNotIn(live.path, self.get(live, "/nope")[2])
+
+    def test_serve_page_is_fresh_so_it_has_no_stale_banner_and_no_script(self):
+        """The live page has no stale-copy banner and no script."""
+        live = self.live(); live.refresh()
+        body = self.get(live)[2]
+        self.assertNotIn('id="sg-stale"', body); self.assertNotIn("<script", body); self.assertNotIn("snapshot from", body)
+        self.assertIn("Live view on this computer. Updated just now; rebuilds every", body)
+
+    def test_serve_failed_rebuild_shows_a_red_banner_and_keeps_the_last_good_page(self):
+        """A failed rebuild shows a red banner over the last good page."""
+        calls = []
+        def build(tmp):
+            """Fake build that fails on the second call."""
+            calls.append(tmp)
+            if len(calls) == 2:
+                raise RuntimeError("git fetch failed for https://user:SECRET@github.com/o/r <script>")
+            if len(calls) == 3:
+                sys.exit("config broken")  # even a SystemExit from gate.py must not stop the server
+            return self.D.to_html(self.data([self.story(1, title="KEEP ME")]), live=True)
+        live = self.live(build)
+        self.assertEqual(self.get(live)[0], 200); self.assertIn("Building the dashboard", self.get(live)[2])  # nothing built yet
+        self.assertTrue(live.refresh()); self.assertIn("Story-gate dashboard", self.get(live)[2])
+        self.assertFalse(live.refresh())
+        st, _, body = self.get(live)
+        self.assertEqual(st, 200); self.assertIn("Couldn't refresh: git fetch failed", body); self.assertIn("Showing the last good version", body)
+        self.assertIn("background:#B42318", body); self.assertIn('role="alert"', body)
+        self.assertNotIn("SECRET", body); self.assertNotIn("<script>", body)  # no password from a URL, and the reason is escaped
+        self.assertFalse(live.refresh()); self.assertIn("config broken", self.get(live)[2])
+        self.assertTrue(live.refresh())
+        self.assertNotIn("Couldn", self.get(live)[2]); self.assertEqual(self.get(live)[0], 200)
+
+    def test_serve_first_build_failing_still_serves_an_error_page(self):
+        """If the very first build fails, the server still answers with the error."""
+        def build(tmp): raise OSError("offline")
+        live = self.live(build); live.refresh()
+        st, _, body = self.get(live)
+        self.assertEqual(st, 200); self.assertIn("Couldn't refresh: offline", body); self.assertIn("Trying again soon", body)
+
+    def test_serve_keeps_everything_in_a_temp_folder_that_is_removed(self):
+        """Built files live in a temporary folder that is removed on close."""
+        seen = []
+        def build(tmp):
+            """Fake build that writes into the temporary folder."""
+            seen.append(tmp); (Path(tmp) / "dashboard.html").write_text("x"); return "<html><head></head><body></body></html>"
+        live = self.live(build); live.refresh()
+        tmp = Path(seen[0]); self.assertTrue(tmp.is_dir()); self.assertTrue(str(tmp).startswith(tempfile.gettempdir()))
+        port = live.httpd.server_address[1]
+        live.close(); live.close()  # closing twice is fine
+        self.assertFalse(tmp.exists())
+        import socket
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=2)
+
+    def test_serve_stops_after_the_idle_time_and_cleans_up(self):
+        """The server stops by itself when nobody opens the page for the idle time."""
+        live = self.live(idle=0); live.refresh(); tmp = Path(live.tmp.name)
+        t0 = time.time(); live.wait()
+        self.assertLess(time.time() - t0, 10); self.assertFalse(tmp.exists())
+
+    def test_serve_rejects_a_non_numeric_interval_and_help_lists_it(self):
+        """`--serve --every soon` or a trailing `--every`/`--idle` is refused with a plain message; help lists --serve."""
+        r = run(self.repo, "dashboard", "--serve", "--every", "soon", "--no-browser")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
+        for args in (("--no-browser", "--every"), ("--no-browser", "--idle")):  # a flag given last with no number
+            r = run(self.repo, "dashboard", "--serve", *args)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
+        self.assertIn("--serve", run(self.repo, "help").stdout)
+
+    # ---- the saved copy
+    def test_saved_report_warns_when_it_is_old_but_a_live_page_does_not(self):
+        """A saved copy warns when it is old; the live page never does."""
+        import base64, hashlib
+        d = self.data([self.story(1)])
+        page = self.D.to_html(d, issue="https://github.com/o/r/issues?q=label")
+        self.assertIn('id="sg-stale"', page); self.assertIn('data-generated="2026-10-02T00:20:00Z"', page); self.assertIn("hidden>", page)
+        self.assertIn("This is a snapshot from <b></b> ago. Live view: the", page)
+        self.assertIn('<a href="https://github.com/o/r/issues?q=label">pinned \'Story-gate dashboard\' issue</a>', page)
+        self.assertIn("<code>story-gate dashboard --serve</code>", page); self.assertIn("Anyone you sent this file to keeps this copy.", page)
+        self.assertIn("m>60", self.D.STALE_JS); self.assertIn("Math.round(m/1440)", self.D.STALE_JS)  # over 60 minutes, hours then days
+        sha = base64.b64encode(hashlib.sha256(self.D.STALE_JS.encode()).digest()).decode()
+        self.assertIn("script-src 'sha256-%s'" % sha, page); self.assertIn("<script>%s</script>" % self.D.STALE_JS, page)
+        self.assertNotIn("<a href", self.D.to_html(d).split("<header")[0])  # no link known: plain words
+        live = self.D.to_html(d, live=True)
+        for t in ('id="sg-stale"', "<script", "script-src", "snapshot from"):
+            self.assertNotIn(t, live)
+
+    def test_saved_report_banner_script_computes_the_age(self):
+        """The saved copy's banner script computes the age correctly (run in node)."""
+        import shutil as sh
+        node = sh.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        def shown(generated, now_ms):
+            """Run the banner script in node; returns whether it is hidden and its text."""
+            js = ("var el={hidden:true,_b:{textContent:''},getAttribute:function(){return %r},querySelector:function(){return this._b}};"
+                  "var document={getElementById:function(){return el}};Date.now=function(){return %d};%s;console.log(el.hidden+'|'+el._b.textContent)"
+                  % (generated, now_ms, self.D.STALE_JS))
+            return subprocess.run([node, "-e", js], capture_output=True, text=True).stdout.strip()
+        t = 1790000000000
+        iso = lambda mins: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((t - mins * 60000) / 1000))
+        self.assertEqual(shown(iso(59), t), "true|"); self.assertEqual(shown(iso(61), t), "false|1 hour")
+        self.assertEqual(shown(iso(5 * 60), t), "false|5 hours"); self.assertEqual(shown(iso(3 * 1440), t), "false|3 days")
+        self.assertEqual(shown("garbage", t), "true|")
 
 
 class TestInstallV03(Base):
@@ -6801,17 +7139,16 @@ class TestReusableWorkflow(Base):
         sys.modules.pop("sg_dashboard", None); D = importlib.import_module("sg_dashboard")
         asked = []
         def call(m, path, t=None, b=None):
-            if "/pulls?" in path:
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}}], {}
-            if "/check-runs" in path:
-                asked.append(path); return 200, {"check_runs": [{"conclusion": "failure" if "%2F" in path else "success"}]}, {}
+            if path == "/graphql":
+                asked.append(b["variables"]["check"])
+                return 200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(1, "COMPLETED", "FAILURE" if "/" in asked[-1] else "SUCCESS")])]), {}
             return 404, {}, {}
         data = {"stories": [{"id": "SAT-5", "ref": "origin/feat/SAT-5", "merged": False}]}
         from unittest import mock
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         with mock.patch.object(GH, "call", side_effect=call), mock.patch.dict(os.environ, {"STORY_GATE_ROOT": str(self.repo)}):
             D.ci_status(GH, "o/r", "t", data)
-        self.assertEqual(len(asked), 1); self.assertIn("check_name=story-gate%20%2F%20story-gate", asked[0])
+        self.assertEqual(asked, ["story-gate / story-gate"])
         self.assertEqual(data["stories"][0]["ci"]["result"], "failure")
 
     def test_release_tag_is_resolved_to_its_commit(self):

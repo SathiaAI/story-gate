@@ -31,6 +31,7 @@ Commands (run from the repo root):
   plan <ID> --title T [--feature F]  add a story to the backlog (not started; queued once READY passes)
   start <ID> [--model M] [--client C]   claim the story: make folder + skeletons, set active story, record who codes
   dashboard [--open] [--out DIR] [--offline]   build the progress dashboard from every branch (HTML + summary)
+  dashboard --serve [--every MIN] [--idle MIN] [--no-browser]   a live page on this computer only, rebuilt every few minutes
   source <ID>                        run 'command' sources from config, print their output
   record-tests <ID> -- <cmd...>      run the test command, store exit code + output tail (evidence)
   scenario <ID> --name N --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] [--local-only REASON] -- <cmd...>
@@ -4335,7 +4336,7 @@ def flags(argv):
     """Split argv into (--key value / --flag) pairs and the remaining positional arguments."""
     kv, rest, i = {}, [], 0
     while i < len(argv):
-        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--publish",
+        if argv[i] in ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--serve", "--publish",
                        "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force"):
             rest.append(argv[i]); i += 1
         elif argv[i].startswith("--") and i + 1 < len(argv):
