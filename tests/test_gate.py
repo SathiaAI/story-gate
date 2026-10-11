@@ -1213,6 +1213,31 @@ class TestRound4Fixes(Base):
         G.paged = lambda p, t: [{"user": {"login": "coderabbitai[bot]"}, "commit_id": "old0000"}]
         self.assertEqual(G.reviewed_by({"repo": "o/r", "number": 1, "head_sha": "new1111"}, "t", ["coderabbitai[bot]"]), [])
 
+    def test_setup_repo_waits_for_codeowners_on_the_default_branch(self):
+        """The rule is turned on only once the owners are in CODEOWNERS on the default branch; before that it would
+        block the very pull request that adds them (story-gate counts only code owners already on that branch)."""
+        import importlib, base64 as b64
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        def run_with(contents):
+            posts = []
+            def call(m, path, t=None, b=None, accept=None):
+                if m == "GET" and path.endswith("/rulesets"): return 200, [], {}
+                if m == "GET" and "/contents/" in path:
+                    name = path.split("/contents/", 1)[1]
+                    if name in contents:
+                        return 200, {"encoding": "base64", "content": b64.b64encode(contents[name].encode()).decode()}, {}
+                    return 404, {}, {}
+                if m == "POST" and path.endswith("/rulesets"): posts.append(b); return 201, {}, {}
+                return 204, {}, {}
+            G.call = call
+            return G.setup_repo(tempfile.mkdtemp(), "o/r", ["Paul"], "t"), posts
+        out, posts = run_with({})  # no CODEOWNERS on the default branch yet
+        self.assertEqual(posts, []); self.assertIn("Merge the CODEOWNERS change", " ".join(out))
+        out, posts = run_with({".github/CODEOWNERS": "* @someone-else\n"})
+        self.assertEqual(posts, [])
+        out, posts = run_with({"docs/CODEOWNERS": "* @paul\n"})  # case-insensitive, any of GitHub's three places
+        self.assertEqual(len(posts), 1); self.assertIn("Ruleset: created", out)
+
     def test_setup_repo_matches_owner_exactly(self):
         import importlib
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
