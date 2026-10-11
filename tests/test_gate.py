@@ -7059,6 +7059,7 @@ class TestTrackerSetup(Base):
     JTOK = "ATATT3x" + "z9" * 92
 
     def setUp(self):
+        """Fake GitHub and tracker calls, and a private STORY_GATE_HOME, so nothing leaves the test."""
         super().setUp()
         self.gate = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         for m in ("sg_trackersetup", "sg_setup", "sg_trackers", "sg_settings"):
@@ -7133,6 +7134,7 @@ class TestTrackerSetup(Base):
                            [p["files"][".story-gate/config.json"].decode() for p in self.prs]])
 
     def test_signin_is_always_a_fresh_device_code_from_a_person_with_admin_rights(self):
+        """Sign-in always uses a new device code with the repo scope, and only a human admin may continue."""
         ss = self.session(signed=False)
         used = []
         ss.start_signin(flow=lambda cid, on_code, scope: used.append((cid, scope)) or "dev-token")
@@ -7228,6 +7230,7 @@ class TestTrackerSetup(Base):
         self.assertFalse((Path(os.environ["STORY_GATE_HOME"]) / "trackers.env").exists())  # local copy is opt-in
 
     def test_the_agent_app_opens_the_settings_pr_so_a_lone_code_owner_can_approve_it(self):
+        """With the agent App installed, the App opens the settings PR; secrets still use the person's token."""
         self.G.agent_token = lambda repo: ("agent-tok", "later", {})
         ss = self.session()
         ss.details(self.linear_form())
@@ -7300,6 +7303,7 @@ class TestTrackerSetup(Base):
         self.assertEqual(r.returncode, 1); self.assertIn("refusing to run", r.stdout); self.assertIn("SSL_CERT_FILE", r.stdout)
 
     def test_no_going_back_mid_save_and_only_one_device_sign_in_at_a_time(self):
+        """A save in progress can't be undone, and only one device sign-in runs at a time."""
         ss = self.session()
         ss.details(self.linear_form())
         ss.confirm_start({"plan": ss.plan["id"]})

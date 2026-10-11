@@ -266,6 +266,7 @@ def iso_days(a, b):
 
 
 def build(root, default_ref, id_pattern, include_local=False, now=None, gate=None):
+    """Dashboard data from the story records on every scanned branch, `default_ref` first: stories, features, conflicts and metrics. Reads git only."""
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     repo = Repo(root)
     refs = repo.refs(default_ref, include_local)
