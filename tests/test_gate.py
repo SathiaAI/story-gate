@@ -3455,6 +3455,15 @@ class TestAuthorPolicy(unittest.TestCase):
         """pr_author for o/r, branch main, signed in as paul."""
         return self.G.pr_author("o/r", "main", "human-tok", "paul", **kw)
 
+
+    def test_unreadable_approval_rule_counts_as_needing_an_approval(self):
+        """A pull-request rule with an odd approval count or odd parameters means "approval needed", never a crash."""
+        for params in ({"required_approving_review_count": "two"}, {"required_approving_review_count": [1]}, ["x"], "x"):
+            with self.subTest(params=params):
+                self.rules = [{"type": "pull_request", "parameters": params}]
+                self.assertIs(self.G.approval_required("o/r", "main", "t"), True)
+        self.rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": "0"}}, "junk"]
+        self.assertIs(self.G.approval_required("o/r", "main", "t"), False)  # a readable 0 still falls through to the branch
     def test_the_agent_app_opens_it_when_installed(self):
         """Installed agent App: it opens the PR with its own token."""
         self.agent = "app-tok"; self.rules = [{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]

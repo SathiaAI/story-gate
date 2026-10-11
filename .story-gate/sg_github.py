@@ -648,8 +648,16 @@ def approval_required(repo, branch, token):
     if st != 200 or not isinstance(rules, list):
         return None
     for r in rules:
-        p = (r.get("parameters") or {}) if isinstance(r, dict) and r.get("type") == "pull_request" else None
-        if p is not None and (int(p.get("required_approving_review_count") or 0) >= 1 or p.get("require_code_owner_review")):
+        if not (isinstance(r, dict) and r.get("type") == "pull_request"):
+            continue
+        p = r.get("parameters") or {}
+        if not isinstance(p, dict):
+            return True  # a pull-request rule we can't read: assume it needs an approval
+        try:
+            count = int(p.get("required_approving_review_count") or 0)
+        except (TypeError, ValueError):
+            return True
+        if count >= 1 or p.get("require_code_owner_review"):
             return True
     st, b, _ = call("GET", "/repos/%s/branches/%s" % (repo, q), token)
     if st != 200 or not isinstance(b, dict):
