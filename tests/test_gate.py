@@ -7423,6 +7423,7 @@ class TestTrackerSetup(Base):
     JTOK = "ATATT3x" + "z9" * 92
 
     def setUp(self):
+        """Fake GitHub and tracker calls, and a private STORY_GATE_HOME, so nothing leaves the test."""
         super().setUp()
         self.gate = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         for m in ("sg_trackersetup", "sg_setup", "sg_trackers", "sg_settings"):
@@ -7497,11 +7498,12 @@ class TestTrackerSetup(Base):
                            [p["files"][".story-gate/config.json"].decode() for p in self.prs]])
 
     def test_signin_is_always_a_fresh_device_code_from_a_person_with_admin_rights(self):
+        """Sign-in always uses a new device code with the repo scope, and only a human admin may continue."""
         ss = self.session(signed=False)
         used = []
-        ss.start_signin(flow=lambda cid, on_code: used.append(cid) or "dev-token")
+        ss.start_signin(flow=lambda cid, on_code, scope: used.append((cid, scope)) or "dev-token")
         self.wait(ss, "details")
-        self.assertEqual(used, [self.TS.S.OAUTH_CLIENT_ID]); self.assertEqual(ss.token, "dev-token")
+        self.assertEqual(used, [(self.TS.S.OAUTH_CLIENT_ID, "repo")]); self.assertEqual(ss.token, "dev-token")  # no workflow scope
         self.user = {"login": "story-gate-agent[bot]", "type": "Bot"}
         with self.assertRaises(self.TS.SetupError):
             self.session()
@@ -7655,6 +7657,7 @@ class TestTrackerSetup(Base):
         self.assertEqual(r.returncode, 1); self.assertIn("refusing to run", r.stdout); self.assertIn("SSL_CERT_FILE", r.stdout)
 
     def test_no_going_back_mid_save_and_only_one_device_sign_in_at_a_time(self):
+        """A save in progress can't be undone, and only one device sign-in runs at a time."""
         ss = self.session()
         ss.details(self.linear_form())
         ss.confirm_start({"plan": ss.plan["id"]})
@@ -7665,8 +7668,8 @@ class TestTrackerSetup(Base):
         fresh = self.session(signed=False)
         import threading
         gate_, calls = threading.Event(), []
-        fresh.start_signin(flow=lambda cid, on_code: calls.append(1) or gate_.wait(5) and "dev-token")
-        fresh.start_signin(flow=lambda cid, on_code: calls.append(2) or "other")
+        fresh.start_signin(flow=lambda cid, on_code, **kw: calls.append(1) or gate_.wait(5) and "dev-token")
+        fresh.start_signin(flow=lambda cid, on_code, **kw: calls.append(2) or "other")
         gate_.set(); self.wait(fresh, "details")
         self.assertEqual(calls, [1])
 
@@ -7783,6 +7786,8 @@ class TestReviewFixes(Base):
         step = lambda t: t.split("- name: build", 1)[1].split("- id: report", 1)[0]
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step(g.dash_yml()))
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step((SRC.parent / ".github/workflows/dashboard.yml").read_text()))
+        publish = g.dash_yml().split("- name: publish", 1)[1].split("- name:", 1)[0]
+        self.assertIn('--artifact-url "$ARTIFACT_URL"', publish); self.assertNotIn("${{ steps", publish.split("run:", 1)[1])
 
     def test_only_the_exact_story_gate_hook_command_is_exempt_from_the_project_hook_check(self):
         sys.path.insert(0, str(SRC))

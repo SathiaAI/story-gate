@@ -146,8 +146,9 @@ class Session:
         flow = flow or G.device_flow
 
         def go():
+            """Run the GitHub device sign-in in the background; clears the busy flag when it ends."""
             try:
-                self._signed_in(flow(S.OAUTH_CLIENT_ID, on_code=self._show_code))
+                self._signed_in(flow(S.OAUTH_CLIENT_ID, scope="repo", on_code=self._show_code))  # no workflow scope: it never edits workflows
             finally:
                 with self.lock:
                     self._flow = False
