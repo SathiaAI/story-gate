@@ -702,50 +702,111 @@ def to_html(d, artifact_note="", live=False, issue=None):
 
 
 # ------------------------------------------------------------------ publishing (CI)
-def call(G, method, path, token, body=None, tries=3):
-    """GitHub API call that backs off on rate limits (403/429 with Retry-After or a reset time)."""
+def rate_limited(st, data, hdr):
+    """True when GitHub refused because of a rate limit (worth waiting for), not because a permission is missing."""
+    if st == 429:
+        return True
+    if st != 403:
+        return False
+    h = hdr or {}
+    msg = str(data.get("message", "")).lower() if isinstance(data, dict) else ""
+    return bool(h.get("Retry-After")) or str(h.get("X-RateLimit-Remaining", "")) == "0" or "rate limit" in msg
+
+
+def backoff(hdr, attempt, now=None):
+    """Seconds to wait before trying again: Retry-After, else until the limit resets, else 5, 10, 20 ... (60 at most).
+    None when the limit resets more than a minute from now: waiting longer than that would only hold up the run."""
+    h = hdr or {}
+    try:
+        if h.get("Retry-After"):
+            return min(60, max(1, int(h["Retry-After"])))
+        reset = int(h.get("X-RateLimit-Reset") or 0)
+        if reset and str(h.get("X-RateLimit-Remaining", "")) == "0":
+            wait = reset - int(now if now is not None else time.time())
+            return max(1, wait) if wait <= 60 else None
+    except (TypeError, ValueError):
+        pass
+    return min(60, 5 * 2 ** attempt)
+
+
+def call(G, method, path, token, body=None, tries=4):
+    """GitHub API call that waits and tries again on a rate limit only (see backoff); other errors return at once."""
     for i in range(tries):
         st, data, hdr = G.call(method, path, token, body)
-        if st not in (403, 429) or i == tries - 1:
+        if not rate_limited(st, data, hdr) or i == tries - 1:
             return st, data, hdr
-        wait = (hdr or {}).get("Retry-After") or 0
-        try:
-            wait = int(wait) or max(1, int((hdr or {}).get("X-RateLimit-Reset", 0)) - int(time.time()))
-        except (TypeError, ValueError):
-            wait = 5
-        time.sleep(min(60, max(1, wait)))
+        wait = backoff(hdr, i)
+        if wait is None:
+            return st, data, hdr
+        time.sleep(wait)
     return st, data, hdr
+
+
+# Every open pull request with the head commit's story-gate check, in one request per 50 pull requests
+# (asking per pull request cost one call each).
+PRS_QUERY = """query($owner: String!, $name: String!, $check: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 50, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number headRefName headRefOid headRepository { nameWithOwner }
+        commits(last: 1) { nodes { commit { oid checkSuites(first: 20) { nodes {
+          checkRuns(first: 5, filterBy: {checkName: $check}) { nodes { databaseId status conclusion } } } } } } }
+      }
+    }
+  }
+}"""
+
+
+def open_prs(G, repo, token, name):
+    """Open pull requests as [{number, ref, repo, sha, run}], run = the newest check called `name` on the head commit
+    ({id, status, conclusion}, lower case as the REST API writes them) or None. Raises RuntimeError if GitHub won't answer."""
+    owner, rname = repo.split("/", 1)
+    out, after = [], None
+    for _ in range(10):  # up to 500 open pull requests
+        st, d, _ = call(G, "POST", "/graphql", token, {"query": PRS_QUERY, "variables": {"owner": owner, "name": rname, "check": name, "after": after}})
+        prs = (((d or {}).get("data") or {}).get("repository") or {}).get("pullRequests") if isinstance(d, dict) else None
+        if st != 200 or not isinstance(d, dict) or d.get("errors") or not isinstance(prs, dict):
+            raise RuntimeError("HTTP %s%s" % (st, " (%s)" % clean(str(d.get("errors")), 80) if isinstance(d, dict) and d.get("errors") else ""))
+        for p in prs.get("nodes") or []:
+            commits = ((p.get("commits") or {}).get("nodes") or [{}])
+            commit = (commits[-1] or {}).get("commit") or {}
+            runs = [r for s in ((commit.get("checkSuites") or {}).get("nodes") or [])
+                    for r in (((s or {}).get("checkRuns") or {}).get("nodes") or []) if r and r.get("databaseId")]
+            r = max(runs, key=lambda x: x["databaseId"]) if runs else None  # a re-run is a newer check run
+            out.append({"number": p.get("number"), "ref": p.get("headRefName") or "", "sha": commit.get("oid") or p.get("headRefOid"),
+                        "repo": ((p.get("headRepository") or {}).get("nameWithOwner") or ""),
+                        "run": {"id": r["databaseId"], "status": (r.get("status") or "").lower(),
+                                "conclusion": (r.get("conclusion") or "").lower() or None} if r else None})
+        page = prs.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        after = page.get("endCursor")
+    return out
 
 
 def ci_status(G, repo, token, data):
     """Mark each unmerged story with the result of the story-gate check on its open pull request (CI-verified or not)."""
     # the check this installation runs: 'story-gate' (copied workflow) or 'story-gate / story-gate' (reusable workflow)
     name = G.ci_check_name(os.environ.get("STORY_GATE_ROOT") or os.getcwd())
-    prs, page = [], 1
-    while page <= 5:  # up to 500 open pull requests
-        st, chunk, _ = call(G, "GET", "/repos/%s/pulls?state=open&per_page=100&page=%d" % (repo, page), token)
-        if st != 200 or not isinstance(chunk, list):
-            data["omissions"].append("could not read open pull requests (HTTP %s), so some CI results aren't shown" % st)
-            break
-        prs += chunk
-        if len(chunk) < 100:
-            break
-        page += 1
-    own = [p for p in prs if (((p.get("head") or {}).get("repo") or {}).get("full_name") or "").lower() == repo.lower()]  # a fork's branch can share a name
-    heads = {"origin/" + (p.get("head") or {}).get("ref", ""): ((p.get("head") or {}).get("sha"), p.get("number")) for p in own}
+    try:
+        prs = open_prs(G, repo, token, name)
+    except RuntimeError as e:
+        data["omissions"].append("could not read open pull requests (%s), so some CI results aren't shown" % e)
+        return
+    own = [p for p in prs if p["repo"].lower() == repo.lower()]  # a fork's branch can share a name
+    heads = {"origin/" + p["ref"]: p for p in own}
     for s in data["stories"]:
         if s["merged"] or s["ref"] not in heads:
             continue
-        sha, num = heads[s["ref"]]
-        st, runs, _ = call(G, "GET", "/repos/%s/commits/%s/check-runs?check_name=%s" % (repo, sha, urllib.parse.quote(name, safe="")), token)
-        runs = (runs or {}).get("check_runs") if isinstance(runs, dict) else None
-        if st == 200 and runs:
-            r = runs[0]
-            s["ci"] = {"pr": num, "result": clean(r.get("conclusion") or r.get("status"), 20)}
+        p = heads[s["ref"]]
+        r = p["run"]
+        if r:
+            s["ci"] = {"pr": p["number"], "result": clean(r.get("conclusion") or r.get("status"), 20)}
             if s.get("snapshots"):
                 s["ci"]["source"] = source_state(G, repo, token, r, s["snapshots"])
         else:
-            s["ci"] = {"pr": num, "result": "not run"}
+            s["ci"] = {"pr": p["number"], "result": "not run"}
             if s.get("snapshots"):
                 s["ci"]["source"] = "not checked"
 

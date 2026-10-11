@@ -899,6 +899,22 @@ class TestSignedSetup(unittest.TestCase):
             S.signed_or_not(d)
 
 
+def run_node(i, status, conclusion):
+    """A GraphQL check run as GitHub returns it (upper-case status and conclusion)."""
+    return {"databaseId": i, "status": status, "conclusion": conclusion}
+
+
+def pr_node(number, ref, sha, repo, runs):
+    """A GraphQL open pull request whose head commit has these check runs (all in one suite)."""
+    return {"number": number, "headRefName": ref, "headRefOid": sha, "headRepository": {"nameWithOwner": repo},
+            "commits": {"nodes": [{"commit": {"oid": sha, "checkSuites": {"nodes": [{"checkRuns": {"nodes": runs}}]}}}]}}
+
+
+def gql_prs(nodes, cursor=None):
+    """The GraphQL reply for one page of open pull requests."""
+    return {"data": {"repository": {"pullRequests": {"pageInfo": {"hasNextPage": bool(cursor), "endCursor": cursor}, "nodes": nodes}}}}
+
+
 def keep_github_fakes_local(test, G):
     """Tests replace sg_github's network functions; put the real ones back afterwards so test order never matters."""
     saved = {n: getattr(G, n) for n in ("call", "paged", "graphql")}
@@ -2647,24 +2663,69 @@ class TestDashboard(Base):
         self.assertIn("```mermaid\npie showData\n", md)
 
     def test_ci_status_and_rate_limit_backoff(self):
+        """One GraphQL request lists open pull requests with their check; a rate limit is waited out and a fork's same-named branch ignored."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         seen = {"n": 0}
         def call(m, path, t=None, b=None, accept=None):
-            if "/pulls?" in path:
+            if path == "/graphql":
                 seen["n"] += 1
                 if seen["n"] == 1: return 429, {}, {"Retry-After": "1"}
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}},
-                             {"number": 9, "head": {"ref": "feat/SAT-5", "sha": "fff", "repo": {"full_name": "fork/r"}}}], {}  # a fork's same-named branch
-            if "/check-runs" in path: return 200, {"check_runs": [{"conclusion": "success"}]}, {}
+                return 200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(7, "COMPLETED", "SUCCESS")]),
+                                     pr_node(9, "feat/SAT-5", "fff", "fork/r", [run_node(8, "COMPLETED", "FAILURE")])]), {}  # a fork's same-named branch
             return 404, {}, {}
         G.call = call
-        orig = self.D.time.sleep; self.D.time.sleep = lambda s: None
+        waits = []
+        orig = self.D.time.sleep; self.D.time.sleep = waits.append
         try:
             self.D.ci_status(G, "o/r", "t", self.data)
         finally:
             self.D.time.sleep = orig
+        self.assertEqual(waits, [1]); self.assertEqual(seen["n"], 2)
         self.assertEqual(self.st("SAT-5")["ci"], {"pr": 5, "result": "success"})
         self.assertIn("#5 success", self.D.to_markdown(self.data))
+
+    def test_open_prs_pages_and_picks_the_newest_run(self):
+        """Pages through every open pull request and uses the newest run of the check (a re-run), in lower case like REST."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        pages = [gql_prs([pr_node(1, "a", "s1", "o/r", [run_node(3, "COMPLETED", "FAILURE"), run_node(4, "IN_PROGRESS", None)])], "c1"),
+                 gql_prs([pr_node(2, "b", "s2", "o/r", [])])]
+        asked = []
+        def call(m, path, t=None, b=None, accept=None):
+            asked.append(b["variables"]); return 200, pages[len(asked) - 1], {}
+        with mock.patch.object(G, "call", side_effect=call):
+            prs = self.D.open_prs(G, "o/r", "t", "story-gate")
+        self.assertEqual([a["after"] for a in asked], [None, "c1"]); self.assertEqual(asked[0]["check"], "story-gate")
+        self.assertEqual(prs[0]["run"], {"id": 4, "status": "in_progress", "conclusion": None})
+        self.assertIsNone(prs[1]["run"]); self.assertEqual(prs[1]["sha"], "s2")
+
+    def test_graphql_errors_become_an_omission_not_a_crash(self):
+        """A GraphQL error or a missing permission leaves a note and no CI results; it is not retried."""
+        from unittest import mock
+        import importlib; G = importlib.import_module("sg_github")
+        for reply in ((200, {"errors": [{"message": "Resource not accessible by integration"}]}, {}),
+                      (403, {"message": "Resource not accessible by integration"}, {}), (200, [], {})):
+            calls = []
+            data = {"stories": [], "omissions": []}
+            with mock.patch.object(G, "call", side_effect=lambda *a, **k: calls.append(1) or reply), \
+                    mock.patch.object(self.D.time, "sleep", side_effect=AssertionError("must not wait")):
+                self.D.ci_status(G, "o/r", "t", data)
+            self.assertEqual(len(calls), 1); self.assertIn("could not read open pull requests", data["omissions"][0])
+
+    def test_rate_limit_backoff_rules(self):
+        """Only rate limits are retried: Retry-After first, then the reset time if it is within a minute, else 5, 10, 20 s."""
+        D = self.D
+        self.assertTrue(D.rate_limited(429, {}, {}))
+        self.assertTrue(D.rate_limited(403, {}, {"X-RateLimit-Remaining": "0"}))
+        self.assertTrue(D.rate_limited(403, {"message": "You have exceeded a secondary rate limit"}, {}))
+        self.assertFalse(D.rate_limited(403, {"message": "Resource not accessible by integration"}, {"X-RateLimit-Remaining": "4000"}))
+        self.assertFalse(D.rate_limited(500, {}, {}))
+        self.assertEqual(D.backoff({"Retry-After": "7"}, 0), 7)
+        self.assertEqual(D.backoff({"Retry-After": "900"}, 0), 60)
+        self.assertEqual(D.backoff({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1030"}, 0, now=1000), 30)
+        self.assertIsNone(D.backoff({"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4600"}, 0, now=1000))  # an hour away: give up
+        self.assertEqual([D.backoff({}, i) for i in range(5)], [5, 10, 20, 40, 60])
+        self.assertEqual(D.backoff({"Retry-After": "soon"}, 1), 10)
 
     def test_ready_verdicts_are_checked_against_the_story(self):
         self.g("checkout", "-q", "-b", "feat/SAT-7")
@@ -2988,8 +3049,8 @@ class TestLiveDashboard(Base):
         t0 = time.time(); live.wait()
         self.assertLess(time.time() - t0, 10); self.assertFalse(tmp.exists())
 
-    def test_serve_real_build_writes_only_to_the_temp_folder(self):
-        """A real build in serve mode writes nothing outside its temporary folder."""
+    def test_serve_rejects_a_non_numeric_interval_and_help_lists_it(self):
+        """`--serve --every soon` is refused with a plain message, and the help text lists --serve."""
         r = run(self.repo, "dashboard", "--serve", "--every", "soon", "--no-browser")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
         self.assertIn("--serve", run(self.repo, "help").stdout)
@@ -7059,17 +7120,16 @@ class TestReusableWorkflow(Base):
         sys.modules.pop("sg_dashboard", None); D = importlib.import_module("sg_dashboard")
         asked = []
         def call(m, path, t=None, b=None):
-            if "/pulls?" in path:
-                return 200, [{"number": 5, "head": {"ref": "feat/SAT-5", "sha": "abc", "repo": {"full_name": "o/r"}}}], {}
-            if "/check-runs" in path:
-                asked.append(path); return 200, {"check_runs": [{"conclusion": "failure" if "%2F" in path else "success"}]}, {}
+            if path == "/graphql":
+                asked.append(b["variables"]["check"])
+                return 200, gql_prs([pr_node(5, "feat/SAT-5", "abc", "o/r", [run_node(1, "COMPLETED", "FAILURE" if "/" in asked[-1] else "SUCCESS")])]), {}
             return 404, {}, {}
         data = {"stories": [{"id": "SAT-5", "ref": "origin/feat/SAT-5", "merged": False}]}
         from unittest import mock
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         with mock.patch.object(GH, "call", side_effect=call), mock.patch.dict(os.environ, {"STORY_GATE_ROOT": str(self.repo)}):
             D.ci_status(GH, "o/r", "t", data)
-        self.assertEqual(len(asked), 1); self.assertIn("check_name=story-gate%20%2F%20story-gate", asked[0])
+        self.assertEqual(asked, ["story-gate / story-gate"])
         self.assertEqual(data["stories"][0]["ci"]["result"], "failure")
 
     def test_release_tag_is_resolved_to_its_commit(self):

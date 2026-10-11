@@ -571,7 +571,7 @@ The workflow runs only the default branch's copy of story-gate. It reads story r
 - `pull-requests: read`: find which pull request each story is on.
 - `checks: read`: read the story-gate check's result.
 
-It uses the repository's own `GITHUB_TOKEN`, so GitHub's normal API limits apply; a few requests per refresh are far below them.
+It uses the repository's own `GITHUB_TOKEN`, so GitHub's normal API limits apply. A refresh reads every open pull request and its story-gate check in one request per 50 pull requests, which stays far below them. If GitHub does say "rate limited", the refresh waits as GitHub asks (up to a minute) and tries again; if the limit resets later than that, the dashboard notes that CI results are missing this time instead of holding up the run.
 
 ### What it shows
 
