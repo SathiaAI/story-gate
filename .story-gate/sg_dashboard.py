@@ -1092,9 +1092,6 @@ def write_files(data, out, artifact_url=None, issue=None, live=False):
 
 def serve(gate, c, kv, rest, issue):
     """`dashboard --serve [--every MIN] [--idle MIN] [--no-browser]`: uses the same GitHub access as --open (your own git login)."""
-    if "--every" in rest or "--idle" in rest:  # given last with no number after it: don't quietly use the default
-        print("story-gate dashboard: --every and --idle are whole numbers of minutes.")
-        return 2
     try:
         every, idle = max(1, int(kv.get("every", 5))), max(1, int(kv.get("idle", 120)))
     except ValueError:

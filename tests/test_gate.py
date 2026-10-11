@@ -3189,9 +3189,9 @@ class TestLiveDashboard(Base):
         """`--serve --every soon` or a trailing `--every`/`--idle` is refused with a plain message; help lists --serve."""
         r = run(self.repo, "dashboard", "--serve", "--every", "soon", "--no-browser")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
-        for args in (("--no-browser", "--every"), ("--no-browser", "--idle")):  # a flag given last with no number
+        for args in (("--no-browser", "--every"), ("--no-browser", "--idle")):  # a flag given last: flags() refuses it
             r = run(self.repo, "dashboard", "--serve", *args)
-            self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("needs a value", r.stderr)
         self.assertIn("--serve", run(self.repo, "help").stdout)
 
     # ---- the saved copy
