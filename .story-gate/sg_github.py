@@ -379,6 +379,18 @@ def allow_ai_prs(repo, ruleset_id, token):
             "and untick 'Require an additional approval for unattributed Copilot pull requests'." % (st, (r or {}).get("message", ""), RULESET_NAME))
 
 
+def owners_on_default_branch(repo, token):
+    """Users on the '*' rule of the CODEOWNERS file GitHub uses on the default branch (.github/, then the root, then docs/);
+    [] when there is none; None when GitHub's answer can't tell (then the caller carries on as before)."""
+    for path in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+        st, f, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
+        if st == 200 and isinstance(f, dict) and f.get("encoding") == "base64":
+            return codeowners(base64.b64decode(f.get("content") or "").decode("utf-8", "replace"))[0]
+        if st != 404:
+            return None
+    return []
+
+
 def setup_repo(root, repo, owners, token, dry_run=False):
     """Human-run, one time: CODEOWNERS, ruleset, Actions cannot approve PRs. Returns a list of plain-English results."""
     out = []
@@ -404,8 +416,15 @@ def setup_repo(root, repo, owners, token, dry_run=False):
         out.append(allow_ai_prs(repo, mine[0].get("id"), token))
         out.append(require_check(repo, mine[0].get("id"), token, ci_check_name(root)))
     else:
-        st, r, _ = call("POST", "/repos/%s/rulesets" % repo, token, ruleset_json(ci_check_name(root)))
-        out.append("Ruleset: %s" % ("created" if st in (200, 201) else "NOT created (HTTP %s %s). Import docs/story-gate-ruleset.json in Settings > Rules instead." % (st, (r or {}).get("message", ""))))
+        live = owners_on_default_branch(repo, token)
+        if live is not None and not {o.lstrip("@").lower() for o in owners} & {u.lower() for u in live}:
+            # story-gate takes code owners from the default branch, so a rule turned on now would block the very pull
+            # request that adds them: nobody's approval could count.
+            out.append("Ruleset: not turned on yet. Merge the CODEOWNERS change into the default branch first, then run "
+                       "setup-repo again (story-gate only counts approvals from code owners already on that branch).")
+        else:
+            st, r, _ = call("POST", "/repos/%s/rulesets" % repo, token, ruleset_json(ci_check_name(root)))
+            out.append("Ruleset: %s" % ("created" if st in (200, 201) else "NOT created (HTTP %s %s). Import docs/story-gate-ruleset.json in Settings > Rules instead." % (st, (r or {}).get("message", ""))))
     st, _, _ = call("PUT", "/repos/%s/actions/permissions/workflow" % repo, token,
                     {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False})
     out.append("Actions: %s" % ("default token is read-only and cannot approve PRs" if st in (200, 204) else "could not update (HTTP %s); set it in Settings > Actions" % st))

@@ -83,10 +83,10 @@ python3 .story-gate/gate.py setup-repo        # add teammates with --owners you,
 ```
 This step:
 - Writes `.github/CODEOWNERS` with your username.
-- Adds a branch rule that requires a code owner's approval on the latest commit, the `story-gate` check, and resolved review threads.
+- Adds a branch rule that requires a code owner's approval on the latest commit, the `story-gate` check, and resolved review threads. It does this only once CODEOWNERS on the default branch names you: story-gate counts approvals only from code owners already there, so the rule would otherwise block the pull request that adds them.
 - Stops GitHub Actions from approving pull requests.
 
-Commit and merge the CODEOWNERS file. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
+Commit and merge the CODEOWNERS file, then run `setup-repo` again to turn the branch rule on. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
 
 **If GitHub blocks the merge with "rule violation" but every check is green:** GitHub may have switched on **Require an additional approval for unattributed Copilot pull requests** in the ruleset. It asks for a second approval on every pull request the AI opens, which a solo owner can't give. Setup turns it off; to fix an older repository, run `story-gate setup-repo` again, or untick it in **Settings › Rules › Rulesets › story-gate: human acceptance**.
 
