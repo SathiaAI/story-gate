@@ -88,6 +88,14 @@ This step:
 
 Commit and merge the CODEOWNERS file, then run `setup-repo` again to turn the branch rule on. If your account can't create rules through the API, import `docs/story-gate-ruleset.json` in **Settings › Rules › Rulesets › New › Import**.
 
+**Who opens story-gate's pull requests.** GitHub never counts an approval from whoever opened a pull request. So when story-gate opens one for you (`tracker-setup`, `settings --pr`, `setup-repo`'s CODEOWNERS change, `init`), it decides who opens it before writing anything:
+
+1. The agent App, when it's installed on the repository (`story-gate setup-agent`). It opens; you approve. Not for changes to workflow files, which the App can't make.
+2. You, when the default branch doesn't need an approval yet, or another code owner can approve.
+3. Otherwise it stops and says what to do: install the agent App, or add a second code owner.
+
+It never switches to your login because something went wrong with the App: any error other than "not set up" stops the command. The review screen and the pull request say who opened it and why.
+
 **If GitHub blocks the merge with "rule violation" but every check is green:** GitHub may have switched on **Require an additional approval for unattributed Copilot pull requests** in the ruleset. It asks for a second approval on every pull request the AI opens, which a solo owner can't give. Setup turns it off; to fix an older repository, run `story-gate setup-repo` again, or untick it in **Settings › Rules › Rulesets › story-gate: human acceptance**.
 
 **Manual C · Add the judge key** (step 4)

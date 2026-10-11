@@ -4290,7 +4290,7 @@ def cmd_setup(cmd, kv, rest):
         owners = [o.strip() for o in (kv.get("owners") or me or "").split(",") if o.strip()]
         if not repo or not owners:
             sys.exit("usage: gate.py setup-repo [--repo owner/name] [--owners you,teammate]")
-        for line in G.setup_repo(ROOT, repo, owners, tok, dry_run="--dry-run" in rest):
+        for line in G.setup_repo(ROOT, repo, owners, tok, dry_run="--dry-run" in rest, login=me):
             print("  " + line)
         if "--dry-run" not in rest:
             wj(ROOT / "docs" / "story-gate-ruleset.json", G.ruleset_json(G.ci_check_name(ROOT)))

@@ -411,7 +411,9 @@ class Wizard:
                       "**Before any story can finish**, set `test_command` (how CI runs your tests), make it write a JUnit XML "
                       "report, and set `junit_path` to that file in `.story-gate/config.json`, in a pull request of its own.")
                    if nojudge else ""))
-        self.pr = G.open_setup_pr(self.token, self.repo, files, body=body, base=base)
+        # the setup pull request adds workflow files, which the agent App can't change: pr_author picks you, or says what to do
+        who, tok, why = G.pr_author(self.repo, base, self.token, self.login, touches_workflows=True)
+        self.pr = G.open_setup_pr(tok, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base))
 
