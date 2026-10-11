@@ -1219,8 +1219,10 @@ class TestRound4Fixes(Base):
         import importlib, base64 as b64
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         def run_with(contents):
+            """Run setup_repo against a fake GitHub whose default branch holds `contents` (path -> CODEOWNERS text); returns its report and the rulesets it tried to create."""
             posts = []
             def call(m, path, t=None, b=None, accept=None):
+                """Fake GitHub API: no existing rulesets, the given CODEOWNERS files (404 for the rest), ruleset creation recorded."""
                 if m == "GET" and path.endswith("/rulesets"): return 200, [], {}
                 if m == "GET" and "/contents/" in path:
                     name = path.split("/contents/", 1)[1]
