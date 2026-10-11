@@ -639,6 +639,11 @@ def pr_author(repo, branch, token, login, touches_workflows=False):
     if not touches_workflows:
         try:
             tok, _, rec = agent_token(repo)
+            perms = rec.get("permissions") or {}
+            short = [p for p in ("contents", "pull_requests") if perms.get(p) != "write"]
+            if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
+                raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
+                                   "and accept them on the installation, then try again." % (repo, " and ".join(short)))
             return "app", tok, "the agent App (%s[bot]) opens it, so a code owner's approval counts" % rec.get("slug", "story-gate-agent")
         except AgentMissing:
             pass
@@ -705,7 +710,7 @@ def agent_token(repo):
     st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt, {"repositories": [repo.split("/", 1)[1]]})
     if st not in (200, 201):
         raise RuntimeError("GitHub refused an agent token (HTTP %s)" % st)
-    return tok["token"], tok.get("expires_at"), rec
+    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {})
 
 
 def bot_identity(rec):

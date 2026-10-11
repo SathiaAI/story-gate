@@ -3377,13 +3377,14 @@ class TestAuthorPolicy(unittest.TestCase):
             return 404, {}, {}
         G.call = call
         self.agent = None  # None: no agent App; a string: its token; an exception: what agent_token raises
+        self.perms = {"contents": "write", "pull_requests": "write", "metadata": "read"}
         def agent_token(repo):
             """The fake agent App."""
             if self.agent is None:
                 raise G.AgentMissing("no agent App yet")
             if isinstance(self.agent, Exception):
                 raise self.agent
-            return self.agent, "later", {"slug": "sg-agent"}
+            return self.agent, "later", {"slug": "sg-agent", "permissions": self.perms}
         G.agent_token = agent_token
 
     def author(self, **kw):
@@ -3426,6 +3427,17 @@ class TestAuthorPolicy(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HTTP 500") as cm:
             self.author()
         self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
+
+    def test_an_app_without_write_access_stops_instead_of_falling_back(self):
+        """An installed App that can't push or open pull requests is an error, not a reason to use the person's login."""
+        self.agent = "app-tok"; self.perms = {"contents": "read", "pull_requests": "write"}
+        with self.assertRaisesRegex(RuntimeError, "lacks write access to contents") as cm:
+            self.author()
+        self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
+
+    def test_the_ruleset_never_lets_anyone_bypass_it(self):
+        """The rule story-gate creates has no bypass actors, so neither the agent App nor an admin can skip approval."""
+        self.assertEqual(self.G.ruleset_json("story-gate")["bypass_actors"], [])
 
     def test_workflow_changes_skip_the_agent_app(self):
         """The agent App can't change workflow files, so such a PR never uses it."""
