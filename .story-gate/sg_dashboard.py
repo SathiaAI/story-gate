@@ -285,7 +285,7 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
         ids = sorted(x for x in ids if idre.fullmatch(x))
         specs = ["%s:.story-gate/stories/%s/%s" % (sha, sid, f) for sid in ids for f in listing.get(sid, [])]
         specs += ["%s:.story-gate/%s" % (sha, f) for f in ("calibration.jsonl", "learnings.jsonl", "features.json")]
-        spec_names = []
+        spec_names, pc = [], None
         if gate is not None:  # PRD/TRD at this ref, to check READY verdicts against the specs they were scored on
             try:
                 pc = gate.cfg()

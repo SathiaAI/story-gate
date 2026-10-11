@@ -7066,7 +7066,7 @@ class TestTrackerSetup(Base):
         import sg_trackersetup as TS, sg_github as G, sg_trackers as TR
         self.TS, self.G, self.TR = TS, G, TR
         keep_github_fakes_local(self, G)
-        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token"):
+        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token", "agent_token"):
             self.addCleanup(setattr, G, n, getattr(G, n))
         self.addCleanup(setattr, TR, "get_json", TR.get_json)
         os.environ["STORY_GATE_HOME"] = str(self.repo.parent / (self.repo.name + "-home") / "sg")
@@ -7135,9 +7135,9 @@ class TestTrackerSetup(Base):
     def test_signin_is_always_a_fresh_device_code_from_a_person_with_admin_rights(self):
         ss = self.session(signed=False)
         used = []
-        ss.start_signin(flow=lambda cid, on_code: used.append(cid) or "dev-token")
+        ss.start_signin(flow=lambda cid, on_code, scope: used.append((cid, scope)) or "dev-token")
         self.wait(ss, "details")
-        self.assertEqual(used, [self.TS.S.OAUTH_CLIENT_ID]); self.assertEqual(ss.token, "dev-token")
+        self.assertEqual(used, [(self.TS.S.OAUTH_CLIENT_ID, "repo")]); self.assertEqual(ss.token, "dev-token")  # no workflow scope
         self.user = {"login": "story-gate-agent[bot]", "type": "Bot"}
         with self.assertRaises(self.TS.SetupError):
             self.session()
@@ -7227,6 +7227,15 @@ class TestTrackerSetup(Base):
         self.assertIsNone(ss._key)  # dropped once sent
         self.assertFalse((Path(os.environ["STORY_GATE_HOME"]) / "trackers.env").exists())  # local copy is opt-in
 
+    def test_the_agent_app_opens_the_settings_pr_so_a_lone_code_owner_can_approve_it(self):
+        self.G.agent_token = lambda repo: ("agent-tok", "later", {})
+        ss = self.session()
+        ss.details(self.linear_form())
+        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
+        self.assertEqual(ss.step, "done", ss.msg)
+        self.assertEqual(self.prs[0]["tok"], "agent-tok")
+        self.assertEqual(self.secrets["STORY_GATE_LINEAR_KEY"][0], "human-oauth")  # secrets stay the person's own action
+
     def test_confirm_must_name_the_reviewed_plan_and_replacing_needs_its_own_tick(self):
         self.have = {"STORY_GATE_LINEAR_KEY"}
         ss = self.session()
@@ -7301,8 +7310,8 @@ class TestTrackerSetup(Base):
         fresh = self.session(signed=False)
         import threading
         gate_, calls = threading.Event(), []
-        fresh.start_signin(flow=lambda cid, on_code: calls.append(1) or gate_.wait(5) and "dev-token")
-        fresh.start_signin(flow=lambda cid, on_code: calls.append(2) or "other")
+        fresh.start_signin(flow=lambda cid, on_code, **kw: calls.append(1) or gate_.wait(5) and "dev-token")
+        fresh.start_signin(flow=lambda cid, on_code, **kw: calls.append(2) or "other")
         gate_.set(); self.wait(fresh, "details")
         self.assertEqual(calls, [1])
 
@@ -7419,6 +7428,8 @@ class TestReviewFixes(Base):
         step = lambda t: t.split("- name: build", 1)[1].split("- id: report", 1)[0]
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step(g.dash_yml()))
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step((SRC.parent / ".github/workflows/dashboard.yml").read_text()))
+        publish = g.dash_yml().split("- name: publish", 1)[1].split("- name:", 1)[0]
+        self.assertIn('--artifact-url "$ARTIFACT_URL"', publish); self.assertNotIn("${{ steps", publish.split("run:", 1)[1])
 
     def test_only_the_exact_story_gate_hook_command_is_exempt_from_the_project_hook_check(self):
         sys.path.insert(0, str(SRC))

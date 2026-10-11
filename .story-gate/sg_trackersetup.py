@@ -147,7 +147,7 @@ class Session:
 
         def go():
             try:
-                self._signed_in(flow(S.OAUTH_CLIENT_ID, on_code=self._show_code))
+                self._signed_in(flow(S.OAUTH_CLIENT_ID, scope="repo", on_code=self._show_code))  # no workflow scope: it never edits workflows
             finally:
                 with self.lock:
                     self._flow = False
@@ -370,6 +370,15 @@ def read_local(p=None):
     return out
 
 
+def pr_token(token, repo):
+    """The agent App's token when this computer has one on repo, else the person's. GitHub doesn't count a code owner's
+    approval of their own pull request, so a pull request the App opens can be approved by a lone code owner."""
+    try:
+        return G.agent_token(repo)[0]
+    except Exception:  # no agent App here, or it isn't installed on this repository
+        return token
+
+
 def open_settings_pr(gate, token, repo, kind, settings, plan):
     """A pull request that changes only trackers.<kind> in .story-gate/config.json on the default branch."""
     import sg_settings as SET
@@ -412,7 +421,7 @@ def open_settings_pr(gate, token, repo, kind, settings, plan):
     body += ["", "A code owner approves this pull request; GitHub doesn't count an approval from whoever opened it (or a code "
                  "owner adds the label `%s`)." % getattr(gate, "CHANGE_LABEL", "story-gate-change")]
     branch = "story-gate-tracker-%s-%s-%s" % (kind, time.strftime("%Y%m%d%H%M%S", time.gmtime()), secrets.token_hex(3))
-    res = G.open_setup_pr(token, repo, {cfgp: SET.dump(new).encode("utf-8")}, branch=branch,
+    res = G.open_setup_pr(pr_token(token, repo), repo, {cfgp: SET.dump(new).encode("utf-8")}, branch=branch,
                           title="story-gate: connect %s (%s)" % (plan["label"], plan["site"]), body="\n".join(body),
                           base=plan["branch"], parent=tip)
     if res.get("branch") != branch:

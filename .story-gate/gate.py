@@ -3609,7 +3609,8 @@ jobs:
         env:
           STORY_GATE_ROOT: ${{{{ github.workspace }}}}
           GITHUB_TOKEN: ${{{{ github.token }}}}
-        run: python3 .story-gate/gate.py dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "${{{{ steps.report.outputs.artifact-url }}}}" --out "$RUNNER_TEMP/sg-dashboard"
+          ARTIFACT_URL: ${{{{ steps.report.outputs.artifact-url }}}}
+        run: python3 .story-gate/gate.py dashboard --from-json "$RUNNER_TEMP/sg-dashboard/dashboard.json" --publish --artifact-url "$ARTIFACT_URL" --out "$RUNNER_TEMP/sg-dashboard"
       - name: say so if the refresh failed (the last good snapshot stays)
         if: failure()
         env:
