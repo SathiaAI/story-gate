@@ -83,6 +83,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: urllib would resend the Authorization header (the key) to wherever it points."""
 
     def redirect_request(self, *args, **kwargs):
+        """Refuse every redirect (return None), so urllib raises instead of following it."""
         return None
 
 
@@ -109,6 +110,7 @@ def open_url(req, timeout):
 
 
 def _post(url, key, body, timeout):
+    """POST JSON to the judge with its key, only to an allowed address and without following redirects. -> parsed reply, or {error}."""
     why = endpoint_error(url)
     if why:  # the key never goes to an address that isn't encrypted or that we can't name
         return {"error": "judge address refused: %s" % why}

@@ -2647,6 +2647,7 @@ class TestReleaseSignatures(unittest.TestCase):
             self.T.verify_release(self.rel, other)
 
     def test_release_archive_cannot_escape_its_folder(self):
+        """A downloaded archive whose entries point outside its folder is refused, and plain http:// downloads are refused."""
         import io, tarfile, urllib.request
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as t:
@@ -2657,6 +2658,7 @@ class TestReleaseSignatures(unittest.TestCase):
         class FakeOpener:
             """Stands in for the download: returns the archive above."""
             def open(self, *a, **k):
+                """Return the test archive instead of downloading."""
                 return io.BytesIO(buf.getvalue())
         orig = urllib.request.build_opener
         urllib.request.build_opener = lambda *h: handlers.extend(h) or FakeOpener()

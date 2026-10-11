@@ -3296,6 +3296,7 @@ def cmd_audit():
 
 # ------------------------------------------------------------------ sinks
 def cmd_publish():
+    """`publish`: send new story events to the sinks configured in config.json (command, webhook, control-hub), each from where it left off."""
     c = cfg()
     lines = [l for l in rd(OUTBOX).splitlines() if l.strip()]
     sent_p = GATE / ".outbox.sent"
@@ -3337,6 +3338,7 @@ def cmd_publish():
 
 
 def publish_control_hub(s, todo):
+    """Send events to a control-hub (Supabase REST) endpoint over https with its key; never follows a redirect. -> True on success."""
     url, key = os.environ[s["url_env"]].rstrip("/"), os.environ[s["key_env"]]
     if J.endpoint_error(url):  # the key goes in the headers: never to an unencrypted or redirected address
         raise RuntimeError("control-hub address refused: %s" % J.endpoint_error(url))

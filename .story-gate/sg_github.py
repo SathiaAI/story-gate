@@ -243,6 +243,7 @@ def _parse_xml_without_dtd(raw):
     p = xml.parsers.expat.ParserCreate()
 
     def refuse(*_):
+        """Expat handler: any DTD or entity declaration stops the parse."""
         raise ValueError("JUnit report rejected (it declares a DTD or an entity)")
     p.StartDoctypeDeclHandler = p.EntityDeclHandler = p.UnparsedEntityDeclHandler = refuse
     p.ExternalEntityRefHandler = refuse

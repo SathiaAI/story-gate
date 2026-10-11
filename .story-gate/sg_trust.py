@@ -205,6 +205,7 @@ class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     """Follow a redirect only to another https:// address."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Allow the redirect only when it points to another https:// address."""
         if not str(newurl).startswith("https://"):
             raise TrustError("the release download redirected to a non-https address")
         return super().redirect_request(req, fp, code, msg, headers, newurl)

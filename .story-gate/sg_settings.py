@@ -234,6 +234,7 @@ def policy_ref(G):
 
 
 def read_local(G):
+    """This folder's .story-gate/config.json -> (path, text, parsed object); a missing file or anything but a JSON object is a SettingsError."""
     p = G.GATE / "config.json"
     if not p.is_file():
         raise SettingsError("story-gate isn't set up in this folder (no %s). Run `story-gate init` first" % CONFIG)
