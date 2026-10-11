@@ -414,7 +414,8 @@ class Wizard:
                    if nojudge else ""))
         # the setup pull request adds workflow files, which the agent App can't change: pr_author picks you, or says what to do
         who, tok, why = G.pr_author(self.repo, base, self.token, self.login, touches_workflows=True)
-        self.pr = G.open_setup_pr(tok, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base)
+        # running init again before that pull request is merged brings the open one up to date instead of leaving it stale
+        self.pr = G.open_setup_pr(tok, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base, update_existing=True)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base))
 

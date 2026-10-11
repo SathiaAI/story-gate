@@ -3331,6 +3331,34 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         self.assertEqual(out["number"], 3)
         self.assertFalse(any(m == "POST" for m, _, _ in self.calls))
 
+    def test_open_setup_pr_brings_an_open_pr_up_to_date_when_asked(self):
+        """With update_existing, an already-open setup PR gets one commit making its files match (none when they already
+        do); without it, nothing is written and the PR is only returned."""
+        open_pr = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3"}]),
+                   ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "btip"}}),
+                   ("GET", "/repos/o/r/git/commits/btip"): (200, {"tree": {"sha": "btree"}}),
+                   ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (200, {})}
+        def routes(extra=None):
+            """The open-PR routes first, so their longer paths win over pr_routes' shorter prefixes."""
+            r = {**open_pr, **(extra or {})}
+            for k, v in self.pr_routes().items():
+                r.setdefault(k, v)
+            return r
+        self.fake_api(routes())
+        out = self.G.open_setup_pr("t", "o/r", {"x": b"new"}, update_existing=True)
+        self.assertEqual((out["number"], out["existing"], out["updated"]), (3, True, True))
+        commit = [b for m, p, b in self.calls if m == "POST" and p.endswith("/git/commits")][0]
+        self.assertEqual(commit["parents"], ["btip"])
+        trees = [b for m, p, b in self.calls if m == "POST" and p.endswith("/git/trees")]
+        self.assertEqual(trees[0]["base_tree"], "btree")
+        self.assertEqual([(m, p) for m, p, _ in self.calls if m == "PATCH"], [("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup")])
+        self.assertFalse([p for m, p, _ in self.calls if m == "POST" and p.endswith("/pulls")])  # no second PR
+        self.calls.clear()
+        self.fake_api(routes({("POST", "/repos/o/r/git/trees"): (201, {"sha": "btree"})}))
+        out = self.G.open_setup_pr("t", "o/r", {"x": b"same"}, update_existing=True)
+        self.assertIs(out["updated"], False)
+        self.assertFalse([1 for m, p, _ in self.calls if p.endswith("/git/commits") and m == "POST" or m == "PATCH"])
+
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
         with self.assertRaisesRegex(RuntimeError, "already exists.*Merge or delete"):
@@ -8130,6 +8158,18 @@ class TestReviewFixes(Base):
         for name, ref in used:
             self.assertRegex(ref, r"^[0-9a-f]{40}$", name)
             self.assertIn(ref, pinned.get(name, set()), name)
+
+    def test_every_workflow_pins_each_action_to_one_full_sha(self):
+        """story-gate's own workflows use actions only at a full commit SHA, and the same SHA everywhere an action is used."""
+        import re
+        seen = {}
+        for f in sorted((SRC.parent / ".github/workflows").glob("*.yml")):
+            for name, ref in re.findall(r"uses: (actions/[\w-]+)@(\S+)", f.read_text()):
+                with self.subTest(file=f.name, action=name):
+                    self.assertRegex(ref, r"^[0-9a-f]{40}$")
+                seen.setdefault(name, set()).add(ref)
+        self.assertTrue(seen)
+        self.assertEqual({n: len(r) for n, r in seen.items() if len(r) > 1}, {})
 
     def test_dashboard_build_step_gets_the_token_so_ci_results_show(self):
         """GitHub doesn't export GITHUB_TOKEN to steps; the dashboard reads CI results only when it has one."""
