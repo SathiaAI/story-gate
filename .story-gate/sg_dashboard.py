@@ -461,6 +461,7 @@ def next_refresh(iso):
 
 
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
+    """The pinned issue's Markdown: summary, charts and tables, trimmed to `limit` characters with a link to the full report."""
     M = {m["key"]: m for m in d.get("metrics", [])}
     nxt = next_refresh(d.get("generated_at"))
     head = ["<!-- story-gate-dashboard generated_at=%s schema=%s -->" % (d.get("generated_at"), d.get("schema")),
@@ -622,6 +623,7 @@ STALE_JS = ('(function(){var b=document.getElementById("sg-stale"),m=(Date.now()
 
 
 def to_html(d, artifact_note="", live=False, issue=None):
+    """The full report as one self-contained HTML page; `live` drops the stale-copy banner script used by saved copies."""
     M = d.get("metrics", [])
     label = dict((k, l) for k, l, _ in STATUSES)
     counts = [(k, l, len([s for s in d["stories"] if s["status"] == k]), hint) for k, l, hint in STATUSES]
@@ -850,6 +852,7 @@ SERVE_CSP = "default-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-anc
 
 
 def ago(t):
+    """How long ago a time.time() value was, in words (just now, N min ago, N h ago)."""
     n = int(time.time() - t)
     return "just now" if n < 60 else ("%d min ago" % (n // 60) if n < 3600 else "%d h ago" % (n // 3600))
 
@@ -864,6 +867,7 @@ class Live:
     `build(folder)` returns the page's HTML or raises; if it raises, the last good page stays up under a red banner."""
 
     def __init__(self, build, every=300, idle=7200):
+        """Set up the server on a random loopback port with a fresh secret path; nothing is built yet."""
         self.build, self.every, self.idle = build, every, idle
         self.tmp = tempfile.TemporaryDirectory(prefix="story-gate-live-")
         self.path = "/s/%s/" % secrets.token_urlsafe(24)
@@ -874,9 +878,11 @@ class Live:
 
     @property
     def url(self):
+        """The address to open: loopback, this server's port and the secret path."""
         return "http://127.0.0.1:%d%s" % (self.httpd.server_address[1], self.path)
 
     def refresh(self):
+        """Rebuild the page; on failure keep the last good page and remember the reason. Returns True when it worked."""
         try:
             page = self.build(self.tmp.name)
         except (Exception, SystemExit) as e:  # a failed rebuild never stops the server
@@ -888,6 +894,7 @@ class Live:
         return True
 
     def render(self):
+        """The page to send: the last good build with a status bar on top, or a short holding page before the first build."""
         with self.lock:
             page, ok_at, err = self.page, self.ok_at, self.error
         if err:
@@ -901,13 +908,16 @@ class Live:
         return page.replace("<head>", '<head><meta http-equiv="refresh" content="60">', 1).replace("<body>", "<body>" + bar, 1).encode("utf-8")
 
     def _handler(self):
+        """The request handler class, bound to this server."""
         live = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):  # nothing is logged: the address holds the session secret
+                """Log nothing: request lines contain the secret path."""
                 pass
 
             def _send(self, code, data, ctype="text/plain; charset=utf-8", allow=None):
+                """Send one response with security headers that forbid framing, caching and outside scripts."""
                 data = data if isinstance(data, bytes) else data.encode("utf-8")
                 self.send_response(code)
                 for k, v in (("Content-Type", ctype), ("Cache-Control", "no-store"), ("Content-Security-Policy", SERVE_CSP), ("X-Frame-Options", "DENY"),
@@ -918,9 +928,11 @@ class Live:
                 self.wfile.write(data)
 
             def _host_ok(self):  # DNS-rebinding guard: only our own loopback address and port
+                """True only for our own loopback address and port, so a DNS-rebinding page can't reach the server."""
                 return self.headers.get("Host", "") == "127.0.0.1:%d" % self.server.server_address[1]
 
             def do_GET(self):
+                """Serve the page at the secret path only; anything else is 404."""
                 if not self._host_ok():
                     return self._send(403, "forbidden")
                 if not secrets.compare_digest(urllib.parse.urlparse(self.path).path.encode("utf-8", "replace"), live.path.encode("utf-8")):
@@ -929,6 +941,7 @@ class Live:
                 self._send(200, live.render(), "text/html; charset=utf-8")
 
             def _other(self):  # GET only
+                """Refuse every method except GET."""
                 self._send(405 if self._host_ok() else 403, "method not allowed" if self._host_ok() else "forbidden", allow="GET")
 
             do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _other
@@ -936,6 +949,7 @@ class Live:
         return H
 
     def serve_thread(self):
+        """Start answering requests in a background thread."""
         self.serving = True
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
 
@@ -944,6 +958,7 @@ class Live:
         self.serve_thread()
 
         def loop():
+            """Build once now, then again every `every` seconds until stopped."""
             self.refresh()
             while not self.stop.wait(self.every):
                 self.refresh()
@@ -967,6 +982,7 @@ class Live:
             self.close()
 
     def close(self):
+        """Stop the server and remove the temporary folder with everything built in it. Safe to call twice."""
         if self.closed:
             return
         self.closed = True
@@ -1017,6 +1033,7 @@ def serve(gate, c, kv, rest, issue):
         return 2
 
     def build_page(tmp):
+        """Build a fresh snapshot into `tmp` and return the live page's HTML."""
         write_files(snapshot(gate, c, False), Path(tmp), issue=issue, live=True)
         return (Path(tmp) / "dashboard.html").read_text(encoding="utf-8")
     live = Live(build_page, every * 60, idle * 60)
@@ -1030,6 +1047,7 @@ def serve(gate, c, kv, rest, issue):
 
 
 def cli(gate, kv, rest):
+    """`gate.py dashboard`: build, serve, publish or report a failed refresh, depending on the options."""
     import sg_github as G
     c = gate.cfg()
     root = gate.ROOT

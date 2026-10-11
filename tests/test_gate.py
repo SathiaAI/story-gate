@@ -2608,6 +2608,7 @@ class TestDashboard(Base):
         self.assertLessEqual(len(self.D.to_markdown(many)), self.D.ISSUE_LIMIT + 100)
 
     def test_html_is_self_contained_escaped_and_branded(self):
+        """The HTML report has no outside resources, escapes story text and carries the story-gate look."""
         page = self.D.to_html(self.data)
         self.assertNotIn("<script>alert", page); self.assertIn("default-src 'none'", page)
         self.assertNotIn("http", page.split("</style>")[-1].replace('xmlns="http://www.w3.org/2000/svg"', "")); self.assertNotRegex(page, r"<(link|img|iframe)[\s>]")
@@ -2781,19 +2782,23 @@ class TestLiveDashboard(Base):
     URL = "https://github.com/o/r/actions/runs/1/artifacts/9"
 
     def setUp(self):
+        """Load sg_dashboard from the source tree."""
         super().setUp()
         sys.path.insert(0, str(SRC))
         import importlib; self.D = importlib.import_module("sg_dashboard")
 
     def story(self, i, status="draft", title="T", feature="", ref="origin/main"):
+        """A minimal story row for building dashboard data."""
         return {"id": "SAT-%d" % i, "title": title, "feature": feature, "status": status, "ready": None, "done": None, "checkpoint": None, "coder": None,
                 "trace": [], "ref": ref, "merged": True, "acs": 0, "stale": False, "last_reported": None}
 
     def data(self, stories, **kw):
+        """Dashboard data around the given stories."""
         return dict({"schema": 1, "generated_at": "2026-10-02T00:20:00Z", "default_ref": "origin/main", "default_sha": "abc", "refs_scanned": [{"ref": "origin/main", "sha": "abc"}],
                      "omissions": [], "conflicts": [], "features": [], "stories": stories, "metrics": []}, **kw)
 
     def get(self, live, path=None, method="GET", host=None):
+        """Send one request to a running live server; returns status, response and body."""
         import http.client
         c = http.client.HTTPConnection("127.0.0.1", live.httpd.server_address[1], timeout=10)
         c.request(method, path if path is not None else live.path, headers={"Host": host or "127.0.0.1:%d" % live.httpd.server_address[1]})
@@ -2801,12 +2806,14 @@ class TestLiveDashboard(Base):
         return r.status, r, body
 
     def live(self, build=None, **kw):
+        """A live server on a random port (stopped after the test), serving `build`'s page."""
         live = self.D.Live(build or (lambda tmp: self.D.to_html(self.data([self.story(1)]), live=True)), **kw)
         live.serve_thread(); self.addCleanup(live.close)
         return live
 
     # ---- the pinned issue
     def test_mermaid_labels_cannot_break_out(self):
+        """Story titles in Mermaid charts can't close the label or inject chart code."""
         import re
         bad = self.HOSTILE
         lab = self.D.mm(bad)
@@ -2827,6 +2834,7 @@ class TestLiveDashboard(Base):
         self.assertIn("Queued: 1", blocks[1]); self.assertIn('"Done" : 1', blocks[0])
 
     def test_issue_has_details_and_both_charts_next_to_the_tables(self):
+        """The pinned issue shows per-story details and both charts beside their tables."""
         body = self.D.to_markdown(self.data([self.story(1, "queued")]))
         self.assertEqual(body.count("<details>"), body.count("</details>"))
         for t in ("All stories", "Features", "Queued to start", "How each number is calculated"):
@@ -2835,6 +2843,7 @@ class TestLiveDashboard(Base):
         self.assertIn("| Story | Feature | Stage | READY | DONE | Branch |", body)
 
     def test_issue_stays_under_the_size_budget_and_links_the_full_report(self):
+        """A large dashboard is trimmed under GitHub's issue size and links to the full report."""
         many = self.data([self.story(i, ["draft", "queued", "in_progress", "done"][i % 4], "x" * 50, "F%d" % (i % 9)) for i in range(2000)],
                          features=[{"id": "F%d" % i, "title": "t" * 60} for i in range(9)])
         body = self.D.to_markdown(many, self.URL)
@@ -2848,6 +2857,7 @@ class TestLiveDashboard(Base):
         self.assertLess(len(tiny), 3000); self.assertIn("Left out to stay under GitHub's size limit", tiny)
 
     def test_issue_says_when_it_was_updated_and_when_it_refreshes_next(self):
+        """The pinned issue states its build time and the next scheduled refresh."""
         body = self.D.to_markdown(self.data([self.story(1)]))
         self.assertIn("Updated **2026-10-02T00:20:00Z (UTC)**", body)
         self.assertIn("Next refresh: by **2026-10-02 00:41 (UTC)**", body); self.assertIn("at least every 30 minutes", body)
@@ -2858,9 +2868,11 @@ class TestLiveDashboard(Base):
         self.assertNotIn("Next refresh", self.D.to_markdown(self.data([], generated_at="soon")))
 
     def test_failed_refresh_marker_sits_at_the_top_and_says_stale(self):
+        """A failed refresh puts a stale warning at the top of the issue and keeps the last snapshot."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         issue = {"number": 3, "body": self.D.to_markdown(self.data([self.story(1)]))}
         def call(m, path, t=None, b=None, accept=None):
+            """Fake GitHub: GET returns the issue, PATCH updates it."""
             if m == "GET": return 200, [issue], {}
             issue.update(b); return 200, {}, {}
         G.call = call
@@ -2870,6 +2882,7 @@ class TestLiveDashboard(Base):
         self.assertLess(issue["body"].index("STALE"), issue["body"].index("Updated **"))
 
     def test_publish_never_overwrites_a_newer_snapshot(self):
+        """Publishing an older snapshot leaves a newer one in the issue untouched."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         issue = {"number": 3, "state": "open", "body": "<!-- story-gate-dashboard generated_at=2026-10-02T09:00:00Z schema=1 -->"}
         G.call = lambda m, path, t=None, b=None, accept=None: (200, [issue], {}) if m == "GET" and "/issues?" in path else (200, {}, {})
@@ -2877,6 +2890,7 @@ class TestLiveDashboard(Base):
 
     # ---- refresh on events
     def test_dashboard_workflows_refresh_on_events_and_stay_least_privilege(self):
+        """Both dashboard workflows run on events and ask only for the permissions they use."""
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         sys.modules.pop("sg_reusable", None)
         import re, sg_reusable as R
@@ -2895,6 +2909,7 @@ class TestLiveDashboard(Base):
 
     # ---- the live page on this computer
     def test_serve_answers_only_the_secret_path_host_and_get(self):
+        """The live server answers only GET on the secret path with our own Host header."""
         live = self.live()
         self.assertRegex(live.path, r"^/s/[A-Za-z0-9_-]{32}/$"); self.assertTrue(live.url.startswith("http://127.0.0.1:"))
         self.assertEqual(live.httpd.server_address[0], "127.0.0.1")
@@ -2916,14 +2931,17 @@ class TestLiveDashboard(Base):
         self.assertEqual(self.get(live, "/nope")[2], "not found"); self.assertNotIn(live.path, self.get(live, "/nope")[2])
 
     def test_serve_page_is_fresh_so_it_has_no_stale_banner_and_no_script(self):
+        """The live page has no stale-copy banner and no script."""
         live = self.live(); live.refresh()
         body = self.get(live)[2]
         self.assertNotIn('id="sg-stale"', body); self.assertNotIn("<script", body); self.assertNotIn("snapshot from", body)
         self.assertIn("Live view on this computer. Updated just now; rebuilds every", body)
 
     def test_serve_failed_rebuild_shows_a_red_banner_and_keeps_the_last_good_page(self):
+        """A failed rebuild shows a red banner over the last good page."""
         calls = []
         def build(tmp):
+            """Fake build that fails on the second call."""
             calls.append(tmp)
             if len(calls) == 2:
                 raise RuntimeError("git fetch failed for https://user:SECRET@github.com/o/r <script>")
@@ -2943,14 +2961,17 @@ class TestLiveDashboard(Base):
         self.assertNotIn("Couldn", self.get(live)[2]); self.assertEqual(self.get(live)[0], 200)
 
     def test_serve_first_build_failing_still_serves_an_error_page(self):
+        """If the very first build fails, the server still answers with the error."""
         def build(tmp): raise OSError("offline")
         live = self.live(build); live.refresh()
         st, _, body = self.get(live)
         self.assertEqual(st, 200); self.assertIn("Couldn't refresh: offline", body); self.assertIn("Trying again soon", body)
 
     def test_serve_keeps_everything_in_a_temp_folder_that_is_removed(self):
+        """Built files live in a temporary folder that is removed on close."""
         seen = []
         def build(tmp):
+            """Fake build that writes into the temporary folder."""
             seen.append(tmp); (Path(tmp) / "dashboard.html").write_text("x"); return "<html><head></head><body></body></html>"
         live = self.live(build); live.refresh()
         tmp = Path(seen[0]); self.assertTrue(tmp.is_dir()); self.assertTrue(str(tmp).startswith(tempfile.gettempdir()))
@@ -2962,17 +2983,20 @@ class TestLiveDashboard(Base):
             socket.create_connection(("127.0.0.1", port), timeout=2)
 
     def test_serve_stops_after_the_idle_time_and_cleans_up(self):
+        """The server stops by itself when nobody opens the page for the idle time."""
         live = self.live(idle=0); live.refresh(); tmp = Path(live.tmp.name)
         t0 = time.time(); live.wait()
         self.assertLess(time.time() - t0, 10); self.assertFalse(tmp.exists())
 
     def test_serve_real_build_writes_only_to_the_temp_folder(self):
+        """A real build in serve mode writes nothing outside its temporary folder."""
         r = run(self.repo, "dashboard", "--serve", "--every", "soon", "--no-browser")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("whole numbers of minutes", r.stdout)
         self.assertIn("--serve", run(self.repo, "help").stdout)
 
     # ---- the saved copy
     def test_saved_report_warns_when_it_is_old_but_a_live_page_does_not(self):
+        """A saved copy warns when it is old; the live page never does."""
         import base64, hashlib
         d = self.data([self.story(1)])
         page = self.D.to_html(d, issue="https://github.com/o/r/issues?q=label")
@@ -2989,11 +3013,13 @@ class TestLiveDashboard(Base):
             self.assertNotIn(t, live)
 
     def test_saved_report_banner_script_computes_the_age(self):
+        """The saved copy's banner script computes the age correctly (run in node)."""
         import shutil as sh
         node = sh.which("node")
         if not node:
             self.skipTest("node is not installed")
         def shown(generated, now_ms):
+            """Run the banner script in node; returns whether it is hidden and its text."""
             js = ("var el={hidden:true,_b:{textContent:''},getAttribute:function(){return %r},querySelector:function(){return this._b}};"
                   "var document={getElementById:function(){return el}};Date.now=function(){return %d};%s;console.log(el.hidden+'|'+el._b.textContent)"
                   % (generated, now_ms, self.D.STALE_JS))
