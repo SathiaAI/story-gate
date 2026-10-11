@@ -7067,7 +7067,7 @@ class TestTrackerSetup(Base):
         import sg_trackersetup as TS, sg_github as G, sg_trackers as TR
         self.TS, self.G, self.TR = TS, G, TR
         keep_github_fakes_local(self, G)
-        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token", "agent_token"):
+        for n in ("set_repo_secret", "open_setup_pr", "device_flow", "human_token"):
             self.addCleanup(setattr, G, n, getattr(G, n))
         self.addCleanup(setattr, TR, "get_json", TR.get_json)
         os.environ["STORY_GATE_HOME"] = str(self.repo.parent / (self.repo.name + "-home") / "sg")
@@ -7228,16 +7228,6 @@ class TestTrackerSetup(Base):
         self.assertNotIn(self.LKEY, self.everything_seen(ss))
         self.assertIsNone(ss._key)  # dropped once sent
         self.assertFalse((Path(os.environ["STORY_GATE_HOME"]) / "trackers.env").exists())  # local copy is opt-in
-
-    def test_the_agent_app_opens_the_settings_pr_so_a_lone_code_owner_can_approve_it(self):
-        """With the agent App installed, the App opens the settings PR; secrets still use the person's token."""
-        self.G.agent_token = lambda repo: ("agent-tok", "later", {})
-        ss = self.session()
-        ss.details(self.linear_form())
-        ss.confirm({"plan": ss.plan["id"]}, fetch=self.ticket)
-        self.assertEqual(ss.step, "done", ss.msg)
-        self.assertEqual(self.prs[0]["tok"], "agent-tok")
-        self.assertEqual(self.secrets["STORY_GATE_LINEAR_KEY"][0], "human-oauth")  # secrets stay the person's own action
 
     def test_confirm_must_name_the_reviewed_plan_and_replacing_needs_its_own_tick(self):
         self.have = {"STORY_GATE_LINEAR_KEY"}
