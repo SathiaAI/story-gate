@@ -827,7 +827,12 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     r = "/repos/%s" % repo
     owner = repo.split("/", 1)[0]
     st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), token)
-    found = open_prs[0] if st == 200 and isinstance(open_prs, list) and open_prs else None
+    def same_repo(pr):
+        """A PR whose head branch lives in `repo` itself (the head filter alone also matches other repos of the owner)."""
+        head = pr.get("head") if isinstance(pr, dict) else None
+        hrepo = head.get("repo") if isinstance(head, dict) else None
+        return isinstance(hrepo, dict) and hrepo.get("full_name") == repo
+    found = next((pr for pr in open_prs if same_repo(pr)), None) if st == 200 and isinstance(open_prs, list) else None
     if found and not update_existing:  # `existing`: the files were NOT written; the caller decides
         return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True}
     base = base or ok("GET", r)["default_branch"]

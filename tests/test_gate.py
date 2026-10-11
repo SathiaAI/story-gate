@@ -3326,7 +3326,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         self.assertEqual(blob["encoding"], "base64")
 
     def test_open_setup_pr_existing_pr_short_circuits(self):
-        self.fake_api(self.pr_routes({("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3"}])}))
+        self.fake_api(self.pr_routes({("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3", "head": {"repo": {"full_name": "o/r"}}}])}))
         out = self.G.open_setup_pr("t", "o/r", {"x": b"1"})
         self.assertEqual(out["number"], 3)
         self.assertFalse(any(m == "POST" for m, _, _ in self.calls))
@@ -3335,7 +3335,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         """With update_existing, an open setup PR into the same base gets one fast-forward commit whose content is the
         base branch plus the files (anything else pushed there is undone), none when it already matches, and never a
         second PR."""
-        open_pr = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3", "base": {"ref": "main"}}]),
+        open_pr = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3", "base": {"ref": "main"}, "head": {"repo": {"full_name": "o/r"}}}]),
                    ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "btip"}}),
                    ("GET", "/repos/o/r/git/commits/btip"): (200, {"tree": {"sha": "btree"}}),
                    ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (200, {})}
@@ -3359,7 +3359,7 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         self.fake_api(routes({("POST", "/repos/o/r/git/trees"): (201, {"sha": "btree"})}))
         self.assertIs(self.G.open_setup_pr("t", "o/r", {"x": b"same"}, update_existing=True)["updated"], False)
         self.assertFalse([1 for m, p, _ in self.calls if (m == "POST" and p.endswith("/git/commits")) or m == "PATCH"])
-        failures = {"other base": {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "dev"}}])},
+        failures = {"other base": {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "dev"}, "head": {"repo": {"full_name": "o/r"}}}])},
                     "branch gone": {("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (404, {"message": "Not Found"})},
                     "branch moved": {("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (422, {"message": "Update is not a fast forward"})}}
         for why, extra in failures.items():
@@ -3372,6 +3372,18 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.G.open_setup_pr("t", "o/r", {"x": b"new"}, update_existing=True)
         self.assertFalse([1 for m, p, _ in self.calls if m in ("POST", "PATCH")])  # a PR into another base is never touched
+
+    def test_open_setup_pr_ignores_an_open_pr_from_another_repository(self):
+        """A PR from the same owner and branch name but another repository (or a deleted fork) is never reused or updated:
+        the setup PR is created in this repository."""
+        for head in ({"repo": {"full_name": "o/other"}}, {"repo": None}, None):
+            with self.subTest(head=head):
+                self.calls.clear()
+                other = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "x", "base": {"ref": "main"}, "head": head}])}
+                self.fake_api(self.pr_routes(other))
+                out = self.G.open_setup_pr("t", "o/r", {"x": b"1"}, update_existing=True)
+                self.assertEqual(out["number"], 7); self.assertNotIn("existing", out)
+                self.assertFalse([1 for m, _, _ in self.calls if m == "PATCH"])
 
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
