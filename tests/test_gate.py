@@ -6660,6 +6660,9 @@ class TestTrackerJira(Base):
                 unread = []
                 self.assertEqual([s for _, s in g.spec_scenarios(text, unread)], ["Login works"]); self.assertEqual(unread, [])
         self.assertIn("\n- point", TR.adf_to_text(adf(para("Acceptance criteria are below"), bullets("point"))))  # only the whole line counts
+        item = {"type": "listItem", "content": [para("Intro"), para("Acceptance criteria")]}  # a label inside a list item
+        nested = TR.adf_to_text(adf({"type": "bulletList", "content": [item]}, bullets("y")))  # is not a label
+        self.assertNotIn("**Acceptance criteria**", nested); self.assertIn("\n- y", nested); self.assertNotIn("[ ] y", nested)
 
     def test_adf_reads_the_common_parts_and_fails_closed_on_the_rest(self):
         TR = self.TR
