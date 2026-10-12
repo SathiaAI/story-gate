@@ -108,8 +108,9 @@ def normal(b):
 
 
 def load(text, where="the default branch's .story-gate/budgets.json"):
-    """Budgets from budgets.json text ([] for None). Anything invalid raises PolicyError: the gate fails closed."""
-    if text is None or not text.strip():
+    """Budgets from budgets.json text ([] when there is no file: None). Anything invalid, an empty file included, raises
+    PolicyError: the gate fails closed."""
+    if text is None:
         return []
     try:
         doc = json.loads(text)
@@ -161,17 +162,58 @@ def applies(b, changed):
     return not b["paths"] or any(fnmatch.fnmatchcase(f, g) for f in changed for g in b["paths"])
 
 
-INTERPRETERS = {"python", "python3", "py", "node", "deno", "bun", "bash", "sh", "zsh", "ruby", "perl", "php", "pwsh", "powershell", "Rscript"}
+# Per interpreter: options whose next word is a value, not the script (a value that is a repository file is code too,
+# and is pinned), and options that run code given inline or by module name (there is no script file to pin).
+FAMILY = {"python": ({"-W", "-X", "-Q"}, {"-m", "-c"}),
+          "node": ({"-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "-C", "--conditions",
+                    "--import-map", "--config"}, {"-e", "--eval", "-p", "--print"}),
+          "shell": ({"-o", "+o", "-O"}, {"-c"}), "ruby": ({"-I", "-r"}, {"-e"}), "php": ({"-c", "-d"}, {"-r"}),
+          "pwsh": ({"-File", "-file"}, {"-Command", "-command", "-c", "-EncodedCommand"}), "r": (set(), {"-e"})}
+KIND = {"python": "python", "python3": "python", "py": "python", "node": "node", "deno": "node", "bun": "node", "bash": "shell",
+        "sh": "shell", "zsh": "shell", "ruby": "ruby", "perl": "ruby", "php": "php", "pwsh": "pwsh", "powershell": "pwsh", "Rscript": "r"}
+# Programs that run whatever the repository's own config or build files say (package.json scripts, a Makefile, ...).
+RUNNERS = {"npm", "npx", "pnpm", "yarn", "make", "just", "rake", "gradle", "gradlew", "mvn", "mvnw", "cargo", "go", "dotnet",
+           "tox", "nox", "uv", "poetry", "pipenv", "pytest", "jest", "vitest", "eslint", "tsc", "webpack", "vite"}
+
+
+def _prog(cmd):
+    """The interpreter family of a command (python, node, shell, ...), or None."""
+    p = os.path.splitext(os.path.basename(cmd[0]))[0]
+    return KIND.get(p) or ("python" if re.fullmatch(r"python3(?:\.\d+)?", p) else None)
+
+
+def _script_args(cmd):
+    """(words that may name the code an interpreter runs, True when it runs code given inline or by module name)."""
+    values, opaque = FAMILY[_prog(cmd)]
+    out, i = [], 1
+    if os.path.splitext(os.path.basename(cmd[0]))[0] in ("deno", "bun") and len(cmd) > 1 and cmd[1] == "run":
+        i = 2
+    while i < len(cmd):
+        a = cmd[i]
+        if a in opaque:
+            return out, True
+        if a in values:
+            out += cmd[i + 1:i + 2]
+            i += 2
+            continue
+        if a.startswith("-"):
+            if "=" in a:
+                out.append(a.split("=", 1)[1])
+            i += 1
+            continue
+        out.append(a)  # the script
+        break
+    return out, False
 
 
 def auto_pins(b, root):
-    """The script a budget runs, pinned without being listed: the program itself when it is a path (./scripts/count.sh),
-    or the first argument after an interpreter (python scripts/count.py). Data the command measures is never pinned."""
+    """The code a budget runs, pinned without being listed: the program itself when it is a path (./scripts/count.sh),
+    and after an interpreter the script plus any file an option loads (node -r ./setup.js scripts/size.js). Data the
+    command measures is never pinned."""
     cmd = [a.replace("\\", "/") for a in b["command"]]
     cand = [cmd[0]] if os.path.dirname(cmd[0]) else []
-    prog = os.path.splitext(os.path.basename(cmd[0]))[0]
-    if prog in INTERPRETERS or re.fullmatch(r"python3(?:\.\d+)?", prog):
-        cand += [a for a in cmd[1:] if not a.startswith("-")][:1]
+    if _prog(cmd):
+        cand += _script_args(cmd)[0]
     out = set()
     for v in cand:
         if os.path.isabs(v) or re.match(r"^[A-Za-z]:", v):
@@ -182,6 +224,21 @@ def auto_pins(b, root):
     return out
 
 
+def unknown_code(b, root):
+    """Why story-gate can't tell which repository files decide this measurement ("" when it can, or pins are listed)."""
+    if b["pins"]:
+        return ""
+    cmd = [a.replace("\\", "/") for a in b["command"]]
+    prog = os.path.splitext(os.path.basename(cmd[0]))[0]
+    if prog in RUNNERS:
+        return "%s runs whatever the repository's own files say (package.json, a Makefile, a config); list them in pins" % prog
+    if _prog(cmd):
+        _, opaque = _script_args(cmd)
+        if opaque or not auto_pins(b, root):
+            return "story-gate can't tell which repository file %s runs (inline code, a module name or no script); list it in pins" % prog
+    return ""
+
+
 def trust_problems(b, root, changed):
     """Why CI can't vouch for this budget's command on this change ([] when it can)."""
     out = []
@@ -190,6 +247,9 @@ def trust_problems(b, root, changed):
     if hit:
         out.append("this change edits files that decide how it is measured (%s); change them in a pull request of their own"
                    % ", ".join(hit[:3]))
+    why = unknown_code(b, root)
+    if why:
+        out.append(why)
     prog = b["command"][0]
     if not os.path.dirname(prog):
         exe = shutil.which(prog, path=os.environ.get("PATH"))
@@ -277,6 +337,8 @@ def run(b, root, work_state, timeout=None):
     if changed:
         note = (note + "; " if note else "") + ("the run created or changed files in the repository (%s), so it doesn't count: "
                                                 "write output to an ignored path" % ", ".join(changed[:5]))
+    if not note:  # what gets stored or uploaded (the tests job's artifact) has known secret shapes removed; parsed the same everywhere
+        raw = V.redact(raw.decode("utf-8", "replace")).encode("utf-8")
     return ({"spec": spec_hash(b), "exit_code": code, "seconds": round(time.time() - t0, 1), "note": note,
              "fingerprint": V.fingerprint_of(before), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
              "output_tail": V.redact(out)[-V.TAIL:]}, b"" if note else raw)
@@ -284,9 +346,9 @@ def run(b, root, work_state, timeout=None):
 
 def run_all(budgets, root, work_state, total=CI_TOTAL):
     """CI order: decided budgets first, then proposed, each by name, inside one time budget. -> {name: (record, raw)}."""
-    out, t0 = {}, time.time()
+    out, t0 = {}, time.monotonic()  # a clock change can't stretch or cut the time
     for b in sorted(budgets, key=lambda x: (x["status"] != "decided", x["name"])):
-        left = total - (time.time() - t0)
+        left = total - (time.monotonic() - t0)
         if left < 5:
             out[b["name"]] = ({"spec": spec_hash(b), "note": "not run: the %d-second time for all budgets ran out" % total}, b"")
             continue

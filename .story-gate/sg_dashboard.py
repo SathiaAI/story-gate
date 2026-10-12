@@ -238,7 +238,8 @@ def budget_results(doc):
             continue
         val = v.get("value") if isinstance(v.get("value"), str) and re.fullmatch(r"-?\d{1,30}(?:\.\d{1,12})?", v.get("value")) else None
         out.append({"name": name, "value": val, "unit": clean(v.get("unit"), 16), "at": clean(v.get("at"), 30),
-                    "state": v.get("state") if v.get("state") in ("checked", "reported", "not_run") else "not_run",
+                    "state": ("reported" if v.get("state") == "checked" and v.get("source") != "ci" else v.get("state"))
+                    if v.get("state") in ("checked", "reported", "not_run") else "not_run",
                     "source": "ci" if v.get("source") == "ci" else "local"})
     return out
 
@@ -248,13 +249,14 @@ def budget_history(policy_text, rows):
     try:
         import sg_measure as BM
         from decimal import Decimal
-        policy = BM.load(policy_text.decode("utf-8", "replace") if policy_text else None)
+        policy = BM.load(policy_text.decode("utf-8", "replace") if policy_text is not None else None)
     except Exception as e:
         return [], "budgets.json on the default branch can't be read (%s)" % clean(str(e), 160)
     out = []
     for b in policy:
         hist = sorted(({"story": s["id"], "value": x["value"], "state": x["state"], "source": x["source"], "at": x["at"]}
-                       for s in rows if s.get("merged") for x in s.get("budgets") or [] if x["name"] == b["name"] and x["value"] is not None),
+                       for s in rows if s.get("merged") for x in s.get("budgets") or []
+                       if x["name"] == b["name"] and x["value"] is not None and x["unit"] == b["unit"]),  # another unit: another measure
                       key=lambda e: (e["at"], e["story"]))[-BUDGET_HISTORY:]
         for e in hist:
             e["within"] = BM.met(b, Decimal(e["value"]))

@@ -3065,8 +3065,12 @@ def cmd_ci_tests(out_dir):
             todo = []
             print("story-gate budgets: not measured (%s)" % e)
         if todo:
-            measured = M.run_all(todo, str(ROOT), work_state)
-            print("story-gate budgets: measured %d" % len(measured))
+            try:
+                measured = M.run_all(todo, str(ROOT), work_state)
+                print("story-gate budgets: measured %d" % len(measured))
+            except Exception as e:  # never stop the project's tests; the story-gate job then sees every budget as not run
+                measured = None
+                print("story-gate budgets: not measured (%s: %s)" % (e.__class__.__name__, str(e)[:200]))
     cmd = c.get("test_command")
     rec, junit = {"command": cmd, "at": now()}, None
     if not cmd:
@@ -3192,13 +3196,15 @@ def cmd_ci(tests_dir=None):
                 notes.insert(0, weak)
                 print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
         import sg_measure as M
-        base_budgets = git("show", "%s:.story-gate/budgets.json" % base)
-        if os.environ.get("STORY_GATE_TRUSTED_DIR") and base_budgets.strip() and not trusted("budgets.json").is_file():
+        has_budgets = git("cat-file", "-t", "%s:.story-gate/budgets.json" % base).strip() == "blob"
+        base_budgets = git("show", "%s:.story-gate/budgets.json" % base) if has_budgets else None
+        if os.environ.get("STORY_GATE_TRUSTED_DIR") and has_budgets and not trusted("budgets.json").is_file():
             raise ConfigError("the default branch has budgets (.story-gate/budgets.json) but this workflow didn't hand them to "
                               "story-gate, so they can't be checked. A code owner runs `story-gate install` to update the workflow")
         if ".story-gate/budgets.json" in files:  # the same plain words for looser budgets
             try:
-                wb = M.weaker(M.load(base_budgets), M.load(rd(GATE / "budgets.json") or None, "this PR's .story-gate/budgets.json"))
+                mine = rd(GATE / "budgets.json") if (GATE / "budgets.json").is_file() else None
+                wb = M.weaker(M.load(base_budgets), M.load(mine, "this PR's .story-gate/budgets.json"))
             except M.PolicyError as e:
                 problems.append("%s. Once merged it would stop the gate (it fails closed), so fix it first" % e)
                 wb = []

@@ -453,8 +453,8 @@ def budget_value(field, raw):
             v = json.loads(s)
         except ValueError:
             v = None
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise SettingsError("%s must be a number" % field)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+            raise SettingsError("%s must be a number" % field)  # NaN and infinity aren't limits (nor valid JSON)
         return v
     if kind == "int":
         if field == "expect_exit" and s.lower() in ("", "none", "any"):

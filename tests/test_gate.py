@@ -8837,7 +8837,7 @@ class TestBudgets(Base):
     def budget(self, **kw):
         """A valid decided budget whose command prints 3 (override any field)."""
         b = {"name": "widgets", "unit": "count", "limit": 5, "status": "decided", "source": "owner, for the test",
-             "measure": "number", "command": [PY, "-c", "print(3)"]}
+             "measure": "number", "command": [PY, "-c", "print(3)"], "pins": ["scripts"]}  # inline code needs pins
         b.update(kw)
         return b
 
@@ -8887,7 +8887,9 @@ class TestBudgets(Base):
         """load() refuses bad JSON, a wrong version, unknown top-level keys, duplicate names, too many budgets and any bad
         budget; the gate then stops with a ConfigError instead of scoring without the budgets."""
         M = self.M()
-        self.assertEqual(M.load(None), []); self.assertEqual(M.load("  "), [])
+        self.assertEqual(M.load(None), [])
+        with self.assertRaises(M.PolicyError):
+            M.load("  ")  # an empty file is a broken policy, not "no budgets"
         for text in ("{", "[]", json.dumps({"version": 2, "budgets": []}), json.dumps({"version": 1, "budgets": [], "x": 1}),
                      json.dumps({"version": 1, "budgets": [self.budget(), self.budget()]}),
                      json.dumps({"version": 1, "budgets": [self.budget(name="b%d" % i) for i in range(M.MAX_BUDGETS + 1)]}),
@@ -9003,6 +9005,19 @@ class TestBudgets(Base):
             self.assertTrue(any("isn't pinned" in p for p in M.trust_problems(b, str(self.repo), ["app.py"])))
             b = M.normal(self.budget(command=["lint"], pins=["bin"]))
             self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
+        (self.repo / "setup.js").write_text("")
+        for cmd, pins in ((["node", "-r", "./setup.js", "scripts/count.py"], {"setup.js", "scripts/count.py"}),
+                          (["python3", "-X", "utf8", "-W", "ignore", "scripts/count.py", "data"], {"scripts/count.py"}),
+                          (["deno", "run", "--import-map=setup.js", "scripts/count.py"], {"setup.js", "scripts/count.py"})):
+            with self.subTest(cmd=cmd):  # an option's value is never mistaken for the script
+                b = M.normal(self.budget(command=cmd, pins=[]))
+                self.assertEqual(M.auto_pins(b, str(self.repo)), pins)
+                self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
+        for cmd in (["python3", "-m", "tools.count"], ["python3", "-c", "print(1)"], ["node", "-e", "1"], ["bash", "-c", "echo 1"],
+                    ["npm", "run", "size"], ["make", "count"], ["python3", "missing.py"]):
+            with self.subTest(cmd=cmd):  # story-gate can't tell which file runs: no credit without pins
+                self.assertTrue(M.trust_problems(M.normal(self.budget(command=cmd, pins=[])), str(self.repo), ["app.py"]))
+                self.assertEqual(M.trust_problems(M.normal(self.budget(command=cmd, pins=["tools"])), str(self.repo), ["app.py"]), [])
 
     # ---------------------------------------------------------------- the verdict
     def test_decided_budgets_need_a_value_ci_checked(self):
@@ -9216,6 +9231,20 @@ class TestBudgets(Base):
         self.assertEqual((res["value"], res["state"], res["source"]), ("3", "checked", "ci"))
         self.assertIn("| widgets | at most 2 count | 3 count | checked by CI | OVER |", summary.read_text())
 
+    def test_ci_artifact_never_carries_secret_shapes(self):
+        """The tests job's raw output has known secret shapes removed before it is uploaded, and it parses the same way."""
+        tok = "ghp_" + "A1b2" * 9
+        self.policy(self.budget(command=[PY, "-c", "print('debug %s'); print(3)" % tok]), commit=True)
+        self.ready(); self.fill_validation()
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        run(self.repo, "ci-tests", str(td), env=env)
+        raw = (td / "measures/widgets.raw").read_bytes()
+        self.assertNotIn(tok.encode(), raw); self.assertIn(b"[redacted]", raw)
+        run(self.repo, "ci", "--tests", str(td), env=env)
+        self.assertEqual(self.results()["widgets"]["value"], "3")
+        self.assertNotIn(tok, (self.sd / "budget_results.json").read_text())
+
     def test_ci_ignores_runs_from_another_commit_or_command(self):
         """A tests-job run for another head commit or another command hash is not counted (not_run)."""
         self.policy(self.budget(), commit=True)
@@ -9287,6 +9316,11 @@ class TestBudgets(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(json.loads((out / "budgets.json").read_text())["budgets"][0]["name"], "widgets")
         self.assertTrue((out / "sg_measure.py").is_file())
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / ".story-gate/budgets.json").write_text(""); g_("commit", "-qam", "empty")
+        g_("checkout", "-q", "feature/SAT-1-thing")
+        run(self.repo, "runtime-prepare", "--out", str(out), "--base", "main", "--allow-unsigned", "true", env={"GITHUB_OUTPUT": str(gho)})
+        self.assertEqual((out / "budgets.json").read_text(), "")  # an empty file is handed over, so the loader refuses it
 
     # ---------------------------------------------------------------- settings and dashboard
     def test_settings_budget_changes_go_through_a_pull_request(self):
@@ -9327,6 +9361,8 @@ class TestBudgets(Base):
             self.assertIn("Not looser", sent[-1][1]["body"])
             self.assertEqual(SET.cli(g, ["budget", "set", "lines", "unit", "seconds"]), 1)  # refused before any PR
             self.assertEqual(SET.cli(g, ["budget", "set", "lines", "colour", "red"]), 1)
+            for bad in ("NaN", "Infinity", "-Infinity", "true", "ten"):
+                self.assertEqual(SET.cli(g, ["budget", "set", "lines", "limit", bad]), 1, bad)
             self.assertEqual(SET.cli(g, ["budget", "remove", "nope"]), 1)
             n = len(sent)
             self.assertEqual(SET.cli(g, ["budget", "decide", "lines"]), 0)  # already decided: no pull request
@@ -9350,6 +9386,10 @@ class TestBudgets(Base):
         self.assertEqual([e["value"] for e in hist[0]["history"]], ["3", "7", "4"])  # merged only, oldest first
         self.assertEqual([e["within"] for e in hist[0]["history"]], [True, False, True])
         self.assertEqual(rows[0]["budgets"][-1]["value"], None)  # "1e9" isn't a plain number
+        self.assertEqual(D.budget_results({"results": {"w": {"value": "1", "state": "checked", "source": "local"}}})[0]["state"], "reported")
+        old_unit = [{"id": "SAT-0", "merged": True, "budgets": D.budget_results({"results": {"widgets": {"value": "900", "unit": "KB", "at": "2026-09-01"}}})}]
+        self.assertEqual([e["value"] for e in D.budget_history(json.dumps({"version": 1, "budgets": [self.budget()]}).encode(), old_unit + rows)[0][0]["history"]],
+                         ["3", "7", "4"])  # a value recorded in another unit isn't this budget's history
         d = {"generated_at": "2026-10-12T00:00:00Z", "stories": [], "metrics": [], "budgets": hist}
         md = D.to_markdown(d)
         self.assertIn("## Budgets", md); self.assertIn("| widgets | at most 5 count | 4 count in SAT-3 (checked by CI) | 3 → 7 → 4 | 1 of 3 |", md)

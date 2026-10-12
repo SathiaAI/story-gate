@@ -14,7 +14,7 @@ accessibility), SARIF scanner results and price checks come in part 2. The desig
 |---|---|---|
 | The limit | at most 250 KB | The number DONE checks against |
 | Decided or proposed | decided | A missed **decided** budget fails DONE. A missed **proposed** budget is CONCERNS. |
-| Where the limit came from | "Paul, 2026-10: mobile users on slow networks" | Shown next to every result, so nobody has to guess |
+| Where the limit came from | "product owner, 2026-10: mobile users on slow networks" | Shown next to every result, so nobody has to guess. It is stored in the repository and shown on the dashboard: name a role or a ticket, not a person's name or email |
 | Which changes it applies to | `src/**` | Leave it empty and the budget applies to every change |
 
 Budgets count things. Timings (seconds, minutes) are refused, because the same code runs faster or slower from one run
@@ -74,7 +74,9 @@ first.
 - story-gate pins the program itself when it is a repository file (`./scripts/count.sh`), and the script after an
   interpreter (`python scripts/count.py`, `node scripts/size.js`).
 - Add the rest yourself: `story-gate settings budget set bundle-kb pins scripts/bundle-size.js,package.json,webpack.config.js`.
-- `npm run size` runs whatever `package.json` says, so pin `package.json` for a budget like that.
+- `npm run size` runs whatever `package.json` says, so pin `package.json` for a budget like that. A budget whose command
+  is a runner like that (`npm`, `npx`, `yarn`, `make`, `pytest`, ...) or runs a module or inline code (`python -m`,
+  `node -e`) with no `pins` at all is always **reported**, because story-gate can't tell which files to protect.
 - A script can load other repository files: modules it imports, a config it reads. Pin those too, or pin the whole
   folder (`scripts`): a pinned folder covers every file in it.
 
@@ -124,7 +126,7 @@ tolerance, narrows `paths`, drops a pin, or changes how a budget is measured.
 ## History on the dashboard
 
 Results are saved with the story (`budget_results.json`), so they reach the default branch when the story merges. The
-dashboard's **Budgets** table shows each budget's limit, the latest value, the last five values and how many were over,
+dashboard's **Budgets** table shows each budget's limit, the latest value, the last five values and how many were over
 (the last 50 values from merged stories). Output kept in the records is cut to 4,000 characters and has known secret shapes
 removed. The values the dashboard shows are the ones the AI recorded; CI measured each one again before the merge.
 

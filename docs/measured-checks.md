@@ -45,7 +45,10 @@ they block.
   killed at the time limit, output read from a file (not a pipe), at most 5 MB. Over 5 MB, a timeout, or a failure to
   start is `not_run`.
 - The command is an argv list from the policy. The program is found on `PATH`; one that resolves inside the repository
-  must be pinned, or the result is `reported`. Arguments that name repository files are pinned automatically.
+  must be pinned, or the result is `reported`. The program itself (when it is a repository path), the script after an
+  interpreter and files an interpreter option loads (`node -r ./setup.js`) are pinned automatically; every other file
+  only when `pins` lists it. When story-gate can't tell which file runs (`python -m`, inline code, `npm run`, `make`),
+  the budget needs `pins`, or its result is `reported`.
 - Exit codes: by default any exit code, but the output must parse. With `expect_exit`, another exit code is `not_run`.
   A run that is killed (a timeout or a signal) or prints nothing parseable is `not_run`, never a pass.
 - A run that creates or changes files in the work is void (`not_run`), as for scenarios.
