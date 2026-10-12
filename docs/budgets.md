@@ -49,8 +49,9 @@ to the next, and the check would fail at random.
 
 On every pull request with a story:
 
-1. The tests job measures each of the default branch's budgets that apply. It does this first, before the project's
-   own tests and scenarios run, with the command from the default branch. That job has no secrets.
+1. A **measure** job of its own measures each of the default branch's budgets that apply, with the command from the
+   default branch. It runs on a separate runner from the project's tests and scenarios, so their code can't touch the
+   measurements. That job has no secrets.
 2. The story-gate job reads the output, finds the number with its own code and compares it with the default branch's
    limit. It never takes a result the pull request wrote.
 3. The check summary shows a table: budget, limit, measured value, how sure it is, and within or over.
@@ -81,7 +82,8 @@ first.
   folder (`scripts`): a pinned folder covers every file in it.
 
 **What CI can't prove.** Running a command again proves it ran on this code. It doesn't prove the command measures the
-right thing. Pins stop a pull request from quietly changing the measuring script; they can't check that the script was
+right thing. A measuring command that runs the pull request's own code (its tests, say) can be fooled by that code,
+which can even outlive the command on the measure job's runner; reviewers see such code in the diff. Pins stop a pull request from quietly changing the measuring script; they can't check that the script was
 right in the first place. Read a budget's command before you decide it.
 
 ## Writing a measuring command
@@ -128,10 +130,11 @@ tolerance, narrows `paths`, drops a pin, or changes how a budget is measured.
 Results are saved with the story (`budget_results.json`), so they reach the default branch when the story merges. The
 dashboard's **Budgets** table shows each budget's limit, the latest value, the last five values and how many were over
 (the last 50 values from merged stories). Output kept in the records is cut to 4,000 characters and has known secret shapes
-removed. The values the dashboard shows are the ones the AI recorded; CI measured each one again before the merge.
+removed. The values the dashboard shows are the ones the AI recorded (marked *reported*). CI measures every decided
+budget again on the pull request, but it doesn't commit its runs, so the dashboard never claims a value was checked by CI.
 
 ## Upgrading
 
-Repositories that use story-gate's reusable workflow get budgets with the new release. Repositories with a copied
-workflow need `story-gate install` once: older workflows don't hand `budgets.json` to the check, and CI says so instead
-of skipping your budgets.
+Budgets need the new **measure** job in the story-gate workflow. Repositories that use story-gate's reusable workflow
+get it when they move to the release with budgets. Repositories with a copied workflow need `story-gate install` once.
+Until then CI says so, and a decided budget fails rather than being skipped.

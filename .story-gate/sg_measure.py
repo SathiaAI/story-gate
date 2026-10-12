@@ -214,13 +214,16 @@ def auto_pins(b, root):
     cand = [cmd[0]] if os.path.dirname(cmd[0]) else []
     if _prog(cmd):
         cand += _script_args(cmd)[0]
-    out = set()
+    out, top = set(), os.path.realpath(root)
     for v in cand:
         if os.path.isabs(v) or re.match(r"^[A-Za-z]:", v):
             continue
-        p = os.path.realpath(os.path.join(root, v))
-        if os.path.isfile(p) and p.startswith(os.path.realpath(root) + os.sep):
-            out.add(os.path.relpath(p, os.path.realpath(root)).replace(os.sep, "/"))
+        link = os.path.normpath(os.path.join(top, v))
+        p = os.path.realpath(link)
+        if os.path.isfile(p) and p.startswith(top + os.sep):
+            out.add(os.path.relpath(p, top).replace(os.sep, "/"))
+            if link.startswith(top + os.sep) and link != p:  # a symlink: repointing it changes the code as much as editing it
+                out.add(os.path.relpath(link, top).replace(os.sep, "/"))
     return out
 
 
@@ -451,7 +454,7 @@ def weaker(old, new):
             out.append("budget %s limit loosened from %s to %s %s" % (name, o["limit"], b["limit"], b["unit"]))
         if _num(b["tolerance"]) > _num(o["tolerance"]):
             out.append("budget %s tolerance raised from %s to %s" % (name, o["tolerance"], b["tolerance"]))
-        if (not o["paths"] and b["paths"]) or set(o["paths"]) - set(b["paths"]):
+        if b["paths"] and (not o["paths"] or set(o["paths"]) - set(b["paths"])):  # no paths at all covers every change
             out.append("budget %s applies to fewer changes (paths)" % name)
         gone = sorted(set(o["pins"]) - set(b["pins"]))
         if gone:

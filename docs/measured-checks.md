@@ -52,8 +52,8 @@ they block.
 - Exit codes: by default any exit code, but the output must parse. With `expect_exit`, another exit code is `not_run`.
   A run that is killed (a timeout or a signal) or prints nothing parseable is `not_run`, never a pass.
 - A run that creates or changes files in the work is void (`not_run`), as for scenarios.
-- CI order is fixed: the tests job runs decided budgets first (before the project's tests and scenarios, so no other
-  PR code has run yet), sorted by name, inside a 900-second total. Anything left is `not_run` with its own line.
+- CI order is fixed: a measure job of its own (no secrets, never the project's tests or scenarios) runs decided budgets
+  first, then proposed ones, each sorted by name, inside a 900-second total. Anything left is `not_run` with its own line.
 
 ## Parsers
 
@@ -68,8 +68,10 @@ they block.
 ## Trust boundary in CI
 
 1. `runtime-prepare` copies the default branch's `config.json` and `budgets.json` before any PR code runs.
-2. The tests job (no secrets) runs the decided budgets that apply and saves, per budget: exit code, the capped raw
-   output (or report), the time and the command hash. Nothing else.
+2. The measure job (no secrets, its own runner, no tests or scenarios) runs the budgets that apply and saves, per
+   budget: exit code, the capped raw output or report (secret shapes removed), the time and the command hash. Nothing
+   else. Keeping it apart from the tests job means test and scenario code can't rewrite the saved output. Code the
+   measuring command itself runs still can: that is the limit stated in the threat model.
 3. The story-gate job (secrets, never runs PR code) recomputes which budgets apply, which pinned files changed (from its
    own checkout), parses the saved output with its own parser and compares it with the default branch's limit. A saved
    run for another command hash is ignored.
@@ -90,8 +92,9 @@ proposed budgets in their own folder.
 
 ## Evidence binding
 
-The DONE evidence hash includes the policy's `budgets.json` hash, every applicable result's `spec`, `state`, `value` and
-`fingerprint`, and the code fingerprint. A change to the code, the command or the default branch's policy makes DONE out
+The DONE evidence hash includes the policy's `budgets.json` hash, the story's proposals, each stored result's `spec`,
+`value` and `fingerprint`, and the code fingerprint. Not the state or who measured it: CI's run of the same code is the
+same evidence, and CI works the state out again itself. A change to the code, the command or the default branch's policy makes DONE out
 of date. CI always recomputes from the current default branch, so a policy change before merge applies on the next run.
 GitHub doesn't re-run a pull request's check when the default branch changes; requiring branches to be up to date
 before merging makes that next run happen.

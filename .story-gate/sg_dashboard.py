@@ -238,9 +238,8 @@ def budget_results(doc):
             continue
         val = v.get("value") if isinstance(v.get("value"), str) and re.fullmatch(r"-?\d{1,30}(?:\.\d{1,12})?", v.get("value")) else None
         out.append({"name": name, "value": val, "unit": clean(v.get("unit"), 16), "at": clean(v.get("at"), 30),
-                    "state": ("reported" if v.get("state") == "checked" and v.get("source") != "ci" else v.get("state"))
-                    if v.get("state") in ("checked", "reported", "not_run") else "not_run",
-                    "source": "ci" if v.get("source") == "ci" else "local"})
+                    # CI never commits these files: whatever a merged story says, the value is what the agent recorded
+                    "state": "not_run" if v.get("state") not in ("checked", "reported") else "reported"})
     return out
 
 
@@ -254,7 +253,7 @@ def budget_history(policy_text, rows):
         return [], "budgets.json on the default branch can't be read (%s)" % clean(str(e), 160)
     out = []
     for b in policy:
-        hist = sorted(({"story": s["id"], "value": x["value"], "state": x["state"], "source": x["source"], "at": x["at"]}
+        hist = sorted(({"story": s["id"], "value": x["value"], "state": x["state"], "at": x["at"]}
                        for s in rows if s.get("merged") for x in s.get("budgets") or []
                        if x["name"] == b["name"] and x["value"] is not None and x["unit"] == b["unit"]),  # another unit: another measure
                       key=lambda e: (e["at"], e["story"]))[-BUDGET_HISTORY:]
@@ -509,13 +508,13 @@ def next_refresh(iso):
     return t.strftime("%Y-%m-%d %H:%M")
 
 
-BUDGET_LEGEND = ("checked: CI measured it on the pull request; reported: the agent measured it on its own computer (CI then "
-                 "measured it again before merge); not run: no usable value")
+BUDGET_LEGEND = ("values are what the agent recorded with each story (reported). CI measured every decided budget again on the "
+                 "pull request; that check, not this table, decided whether the story could merge")
 
 
 def budget_word(e):
-    """How sure a recorded value is, in the dashboard's words."""
-    return {"checked": "checked by CI", "reported": "reported"}.get(e.get("state"), "not run")
+    """How sure a recorded value is, in the dashboard's words: never more than 'reported' (CI doesn't commit its runs)."""
+    return "reported" if e.get("state") == "reported" else "not run"
 
 
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):

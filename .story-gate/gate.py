@@ -1747,6 +1747,9 @@ def budget_rows(sd, c, in_ci=False, files=None):
             r = M.current(b, stored.get(b["name"]), fp)
             if b.get("_origin") == "story" and r.get("state") == "checked":
                 r = dict(r, state="reported", why="proposed by this story")
+            elif mainb and r.get("value") is not None and r.get("state") != "not_run":
+                trust = M.trust_problems(b, str(ROOT), files)  # worked out again here: a stored "why" can't clear a pin
+                r = dict(r, state="reported", why="; ".join(trust + ["measured on the agent's computer"]))
         rows.append((b, r))
     return rows
 
@@ -3053,24 +3056,6 @@ def cmd_ci_tests(out_dir):
     c = cfg()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    measured = None
-    sid = story_id(c)
-    if sid:  # budgets first, before the project's tests or scenarios: no other pull request code has run in this job yet
-        import sg_measure as M
-        try:
-            bref = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF")
-            files = changed_paths(("origin/" + bref) if bref else c["base_branch"])
-            todo = [b for b in budgets_policy() if M.applies(b, files)]
-        except (ConfigError, RuntimeError) as e:  # the story-gate job reports it (it reads the same policy)
-            todo = []
-            print("story-gate budgets: not measured (%s)" % e)
-        if todo:
-            try:
-                measured = M.run_all(todo, str(ROOT), work_state)
-                print("story-gate budgets: measured %d" % len(measured))
-            except Exception as e:  # never stop the project's tests; the story-gate job then sees every budget as not run
-                measured = None
-                print("story-gate budgets: not measured (%s: %s)" % (e.__class__.__name__, str(e)[:200]))
     cmd = c.get("test_command")
     rec, junit = {"command": cmd, "at": now()}, None
     if not cmd:
@@ -3090,7 +3075,8 @@ def cmd_ci_tests(out_dir):
         if jf and jf.is_file():
             junit = jf.read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
     print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
-    scen = None  # the story's scenarios run here too: PR code, no secrets
+    scen = None
+    sid = story_id(c)  # the story's scenarios run here too: PR code, no secrets
     if sid and (STORIES / sid / "scenarios.json").is_file():
         import sg_validation as V
         res = V.run_all(V.specs_of(load_json(STORIES / sid / "scenarios.json")), str(ROOT), work_state, "ci",
@@ -3103,23 +3089,50 @@ def cmd_ci_tests(out_dir):
         (out / "junit.xml").write_bytes(junit)
     if scen is not None:
         wj(out / "scenarios.json", scen)
-    if measured is not None:  # the raw output only: the story-gate job parses and compares it with its own code
-        (out / "measures").mkdir(exist_ok=True)
-        for n, (r, raw) in measured.items():
-            (out / "measures" / (n + ".raw")).write_bytes(raw)
-        wj(out / "measures.json", {"head": git("rev-parse", "HEAD").strip(), "runs": {n: r for n, (r, _) in measured.items()}})
+    return 0
+
+
+def cmd_ci_measure(out_dir):
+    """The measure job (no secrets, its own runner): measure the default branch's budgets that apply to this pull request
+    and save only the raw output. It runs before, and apart from, the project's tests and scenarios, so their code can't
+    touch these files. The story-gate job parses and compares; nothing here decides."""
+    import sg_measure as M
+    c = cfg()
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if not story_id(c):
+        print("story-gate budgets: no story on this pull request, nothing to measure")
+        return 0
+    try:
+        bref = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF")
+        files = changed_paths(("origin/" + bref) if bref else c["base_branch"])
+        todo = [b for b in budgets_policy() if M.applies(b, files)]
+    except (ConfigError, RuntimeError) as e:  # the story-gate job reads the same policy and reports it
+        print("story-gate budgets: not measured (%s)" % e)
+        return 0
+    head = git("rev-parse", "HEAD").strip()
+    try:
+        measured = M.run_all(todo, str(ROOT), work_state)
+    except Exception as e:  # the story-gate job then sees every budget as not run (never a pass)
+        print("story-gate budgets: not measured (%s: %s)" % (e.__class__.__name__, str(e)[:200]))
+        return 0
+    (out / "measures").mkdir(exist_ok=True)
+    for n, (r, raw) in measured.items():
+        (out / "measures" / (n + ".raw")).write_bytes(raw)
+    wj(out / "measures.json", {"head": head, "runs": {n: r for n, (r, _) in measured.items()}})
+    print("story-gate budgets: measured %d" % len(measured))
     return 0
 
 
 CHANGE_LABEL = "story-gate-change"
 
 
-def ci_budgets(tests_dir, base, files_of):
+def ci_budgets(measures_dir, base, files_of):
     """{budget: result} for the default branch's budgets that apply, from the tests job's raw runs. Everything is decided
     here: which budgets apply, whether a pinned file changed, the parse and the comparison. A run for another command,
     or from another commit, doesn't count."""
     import sg_measure as M
-    meta = load_json(Path(tests_dir) / "measures.json") if tests_dir else {}
+    meta = load_json(Path(measures_dir) / "measures.json") if measures_dir else {}
     runs = meta.get("runs") if isinstance(meta.get("runs"), dict) and meta.get("head") == git("rev-parse", "HEAD").strip() else {}
     fp, out = work_fingerprint(), {}
     for b in budgets_policy():
@@ -3129,7 +3142,7 @@ def ci_budgets(tests_dir, base, files_of):
         raw = b""
         if rec:
             rec = dict(rec, fingerprint=fp)  # the same commit as the tests job (its run may leave build files a clean checkout lacks)
-            f = Path(tests_dir) / "measures" / (b["name"] + ".raw")
+            f = Path(measures_dir) / "measures" / (b["name"] + ".raw")
             if f.is_file() and not f.is_symlink():
                 with open(f, "rb") as fh:
                     raw = fh.read(M.OUTPUT_CAP + 1)
@@ -3137,7 +3150,7 @@ def ci_budgets(tests_dir, base, files_of):
     return out
 
 
-def cmd_ci(tests_dir=None):
+def cmd_ci(tests_dir=None, measures_dir=None):
     """Job 2 (has the judge key, runs no PR code): re-score READY and DONE with CI's own test results,
     verify human acceptance through GitHub, report clearly whether merges are actually blocked."""
     import sg_github as G
@@ -3348,7 +3361,10 @@ def cmd_ci(tests_dir=None):
                 merged.update({n: dict(r, source="ci", fingerprint=fp) for n, r in ci_runs.items() if isinstance(r, dict) and n not in local_only})
                 wj(sd / "scenario_results.json", {"story": sid, "results": merged})
             if sd.exists():  # budgets: parsed and compared here, from the tests job's raw output, never from the PR's records
-                CI_MEASURED[sid] = ci_budgets(tests_dir, base, files_of=changed_paths(base))
+                CI_MEASURED[sid] = ci_budgets(measures_dir, base, files_of=changed_paths(base))
+                if CI_MEASURED[sid] and not measures_dir:
+                    notes.append("No budgets were measured: this repository's story-gate workflow has no measure job yet. "
+                                 "A code owner runs `story-gate install` to update it; until then decided budgets fail.")
                 kept = load_json(sd / "budget_results.json").get("results")
                 kept = {n: r for n, r in (kept if isinstance(kept, dict) else {}).items() if n not in CI_MEASURED[sid]}
                 wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": dict(kept, **CI_MEASURED[sid])})
@@ -3703,9 +3719,35 @@ jobs:
           name: sg-tests
           path: ${{ runner.temp }}/sg-tests
           retention-days: 7
+  measure:
+    # Measures the BASE branch's budgets on the PR's code, on its own runner, apart from the tests. No secrets here.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: measure budgets
+        env:
+          BASE: origin/${{ github.event.pull_request.base.ref }}
+          SG_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          SG_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          STORY_GATE_ROOT: ${{ github.workspace }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+""" + TRUSTED_COPY + """
+          python3 "$RUNNER_TEMP/sg/gate.py" ci-measure "$RUNNER_TEMP/sg-measures"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sg-measures
+          path: ${{ runner.temp }}/sg-measures
+          retention-days: 7
   story-gate:
     # Has the judge key; runs story-gate from the BASE branch and never executes PR code.
-    needs: tests
+    needs: [tests, measure]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -3722,6 +3764,11 @@ jobs:
         with:
           name: sg-tests
           path: ${{ runner.temp }}/sg-tests
+        continue-on-error: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: sg-measures
+          path: ${{ runner.temp }}/sg-measures
         continue-on-error: true
 """ + USER_STEPS[0] + USER_STEPS[1] + """      - name: story gate
         env:
@@ -3742,7 +3789,7 @@ jobs:
           STORY_GATE_JIRA_TOKEN: ${{ secrets.STORY_GATE_JIRA_TOKEN }}
         run: |
 """ + TRUSTED_COPY + """
-          python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests"
+          python3 "$RUNNER_TEMP/sg/gate.py" ci --tests "$RUNNER_TEMP/sg-tests" --measures "$RUNNER_TEMP/sg-measures"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         with:
@@ -4745,7 +4792,9 @@ def main(argv):
     if cmd == "hook":
         return cmd_hook(kv.get("client", ""), kv.get("event", "pre"))
     if cmd == "ci":
-        return cmd_ci(kv.get("tests"))
+        return cmd_ci(kv.get("tests"), kv.get("measures"))
+    if cmd == "ci-measure":
+        return cmd_ci_measure(rest[0] if rest else "sg-measures")
     if cmd == "ci-tests":
         return cmd_ci_tests(rest[0] if rest else "sg-tests")
     if cmd == "audit":
