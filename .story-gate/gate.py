@@ -591,6 +591,14 @@ def inputs_hash(sd, phase, c=None):
         sr = V.results_of(load_json(sd / "scenario_results.json"))
         blob += json.dumps({n: [r.get(k) for k in ("spec", "passed", "fingerprint")] for n, r in sr.items()
                             if isinstance(r, dict)}, sort_keys=True)  # not who ran it: CI's run of the same code is the same evidence
+        try:  # budgets: the policy, the story's proposals and each measured value (not who measured it, as above)
+            import sg_measure as M
+            br = load_json(sd / "budget_results.json").get("results")
+            blob += M.policy_hash(budgets_policy()) + rd(sd / "budgets.json") + json.dumps(
+                {n: [r.get(k) for k in ("spec", "value", "fingerprint")] for n, r in (br if isinstance(br, dict) else {}).items()
+                 if isinstance(r, dict)}, sort_keys=True)
+        except ConfigError:
+            blob += "<budgets unreadable>"
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
@@ -1147,6 +1155,7 @@ SOURCE_LEGEND = ("verified: CI compared the copy with the live issue in this com
                  "they differ; not checked: CI hasn't compared them on this commit. An issue edited after the check shows up "
                  "at the next check")
 CI_SOURCES = {}  # story id -> [{path, issue, state, detail}] from this CI run, for the validation page
+CI_MEASURED = {}  # story id -> {budget: result} the story-gate job worked out from the tests job's runs (never from the PR)
 
 
 def snapshot_links(story_text):
@@ -1399,6 +1408,11 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
             why.append("ACs proved only on the agent's computer (local-only scenarios; CI did not run them): %s. This blocks "
                        "unless accept_concerns is on; better, make the scenario runnable in CI" % ", ".join(local))
         out["scenarios_prove_acs"] = ("FAIL" if gone or not ids or broken else "CONCERNS" if local else "PASS", " | ".join(why))
+    rows = budget_rows(sd, c, in_ci)
+    if rows:  # only when a budget applies: repositories without budgets.json score exactly as before
+        import sg_measure as M
+        st, why = M.verdict(rows, in_ci)
+        out["budgets_met"] = (st, why + (". Measure again with `%s`" % gate_cmd("measure " + sid) if st != "PASS" and not in_ci else ""))
     if truncated and not objective(c):  # the size limit is the judge's; without one a person reviews the whole diff anyway
         out["evidence_complete"] = ("CONCERNS", "the change is too large for one judge pass; split the story or get a human review of the whole diff")
     return out
@@ -1693,6 +1707,50 @@ def is_record(path):
     return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS)
 
 
+def budgets_policy():
+    """The default branch's budgets, from the same trusted source as config.json ([] when there are none).
+    An invalid budgets.json raises ConfigError: the gate fails closed until it is fixed."""
+    import sg_measure as M
+    try:
+        return M.load(policy_json("budgets.json"))
+    except M.PolicyError as e:
+        raise ConfigError("%s - fix it in a pull request of its own; the gate fails closed until then" % e)
+
+
+def changed_paths(base):
+    """Every path the work changes against the merge base: added, modified, deleted, both sides of a rename, and new
+    untracked files. Story records don't count. Budgets use this to decide which of them apply."""
+    mb = resolve_base(base)
+    names = (set(zlist("diff", "--name-only", "--no-renames", mb)) | set(zlist("diff", "--name-only", "--no-renames"))
+             | set(zlist("ls-files", "--others", "--exclude-standard")))
+    return sorted(n for n in names if not is_record(n))
+
+
+def budget_rows(sd, c, in_ci=False, files=None):
+    """[(budget, result)] for every budget that applies to this work: the default branch's first, then the story's own
+    proposals. In CI the default branch's budgets use only what the story-gate job measured (CI_MEASURED)."""
+    import sg_measure as M
+    main = budgets_policy()
+    names = {b["name"] for b in main}
+    mine = [dict(b, _origin="story") for b in M.story_budgets(load_json(sd / "budgets.json")) if b["name"] not in names]
+    files = changed_paths(c["base_branch"]) if files is None else files
+    stored = load_json(sd / "budget_results.json").get("results")
+    stored = stored if isinstance(stored, dict) else {}
+    fp, rows, ci = work_fingerprint(), [], CI_MEASURED.get(sd.name) if in_ci else None
+    for b in main + mine:
+        mainb = b.get("_origin") != "story"
+        if not (b["name"] in ci if ci is not None and mainb else M.applies(b, files)):
+            continue  # in CI the story-gate job already decided which of the default branch's budgets apply
+        if in_ci and mainb:
+            r = (ci or {}).get(b["name"]) or {"state": "not_run", "value": None, "why": "CI did not measure it"}
+        else:
+            r = M.current(b, stored.get(b["name"]), fp)
+            if b.get("_origin") == "story" and r.get("state") == "checked":
+                r = dict(r, state="reported", why="proposed by this story")
+        rows.append((b, r))
+    return rows
+
+
 def partially_staged():
     """Files whose staged version differs from both the last commit and the working copy (git add -p)."""
     staged = set(zlist("diff", "--cached", "--name-only"))
@@ -1794,6 +1852,80 @@ def cmd_scenarios(sid):
         if s.get("name") in res:
             print_scenario(s, res[s["name"]])
     return 0 if all(r.get("passed") for r in res.values()) else 1
+
+
+def cmd_measure(sid, kv, flags_, argv):
+    """Measure budgets on this computer: every one that applies (no --budget), or one. With -- <command> the story
+    proposes a budget of its own (or replaces it); --remove drops a proposal. Results are 'reported' until CI measures."""
+    import sg_measure as M
+    sd = sdir(sid)
+    if not sd.exists():
+        sys.exit("no story folder; run: start %s" % sid)
+    c = cfg()
+    try:
+        main = budgets_policy()
+    except ConfigError as e:
+        sys.exit("story-gate: %s" % e)
+    names = {b["name"] for b in main}
+    doc = load_json(sd / "budgets.json")
+    mine = [b for b in M.story_budgets(doc)]
+    name = kv.get("budget")
+    extra = sorted(set(kv) & {"unit", "limit", "direction", "tolerance", "source", "measure", "report", "pins", "paths", "timeout", "exit"})
+    if extra and not argv:
+        sys.exit("story-gate: --%s only go with a proposed budget's command (... -- <command>)" % ", --".join(extra))
+    if "--remove" in flags_ or argv:
+        if not name:
+            sys.exit("story-gate: say which budget with --budget NAME")
+        if name in names:
+            sys.exit("story-gate: %s is a budget from the default branch. A story can't change it; a code owner changes it with "
+                     "`%s` in a pull request of its own" % (name, gate_cmd("settings budget")))
+        mine = [b for b in mine if b["name"] != name]
+        if argv:
+            try:
+                b = {"name": name, "unit": kv.get("unit", ""), "limit": json.loads(kv.get("limit", "null")), "status": "proposed",
+                     "direction": kv.get("direction", "max"), "tolerance": json.loads(kv.get("tolerance", "0")),
+                     "source": kv.get("source", ""), "measure": kv.get("measure", "number"), "command": argv,
+                     "pins": [x.strip() for x in kv.get("pins", "").split(",") if x.strip()],
+                     "paths": [x.strip() for x in kv.get("paths", "").split(",") if x.strip()],
+                     "timeout": int(kv.get("timeout", M.DEFAULT_TIMEOUT))}
+                if kv.get("report"):
+                    b["report"] = kv["report"]
+                if kv.get("exit") is not None:
+                    b["expect_exit"] = int(kv["exit"])
+            except ValueError:
+                sys.exit("story-gate: --limit and --tolerance must be numbers; --timeout and --exit whole numbers")
+            bad = M.problems(b)
+            if bad:
+                sys.exit("story-gate: budget not recorded: " + "; ".join(bad))
+            if len(mine) >= M.MAX_BUDGETS:
+                sys.exit("story-gate: a story can propose at most %d budgets" % M.MAX_BUDGETS)
+            mine.append(M.normal(b))
+        wj(sd / "budgets.json", {"story": sid, "budgets": mine})
+        if not argv:
+            print("story-gate: proposed budget '%s' removed" % name)
+            return 0
+    every = main + [dict(b, _origin="story") for b in mine if b["name"] not in names]
+    files = changed_paths(c["base_branch"])
+    if name:
+        todo = [b for b in every if b["name"] == name]
+        if not todo:
+            sys.exit("story-gate: no budget called %s. Budgets here: %s" % (name, ", ".join(b["name"] for b in every) or "none"))
+    else:
+        todo = [b for b in every if M.applies(b, files)]
+        if not todo:
+            print("story-gate: no budget applies to this change%s." % ("" if every else " (there are no budgets)"))
+            return 0
+    stored = load_json(sd / "budget_results.json").get("results")
+    stored = stored if isinstance(stored, dict) else {}
+    for b in todo:
+        rec, raw = M.run(b, str(ROOT), work_state)
+        stored[b["name"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local", M.trust_problems(b, str(ROOT), files))
+    wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": stored})
+    rows = [(b, M.current(b, stored.get(b["name"]), work_fingerprint())) for b in todo]
+    print("\n".join(M.summary_lines(rows, False)).strip())
+    st, why = M.verdict(rows, False)
+    print("story-gate: budgets %s%s" % (st, (": " + why) if why else ""))
+    return 0 if st == "PASS" else 1
 
 
 def report_facts(sid, in_ci=False):
@@ -2369,6 +2501,7 @@ NEXT_DONE = (("spec_covered", "spec links", "Name every scenario of the linked s
              ("tests_ran_green", "tests", "Run the tests and record them: `{cmd}`"),
              ("traceability", "test links", "Point each AC to its automated tests in tests.json (`test_refs`: the test function names), and make them pass"),
              ("scenarios_prove_acs", "scenarios", "{scenario}"),
+             ("budgets_met", "budgets", "Measure the budgets and keep the work within them (fix the work, never the measuring script): `{measure}`"),
              ("validation_written", "validation.md", "Fill in validation.md for the owner"),
              ("handoff_written", "handoff.md", "Write handoff.md with these sections: " + ", ".join(s.lstrip("# ") for s in HANDOFF_SECTIONS)),
              ("learnings_recorded", "learnings", "Record what you learnt: `{learn}`"))
@@ -2419,7 +2552,7 @@ def next_step(sid, c):
         scenario = "Run the recorded scenarios again on the current code: `%s`. If one still fails, fix the work" % gate_cmd("scenarios " + sid)
     fill = {"cmd": gate_cmd("record-tests %s" % sid) if c.get("test_command") else  # a pinned command is used as is
             gate_cmd("record-tests %s -- <your test command>" % sid),
-            "scenario": scenario,
+            "scenario": scenario, "measure": gate_cmd("measure " + sid),
             "learn": gate_cmd("learn %s --type none --summary \"...\"" % sid) + " (or --type error|pattern with --root-cause and --rule)"}
     for key, label, todo in NEXT_DONE:
         if key not in facts:
@@ -2902,7 +3035,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/config.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -2920,6 +3053,20 @@ def cmd_ci_tests(out_dir):
     c = cfg()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    measured = None
+    sid = story_id(c)
+    if sid:  # budgets first, before the project's tests or scenarios: no other pull request code has run in this job yet
+        import sg_measure as M
+        try:
+            bref = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF")
+            files = changed_paths(("origin/" + bref) if bref else c["base_branch"])
+            todo = [b for b in budgets_policy() if M.applies(b, files)]
+        except (ConfigError, RuntimeError) as e:  # the story-gate job reports it (it reads the same policy)
+            todo = []
+            print("story-gate budgets: not measured (%s)" % e)
+        if todo:
+            measured = M.run_all(todo, str(ROOT), work_state)
+            print("story-gate budgets: measured %d" % len(measured))
     cmd = c.get("test_command")
     rec, junit = {"command": cmd, "at": now()}, None
     if not cmd:
@@ -2939,8 +3086,7 @@ def cmd_ci_tests(out_dir):
         if jf and jf.is_file():
             junit = jf.read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
     print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
-    scen = None
-    sid = story_id(c)  # the story's scenarios run here too: PR code, no secrets
+    scen = None  # the story's scenarios run here too: PR code, no secrets
     if sid and (STORIES / sid / "scenarios.json").is_file():
         import sg_validation as V
         res = V.run_all(V.specs_of(load_json(STORIES / sid / "scenarios.json")), str(ROOT), work_state, "ci",
@@ -2953,10 +3099,38 @@ def cmd_ci_tests(out_dir):
         (out / "junit.xml").write_bytes(junit)
     if scen is not None:
         wj(out / "scenarios.json", scen)
+    if measured is not None:  # the raw output only: the story-gate job parses and compares it with its own code
+        (out / "measures").mkdir(exist_ok=True)
+        for n, (r, raw) in measured.items():
+            (out / "measures" / (n + ".raw")).write_bytes(raw)
+        wj(out / "measures.json", {"head": git("rev-parse", "HEAD").strip(), "runs": {n: r for n, (r, _) in measured.items()}})
     return 0
 
 
 CHANGE_LABEL = "story-gate-change"
+
+
+def ci_budgets(tests_dir, base, files_of):
+    """{budget: result} for the default branch's budgets that apply, from the tests job's raw runs. Everything is decided
+    here: which budgets apply, whether a pinned file changed, the parse and the comparison. A run for another command,
+    or from another commit, doesn't count."""
+    import sg_measure as M
+    meta = load_json(Path(tests_dir) / "measures.json") if tests_dir else {}
+    runs = meta.get("runs") if isinstance(meta.get("runs"), dict) and meta.get("head") == git("rev-parse", "HEAD").strip() else {}
+    fp, out = work_fingerprint(), {}
+    for b in budgets_policy():
+        if not M.applies(b, files_of):
+            continue
+        rec = runs.get(b["name"]) if isinstance(runs.get(b["name"]), dict) else None
+        raw = b""
+        if rec:
+            rec = dict(rec, fingerprint=fp)  # the same commit as the tests job (its run may leave build files a clean checkout lacks)
+            f = Path(tests_dir) / "measures" / (b["name"] + ".raw")
+            if f.is_file() and not f.is_symlink():
+                with open(f, "rb") as fh:
+                    raw = fh.read(M.OUTPUT_CAP + 1)
+        out[b["name"]] = M.evaluate(b, rec, raw, fp, "ci", M.trust_problems(b, str(ROOT), files_of))
+    return out
 
 
 def cmd_ci(tests_dir=None):
@@ -3015,6 +3189,21 @@ def cmd_ci(tests_dir=None):
                          full_config(rd(GATE / "config.json") or None))
             if w:  # a warning, so GitHub shows it on the pull request, not only in the check's summary
                 weak = "This PR makes story-gate's rules weaker: %s. Reviewers: make sure that's intended." % "; ".join(w)
+                notes.insert(0, weak)
+                print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
+        import sg_measure as M
+        base_budgets = git("show", "%s:.story-gate/budgets.json" % base)
+        if os.environ.get("STORY_GATE_TRUSTED_DIR") and base_budgets.strip() and not trusted("budgets.json").is_file():
+            raise ConfigError("the default branch has budgets (.story-gate/budgets.json) but this workflow didn't hand them to "
+                              "story-gate, so they can't be checked. A code owner runs `story-gate install` to update the workflow")
+        if ".story-gate/budgets.json" in files:  # the same plain words for looser budgets
+            try:
+                wb = M.weaker(M.load(base_budgets), M.load(rd(GATE / "budgets.json") or None, "this PR's .story-gate/budgets.json"))
+            except M.PolicyError as e:
+                problems.append("%s. Once merged it would stop the gate (it fails closed), so fix it first" % e)
+                wb = []
+            if wb:
+                weak = "This PR makes story-gate's budgets looser: %s. Reviewers: make sure that's intended." % "; ".join(wb)
                 notes.insert(0, weak)
                 print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
         try:  # pinned project hooks (sg_pin): flag scripts that seem to use repository files outside their pins
@@ -3152,6 +3341,11 @@ def cmd_ci(tests_dir=None):
                 fp = work_fingerprint()  # same commit as the tests job; its run may leave build files that a clean checkout lacks
                 merged.update({n: dict(r, source="ci", fingerprint=fp) for n, r in ci_runs.items() if isinstance(r, dict) and n not in local_only})
                 wj(sd / "scenario_results.json", {"story": sid, "results": merged})
+            if sd.exists():  # budgets: parsed and compared here, from the tests job's raw output, never from the PR's records
+                CI_MEASURED[sid] = ci_budgets(tests_dir, base, files_of=changed_paths(base))
+                kept = load_json(sd / "budget_results.json").get("results")
+                kept = {n: r for n, r in (kept if isinstance(kept, dict) else {}).items() if n not in CI_MEASURED[sid]}
+                wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": dict(kept, **CI_MEASURED[sid])})
             accepted = {"accepted": False, "why": "not running on a pull request"}
             if ctx and token:
                 # Owners come only from the base branch: a PR can never name its own approvers.
@@ -3193,7 +3387,7 @@ def cmd_ci(tests_dir=None):
     for p in problems:
         print("::%s title=story-gate::%s" % (level, p.replace("\n", " ")))
     for n in notes:
-        if not n.startswith("This PR makes story-gate's rules weaker"):  # already printed as a warning
+        if not n.startswith(("This PR makes story-gate's rules weaker", "This PR makes story-gate's budgets looser")):  # already printed as a warning
             print("::notice title=story-gate::%s" % n)
     lines = ["## story-gate %s%s" % ("- %s" % sid if sid else "", " (objective mode: no AI judge)" if objective(c) else ""), ""]
     if objective(c) and code:
@@ -3226,6 +3420,12 @@ def cmd_ci(tests_dir=None):
         import sg_validation as V
         lines += V.summary_lines(load_json(STORIES / sid / "scenarios.json"), V.results_of(load_json(STORIES / sid / "scenario_results.json")),
                                  [a for a, _, _ in acs(STORIES / sid)], work_fingerprint(), True)
+    if sid and code and (STORIES / sid).exists():
+        try:
+            import sg_measure as M
+            lines += M.summary_lines(budget_rows(STORIES / sid, c, True), True)
+        except Exception as e:  # ConfigError is already a problem above
+            lines += ["", "Budgets could not be shown: %s" % str(e)[:200]]
     lines += writing_summary(sid)
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
@@ -3365,7 +3565,7 @@ found, use the full command a story-gate message prints. Only where story-gate i
 don't run) use `{py} .story-gate/gate.py <command>`.
 1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
-3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
+3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, measure any budgets with `story-gate measure <STORY-ID>`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
 5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, validation.md, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
@@ -3448,7 +3648,7 @@ TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=stor
             exit 0
           fi
           # Every module gate.py imports, from the base branch (a fixed list missed sg_trust.py and broke this job).
-          for f in $(git ls-tree --name-only "$BASE" .story-gate/ | sed -n 's#^\\.story-gate/##p' | grep -E '^[A-Za-z0-9_]+\\.py$|^config\\.json$|^judge-calibration\\.json$'); do
+          for f in $(git ls-tree --name-only "$BASE" .story-gate/ | sed -n 's#^\\.story-gate/##p' | grep -E '^[A-Za-z0-9_]+\\.py$|^config\\.json$|^budgets\\.json$|^judge-calibration\\.json$'); do
             rm -f "$RUNNER_TEMP/sg/$f"
             git show "$BASE:.story-gate/$f" > "$RUNNER_TEMP/sg/$f"
           done
@@ -3456,7 +3656,7 @@ TRUSTED_COPY = """          if [ -L .story-gate ]; then echo "::error title=stor
           for f in tabler.min.css viaknox-wordmark.svg; do
             git show "$BASE:.story-gate/vendor/$f" > "$RUNNER_TEMP/sg/vendor/$f" 2>/dev/null || rm -f "$RUNNER_TEMP/sg/vendor/$f"
           done
-          # Settings and judge calibration are read from the base branch's copies; the PR's own files stay as evidence.
+          # Settings, budgets and judge calibration are read from the base branch's copies; the PR's own files stay as evidence.
           export STORY_GATE_TRUSTED_DIR="$RUNNER_TEMP/sg\""""
 CI_YML = MANAGED + """
 name: story-gate
@@ -4406,6 +4606,14 @@ def main(argv):
             sys.exit("usage: scenario <ID> --name NAME --ac AC-1[,AC-2] --expect REGEX [--exit N] [--timeout S] "
                      "[--local-only REASON] -- <command...>   |   scenario <ID> --name NAME --remove")
         return cmd_scenario(rest_[0], kv_, "--remove" in rest_, argv_)
+    if cmd == "measure":
+        head, argv_ = (args[:args.index("--")], args[args.index("--") + 1:]) if "--" in args else (args, [])
+        kv_, rest_ = flags(head)
+        if not rest_:
+            sys.exit("usage: measure <ID> [--budget NAME]   |   measure <ID> --budget NAME --unit U --limit N --source WHY "
+                     "[--direction max|min] [--tolerance N] [--measure number|junit] [--report PATH] [--pins A,B] "
+                     "[--paths GLOB,GLOB] [--timeout S] [--exit N] -- <command...>   |   measure <ID> --budget NAME --remove")
+        return cmd_measure(rest_[0], kv_, rest_[1:], argv_)
     if cmd == "jira-setup":
         import sg_trackers as TR
         return TR.jira_setup(args)

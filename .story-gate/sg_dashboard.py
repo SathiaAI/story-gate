@@ -28,7 +28,8 @@ def issue_url(repo, web="https://github.com"):
     return "%s/%s/issues?q=is%%3Aissue+label%%3A%s" % (web, repo, LABEL)
 STALE_DAYS = 3
 STORY_FILES = ("story.md", "context.md", "tests.json", "ready.json", "done.json", "checkpoints.jsonl", "coder.json", "decisions.jsonl",
-               "trace.md", "test_results.json")
+               "trace.md", "test_results.json", "budget_results.json")
+BUDGET_HISTORY = 50  # measurements kept per budget on the dashboard (the records themselves stay in each story folder)
 STATUSES = [  # order matters: this is the pipeline, left to right
     ("draft", "Draft", "READY not passed yet"),
     ("queued", "Queued", "READY passed, nobody has started it"),
@@ -224,7 +225,42 @@ def parse_story(sid, files):
         "spec_linked": bool(fm.get("spec")) and str(fm.get("spec")).strip().lower() not in ("none", "[]"),
         # issues copied in with spec-pull: CI's check on the pull request says whether each still matches the live issue
         "snapshots": snapshot_paths(fm.get("spec")),
+        "budgets": budget_results(as_json(files.get("budget_results.json"))),
     }
+
+
+def budget_results(doc):
+    """[{name, value, unit, state, source, at}] from a story's budget_results.json, every field checked and capped."""
+    r = doc.get("results") if isinstance(doc, dict) else None
+    out = []
+    for name, v in list((r if isinstance(r, dict) else {}).items())[:30]:
+        if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name) and isinstance(v, dict)):
+            continue
+        val = v.get("value") if isinstance(v.get("value"), str) and re.fullmatch(r"-?\d{1,30}(?:\.\d{1,12})?", v.get("value")) else None
+        out.append({"name": name, "value": val, "unit": clean(v.get("unit"), 16), "at": clean(v.get("at"), 30),
+                    "state": v.get("state") if v.get("state") in ("checked", "reported", "not_run") else "not_run",
+                    "source": "ci" if v.get("source") == "ci" else "local"})
+    return out
+
+
+def budget_history(policy_text, rows):
+    """Per budget on the default branch: its limit and the values merged stories recorded, oldest first (the last 50)."""
+    try:
+        import sg_measure as BM
+        from decimal import Decimal
+        policy = BM.load(policy_text.decode("utf-8", "replace") if policy_text else None)
+    except Exception as e:
+        return [], "budgets.json on the default branch can't be read (%s)" % clean(str(e), 160)
+    out = []
+    for b in policy:
+        hist = sorted(({"story": s["id"], "value": x["value"], "state": x["state"], "source": x["source"], "at": x["at"]}
+                       for s in rows if s.get("merged") for x in s.get("budgets") or [] if x["name"] == b["name"] and x["value"] is not None),
+                      key=lambda e: (e["at"], e["story"]))[-BUDGET_HISTORY:]
+        for e in hist:
+            e["within"] = BM.met(b, Decimal(e["value"]))
+        out.append({"name": b["name"], "unit": b["unit"], "limit": b["limit"], "direction": b["direction"], "status": b["status"],
+                    "history": hist})
+    return out, ""
 
 
 def snapshot_paths(spec):
@@ -277,7 +313,7 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
     if not refs:
         return {"schema": SCHEMA, "generated_at": now, "error": "default branch %s not found" % default_ref, "stories": [], "metrics": []}
     idre = re.compile(r"(?:%s)" % id_pattern)
-    calib, learn = {}, {}
+    calib, learn, policy_blob = {}, {}, None
     features = {}
     for i, (ref, sha) in enumerate(refs):
         merged = i == 0
@@ -289,6 +325,8 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
         ids = sorted(x for x in ids if idre.fullmatch(x))
         specs = ["%s:.story-gate/stories/%s/%s" % (sha, sid, f) for sid in ids for f in listing.get(sid, [])]
         specs += ["%s:.story-gate/%s" % (sha, f) for f in ("calibration.jsonl", "learnings.jsonl", "features.json")]
+        if merged:
+            specs.append("%s:.story-gate/budgets.json" % sha)
         spec_names, pc = [], None
         if gate is not None:  # PRD/TRD at this ref, to check READY verdicts against the specs they were scored on
             try:
@@ -300,6 +338,8 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
         blobs = repo.blobs(specs)
         too_big = [s for s, b in blobs.items() if b is None and s.split(":", 1)[1].split("/")[-1] in STORY_FILES and s in specs]
         dates, file_dates = repo.last_dates(sha)
+        if merged:
+            policy_blob = blobs.get("%s:.story-gate/budgets.json" % sha)
         for row in jsonl_rows(blobs.get("%s:.story-gate/calibration.jsonl" % sha), 20000):
             calib[json.dumps(row, sort_keys=True)] = row
         for row in jsonl_rows(blobs.get("%s:.story-gate/learnings.jsonl" % sha), 20000):
@@ -355,6 +395,9 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
             "refs_scanned": [{"ref": r, "sha": s[:12]} for r, s in refs], "omissions": omissions, "conflicts": conflicts,
             "features": [{"id": k, "title": v} for k, v in sorted(features.items())], "stories": rows}
     data["metrics"] = metrics(rows, list(calib.values()), list(learn.values()), conflicts, now)
+    data["budgets"], why = budget_history(policy_blob, rows)
+    if why:
+        omissions.append(why)
     return data
 
 
@@ -464,6 +507,15 @@ def next_refresh(iso):
     return t.strftime("%Y-%m-%d %H:%M")
 
 
+BUDGET_LEGEND = ("checked: CI measured it on the pull request; reported: the agent measured it on its own computer (CI then "
+                 "measured it again before merge); not run: no usable value")
+
+
+def budget_word(e):
+    """How sure a recorded value is, in the dashboard's words."""
+    return {"checked": "checked by CI", "reported": "reported"}.get(e.get("state"), "not run")
+
+
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     """The pinned issue's Markdown: summary, charts and tables, trimmed to `limit` characters with a link to the full report."""
     M = {m["key"]: m for m in d.get("metrics", [])}
@@ -517,21 +569,29 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
                                                    (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60) + (" · " + ci_cell(s) if s.get("ci") else ""))
              for s in d["stories"]]
     fold = lambda title, summary: ["", "## " + title, "", "<details><summary>%s</summary>" % summary, ""]
+    brows = ["| %s | %s %s %s%s | %s | %s | %d of %d |" % (
+        md(b["name"], 64), "at most" if b["direction"] == "max" else "at least", b["limit"], md(b["unit"], 16),
+        "" if b["status"] == "decided" else " (proposed)",
+        ("%s %s in %s (%s)" % (b["history"][-1]["value"], md(b["unit"], 16), md(b["history"][-1]["story"], 40), budget_word(b["history"][-1])))
+        if b["history"] else "—", " → ".join(e["value"] for e in b["history"][-5:]) or "—",
+        sum(1 for e in b["history"] if not e["within"]), len(b["history"])) for b in d.get("budgets") or []]
     footer = ["", "_Managed by story-gate. Edits to this issue are overwritten._"]
     table_chart = ["", "| Stage | Stories |", "|---|---|"] + ["| %s | %d |" % (lab, n) for lab, n in counts]
     # Fixed order on the page; when space runs out, sections are kept by priority (deterministic):
     # summary > chart (small; falls back to a table) > features > who is working > queued > notes > definitions > all stories.
     # Each part is (lines before the rows, rows, lines after); a long list keeps as many rows as fit (at most half of what is left,
     # so the lists after it still get room) and says how many it left out.
-    order = ["head", "chart", "agents", "queued", "feats", "notes", "defs", "stories"]
+    order = ["head", "chart", "agents", "queued", "feats", "budgets", "notes", "defs", "stories"]
     parts = {"head": (head, [], []), "chart": (chart, [], []),
              "agents": (["", "## Who is working on what", "", "| Story | Agent | Model | Status | Done | Drift | CI check | Last report |", "|---|---|---|---|---|---|---|---|"], arows, []),
              "queued": (fold("Queued to start", "%d queued" % len([s for s in d["stories"] if s["status"] == "queued"])), qrows, ["", "</details>"]),
              "feats": (fold("Features", "%d features" % len(frows)) + ["| Feature | Stories | Done | Ready | Acceptance criteria proven |", "|---|---|---|---|---|"], frows, ["", "</details>"]),
+             "budgets": (["", "## Budgets", "", "Values the merged stories recorded; %s." % BUDGET_LEGEND, "",
+                          "| Budget | Limit | Latest | Last 5 | Over the limit |", "|---|---|---|---|---|"], brows, []) if brows else ([], [], []),
              "notes": (notes, [], []), "defs": (defs, [], []),
              "stories": (fold("All stories", "%d stories" % len(srows)) + ["| Story | Feature | Stage | READY | DONE | Branch |", "|---|---|---|---|---|---|"], srows, ["", "</details>"])}
-    priority = ["head", "chart", "feats", "agents", "queued", "notes", "defs", "stories"]
-    lists = ("stories", "agents", "feats", "queued")
+    priority = ["head", "chart", "feats", "agents", "budgets", "queued", "notes", "defs", "stories"]
+    lists = ("stories", "agents", "feats", "queued", "budgets")
     full = "[see the full report](%s)" % artifact_url if artifact_url else "see the full report"
     more = lambda n: "… %d more: %s" % (n, full)
     size = lambda ls: sum(len(x) + 1 for x in ls)
@@ -659,6 +719,16 @@ def to_html(d, artifact_note="", live=False, issue=None):
         pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80) + (h(f" · #{s['ci'].get('pr')} {s['ci'].get('result')}" + (" · source " + s["ci"]["source"] if s["ci"].get("source") else ""), 80) if s.get("ci") else "")) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
     notes = ""
+    if d.get("budgets"):
+        notes += ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">Budgets</h3></div><div class="table-responsive">'
+                  '<table class="table card-table"><thead><tr><th>Budget</th><th>Limit</th><th>Latest</th><th>Last 5</th><th class="text-end">Over the limit</th></tr></thead><tbody>%s'
+                  '</tbody></table></div><div class="card-body text-secondary small">Values the merged stories recorded. %s.</div></div>'
+                  % ("".join('<tr><td><strong>%s</strong>%s</td><td>%s %s %s</td><td>%s</td><td>%s</td><td class="text-end">%d of %d</td></tr>' % (
+                      h(b["name"], 64), "" if b["status"] == "decided" else ' <span class="text-secondary">(proposed)</span>',
+                      "at most" if b["direction"] == "max" else "at least", h(b["limit"], 40), h(b["unit"], 16),
+                      ("%s %s in %s (%s)" % (h(b["history"][-1]["value"], 40), h(b["unit"], 16), h(b["history"][-1]["story"], 40), budget_word(b["history"][-1])))
+                      if b["history"] else "—", h(" → ".join(e["value"] for e in b["history"][-5:]) or "—", 300),
+                      sum(1 for e in b["history"] if not e["within"]), len(b["history"])) for b in d["budgets"]), h(BUDGET_LEGEND, 300)))
     if any((s.get("ci") or {}).get("source") for s in d["stories"]):
         notes += '<div class="alert alert-info">%s</div>' % h(SOURCE_LEGEND, 400)
     if d.get("conflicts"):

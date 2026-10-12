@@ -58,6 +58,7 @@ Not sure what to do next? Run `next`. It lists what's done and names the one nex
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
    - For every AC, run the feature for real and record it: `scenario <ID> --name ... --ac AC-1 --expect <text> -- <command>`. CI runs these again.
+   - If the repository has budgets (`.story-gate/budgets.json`), run `measure <ID>` after the last code change. A missed decided budget fails DONE; fix the work, not the measuring script.
    - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason'). Add screenshots with `evidence`.
    - Write `handoff.md` (all seven sections), then run `learn` (`--type error|pattern` also needs `--root-cause` and `--rule`), then run `score <ID> done`.
    - Show the owner: `report <ID> --open` builds the validation page. Show it for a change they can see; otherwise point to validation.md.

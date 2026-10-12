@@ -4,7 +4,13 @@
   settings KEY                     one setting
   settings set KEY VALUE [--pr]    change it (a list is comma-separated; "" empties it)
   settings unset KEY [--pr]        put it back to story-gate's default
+  settings budget                  the default branch's budgets (docs/budgets.md)
+  settings budget add ID NAME      make a budget a story proposed one of the default branch's (still "proposed")
+  settings budget decide NAME      make a budget decided: missing it then fails DONE
+  settings budget set NAME FIELD VALUE   change one field (limit, tolerance, unit, source, pins, paths, ...)
+  settings budget remove NAME      drop a budget
 
+Budgets always change through a pull request of their own; nothing in this folder changes.
 Without --pr the change is written to this folder's .story-gate/config.json. With --pr nothing here changes: the same
 change is made to the default branch's config.json on a new branch, as a pull request of its own that a code owner
 approves. Every value is checked with the rules the gate itself applies. Keys and tokens are never accepted: they belong
@@ -71,6 +77,7 @@ SECRET = re.compile("|".join([
 ]))
 DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers")
 CONFIG = ".story-gate/config.json"
+BUDGETS = ".story-gate/budgets.json"
 REPO = re.compile(r"$^")  # owner/repo names: gate.REPO_NAME, set in cli()
 
 
@@ -325,8 +332,9 @@ def cmd_set(G, key, raw, remove, pr):
     return 0
 
 
-def open_pr(G, key, value, remove):
-    """Make the change to the default branch's config.json as its own pull request. Nothing local changes."""
+def pr_target(G):
+    """Where a settings pull request goes, decided before anything is written:
+    (repo, default branch, its tip, the token that opens it, who opens it and why, GET helper)."""
     import sg_github as GH
     repo = G.origin_repo()
     if not repo:
@@ -351,17 +359,51 @@ def open_pr(G, key, value, remove):
     if not ref:
         raise SettingsError("%s has no branch %s" % (repo, base))
     tip = ref["object"]["sha"]
-    try:  # decided before anything is written; see sg_github.pr_author
+    try:  # see sg_github.pr_author
         who, pr_tok, why = GH.pr_author(repo, base, tok, GH.whoami(tok))
     except GH.NoAuthor as e:
         raise SettingsError(str(e))
     except RuntimeError as e:
         raise SettingsError("couldn't tell who should open the pull request: %s" % e)
-    f = ok("/repos/%s/contents/%s?ref=%s" % (repo, CONFIG, tip))
-    if not f or f.get("encoding") != "base64":
+    return repo, base, tip, pr_tok, why, ok
+
+
+def remote_text(ok, repo, path, tip):
+    """A file's text on the default branch's tip, or None when it isn't there."""
+    f = ok("/repos/%s/contents/%s?ref=%s" % (repo, path, tip))
+    if not f:
+        return None
+    if f.get("encoding") != "base64":
+        raise SettingsError("GitHub returned %s in a form story-gate can't read" % path)
+    return base64.b64decode(f.get("content") or "").decode("utf-8-sig")
+
+
+def send_pr(G, repo, base, tip, pr_tok, why, path, text, slug, title, body):
+    """Open the pull request that changes only `path`, and print where it is."""
+    import sg_github as GH
+    body = body + ["", "Opened by: %s." % why, "",
+                   "Only `%s` changes. A code owner approves this pull request; GitHub doesn't count an approval from "
+                   "whoever opened it or pushed its latest commit (or a code owner adds the label `%s`)."
+                   % (path, getattr(G, "CHANGE_LABEL", "story-gate-change"))]
+    branch = "story-gate-settings-%s-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-")[:60],
+                                                time.strftime("%Y%m%d%H%M%S", time.gmtime()), secrets.token_hex(3))
+    try:
+        res = GH.open_setup_pr(pr_tok, repo, {path: text.encode("utf-8")}, branch=branch, title=title,
+                               body="\n".join(body), base=base, parent=tip)
+    except RuntimeError as e:
+        raise SettingsError(str(e))
+    if res.get("branch") != branch:
+        raise SettingsError("GitHub returned another pull request (%s) instead of a new one. Check it before running this again" % res.get("url"))
+    return res
+
+
+def open_pr(G, key, value, remove):
+    """Make the change to the default branch's config.json as its own pull request. Nothing local changes."""
+    repo, base, tip, pr_tok, why, ok = pr_target(G)
+    text = remote_text(ok, repo, CONFIG, tip)
+    if text is None:
         raise SettingsError("%s has no %s on %s yet. Set story-gate up first (`story-gate init`)" % (repo, CONFIG, base))
     try:
-        text = base64.b64decode(f.get("content") or "").decode("utf-8-sig")
         doc = json.loads(text)
         if not isinstance(doc, dict):  # not assert: python -O would skip it
             raise TypeError("not a JSON object")
@@ -381,25 +423,148 @@ def open_pr(G, key, value, remove):
         body += ["**This makes the rules looser than %s:**" % base, fence("\n".join("- " + x for x in looser), "text")]
     else:
         body += ["Not looser than %s." % base]
-    body += ["", "Opened by: %s." % why]
-    body += ["", "Only `%s` changes. A code owner approves this pull request; GitHub doesn't count an approval from "
-                 "whoever opened it or pushed its latest commit (or a code owner adds the label `%s`)."
-             % (CONFIG, getattr(G, "CHANGE_LABEL", "story-gate-change"))]
-    branch = "story-gate-settings-%s-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-"),
-                                                time.strftime("%Y%m%d%H%M%S", time.gmtime()), secrets.token_hex(3))
-    try:
-        res = GH.open_setup_pr(pr_tok, repo, {CONFIG: dump(new).encode("utf-8")}, branch=branch,
-                               title="story-gate settings: %s %s" % ("reset" if remove else "change", key),
-                               body="\n".join(body), base=base, parent=tip)
-    except RuntimeError as e:
-        raise SettingsError(str(e))
-    if res.get("branch") != branch:
-        raise SettingsError("GitHub returned another pull request (%s) instead of a new one. Check it before running this again" % res.get("url"))
+    res = send_pr(G, repo, base, tip, pr_tok, why, CONFIG, dump(new), key,
+                  "story-gate settings: %s %s" % ("reset" if remove else "change", key), body)
     print("Opened pull request #%s to %s: %s (%s)" % (res["number"], what, res["url"], why))
     for line in strictness(looser, base):
         print(line)
     print("Nothing changed in this folder. A code owner approves the pull request; it takes effect when it's merged.")
     return 0
+
+
+# ------------------------------------------------------------------ budgets (always through a pull request)
+BUDGET_FIELDS = {"limit": "number", "tolerance": "number", "unit": "text", "direction": "text", "source": "text",
+                 "status": "text", "measure": "text", "report": "text", "pins": "list", "paths": "list",
+                 "timeout": "int", "expect_exit": "int", "command": "words"}
+
+
+def budget_value(field, raw):
+    """The JSON value for one budget field from the text typed on the command line."""
+    import shlex
+    if field not in BUDGET_FIELDS:
+        raise SettingsError("a budget has no field %r (fields: %s)" % (field, ", ".join(sorted(BUDGET_FIELDS))))
+    if SECRET.search(raw or ""):
+        raise SettingsError("that value looks like a key or token; budgets never hold secrets")
+    s, kind = (raw or "").strip(), BUDGET_FIELDS[field]
+    if "\n" in s or len(s) > 500:
+        raise SettingsError("%s must be one line of at most 500 characters" % field)
+    if kind == "number":
+        try:
+            v = json.loads(s)
+        except ValueError:
+            v = None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise SettingsError("%s must be a number" % field)
+        return v
+    if kind == "int":
+        if field == "expect_exit" and s.lower() in ("", "none", "any"):
+            return None
+        if not re.fullmatch(r"-?\d{1,6}", s):
+            raise SettingsError("%s must be a whole number" % field)
+        return int(s)
+    if kind == "list":
+        return [x.strip() for x in s.split(",") if x.strip()]
+    if kind == "words":
+        try:
+            return shlex.split(s)
+        except ValueError as e:
+            raise SettingsError("command: %s" % e)
+    return s or None
+
+
+def budget_pr(G, edit, slug, title, what):
+    """Open a pull request that applies edit(list of budgets) to the default branch's budgets.json."""
+    import sg_measure as M
+    repo, base, tip, pr_tok, why, ok = pr_target(G)
+    text = remote_text(ok, repo, BUDGETS, tip)
+    try:
+        old = M.load(text, "%s on %s" % (BUDGETS, base))
+    except M.PolicyError as e:
+        raise SettingsError("%s. Fix it by hand in a pull request of its own" % e)
+    new = edit([dict(b) for b in old])
+    new_text = json.dumps({"version": M.SCHEMA, "budgets": new}, indent=1, ensure_ascii=False) + "\n"
+    try:
+        new = M.load(new_text, "the changed budgets.json")
+    except M.PolicyError as e:
+        raise SettingsError(str(e))
+    if new == old:
+        print("Nothing to change: %s on %s already says that. No pull request needed." % (BUDGETS, base))
+        return 0
+    looser = M.weaker(old, new)
+    body = ["story-gate settings: %s." % what, "", "After:", fence(new_text.strip(), "json"), ""]
+    body += (["**This makes the budgets looser than %s:**" % base, fence("\n".join("- " + x for x in looser), "text")]
+             if looser else ["Not looser than %s." % base])
+    res = send_pr(G, repo, base, tip, pr_tok, why, BUDGETS, new_text, slug, title, body)
+    print("Opened pull request #%s to %s: %s (%s)" % (res["number"], what, res["url"], why))
+    for line in strictness(looser, base):
+        print(line)
+    print("Nothing changed in this folder. A code owner approves the pull request; it takes effect when it's merged.")
+    return 0
+
+
+def find(bs, name):
+    """The budget called name in a list, or a SettingsError naming the ones there are."""
+    for b in bs:
+        if b["name"] == name:
+            return b
+    raise SettingsError("there's no budget called %r (budgets: %s)" % (name, ", ".join(b["name"] for b in bs) or "none"))
+
+
+def cmd_budget(G, a):
+    """settings budget [add ID NAME | decide NAME | set NAME FIELD VALUE | remove NAME]."""
+    import sg_measure as M
+    if not a:
+        try:
+            bs = G.budgets_policy()
+        except G.ConfigError as e:
+            raise SettingsError(str(e))
+        if not bs:
+            print("No budgets yet. A story proposes one with `story-gate measure <ID> --budget NAME ... -- <command>`; "
+                  "then `story-gate settings budget add <ID> NAME` makes it one of the default branch's.")
+            return 0
+        for b in bs:
+            print("%s: %s %s %s (%s, %s) - %s" % (b["name"], "at most" if b["direction"] == "max" else "at least", b["limit"], b["unit"],
+                                                 b["status"], " ".join(b["command"])[:80], b["source"][:80]))
+            if b["pins"] or b["paths"]:
+                print("    pins: %s; applies to: %s" % (", ".join(b["pins"]) or "none", ", ".join(b["paths"]) or "every change"))
+        print("CI uses the copy on the default branch. Change one there: settings budget set NAME FIELD VALUE (opens a pull request)")
+        return 0
+    op = a[0]
+    if op == "add" and len(a) == 3:
+        sd = G.sdir(a[1])
+        mine = {b["name"]: b for b in M.story_budgets(G.load_json(sd / "budgets.json"))}
+        if a[2] not in mine:
+            raise SettingsError("story %s has no proposed budget called %r (it has: %s)" % (a[1], a[2], ", ".join(mine) or "none"))
+        b = mine[a[2]]
+
+        def add(bs):
+            """The list with the story's proposal added (never over an existing budget)."""
+            if any(x["name"] == b["name"] for x in bs):
+                raise SettingsError("the default branch already has a budget called %s" % b["name"])
+            return bs + [b]
+        return budget_pr(G, add, "budget-add-" + b["name"], "story-gate settings: add budget %s" % b["name"],
+                         "add budget %s (proposed, from story %s)" % (b["name"], a[1]))
+    if op == "decide" and len(a) == 2:
+        return budget_pr(G, lambda bs: (find(bs, a[1]).update(status="decided"), bs)[1], "budget-decide-" + a[1],
+                         "story-gate settings: decide budget %s" % a[1], "make budget %s decided" % a[1])
+    if op == "remove" and len(a) == 2:
+        return budget_pr(G, lambda bs: (find(bs, a[1]), [x for x in bs if x["name"] != a[1]])[1], "budget-remove-" + a[1],
+                         "story-gate settings: remove budget %s" % a[1], "remove budget %s" % a[1])
+    if op == "set" and len(a) == 4:
+        v = budget_value(a[2], a[3])
+
+        def put(bs):
+            """The list with one field of one budget changed (an empty value removes the field)."""
+            b = find(bs, a[1])
+            if v is None:
+                b.pop(a[2], None)
+            else:
+                b[a[2]] = v
+            return bs
+        return budget_pr(G, put, "budget-%s-%s" % (a[1], a[2]), "story-gate settings: budget %s %s" % (a[1], a[2]),
+                         "set budget %s %s to %s" % (a[1], a[2], show(v)))
+    raise SettingsError("usage: settings budget | budget add ID NAME | budget decide NAME | budget set NAME FIELD VALUE | "
+                        "budget remove NAME")
 
 
 def rows(G):
@@ -453,6 +618,8 @@ def cli(G, args):
     pr = "--pr" in args
     a = [x for x in args if x != "--pr"]
     try:
+        if a and a[0] == "budget":
+            return cmd_budget(G, a[1:])
         if not a:
             return cmd_list(G)
         if a[0] == "set":
