@@ -108,12 +108,14 @@ class Account:
         step fails, everything done so far is undone (the checkout given back, the account removed) before it raises."""
         try:
             return self._setup()
-        except Exception:
+        except Exception as e:
             if self.uid is not None:
                 try:
-                    self.teardown()
-                except IsolationError:
-                    pass  # the original reason is the one to report
+                    left = self.teardown()
+                except IsolationError as e2:
+                    left = [str(e2)]
+                if left:  # say so: on a runner that is kept, the account or its processes would stay
+                    raise IsolationError("%s; undoing the set-up didn't finish either: %s" % (e, "; ".join(left)))
             raise
 
     def _setup(self):

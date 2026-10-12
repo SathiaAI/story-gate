@@ -48,7 +48,7 @@ def main():
     if os.geteuid() == 0:
         print("run this as the CI user (not root), with password-free sudo"); return 2
     home = Path.home()  # like GitHub's checkout under /home/runner/work: the account must pass through a closed home
-    home_mode = home.stat().st_mode & 0o7777
+    modes = {p: p.stat().st_mode & 0o7777 for p in [home] + list(home.parents)}
     work = Path(tempfile.mkdtemp(prefix="sg-iso-", dir=str(home)))
     os.chmod(work, 0o700)
     repo, out, mout, rt = work / "repo", work / "out", work / "mout", work / "runtime"
@@ -70,6 +70,9 @@ sleep 1
 python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/', timeout=5); print('server-ok')"
 mkdir -p reports && printf '<testsuite><testcase name="t1"/><testcase name="t2"><failure/></testcase></testsuite>' > reports/junit.xml
 sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
+mv .git .git-moved 2>/dev/null && echo GIT-REPLACED || echo git-kept
+ln -s /tmp .git 2>/dev/null && echo GIT-LINKED || true
+cat "$SG_SECRET_FILE" 2>/dev/null && echo SECRET-READ || echo secret-unreadable
 ''' + "python3 attack.py " + " ".join(targets) + "\nexit 1\n")
     tests.chmod(0o755)
     (repo / ".gitignore").write_text("reports/\n")
@@ -78,7 +81,10 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
     (repo / ".story-gate/config.json").write_text(json.dumps(cfg))
     (repo / ".story-gate/budgets.json").write_text(json.dumps({"version": 1, "budgets": [
         {"name": "widgets", "unit": "count", "limit": 5, "status": "decided", "source": "e2e", "measure": "number",
-         "command": ["python3", "count.py"]}]}))
+         "command": ["python3", "count.py"]},
+        {"name": "fsize", "unit": "blocks", "limit": 10 ** 9, "status": "decided", "source": "e2e", "measure": "number",
+         "command": ["python3", "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[1] // 512)"],
+         "pins": ["count.py"]}]}))
     (repo / "count.py").write_text("import subprocess, sys\nsubprocess.Popen([sys.executable, 'attack.py'] + %r)\nprint(3)\n" % targets)
     git(repo, "init", "-q", "-b", "main"); git(repo, "config", "user.email", "e@e"); git(repo, "config", "user.name", "e")
     git(repo, "add", "."); git(repo, "commit", "-qm", "base")
@@ -98,7 +104,8 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
         env.pop(k, None)  # this throwaway repository is compared with its own main, not the pull request's
     env["PATH"] = env.get("PATH", "")
     # SG_RUNNER_UID isn't on the allowlist, so pass it through the test command itself
-    cfg["test_command"] = "SG_RUNNER_UID=%d ./tests.sh" % os.getuid()
+    secret = work / "runner-secret.txt"; secret.write_text("do-not-leak"); os.chmod(secret, 0o600)
+    cfg["test_command"] = "SG_RUNNER_UID=%d SG_SECRET_FILE=%s ./tests.sh" % (os.getuid(), secret)
     (repo / ".story-gate/config.json").write_text(json.dumps(cfg))
     git(repo, "commit", "-qam", "uid")
     out.mkdir(); os.chmod(out, 0o777)  # as a careless runner set-up might leave it: story-gate must lock it down itself
@@ -109,9 +116,10 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
     tail = res.get("output_tail", "")
     check(res.get("isolated") is True, "tests ran as a separate account")
     check(res.get("exit_code") == 1 and not res.get("forged"), "the real exit code (1) was kept, not the forged 0")
-    for word in ("uid-ok", "env-ok", "home-ok", "server-ok", "sudo-denied"):
+    for word in ("uid-ok", "env-ok", "home-ok", "server-ok", "sudo-denied", "git-kept", "secret-unreadable"):
         check(word in tail, "honest work and limits inside the run: %s" % word)
-    check("SUDO-WORKED" not in tail, "the account could not use sudo")
+    for bad in ("SUDO-WORKED", "GIT-REPLACED", "GIT-LINKED", "SECRET-READ", "do-not-leak"):
+        check(bad not in tail, "the account could not: %s" % bad)
     check((out / "junit.xml").is_file() and b"forged" not in (out / "junit.xml").read_bytes(), "the JUnit report was read and not forged")
     check(git_cfg.read_bytes() == cfg_hash, ".git/config was not changed")
     check((rt / "gate.py").read_bytes() == gate_bytes, "story-gate's runtime copy was not changed")
@@ -121,8 +129,8 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
     check(not left, "no attacker process survived (%s)" % " ".join(left))
     users = [u.split(":")[0] for u in Path("/etc/passwd").read_text().splitlines() if u.startswith("sgpr-")]
     check(not users, "the throwaway account was removed (%s)" % ", ".join(users))
-    check(all(p.stat().st_uid == os.getuid() for p in [repo] + list(repo.rglob("*"))[:500]), "the checkout belongs to the CI user again")
-    check(home.stat().st_mode & 0o7777 == home_mode and work.stat().st_mode & 0o7777 == 0o700,
+    check(all(p.lstat().st_uid == os.getuid() for p in [repo] + list(repo.rglob("*"))), "the checkout belongs to the CI user again")
+    check(all(p.stat().st_mode & 0o7777 == m for p, m in modes.items()) and work.stat().st_mode & 0o7777 == 0o700,
           "the folders opened for the account were closed again")
     r = subprocess.run([sys.executable, str(rt / "gate.py"), "ci-measure", str(mout)], cwd=repo, env=env, capture_output=True, text=True, timeout=600)
     print(r.stdout[-1500:], r.stderr[-1500:])
@@ -130,6 +138,19 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
     meta = json.loads((mout / "measures.json").read_text())
     check(meta.get("isolated") is True and not meta.get("forged"), "budgets were measured isolated and measures.json not forged")
     check((mout / "measures" / "widgets.raw").read_bytes().strip() == b"3", "the measured value is the real one")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sgv", str(rt / "sg_validation.py")); V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
+    check((mout / "measures" / "fsize.raw").read_bytes().strip() == str(V.FILE_LIMIT // 512).encode(),
+          "a measuring command's file-size limit is hard (it can't raise it)")
+    # A set-up that can't be made safe fails closed and undoes itself: a results folder inside a folder anyone can write.
+    loose = work / "loose"; loose.mkdir(); os.chmod(loose, 0o777)  # not sticky: the account could swap the results folder
+    r = subprocess.run([sys.executable, str(rt / "gate.py"), "ci-tests", str(loose / "out")], cwd=repo, env=env, capture_output=True, text=True, timeout=600)
+    res = json.loads((loose / "out" / "results.json").read_text())
+    check(res.get("exit_code") is None and res.get("isolated") is False and "could write" in res.get("error", ""),
+          "an unsafe set-up runs nothing (strict) and says why")
+    users = [u.split(":")[0] for u in Path("/etc/passwd").read_text().splitlines() if u.startswith("sgpr-")]
+    check(not users and all(p.lstat().st_uid == os.getuid() for p in [repo] + list(repo.rglob("*"))),
+          "the failed set-up removed its account and gave the checkout back")
     left = subprocess.run(["pgrep", "-f", "attack.py"], capture_output=True, text=True).stdout.split()
     check(not left, "no attacker process survived the measure run")
     shutil.rmtree(work, ignore_errors=True)

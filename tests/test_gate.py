@@ -9601,3 +9601,29 @@ class TestCiIsolation(Base):
         self.assertEqual((rec["exit_code"], rec["isolated"]), (0, True))
         self.assertIn("remove them by hand", rec["warnings"][0])
         self.assertIn("::warning title=story-gate: clean-up::couldn't remove", buf.getvalue())
+
+    def test_the_gate_job_takes_isolation_only_from_the_tests_jobs_own_record(self):
+        """ci: test and scenario results count as isolated only when the tests job's own results.json / scenarios.json
+        say so; anything else (missing, false, or a story-folder claim) is stamped not isolated."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+        self.fill_validation()
+        td = self.repo.parent / (self.repo.name + "-td"); td.mkdir(); self.addCleanup(shutil.rmtree, td, True)
+        name = next(iter(json.loads((sd / "scenario_results.json").read_text())["results"]))
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_ISOLATE": "1"}
+        for flag, want in ((True, True), (False, False), (None, False)):
+            rec, sc = {"exit_code": 0, "command": "x"}, {"results": {name: {"passed": True, "spec": "s"}}}
+            if flag is not None:
+                rec["isolated"] = sc["isolated"] = flag
+            (td / "results.json").write_text(json.dumps(rec)); (td / "scenarios.json").write_text(json.dumps(sc))
+            run(self.repo, "ci", "--tests", str(td), env=env)
+            self.assertIs(json.loads((sd / "test_results.json").read_text())["isolated"], want, flag)
+            self.assertIs(json.loads((sd / "scenario_results.json").read_text())["results"][name]["isolated"], want, flag)
+        res = json.loads((sd / "scenario_results.json").read_text())
+        res["results"][name]["isolated"] = True  # a claim in the story folder never counts
+        (sd / "scenario_results.json").write_text(json.dumps(res))
+        (td / "scenarios.json").write_text(json.dumps({"results": {name: {"passed": True, "spec": "s"}}}))
+        run(self.repo, "ci", "--tests", str(td), env=env)
+        self.assertIs(json.loads((sd / "scenario_results.json").read_text())["results"][name]["isolated"], False)
