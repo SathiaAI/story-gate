@@ -146,7 +146,7 @@ jobs:
 | Proof it's a real release | Before anything runs, it checks the release signature, and that the release key is the one your file names (`release-key-fingerprint`). A commit that isn't a signed release stops the check, unless you set `allow-unsigned: true` for a development copy |
 | Your rules | Always from your main branch's `.story-gate/config.json`, never from the pull request |
 | Secrets | Passed by name, one by one (never `secrets: inherit`). The job that runs the pull request's tests gets none |
-| The check's name | GitHub names it `story-gate / story-gate`. `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
+| The check's name | GitHub names it `story-gate / story-gate` (after the job in your short workflow, so keep that job called `story-gate`, with no `name:`; doctor checks). `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
 | Upgrading | Change the SHA and the version comment to a newer release, in a pull request of its own. A code owner approves it |
 | Your own steps | The reusable workflow can't run steps you added between the "your steps" markers. `install --ci reusable` stops if you have some; move them out first, or use `--force` to drop them |
 

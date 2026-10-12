@@ -7899,6 +7899,27 @@ class TestReusableWorkflow(Base):
             self.assertIn("now requires", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
         self.assertEqual(c.call_args_list[1][0][3]["rules"][0]["parameters"]["required_status_checks"], [{"context": "story-gate / story-gate"}])
 
+    def test_a_renamed_caller_job_is_refused_so_the_required_check_name_holds(self):
+        """GitHub names the reusable check `<caller job> / story-gate`, and branch rules require `story-gate / story-gate`.
+        doctor refuses a caller job with another id or its own `name:`, and protection() checks that exact name."""
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
+        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        for bad in (t.replace("\n  story-gate:\n", "\n  gate:\n", 1),
+                    t.replace("\n  story-gate:\n", "\n  story-gate:\n    name: Gate\n", 1)):
+            g.write_text(bad)
+            self.assertIn("its job must be called `story-gate`", run(self.repo, "doctor").stdout)
+        g.write_text(t)
+        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as GH
+        name = GH.ci_check_name(self.repo)
+        for required, ok in (("story-gate / story-gate", True), ("gate / story-gate", False)):
+            rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": required}]}}]
+            with patch.object(GH, "call", lambda *a, rules=rules, **k: (200, rules, {})):
+                missing = GH.protection("o/r", "main", "t", name)[1]
+            self.assertEqual(any("status check" in m for m in missing), not ok, required)
+
     def test_doctor_checks_the_short_workflows_and_a_plain_install_keeps_the_mode(self):
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         r = run(self.repo, "doctor")
