@@ -94,7 +94,8 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
     gate_bytes = (rt / "gate.py").read_bytes()
     env = dict(os.environ, STORY_GATE_ROOT=str(repo), STORY_GATE_ISOLATE="1", STORY_GATE_ID="SAT-1",
                SG_E2E_SECRET_TOKEN="do-not-leak", SG_RUNNER_UID=str(os.getuid()))
-    env.pop("GITHUB_TOKEN", None)
+    for k in ("GITHUB_TOKEN", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF"):
+        env.pop(k, None)  # this throwaway repository is compared with its own main, not the pull request's
     env["PATH"] = env.get("PATH", "")
     # SG_RUNNER_UID isn't on the allowlist, so pass it through the test command itself
     cfg["test_command"] = "SG_RUNNER_UID=%d ./tests.sh" % os.getuid()
