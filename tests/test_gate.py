@@ -9139,6 +9139,19 @@ class TestBudgets(Base):
             code, out, _, _ = V.execute([PY, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])"],
                                         str(self.repo), 30, max_bytes=100)
             self.assertEqual((code, int(out.strip())), (0, V.FILE_LIMIT))
+            beat = self.repo.parent / (self.repo.name + "-beat"); self.addCleanup(lambda: beat.unlink() if beat.exists() else None)
+            child = "import time\nwhile True:\n    open(%r, 'a').write('x'); time.sleep(0.05)" % str(beat)
+            for extra in ({}, {"max_bytes": 100}):  # timeout, with and without the output check: the command's children stop too
+                V.execute([PY, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); time.sleep(30)" % child],
+                          str(self.repo), 1, **extra)
+                time.sleep(0.4); n = beat.stat().st_size; time.sleep(0.5)
+                self.assertEqual(beat.stat().st_size, n, extra)
+            probe = ("import resource, sys; sys.path.insert(0, %r); import sg_validation as V\n"
+                     "resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))\n"  # a lower limit already in place
+                     "print(V.execute([sys.executable, '-c', 'import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])'], %r, 30, max_bytes=100))"
+                     % (str(SRC), str(self.repo)))
+            r = subprocess.run([PY, "-c", probe], capture_output=True, text=True, timeout=60)
+            self.assertIn("(0, '1048576\\n'", r.stdout, r.stdout + r.stderr)  # kept the lower limit; never a crash
 
     def test_measure_reads_a_junit_report_the_run_writes(self):
         """A junit budget reads the report its command writes (to an ignored path); an old report never counts."""

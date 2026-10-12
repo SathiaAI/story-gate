@@ -142,9 +142,12 @@ FILE_LIMIT = 1 << 30  # bytes: the largest file a measuring command may write (L
 
 
 def _file_limit():
-    """In the measuring command's process, before it starts: the system refuses any file write past FILE_LIMIT."""
+    """In the measuring command's process, before it starts: the system refuses any file write past FILE_LIMIT (or past
+    a lower limit this process already has: a limit can only be lowered here, never raised)."""
     import resource
-    resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT, FILE_LIMIT))
+    hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    cap = FILE_LIMIT if hard == resource.RLIM_INFINITY else min(FILE_LIMIT, hard)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
 
 
 def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
@@ -187,7 +190,7 @@ def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
             size = buf.seek(0, 2)
             buf.seek(max(0, size - keep))  # the end of the output: where results and errors are
             out = buf.read(keep).decode("utf-8", "replace").replace("\r\n", "\n")  # Windows line ends: '$' still matches
-    except OSError as e:
+    except (OSError, subprocess.SubprocessError) as e:  # SubprocessError: the set-up before the command failed
         note = "could not start: %s" % e
     return code, out, size, note
 
