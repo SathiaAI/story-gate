@@ -3790,7 +3790,10 @@ def cmd_user(cmd, kv, rest):
         if not dry and kf and os.path.isfile(kf) and Path(os.path.realpath(kf)).is_relative_to(Path(os.path.realpath(T.runtime_root()))):
             import sg_github as G
             dest = G.config_dir() / "judge.env"
-            dest = dest if not dest.exists() else dest.with_name("judge.env.from-runtime")
+            n = 1
+            while os.path.lexists(dest):  # never overwrite a key that's already there
+                dest = dest.with_name("judge.env.from-runtime" + ("" if n == 1 else f"-{n}"))
+                n += 1
             G.write_private(dest, Path(kf).read_text(encoding="utf-8"))  # your key is never removed with the runtime
             print(f"Moved your local judge key out of the runtime to {dest}; point STORY_GATE_ENV_FILE there.")
             kf = str(dest)

@@ -1846,6 +1846,19 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertEqual(len(kept), 1, r.stdout); self.assertIn("Moved your local judge key", r.stdout)
         self.assertNotIn("sk-or-test", r.stdout + r.stderr)
 
+    def test_uninstall_never_overwrites_a_kept_judge_key(self):
+        """Moving a runtime key out picks a new name when judge.env and judge.env.from-runtime already exist."""
+        rt = self.home / "runtime"
+        cfg = self.home  # STORY_GATE_HOME: story-gate's user folder in these tests
+        existing = {cfg / "judge.env": "A\n", cfg / "judge.env.from-runtime": "B\n"}
+        for f, body in existing.items():
+            f.write_text(body)
+        kf = rt / "my.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        for f, body in existing.items():
+            self.assertEqual(f.read_text(), body, r.stdout)
+        self.assertEqual((cfg / "judge.env.from-runtime-2").read_text(), "OPENROUTER_API_KEY=sk-or-test\n")
+
     def test_invalid_user_json_is_never_clobbered(self):
         p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
         r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
