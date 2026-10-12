@@ -47,13 +47,18 @@ In `.story-gate/config.json` **on the default branch** (a branch can't approve i
 - `gate.py doctor` warns when a pinned script seems to use a repository file that isn't pinned (for example `source scripts/lib.sh`). This is a best-effort hint, not proof.
 - Pinned commands must be simple: a program, then plain words and paths. Use forward slashes.
 
-**MCP servers** (`command` plus `args`, `env`, `cwd`) are checked as the whole line they run. Environment values count
-too, unless they are only a reference to one of your own variables (`${GITHUB_TOKEN}`; not the project folder).
-Any literal value counts, even `1` or `true`: in a variable like `PATH` it names a folder.
-So `{"command": "node", "args": ["server.js"], "env": {"NODE_OPTIONS": "--require ./x.js"}}` is checked as
-`'NODE_OPTIONS=--require ./x.js' node server.js`, and a working folder adds `cd <folder> && ` in front. Such lines can't be
-pinned (the runner can't carry arguments), so a server that uses repository code runs only if a code owner accepts that
-exact line (`"runs_repo_code": "accepted"`). A server that loads an env file (`envFile`) is always removed.
+**MCP servers** (`command` plus `args`, `env`, `cwd`) are checked as the whole line they run. These `env` entries count
+as part of it: any variable that steers what a program loads (`PATH` and anything with `PATH`, `LD_*`, `*_OPTIONS`,
+`PYTHON*`, `GIT_*`, `HOME` and config folders, `EDITOR` and the like), any value written like a path, and references to
+the project or workspace folder. Ordinary settings (`API_KEY`, `NODE_ENV=production`, `DEBUG=1`, a web address, `${TOKEN}`)
+don't. So `{"command": "node", "args": ["server.js"], "env": {"NODE_OPTIONS": "--require ./x.js"}}` is checked as
+`'NODE_OPTIONS=--require ./x.js' node server.js`, and a working folder adds `cd <folder> && ` in front. Such lines can't
+be pinned (the runner can't carry arguments), so a server that uses repository code runs only if a code owner accepts that
+exact line (`"runs_repo_code": "accepted"`). A server that loads an env file (`envFile`) is always removed, and so is a
+container that mounts a repository folder (`docker run -v .:/w`).
+
+This covers what the line names. A program can still read repository files on its own (a server that loads a config
+file from its working folder, say): approve servers on the default branch with that in mind.
 
 ## The runner, step by step
 

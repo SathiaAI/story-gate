@@ -2036,10 +2036,13 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertTrue(G.is_filtered_form(stored, edited, approved=stored))  # no note: treated as the filter's copy
         self.assertTrue(G.is_filtered_form(stored, stored, approved=stored, smudged=wrote))
         listed = json.dumps(["not", "settings"]).encode()  # a branch that stored a non-object
-        self.assertFalse(G.is_filtered_form(listed, edited, approved=stored))  # your edit: kept
+        self.assertFalse(G.is_filtered_form(listed, edited, approved=stored, smudged=wrote))  # your edit: kept
+        self.assertTrue(G.is_filtered_form(listed, edited, approved=stored))  # no note: keep the stored copy
         self.assertTrue(G.is_filtered_form(listed, stored, approved=stored))  # the approved copy the filter wrote
         older = json.dumps({"permissions": {"allow": ["old"]}}).encode()  # written under an approval since revoked
         self.assertTrue(G.is_filtered_form(listed, older, approved=stored, smudged={"sha": hashlib.sha256(older).hexdigest()}))
+        noted = {"sha": "0" * 64, "guarded": {k: json.loads(older).get(k) for k in G.GUARDED_KEYS}}
+        self.assertTrue(G.is_filtered_form(listed, older + b"\n", approved=stored, smudged=noted))  # bytes differ, settings ours
         # our own filtered copy (guarded value is the approved one, an entry was dropped) is still recognised
         branch = json.dumps({"permissions": {"allow": ["branch"]}, "apiKeyHelper": "evil"}).encode()
         approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
@@ -2076,6 +2079,16 @@ class TestRepoHookGuard(RuntimeFixture):
         os.utime(f)
         r = self.git("add", ".claude/settings.json")
         self.assertEqual(self.git("diff", "--cached").stdout, ""); self.assertIn("git checkout --", r.stderr)
+
+    def test_git_status_before_add_does_not_swallow_an_edit(self):
+        """Looking at an edit (git status / git diff run the clean filter) never changes what git add then stages."""
+        self.approve_on_main({"permissions": {"allow": ["a"]}})
+        self.git("checkout", "-q", "-B", "look"); self.git("checkout", "-q", "main"); self.git("checkout", "-q", "look")
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps({"permissions": {"allow": ["a", "b"]}}, indent=2))
+        self.git("status"); self.git("diff")
+        self.git("add", ".claude/settings.json")
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
 
     def test_editing_a_guarded_setting_on_the_default_branch_can_be_committed(self):
         """On the default branch, a user's edit to a guarded setting survives the clean filter and is staged."""
@@ -2783,8 +2796,8 @@ class TestPinnedHooks(RuntimeFixture):
 
     def test_mcp_env_cwd_and_env_files_are_part_of_what_is_checked(self):
         """env values that could name code, a working folder, or an env file make an MCP entry run repository code
-        the pin check never saw: dropped unless a code owner accepted that exact line. Only a reference to one of your
-        own variables (not the project folder) doesn't count."""
+        the pin check never saw: dropped unless a code owner accepted that exact line. Ordinary settings (tokens,
+        words, numbers, web addresses) in other variables don't count."""
         for entry in ({"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}},
                       {"command": "node", "args": ["--version"], "env": {"NODE_OPTIONS": "--require ./pwn.js"}},
                       {"command": "echo", "args": ["hello"], "cwd": "tools"},
@@ -2793,12 +2806,15 @@ class TestPinnedHooks(RuntimeFixture):
             with self.subTest(entry=entry):
                 out, notes = self.smudge_json({"mcpServers": {"s": entry}})
                 self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
-        for env in ({"PATH": "true"}, {"PATH": "1"}, {"PATH": "http://bin"}, {"PYTHONPATH": "${CLAUDE_PROJECT_DIR}"},
-                    {"NODE_PATH": "$PWD"}, {"X": "${workspaceFolder}"}, {"PORT": "8080"}):  # literals can name a folder; project variables point inside
-            with self.subTest(env=env):
+        for env in ({"PATH": "true"}, {"PATH": "1"}, {"PATH": "http://bin"}, {"PATH": "$FOO"}, {"GIT_DIR": "${FOO}"},
+                    {"PYTHONPATH": "${CLAUDE_PROJECT_DIR}"}, {"X": "${workspaceFolder}"}, {"NODE_OPTIONS": "--inspect"},
+                    {"HOME": "true"}, {"APP_CONFIG": "app.json"}, {"DATA": "./data"}, {"BASE": "${PWD}/x"}):
+            with self.subTest(env=env):  # loader/path/config variables (any value), path-like values, project folders
                 out, notes = self.smudge_json({"mcpServers": {"s": {"command": "echo", "args": ["ok"], "env": env}}})
                 self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
-        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"TOKEN": "${GITHUB_TOKEN}", "HOME_DIR": "$HOME"}}}}
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {
+            "TOKEN": "${GITHUB_TOKEN}", "API_KEY": "sk-abc", "NODE_ENV": "production", "DEBUG": "1", "PORT": "8080",
+            "API_URL": "https://api.example.com/v1"}}}}
         self.assertEqual(self.smudge_json(keep), (keep, []))
         risky = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}}}}
         accepted = {"project_hooks_allowed": [{"command": "LD_PRELOAD=./evil.so echo hello", "runs_repo_code": "accepted"}]}
@@ -2813,6 +2829,13 @@ class TestPinnedHooks(RuntimeFixture):
                 self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
         out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker-compose", "args": ["up"]}}})
         self.assertEqual(out, {})
+        for args in (["run", "--rm", "-v", ".:/w", "alpine", "/w/evil.sh"], ["run", "--volume=./src:/w", "img"],
+                     ["run", "-v./x:/w", "img"], ["run", "--mount", "type=bind,source=tools,target=/t", "img"]):
+            with self.subTest(args=args):  # a bind mount of a repository folder runs what the branch put there
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        P = self.pin_module()  # a named volume or this computer's own folder isn't a repository mount
+        self.assertFalse(P._mounts_working_folder(["run", "-v", "cache:/c", "-v", "/opt/x:/x", "--mount", "type=volume,src=v,dst=/v", "img"]))
         keep = {"mcpServers": {"s": {"command": "docker", "args": ["run", "-i", "--rm", "acme-mcp"]}}}
         self.assertEqual(self.smudge_json(keep), (keep, []))
 

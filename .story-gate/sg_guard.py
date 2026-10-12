@@ -165,9 +165,13 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
         s, d = _load(stored), _load(on_disk)
         a = _load(approved) if approved else {}
         a = a if isinstance(a, dict) else {}
-        if not isinstance(s, dict):  # the branch stored something that isn't a settings object: the filter only ever
-            return d == s or d == a  # writes it back or the approved version, so anything else is the user's own edit
         g = (smudged or {}).get("guarded")
+        if not isinstance(s, dict):  # the branch stored something that isn't a settings object: the filter only ever
+            if d == s or d == a:     # writes it back or an approved version
+                return True
+            if not isinstance(g, dict) or not isinstance(d, dict):
+                return smudged is None  # no note: can't tell an old approval from an edit, so keep the stored copy
+            return all(d.get(k) == g.get(k) for k in GUARDED_KEYS)  # still the guarded settings the filter wrote: ours
         if isinstance(g, dict) and isinstance(d, dict):
             for k in GUARDED_KEYS:
                 if d.get(k) != s.get(k) and d.get(k) != a.get(k) and (k not in g or d.get(k) != g[k]):
@@ -178,12 +182,14 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
 
 
 def _guarded_differ(a, b):
-    """True when two settings files disagree on any guarded setting."""
+    """True when two settings files disagree on any guarded setting (or one of them isn't a settings object)."""
     try:
         x, y = _load(a), _load(b)
     except (ValueError, UnicodeDecodeError):
         return False
-    return isinstance(x, dict) and isinstance(y, dict) and any(x.get(k) != y.get(k) for k in GUARDED_KEYS)
+    if not (isinstance(x, dict) and isinstance(y, dict)):
+        return x != y
+    return any(x.get(k) != y.get(k) for k in GUARDED_KEYS)
 
 
 def restore_filtered_keys(stored, on_disk, smudged):
@@ -332,8 +338,8 @@ def filter_main(mode, path):
                 if lost:
                     sys.stderr.write("story-gate: %s on disk is the filtered copy, so committing it drops %d hook command(s) this branch "
                                      "added. Get new hook commands approved on the default branch first.\n" % (path, len(lost)))
-            if out == plain and out != idx:  # your own content goes in as is: note it, so it never counts as a stale copy
-                remember_smudge(top, path, out)
+            if idx is None:  # a new file goes in as you wrote it: note it, so your later edits are recognised as yours
+                remember_smudge(top, path, plain)
     except Exception as ex:  # fail closed: never pass the branch's hook file through unchecked
         sys.stderr.write("story-gate filter error on %s: %r\n" % (path, ex))
         out = (b"{}\n" if path.endswith(".json") else b"") if mode == "smudge" else data

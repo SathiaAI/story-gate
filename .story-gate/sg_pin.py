@@ -102,6 +102,25 @@ def _head(tok):
     return re.sub(r"\.(exe|cmd|bat|ps1|com)$", "", os.path.basename(tok.replace("\\", "/")).lower())
 
 
+def _mounts_working_folder(args):
+    """True when container arguments bind-mount a relative host folder (`-v .:/w`, `--mount type=bind,src=./x,...`).
+    A source without a slash is a named volume; an absolute one is this computer's own folder."""
+    srcs = []
+    for i, a in enumerate(args):
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a in ("-v", "--volume"):
+            srcs.append(nxt.split(":", 1)[0])
+        elif a.startswith("--volume="):
+            srcs.append(a.split("=", 1)[1].split(":", 1)[0])
+        elif a.startswith("-v") and len(a) > 2:
+            srcs.append(a[2:].split(":", 1)[0])
+        elif a == "--mount" or a.startswith("--mount="):
+            spec = nxt if a == "--mount" else a.split("=", 1)[1]
+            srcs += [kv.split("=", 1)[1] for kv in spec.split(",") if kv.split("=", 1)[0] in ("source", "src") and "=" in kv]
+    return any(s in (".", "..") or s.startswith((".", "~")) or ("/" in s and not s.startswith("/") and not re.match(r"^[A-Za-z]:", s))
+               for s in srcs)
+
+
 def analyse(cmd, top, sha):
     """Default-deny reading of a hook command. -> dict(parse_ok, simple, runner, refs, outside, reasons).
     refs = repository paths the command uses (existing on the default branch, or written like a path/script);
@@ -130,6 +149,9 @@ def analyse(cmd, top, sha):
     elif head in CONTAINER_TOOLS and CONTAINER_CONFIG_VERBS & {t.lower() for t in tokens[1:]}:
         info["runner"] = True  # compose.yaml / Dockerfile / bake files are read from the working folder by default
         info["reasons"].append(f"{head} reads its configuration from repository files")
+    elif head in CONTAINER_TOOLS and _mounts_working_folder(tokens[1:]):
+        info["runner"] = True  # the container runs whatever the branch put in the mounted folder
+        info["reasons"].append(f"{head} mounts a folder from the repository")
     interp = head in INTERPRETERS or bool(re.match(r"^python\d", head))
     if interp:
         if any(t.lower() in CODE_FLAGS or re.match(r"^-[a-z]*[cem]$", t.lower()) for t in tokens[1:]):
@@ -253,17 +275,27 @@ def _walk_commands(data, fn):
 
 
 INVOCATION_KEYS = ("args", "env", "cwd", "envFile", "env_file")
-# the only env value that can't name repository code: a reference to one of your own variables (a literal, even `true`
-# or `1`, can be a folder name in PATH-like variables; project-folder variables point into the repository)
-SAFE_ENV_VALUE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+# environment variables that steer what a program loads or runs: any value for these is part of the checked line
+LOADER_ENV_KEY = re.compile(
+    r"PATH|^LD_|^DYLD_|PRELOAD|OPTIONS$|OPTS$|^PYTHON|^PERL|^RUBY|^GEM_|^BUNDLE_|^NPM_CONFIG|^YARN_|^PNPM_|^PIP_|^UV_|"
+    r"^CARGO|^RUSTUP|^RUSTC|^GO(?:PATH|ROOT|FLAGS|BIN|ENV|PROXY|TOOLCHAIN|EXPERIMENT|CACHE|MODCACHE)$|^GIT_|^BASH_ENV$|"
+    r"^ENV$|^SHELL|^PS4$|^PROMPT_COMMAND$|^IFS$|HOME|^XDG_|CONFIG|RC$|^EDITOR$|^VISUAL$|^PAGER$|^BROWSER$|^DOCKER_|"
+    r"^KUBE|^SSH_|^JAVA|^JDK_|^CLASSPATH$|^MAVEN_|^GRADLE_|^DENO_|^BUN_|^PHP|^COMPOSER_|^LUA_|^TCL|^R_|PLUGIN|"
+    r"INCLUDE|LIB|^TMPDIR$", re.IGNORECASE)
+_FOLDER_VAR = re.compile(r"project|workspace|pwd|cwd|root|dir|folder|path|file", re.IGNORECASE)
 
 
-def _safe_env_value(v):
-    """True only for `$VAR` / `${VAR}` naming a variable that can't point into the repository: not a project,
-    workspace or current folder (`${workspaceFolder}`, `$PWD`), nor any folder- or path-like name."""
-    m = SAFE_ENV_VALUE.match(v)
-    name = m and (m.group(1) or m.group(2))
-    return bool(name) and not re.search(r"project|workspace|pwd|cwd|root|dir|folder|path|file", name, re.IGNORECASE)
+def _risky_env(k, v):
+    """True when an MCP env entry could make the server load repository code: a loader/path/config variable (any
+    value, even `true` or `$FOO`: an empty or unexpanded value can name the working folder), a value written like a
+    path, or a reference to a project/workspace/folder variable. Tokens, words, numbers and web addresses are fine."""
+    if LOADER_ENV_KEY.search(k):
+        return True
+    if re.match(r"^https?://[^\s]*$", v):
+        return False
+    if re.search(r"[/\\]", v) or v.startswith((".", "~")):
+        return True
+    return any(_FOLDER_VAR.search(n) for n in re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", v))
 
 
 def invocation_line(cmd, entry):
@@ -280,7 +312,7 @@ def invocation_line(cmd, entry):
     if cwd is not None and not isinstance(cwd, str):
         return None
     line = f"{cmd} {shlex.join(args)}" if args else cmd
-    risky = [f"{k}={v}" for k, v in sorted(env.items()) if not _safe_env_value(v)]
+    risky = [f"{k}={v}" for k, v in sorted(env.items()) if _risky_env(k, v)]
     if risky:
         line = f"{shlex.join(risky)} {line}"
     if cwd is not None:
