@@ -25,13 +25,13 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
 
-## New in v0.9.0
+## New in v0.9.1
 
-- **Linear and Jira tickets** (Cloud, Server, Data Center): `story-gate spec-pull <story> ENG-12` copies the ticket into the story, and every pull request check compares it with the live ticket. Linear and Jira Cloud passed our live test with real accounts (October 2026); Jira Server and Data Center are still experimental.
-- **`story-gate settings`**: see every setting in plain English, and change one without editing `config.json`. Add `--pr` to open the change as its own pull request.
-- **Short workflows**: `story-gate install --ci reusable` replaces three long workflow files with short ones that call story-gate's own workflows, pinned to a signed release. Upgrading is a one-line change.
-- **Security fix**: a Linear or Jira key could reach GitHub's API during the pull request check. Fixed before any release included trackers.
-- **Safer releases**: story-gate's own main branch and release tags are now protected, so a pinned release can't change.
+- **Safer project settings**: story-gate now checks the whole line an MCP server runs (its arguments, environment, working folder and container mounts), not just the program name. A server that uses code from the repository runs only after a code owner approves that exact line. [How it works](docs/hook-pinning.md).
+- **Your own edits are kept**: when you change a protected setting yourself, story-gate stages your change instead of quietly restoring the old one.
+- **Tracker setup in the browser**: connect Linear or Jira on the setup page, with plain-English errors and tips. Jira Server and Data Center are still experimental.
+- **A livelier dashboard**: the pinned issue shows more, warns when it is out of date, and `story-gate dashboard --serve` keeps a local copy fresh.
+- **Security hardening**: a key is only sent to an `https://` address (or a model on your own computer) and never follows a redirect, and test reports can't load outside files. A full review of the whole codebase fixed 13 issues before this release.
 
 ## Sound familiar?
 
@@ -77,18 +77,18 @@ Nothing to set up, and your own projects aren't touched.
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.1/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.0/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.1/install.ps1 | iex"
 ```
 
 Then run `story-gate try`. It makes a throwaway project with one small story and a real bug, runs each goal, shows one pass and one fail, and opens the validation page. No GitHub, no judge key, no network.
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.0` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.1` instead.
 
 ## Set it up in 5 steps
 
@@ -245,7 +245,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.0`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.1`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).
