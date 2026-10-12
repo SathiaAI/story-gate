@@ -293,6 +293,7 @@ The result is one of three: **ON_TRACK**; **AT_RISK** (fix the named cause); or 
 | `tests_ran_green` | Structural | The pinned test command passed on **this exact code**. CI uses its own run |
 | `traceability` | Structural | Every AC's `test_refs` exist in the current test files and ran and passed (writes `trace.md`) |
 | `scenarios_prove_acs` | Structural | Every AC has a scenario (the feature run end to end) that passed on **this exact code**. In CI only CI's own runs count; a `--local-only` scenario gives CONCERNS |
+| `budgets_met` | Structural | Shown only when a budget applies. Every decided budget was measured by CI on this code and is within its limit; a missed or unmeasured decided budget fails, whatever `accept_concerns` says. A missed proposed budget is CONCERNS ([budgets.md](budgets.md)) |
 | `validation_written` | Structural | All seven `validation.md` sections are filled in: result, ACs, scenarios, bugs, lessons, limits, demo |
 | `handoff_written` | Structural | All seven handoff sections, including release/rollback and drift decisions |
 | `learnings_recorded`, `code_changed`, `evidence_complete` | Structural | Learnings logged, real code in the diff, and the diff small enough for one judge pass |
@@ -334,6 +335,19 @@ flowchart LR
 - **In CI** the PR check builds the page after scoring. It attaches the page to the run as the **story-gate-validation** artifact (kept 14 days), and puts the Result section in the check summary. Older workflows get the artifact after `story-gate install` runs again.
 
 **Stories started before this existed:** run `story-gate start <ID>` again. It adds the template and keeps everything else.
+
+### Budgets: limits you set
+
+A **budget** is a limit on something a command can count: bundle size, failing accessibility tests, build warnings.
+You keep them in `.story-gate/budgets.json` on the default branch. When a story's change touches what a budget covers,
+CI measures it with the default branch's command and compares the number with your limit.
+
+- `story-gate measure SAT-1` measures every budget that applies, on your computer (the result is *reported*).
+- A missed **decided** budget fails DONE. A missed **proposed** one is CONCERNS.
+- Your AI can propose a budget in its story; you make it one of the project's with `story-gate settings budget add SAT-1 NAME`, then `settings budget decide NAME`. Each opens a pull request of its own.
+- A pull request that changes the script that does the measuring gets no credit for that budget.
+
+The full guide, including how to write a measuring command and what CI can and can't prove, is [budgets.md](budgets.md).
 
 ### ACCEPTANCE: in CI, on GitHub
 | Check | Question |

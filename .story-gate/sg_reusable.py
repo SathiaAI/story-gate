@@ -71,9 +71,9 @@ def prepare(G, kv, rest):
         (dest / f).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(str(src / f), str(dest / f))
     (dest / "config.json").write_text(policy, encoding="utf-8")  # settings and calibration come from the base branch only
-    cal = G.git("show", "%s:.story-gate/judge-calibration.json" % base)
-    if cal.strip():
-        (dest / "judge-calibration.json").write_text(cal, encoding="utf-8")
+    for name in ("judge-calibration.json", "budgets.json"):  # judge calibration and budgets: base branch only, like config.json
+        if G.git("cat-file", "-t", "%s:.story-gate/%s" % (base, name)).strip() == "blob":  # present, even if empty: the loader judges it
+            (dest / name).write_text(G.git("show", "%s:.story-gate/%s" % (base, name)), encoding="utf-8")
     out_line("ready", "true")
     print("story-gate is ready in %s, with the settings from %s" % (dest, base))
     return 0

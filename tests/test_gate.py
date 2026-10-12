@@ -8777,6 +8777,15 @@ class TestReviewLessons(unittest.TestCase):
                   (usage, "%d KB max" % (R.MAX_IMAGE // 1000))]
         D = importlib.import_module("sg_dashboard")
         checks.append((guide, "would pass {:,} characters (GitHub allows 65,536)".format(D.ISSUE_LIMIT)))  # the 65,000-vs-60,000 slip
+        M, V = importlib.import_module("sg_measure"), importlib.import_module("sg_validation")
+        budgets = (SRC.parent / "docs/budgets.md").read_text(encoding="utf-8")
+        design = (SRC.parent / "docs/measured-checks.md").read_text(encoding="utf-8")
+        checks += [(budgets, "wrote more than %d MB" % (M.OUTPUT_CAP // 1000000)), (budgets, "(%d minutes for all budgets)" % (M.CI_TOTAL // 60)),
+                   (budgets, "%d seconds by default (`--timeout`, at most %d)" % (M.DEFAULT_TIMEOUT, M.MAX_TIMEOUT)),
+                   (budgets, "the last %d values from merged stories" % D.BUDGET_HISTORY), (budgets, "cut to {:,} characters".format(V.TAIL)),
+                   (budgets, "larger than %d GB" % (V.FILE_LIMIT >> 30)),
+                   (design, "at most %d MB" % (M.OUTPUT_CAP // 1000000)), (design, "inside a %d-second total" % M.CI_TOTAL),
+                   (design, "the last %d per budget" % D.BUDGET_HISTORY)]
         for text, phrase in checks:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
@@ -8814,3 +8823,639 @@ class TestReviewLessons(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBudgets(Base):
+    """G1 part 1: budgets. The default branch sets limits, CI measures with the default branch's command, story-gate's own
+    code parses and compares, and nothing the pull request writes can make a decided budget pass (docs/budgets.md)."""
+
+    def M(self):
+        """sg_measure from the source tree, freshly imported."""
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_measure
+        return importlib.reload(sg_measure)
+
+    def budget(self, **kw):
+        """A valid decided budget whose command prints 3 (override any field)."""
+        b = {"name": "widgets", "unit": "count", "limit": 5, "status": "decided", "source": "owner, for the test",
+             "measure": "number", "command": [PY, "-c", "print(3)"], "pins": ["scripts"]}  # inline code needs pins
+        b.update(kw)
+        return b
+
+    def policy(self, *budgets, commit=False):
+        """Write .story-gate/budgets.json. commit=True makes it the base branch's policy, with objective judging there, so
+        CI scores DONE without a judge key."""
+        p = self.repo / ".story-gate/budgets.json"
+        p.write_text(json.dumps({"version": 1, "budgets": list(budgets)}))
+        if commit:
+            self.cfg(judge_mode="objective")
+            g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+            g("stash", "-u", "-q"); g("checkout", "-q", "main"); g("stash", "pop", "-q")
+            g("add", ".story-gate/budgets.json", ".story-gate/config.json"); g("commit", "-qm", "budgets"); g("checkout", "-q", "feature/SAT-1-thing")
+            g("merge", "-q", "main")
+
+    def ready(self):
+        """SAT-1 through READY, with a code change, so DONE-phase checks run."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        self.sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+
+    def results(self):
+        """budget_results.json results for SAT-1."""
+        return json.loads((self.sd / "budget_results.json").read_text())["results"]
+
+    # ---------------------------------------------------------------- records
+    def test_a_budget_record_is_checked_field_by_field(self):
+        """problems() accepts a full record and names each bad field; time units and junit without a report are refused."""
+        M = self.M()
+        self.assertEqual(M.problems(self.budget()), [])
+        self.assertEqual(M.problems(self.budget(measure="junit", report="reports/a.xml", direction="min", tolerance=1,
+                                                pins=["scripts/x.py"], paths=["src/**"], timeout=30, expect_exit=0)), [])
+        for bad, why in ((dict(unit="seconds"), "is a time"), (dict(unit="ms"), "is a time"), (dict(limit=True), "limit must be a number"),
+                         (dict(limit=float("nan")), "limit must be a number"), (dict(limit="5"), "limit must be a number"),
+                         (dict(tolerance=-1), "tolerance"), (dict(status="final"), "status"), (dict(source=" "), "source"),
+                         (dict(measure="sarif"), "measure"), (dict(command="echo 1"), "command"), (dict(command=[]), "command"),
+                         (dict(measure="junit"), "needs report"), (dict(report="a.xml"), "only for junit"),
+                         (dict(measure="junit", report="../a.xml"), "needs report"), (dict(pins=["/etc/passwd"]), "pins"),
+                         (dict(paths=["a\\b"]), "paths"), (dict(timeout=0), "timeout"), (dict(timeout=601), "timeout"),
+                         (dict(expect_exit=True), "expect_exit"), (dict(direction="up"), "direction"), (dict(name="a b"), "name"),
+                         (dict(extra=1), "unknown fields")):
+            with self.subTest(bad=bad):
+                self.assertTrue(any(why in p for p in M.problems(self.budget(**bad))), M.problems(self.budget(**bad)))
+
+    def test_an_invalid_policy_fails_closed(self):
+        """load() refuses bad JSON, a wrong version, unknown top-level keys, duplicate names, too many budgets and any bad
+        budget; the gate then stops with a ConfigError instead of scoring without the budgets."""
+        M = self.M()
+        self.assertEqual(M.load(None), [])
+        with self.assertRaises(M.PolicyError):
+            M.load("  ")  # an empty file is a broken policy, not "no budgets"
+        for text in ("{", "[]", json.dumps({"version": 2, "budgets": []}), json.dumps({"version": 1, "budgets": [], "x": 1}),
+                     json.dumps({"version": 1, "budgets": [self.budget(), self.budget()]}),
+                     json.dumps({"version": 1, "budgets": [self.budget(name="b%d" % i) for i in range(M.MAX_BUDGETS + 1)]}),
+                     json.dumps({"version": 1, "budgets": [self.budget(unit="s")]})):
+            with self.subTest(text=text[:40]):
+                with self.assertRaises(M.PolicyError):
+                    M.load(text)
+        self.ready()
+        self.policy(self.budget(unit="minutes"))
+        r = run(self.repo, "measure", "SAT-1")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("fails closed", r.stdout + r.stderr)
+        r = run(self.repo, "score", "SAT-1", "done")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("fails closed", r.stdout + r.stderr)
+
+    # ---------------------------------------------------------------- parsers
+    def test_the_number_parser_takes_exactly_one_plain_number(self):
+        """parse_number(): one word with a digit, a plain decimal, the budget's unit may be glued on; colour codes ignored."""
+        M = self.M()
+        from decimal import Decimal
+        for text, want in (("3\n", "3"), ("  245KB ", "245"), ("total: 0.75 %", "0.75"), ("-12", "-12"), ("\x1b[32m7\x1b[0m", "7"),
+                           ("bundle size is\n245\nbytes OK", "245"), ("0", "0")):
+            with self.subTest(text=text):
+                self.assertEqual(M.parse_number(text, "KB")[0], Decimal(want))
+        for text in ("", "no value", "1 2", "v1.2 size 3", "1,234", "1e3", "245MB", "+5", "007", "1.", ".5", "3.0.1", "١٢", "5²",
+                     "x" * 10 + " 9" * 2, "12345678901234567890123456789012", "NaN", "inf", "0x10", "3/4"):
+            with self.subTest(text=text):
+                self.assertIsNone(M.parse_number(text, "KB")[0], text)
+
+    def test_the_number_parser_property_round_trip_and_noise(self):
+        """Property-style: any plain decimal, alone or among words without digits, parses to itself; adding any second
+        word with a digit always makes it ambiguous (not_run)."""
+        import random
+        M = self.M()
+        from decimal import Decimal
+        rnd = random.Random(7)
+        words = ["size", "total:", "ok", "KB", "--", "bundle", "\x1b[1m", "done."]
+        for _ in range(400):
+            v = Decimal(rnd.randint(-10 ** 6, 10 ** 6)) / (10 ** rnd.randint(0, 4))
+            s = format(v, "f")
+            s = s.rstrip("0").rstrip(".") if "." in s else s
+            s = "0" if s in ("-0", "") else s
+            text = " ".join(rnd.sample(words, rnd.randint(0, 4)) + [s] + rnd.sample(words, rnd.randint(0, 3)))
+            self.assertEqual(M.parse_number(text, "KB")[0], Decimal(s), text)
+            extra = rnd.choice(["v2", "3", "a1", "2024-01-01", "1%", "x9y"])
+            self.assertIsNone(M.parse_number(text + " " + extra, "KB")[0], text + " " + extra)
+
+    def test_the_junit_parser_counts_each_failed_case_once(self):
+        """parse_junit(): failures and errors per testcase, nested suites never double-count; DTDs, entities, truncated
+        or oversized reports and reports with no tests are refused."""
+        M = self.M()
+        xml = (b'<testsuites><testsuite name="a" failures="9"><testsuite name="inner"><testcase name="t1"><failure/></testcase>'
+               b'<testcase name="t2"><error/></testcase><testcase name="t3"/></testsuite><testcase name="t4"><skipped/></testcase>'
+               b'</testsuite></testsuites>')
+        v, n, why = M.parse_junit(xml)
+        self.assertEqual((v, n, why), (2, 4, ""))
+        for raw, why in ((b'<!DOCTYPE x [<!ENTITY a "b">]><testsuite><testcase name="x"/></testsuite>', "DTD"),
+                         (xml[:-20], "readable XML"), (b"<testsuite></testsuite>", "no test cases"),
+                         (b"<testsuite>" + b" " * (M.OUTPUT_CAP + 1) + b"</testsuite>", "5 MB"), (b"not xml", "readable XML")):
+            with self.subTest(why=why):
+                v, _, w = M.parse_junit(raw)
+                self.assertIsNone(v); self.assertIn(why, w)
+
+    def test_limits_compare_as_exact_decimals_with_tolerance(self):
+        """met(): at most / at least the limit, tolerance added on the right side, no float rounding."""
+        M = self.M()
+        from decimal import Decimal as D
+        b = M.normal(self.budget(limit=0.3))
+        self.assertTrue(M.met(b, D("0.3"))); self.assertFalse(M.met(b, D("0.30001")))
+        b = M.normal(self.budget(limit=10, tolerance=2))
+        self.assertTrue(M.met(b, D("12"))); self.assertFalse(M.met(b, D("12.01")))
+        b = M.normal(self.budget(limit=10, tolerance=2, direction="min"))
+        self.assertTrue(M.met(b, D("8"))); self.assertFalse(M.met(b, D("7.99"))); self.assertTrue(M.met(b, D("100")))
+
+    # ---------------------------------------------------------------- applicability and trust
+    def test_which_budgets_apply(self):
+        """applies(): no paths means every change; an empty change applies nothing; paths match any changed side."""
+        M = self.M()
+        b = M.normal(self.budget())
+        self.assertFalse(M.applies(b, [])); self.assertTrue(M.applies(b, ["README.md"]))
+        b = M.normal(self.budget(paths=["src/**", "web/*.js"]))
+        self.assertTrue(M.applies(b, ["docs/x.md", "src/a/b.py"])); self.assertTrue(M.applies(b, ["web/app.js"]))
+        self.assertFalse(M.applies(b, ["docs/x.md", "WEB/app.js"]))  # case matters, on every system
+
+    def test_renames_and_deletions_count_as_changes(self):
+        """changed_paths() lists both sides of a rename and deleted files, so moving code out of a budget's paths still
+        triggers it; story records never count."""
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g("checkout", "-q", "main"); (self.repo / "src").mkdir(); (self.repo / "src/a.py").write_text("a = 1\n" * 20)
+        (self.repo / "src/gone.py").write_text("g = 1\n"); g("add", "."); g("commit", "-qm", "src"); g("checkout", "-q", "feature/SAT-1-thing"); g("merge", "-q", "main")
+        g("mv", "src/a.py", "lib_a.py"); g("rm", "-q", "src/gone.py"); g("commit", "-qm", "move")
+        run(self.repo, "start", "SAT-1")
+        gm = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        files = gm.changed_paths("main")
+        self.assertIn("src/a.py", files); self.assertIn("lib_a.py", files); self.assertIn("src/gone.py", files)
+        self.assertFalse([f for f in files if f.startswith(".story-gate/stories")])
+
+    def test_pins_protect_the_measuring_script(self):
+        """trust_problems(): the script after an interpreter and a repository program are pinned automatically, listed pins
+        too; the data a command measures is not pinned; a repository program on PATH must be pinned."""
+        M = self.M()
+        (self.repo / "scripts").mkdir(); (self.repo / "scripts/count.py").write_text("print(1)\n"); (self.repo / "data").mkdir()
+        b = M.normal(self.budget(command=["python3", "scripts/count.py", "data"], pins=["package.json"]))
+        self.assertEqual(M.auto_pins(b, str(self.repo)), {"scripts/count.py"})
+        self.assertEqual(M.trust_problems(b, str(self.repo), ["data/x.csv", "app.py"]), [])
+        self.assertTrue(M.trust_problems(b, str(self.repo), ["scripts/count.py"]))
+        self.assertTrue(M.trust_problems(b, str(self.repo), ["package.json"]))
+        b = M.normal(self.budget(command=["./scripts/count.py"]))
+        self.assertEqual(M.auto_pins(b, str(self.repo)), {"scripts/count.py"})
+        if os.name != "nt":  # a symlinked script: both the link and its target are pinned, so repointing the link counts
+            os.symlink("count.py", self.repo / "scripts/link.py")
+            b = M.normal(self.budget(command=["python3", "scripts/link.py"], pins=[]))
+            self.assertEqual(M.auto_pins(b, str(self.repo)), {"scripts/count.py", "scripts/link.py"})
+            self.assertTrue(M.trust_problems(b, str(self.repo), ["scripts/link.py"]))
+        tool = self.repo / "bin"; tool.mkdir(); exe = tool / ("lint.bat" if os.name == "nt" else "lint")
+        exe.write_text("@echo 1\n" if os.name == "nt" else "#!/bin/sh\necho 1\n"); exe.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": str(tool) + os.pathsep + os.environ.get("PATH", "")}):
+            b = M.normal(self.budget(command=["lint"]))
+            self.assertTrue(any("isn't pinned" in p for p in M.trust_problems(b, str(self.repo), ["app.py"])))
+            b = M.normal(self.budget(command=["lint"], pins=["bin"]))
+            self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
+        (self.repo / "setup.js").write_text("")
+        for cmd, pins in ((["node", "-r", "./setup.js", "scripts/count.py"], {"setup.js", "scripts/count.py"}),
+                          (["python3", "-X", "utf8", "-W", "ignore", "scripts/count.py", "data"], {"scripts/count.py"}),
+                          (["deno", "run", "--import-map=setup.js", "scripts/count.py"], {"setup.js", "scripts/count.py"})):
+            with self.subTest(cmd=cmd):  # an option's value is never mistaken for the script
+                b = M.normal(self.budget(command=cmd, pins=[]))
+                self.assertEqual(M.auto_pins(b, str(self.repo)), pins)
+                self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
+        for cmd in (["python3", "-m", "tools.count"], ["python3", "-c", "print(1)"], ["node", "-e", "1"], ["bash", "-c", "echo 1"],
+                    ["npm", "run", "size"], ["make", "count"], ["python3", "missing.py"],
+                    ["node", "-e", "scripts/count.py"]):  # inline code that happens to look like a file is still inline code
+            with self.subTest(cmd=cmd):  # story-gate can't tell which file runs: no credit without pins
+                self.assertTrue(M.trust_problems(M.normal(self.budget(command=cmd, pins=[])), str(self.repo), ["app.py"]))
+                self.assertEqual(M.trust_problems(M.normal(self.budget(command=cmd, pins=["tools"])), str(self.repo), ["app.py"]), [])
+
+    # ---------------------------------------------------------------- the verdict
+    def test_decided_budgets_need_a_value_ci_checked(self):
+        """verdict(): in CI a decided budget passes only when checked and within; reported or not_run fails, and so does
+        a local value whose pinned script changed. Proposed misses are CONCERNS."""
+        M = self.M()
+        dec, prop = M.normal(self.budget()), M.normal(self.budget(name="p", status="proposed"))
+        ok = {"state": "checked", "value": "3", "why": ""}
+        self.assertEqual(M.verdict([(dec, ok)], True)[0], "PASS")
+        self.assertEqual(M.verdict([(dec, dict(ok, value="6"))], True)[0], "FAIL")
+        self.assertEqual(M.verdict([(dec, dict(ok, state="reported", why="the program x isn't pinned"))], True)[0], "FAIL")
+        self.assertEqual(M.verdict([(dec, {"state": "not_run", "value": None, "why": "timeout"})], True)[0], "FAIL")
+        self.assertEqual(M.verdict([(dec, {"state": "not_run", "value": "3", "why": "stale"})], True)[0], "FAIL")
+        local = {"state": "reported", "value": "3", "why": "measured on the agent's computer"}
+        self.assertEqual(M.verdict([(dec, local)], False)[0], "PASS")
+        self.assertEqual(M.verdict([(dec, local)], True)[0], "FAIL")
+        pinned = dict(local, why="this change edits files that decide how it is measured (s.py); measured on the agent's computer")
+        self.assertEqual(M.verdict([(dec, pinned)], False)[0], "FAIL")
+        self.assertEqual(M.verdict([(prop, dict(ok, value="9"))], True)[0], "CONCERNS")
+        self.assertEqual(M.verdict([(prop, {"state": "not_run", "value": None})], True)[0], "CONCERNS")
+        self.assertEqual(M.verdict([(prop, {"state": "not_run", "value": "3", "why": "stale"})], True)[0], "CONCERNS")  # an old value isn't a value
+        self.assertEqual([x["status"] for x in M.story_budgets({"budgets": [self.budget(), self.budget(name="b", status=None), "x"]})],
+                         ["proposed", "proposed"])  # whatever a story file says, its budgets are proposals
+        self.assertEqual(M.verdict([(dict(dec, _origin="story"), dict(ok, value="9"))], True)[0], "CONCERNS")  # a story can't decide
+        st, why = M.verdict([(dec, dict(ok, value="6")), (prop, dict(ok, value="9"))], True)
+        self.assertEqual(st, "FAIL"); self.assertIn("widgets", why); self.assertIn("p (", why)
+
+    def test_a_stored_result_counts_only_for_its_command_and_code(self):
+        """current(): another command, other code, an unknown state or an odd value make a stored result not_run."""
+        M = self.M()
+        b = M.normal(self.budget())
+        r = {"spec": M.spec_hash(b), "fingerprint": "f", "state": "checked", "value": "3"}
+        self.assertEqual(M.current(b, r, "f")["state"], "checked")
+        self.assertEqual(M.current(b, r, "g")["state"], "not_run")
+        self.assertEqual(M.current(M.normal(self.budget(command=[PY, "-c", "print(4)"])), r, "f")["state"], "not_run")
+        self.assertEqual(M.current(b, dict(r, state="great"), "f")["state"], "not_run")
+        self.assertEqual(M.current(b, dict(r, value="1e9"), "f")["state"], "not_run")
+        self.assertEqual(M.current(b, None, "f")["state"], "not_run")
+        self.assertEqual(M.current(M.normal(self.budget(limit=1)), r, "f")["state"], "checked")  # the limit isn't evidence
+
+    def test_looser_budgets_are_named(self):
+        """weaker(): each way a budget gets looser is named; stricter changes are not."""
+        M = self.M()
+        base = M.normal(self.budget(pins=["a.py"], paths=["src/**"]))
+        loose = {"removed": [], "proposed": [dict(base, status="proposed")], "limit": [dict(base, limit=6)],
+                 "tolerance": [dict(base, tolerance=1)], "paths": [dict(base, paths=["src/a/**"])], "no paths": [dict(base, paths=["src/**"])],
+                 "pin": [dict(base, pins=[])], "command": [dict(base, command=["true"])], "unit": [dict(base, unit="items")],
+                 "direction": [dict(base, direction="min")], "exit": [dict(base, expect_exit=0)], "timeout": [dict(base, timeout=600)]}
+        for k, new in loose.items():
+            with self.subTest(k=k):
+                if k == "no paths":
+                    self.assertTrue(M.weaker([dict(base, paths=[])], new))
+                else:
+                    self.assertTrue(M.weaker([base], new), k)
+        self.assertTrue(M.weaker([dict(base, direction="min")], [dict(base, direction="min", limit=4)]))
+        for new in ([dict(base, limit=4)], [dict(base, pins=["a.py", "b.py"])], [dict(base, paths=["src/**", "lib/**"])],
+                    [base, M.normal(self.budget(name="more"))], [dict(base, source="new reason")]):
+            self.assertEqual(M.weaker([base], new), [])
+        self.assertEqual(M.weaker([M.normal(self.budget(status="proposed"))], []), [])  # dropping a proposal isn't looser
+        self.assertEqual(M.weaker([base], [dict(base, paths=[])]), [])  # no paths covers every change: stricter
+
+    # ---------------------------------------------------------------- the measure command
+    def test_measure_records_reported_values_and_a_miss_fails(self):
+        """`measure` runs the default branch's budgets that apply, stores reported values and exits 1 on a decided miss."""
+        self.ready()
+        self.policy(self.budget(), self.budget(name="docs-only", paths=["docs/**"]))
+        r = run(self.repo, "measure", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        res = self.results()
+        self.assertEqual((res["widgets"]["value"], res["widgets"]["state"], res["widgets"]["source"]), ("3", "reported", "local"))
+        self.assertNotIn("docs-only", res)  # doesn't apply to this change
+        self.assertIn("| widgets | at most 5 count | 3 count |", r.stdout)
+        self.policy(self.budget(limit=2))
+        r = run(self.repo, "measure", "SAT-1")
+        self.assertEqual(r.returncode, 1); self.assertIn("decided budgets not met", r.stdout)
+        r = run(self.repo, "measure", "SAT-1", "--budget", "nope")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("no budget called nope", r.stdout + r.stderr)
+        r = run(self.repo, "measure", "SAT-1", "--budget", "widgets", "--limit", "99")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("only go with a proposed budget", r.stdout + r.stderr)  # never silently ignored
+
+    def test_measure_refuses_odd_runs(self):
+        """A timeout, a wrong exit code, two numbers, more than 5 MB of output, or a run that edits tracked files is not_run."""
+        self.ready()
+        cases = {"slow": dict(command=[PY, "-c", "import time; time.sleep(5)"], timeout=1),
+                 "exit": dict(command=[PY, "-c", "print(3); raise SystemExit(2)"], expect_exit=0),
+                 "two": dict(command=[PY, "-c", "print('v2 3')"]),
+                 "huge": dict(command=[PY, "-c", "import sys; sys.stdout.write('x' * 5000001 + ' 3')"]),
+                 "flood": dict(command=[PY, "-c", "import sys\nwhile True: sys.stdout.write('x' * 65536)"], timeout=60),
+                 "edits": dict(command=[PY, "-c", "open('app.py','a').write('#'); print(3)"])}
+        if os.name != "nt":  # a crash: the process kills itself with a signal after printing a number
+            cases["crash"] = dict(command=[PY, "-c", "import os, signal, sys; print(3); sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)"])
+        self.policy(*[self.budget(name=n, **kw) for n, kw in cases.items()],
+                    self.budget(name="anyexit", command=[PY, "-c", "print(3); raise SystemExit(1)"]))
+        run(self.repo, "measure", "SAT-1")
+        res = self.results()
+        t0 = time.time()
+        run(self.repo, "measure", "SAT-1", "--budget", "flood")
+        self.assertLess(time.time() - t0, 30)  # stopped at 5 MB, not left to fill the disk until its 60-second limit
+        res = self.results()
+        for n, why in (("slow", "timeout"), ("exit", "expected 0"), ("two", "2 numbers"), ("huge", "5 MB"), ("flood", "5 MB"), ("edits", "changed files"),
+                       ("crash", "signal")):
+            if n not in cases:
+                continue
+            with self.subTest(n=n):
+                self.assertEqual(res[n]["state"], "not_run"); self.assertIn(why, res[n]["why"])
+        self.assertEqual(res["anyexit"]["value"], "3")  # any exit code is fine when the output has the number
+        self.M()  # puts .story-gate on sys.path
+        import sg_validation as V
+        code, _, _, note = V.execute([PY, "-c", "import time; time.sleep(1.3); print(3)"], str(self.repo), 1, max_bytes=100)
+        self.assertEqual((code, note), (None, "stopped after 1 seconds (timeout)"))  # finishing late is never a pass
+        if os.name != "nt":  # the system's own file-size limit bounds what a measuring command can write
+            code, out, _, _ = V.execute([PY, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])"],
+                                        str(self.repo), 30, max_bytes=100)
+            self.assertEqual((code, int(out.strip())), (0, V.FILE_LIMIT))
+            beat = self.repo.parent / (self.repo.name + "-beat"); self.addCleanup(lambda: beat.unlink() if beat.exists() else None)
+            child = "import time\nwhile True:\n    open(%r, 'a').write('x'); time.sleep(0.05)" % str(beat)
+            for extra in ({}, {"max_bytes": 100}):  # timeout, with and without the output check: the command's children stop too
+                if beat.exists():
+                    beat.unlink()
+                V.execute([PY, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); time.sleep(30)" % child],
+                          str(self.repo), 1, **extra)
+                n = beat.stat().st_size if beat.exists() else 0
+                self.assertGreater(n, 0, extra)  # this run's child really started and wrote
+                time.sleep(0.4); n = beat.stat().st_size; time.sleep(0.5)
+                self.assertEqual(beat.stat().st_size, n, extra)
+            probe = ("import resource, sys; sys.path.insert(0, %r); import sg_validation as V\n"
+                     "resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, 1 << 20))\n"  # a lower limit already in place
+                     "print(V.execute([sys.executable, '-c', 'import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])'], %r, 30, max_bytes=100))"
+                     % (str(SRC), str(self.repo)))
+            r = subprocess.run([PY, "-c", probe], capture_output=True, text=True, timeout=60)
+            self.assertIn("(0, '1048576\\n'", r.stdout, r.stdout + r.stderr)  # kept the lower limit; never a crash
+
+    def test_measure_reads_a_junit_report_the_run_writes(self):
+        """A junit budget reads the report its command writes (to an ignored path); an old report never counts."""
+        self.ready()
+        (self.repo / ".gitignore").write_text("reports/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "ignore"], cwd=self.repo)
+        (self.repo / "reports").mkdir()
+        xml = '<testsuite><testcase name="a"><failure/></testcase><testcase name="b"/></testsuite>'
+        self.policy(self.budget(name="a11y", measure="junit", report="reports/a11y.xml", limit=0,
+                                command=[PY, "-c", "open('reports/a11y.xml','w').write(%r)" % xml]),
+                    self.budget(name="lazy", measure="junit", report="reports/old.xml", command=[PY, "-c", "pass"]))
+        (self.repo / "reports/old.xml").write_text(xml.replace("<failure/>", ""))
+        run(self.repo, "measure", "SAT-1")
+        res = self.results()
+        self.assertEqual((res["a11y"]["value"], res["a11y"]["tests"]), ("1", 2))
+        self.assertEqual(res["lazy"]["state"], "not_run"); self.assertIn("did not write its report", res["lazy"]["why"])
+        if os.name != "nt":  # a report path through a link out of the repository: nothing outside is deleted or read
+            outside = self.repo.parent / (self.repo.name + "-outside"); outside.mkdir(); self.addCleanup(shutil.rmtree, outside, True)
+            (outside / "x.xml").write_text(xml); os.symlink(outside, self.repo / "reports/out")
+            self.policy(self.budget(name="escape", measure="junit", report="reports/out/x.xml", command=[PY, "-c", "pass"]))
+            run(self.repo, "measure", "SAT-1")
+            self.assertTrue((outside / "x.xml").is_file()); self.assertEqual(self.results()["escape"]["state"], "not_run")
+
+    def test_a_story_can_propose_but_never_decide(self):
+        """`measure --budget NAME ... -- cmd` records a proposal in the story folder (always proposed, always reported);
+        it can't replace a default-branch budget; --remove drops it."""
+        self.ready()
+        self.policy(self.budget())
+        r = run(self.repo, "measure", "SAT-1", "--budget", "lines", "--unit", "count", "--limit", "1", "--source", "agent idea",
+                "--", PY, "-c", "print(4)")
+        self.assertEqual(r.returncode, 1, r.stdout)  # proposed miss: CONCERNS
+        self.assertIn("proposed budgets not met", r.stdout)
+        doc = json.loads((self.sd / "budgets.json").read_text())
+        self.assertEqual(doc["budgets"][0]["status"], "proposed")
+        self.assertEqual(self.results()["lines"]["state"], "reported")
+        res = self.results(); res["lines"]["state"] = "checked"  # a forged record can't make a proposal look checked
+        (self.sd / "budget_results.json").write_text(json.dumps({"results": res}))
+        gm = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        rows = {b["name"]: r for b, r in gm.budget_rows(self.sd, gm.cfg())}
+        self.assertEqual(rows["lines"]["state"], "reported")
+        r = run(self.repo, "measure", "SAT-1", "--budget", "widgets", "--unit", "count", "--limit", "99", "--source", "x", "--", PY, "-c", "print(1)")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("can't change it", r.stdout + r.stderr)
+        r = run(self.repo, "measure", "SAT-1", "--budget", "t", "--unit", "seconds", "--limit", "1", "--source", "x", "--", PY, "-c", "print(1)")
+        self.assertNotEqual(r.returncode, 0); self.assertIn("is a time", r.stdout + r.stderr)
+        r = run(self.repo, "measure", "SAT-1", "--budget", "lines", "--remove")
+        self.assertEqual(r.returncode, 0); self.assertEqual(json.loads((self.sd / "budgets.json").read_text())["budgets"], [])
+        p = {"tool_name": "Write", "tool_input": {"file_path": ".story-gate/stories/SAT-1/budget_results.json"}}
+        r = run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p))
+        self.assertIn("must not edit gate files", r.stdout)  # agents can't write the records by hand
+        self.cfg(mode="enforce")
+        r = run(self.repo, "hook", "--client", "claude", "--event", "pre", stdin=json.dumps(p))
+        self.assertEqual(r.returncode, 2); self.assertIn("must not edit gate files", r.stderr)  # enforce: the write is refused
+
+    def test_done_shows_budgets_only_when_one_applies(self):
+        """struct_done(): no budgets_met without budgets; FAIL on a decided miss; PASS when measured within; stale after
+        a code change; the DONE evidence hash moves when the policy changes."""
+        self.ready(); self.fill_validation()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        c = g.cfg()
+        self.assertNotIn("budgets_met", g.struct_done(self.sd, "SAT-1", ["app.py"], c))
+        self.policy(self.budget())
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c)["budgets_met"][0], "FAIL")  # not measured yet
+        h1 = g.inputs_hash(self.sd, "done", c)
+        run(self.repo, "measure", "SAT-1")
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c)["budgets_met"][0], "PASS")
+        self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["budgets_met"][0], "FAIL")  # CI didn't measure it
+        h2 = g.inputs_hash(self.sd, "done", c)
+        self.policy(self.budget(limit=4))
+        self.assertNotEqual(h2, g.inputs_hash(self.sd, "done", c)); self.assertNotEqual(h1, h2)
+        res = self.results(); res["widgets"].update(state="checked", source="ci")  # a record the PR forged
+        (self.sd / "budget_results.json").write_text(json.dumps({"results": res}))
+        st, why = g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["budgets_met"]
+        self.assertEqual(st, "FAIL"); self.assertIn("CI did not measure it", why)  # in CI only the story-gate job's runs count
+        trust = self.repo.parent / (self.repo.name + "-trust"); trust.mkdir(); self.addCleanup(shutil.rmtree, trust, True)
+        shutil.copy(self.repo / ".story-gate/config.json", trust / "config.json")
+        shutil.copy(self.repo / ".story-gate/budgets.json", trust / "budgets.json")
+        with patch.dict(os.environ, {"STORY_GATE_TRUSTED_DIR": str(trust)}):
+            h3 = g.inputs_hash(self.sd, "done", g.cfg())
+            (trust / "budgets.json").write_text(json.dumps({"version": 1, "budgets": [self.budget(limit=1)]}))  # only the base branch changed
+            self.assertNotEqual(h3, g.inputs_hash(self.sd, "done", g.cfg()))
+        (self.repo / "app.py").write_text("x = 3\n")
+        st, why = g.struct_done(self.sd, "SAT-1", ["app.py"], c)["budgets_met"]
+        self.assertEqual(st, "FAIL"); self.assertIn("other code", why)
+
+    # ---------------------------------------------------------------- CI
+    def ci_dirs(self):
+        """A trusted settings folder (the base branch's config.json and budgets.json) and an empty tests-job folder."""
+        td, trust = self.repo.parent / (self.repo.name + "-ci"), self.repo.parent / (self.repo.name + "-trust")
+        for d in (td, trust):
+            shutil.rmtree(d, True); d.mkdir(); self.addCleanup(shutil.rmtree, d, True)
+        for f in ("config.json", "budgets.json"):
+            text = subprocess.run(["git", "show", "main:.story-gate/" + f], cwd=self.repo, capture_output=True, text=True).stdout
+            if text:
+                (trust / f).write_text(text)
+        return td, trust
+
+    def test_ci_measures_first_and_the_gate_job_decides(self):
+        """ci-tests saves only raw runs; ci parses and compares them with the base branch's limit, ignores what the PR
+        wrote in budget_results.json, and fails DONE on a decided miss."""
+        self.policy(self.budget(limit=2), commit=True)
+        self.ready(); self.fill_validation()
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        r = run(self.repo, "ci-measure", str(td), env=env)
+        self.assertIn("budgets: measured 1", r.stdout)
+        runs = json.loads((td / "measures.json").read_text())
+        self.assertNotIn("value", runs["runs"]["widgets"]); self.assertNotIn("state", runs["runs"]["widgets"])
+        self.assertEqual((td / "measures/widgets.raw").read_bytes().strip(), b"3")
+        (self.sd / "budget_results.json").write_text(json.dumps({"results": {"widgets": {"state": "checked", "value": "1", "source": "ci"}}}))
+        summary = self.repo.parent / (self.repo.name + "-sum.md"); self.addCleanup(lambda: summary.unlink() if summary.exists() else None)
+        r = run(self.repo, "ci", "--measures", str(td), env=dict(env, GITHUB_STEP_SUMMARY=str(summary)))
+        done = json.loads((self.sd / "done.json").read_text())["checks"]["budgets_met"]
+        self.assertEqual(done["status"], "FAIL"); self.assertIn("decided budgets not met", done["why"])
+        res = self.results()["widgets"]
+        self.assertEqual((res["value"], res["state"], res["source"]), ("3", "checked", "ci"))
+        self.assertIn("| widgets | at most 2 count | 3 count | checked by CI | OVER |", summary.read_text())
+
+    def test_ci_artifact_never_carries_secret_shapes(self):
+        """The tests job's raw output has known secret shapes removed before it is uploaded, and it parses the same way."""
+        tok = "ghp_" + "A1b2" * 9
+        self.policy(self.budget(command=[PY, "-c", "print('debug %s'); print(3)" % tok]), commit=True)
+        self.ready(); self.fill_validation()
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        run(self.repo, "ci-measure", str(td), env=env)
+        raw = (td / "measures/widgets.raw").read_bytes()
+        self.assertNotIn(tok.encode(), raw); self.assertIn(b"[redacted]", raw)
+        run(self.repo, "ci", "--measures", str(td), env=env)
+        self.assertEqual(self.results()["widgets"]["value"], "3")
+        self.assertNotIn(tok, (self.sd / "budget_results.json").read_text())
+
+    def test_ci_ignores_runs_from_another_commit_or_command(self):
+        """A tests-job run for another head commit or another command hash is not counted (not_run)."""
+        self.policy(self.budget(), commit=True)
+        self.ready(); self.fill_validation()
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        run(self.repo, "ci-measure", str(td), env=env)
+        meta = json.loads((td / "measures.json").read_text())
+        for change in ({"head": "0" * 40}, {"runs": {"widgets": dict(meta["runs"]["widgets"], spec="forged")}}):
+            with self.subTest(change=list(change)):
+                (td / "measures.json").write_text(json.dumps(dict(meta, **change)))
+                run(self.repo, "ci", "--measures", str(td), env=env)
+                self.assertEqual(self.results()["widgets"]["state"], "not_run")
+        (td / "measures.json").write_text(json.dumps(meta))
+        run(self.repo, "ci", "--measures", str(td), env=env)
+        self.assertEqual(self.results()["widgets"]["state"], "checked")
+        r = run(self.repo, "ci", env=env)  # no measure job at all (an old workflow): nothing counts, whatever the story folder says
+        self.assertEqual(self.results()["widgets"]["state"], "not_run"); self.assertIn("no measure job yet", r.stdout)
+
+    def test_ci_gives_no_credit_when_the_pr_edits_the_measuring_script(self):
+        """A pull request that changes a pinned file gets 'reported', and a decided budget then fails."""
+        (self.repo / "count.py").write_text("print(3)\n")
+        subprocess.run(["git", "add", "count.py"], cwd=self.repo); subprocess.run(["git", "commit", "-qm", "c"], cwd=self.repo)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo); subprocess.run(["git", "merge", "-q", "feature/SAT-1-thing"], cwd=self.repo)
+        subprocess.run(["git", "checkout", "-q", "feature/SAT-1-thing"], cwd=self.repo)
+        self.policy(self.budget(command=[PY, "count.py"], pins=["count.py"]), commit=True)
+        self.ready()
+        (self.repo / "count.py").write_text("print(0)\n")
+        self.fill_validation()
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        run(self.repo, "ci-measure", str(td), env=env)
+        run(self.repo, "ci", "--measures", str(td), env=env)
+        res = self.results()["widgets"]
+        self.assertEqual(res["state"], "reported"); self.assertIn("count.py", res["why"])
+        self.assertIn("CI can't vouch", json.loads((self.sd / "done.json").read_text())["checks"]["budgets_met"]["why"])
+        run(self.repo, "measure", "SAT-1")  # on the agent's computer: a forged "why" can't clear the pin either
+        res = self.results(); res["widgets"]["why"] = "measured on the agent's computer"
+        (self.sd / "budget_results.json").write_text(json.dumps({"results": res}))
+        gm = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        st, why = gm.struct_done(self.sd, "SAT-1", ["app.py"], gm.cfg())["budgets_met"]
+        self.assertEqual(st, "FAIL"); self.assertIn("count.py", why)
+
+    def test_ci_says_when_an_old_workflow_hides_the_budgets(self):
+        """The base branch has budgets but the workflow didn't hand them over: CI fails closed and says how to fix it."""
+        self.policy(self.budget(), commit=True)
+        self.ready(); self.fill_validation()
+        td, trust = self.ci_dirs()
+        (trust / "budgets.json").unlink()
+        r = run(self.repo, "ci", "--measures", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)})
+        self.assertEqual(r.returncode, 1); self.assertIn("story-gate install", r.stdout)
+
+    def test_ci_warns_about_looser_budgets_and_refuses_a_broken_file(self):
+        """A PR that raises a limit gets the 'looser' warning; one that breaks budgets.json gets a problem."""
+        self.policy(self.budget(), commit=True)
+        td, trust = self.ci_dirs()
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        self.policy(self.budget(limit=50))
+        r = run(self.repo, "ci", env=env)
+        self.assertIn("budgets looser: budget widgets limit loosened from 5 to 50", r.stdout)
+        (self.repo / ".story-gate/budgets.json").write_text("{nope")
+        r = run(self.repo, "ci", env=env)
+        self.assertIn("not valid JSON", r.stdout)
+
+    def test_workflows_hand_the_budgets_to_ci(self):
+        """Both CI set-ups copy budgets.json from the base branch: the reusable workflow's prepare step and the copied workflow."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.assertIn(r"^budgets\.json$", g.TRUSTED_COPY)
+        reusable = (SRC.parent / ".github/workflows/gate.yml").read_text(encoding="utf-8")
+        for y in (g.CI_YML, reusable):  # budgets are measured on a runner of their own, never next to the tests and scenarios
+            measure = y[y.index("  measure:\n"):y.index("  story-gate:\n")]
+            self.assertIn("ci-measure", measure); self.assertNotIn("secrets.", measure); self.assertNotIn("ci-tests", measure)
+            self.assertIn("needs: [tests, measure]", y); self.assertIn('--measures "$RUNNER_TEMP/sg-measures"', y)
+            self.assertIn("name: sg-measures", y[y.index("  story-gate:\n"):])
+        self.assertIn(".story-gate/budgets.json", g.GATE_FILES); self.assertIn(".story-gate/sg_measure.py", g.GATE_FILES)
+        self.policy(self.budget(), commit=True)
+        self.cfg(mode="enforce")
+        out = self.repo.parent / (self.repo.name + "-sg"); self.addCleanup(shutil.rmtree, out, True)
+        gho = self.repo.parent / (self.repo.name + "-gho"); gho.write_text(""); self.addCleanup(gho.unlink)
+        r = run(self.repo, "runtime-prepare", "--out", str(out), "--base", "main", "--allow-unsigned", "true", env={"GITHUB_OUTPUT": str(gho)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads((out / "budgets.json").read_text())["budgets"][0]["name"], "widgets")
+        self.assertTrue((out / "sg_measure.py").is_file())
+        td = self.repo.parent / (self.repo.name + "-tests"); self.addCleanup(shutil.rmtree, td, True)
+        run(self.repo, "ci-tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
+        self.assertFalse((td / "measures.json").exists())  # the tests job never measures: test code can't touch the budgets
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / ".story-gate/budgets.json").write_text(""); g_("commit", "-qam", "empty")
+        g_("checkout", "-q", "feature/SAT-1-thing")
+        run(self.repo, "runtime-prepare", "--out", str(out), "--base", "main", "--allow-unsigned", "true", env={"GITHUB_OUTPUT": str(gho)})
+        self.assertEqual((out / "budgets.json").read_text(), "")  # an empty file is handed over, so the loader refuses it
+
+    # ---------------------------------------------------------------- settings and dashboard
+    def test_settings_budget_changes_go_through_a_pull_request(self):
+        """`settings budget add/decide/set/remove` change only budgets.json on the default branch, in a PR, and say when
+        the change is looser; nothing in the folder changes."""
+        self.ready()
+        run(self.repo, "measure", "SAT-1", "--budget", "lines", "--unit", "count", "--limit", "9", "--source", "agent idea", "--", PY, "-c", "print(4)")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        sys.path.insert(0, str(self.repo / ".story-gate"))
+        import sg_settings as SET, sg_github as GH
+        from unittest import mock
+        self.addCleanup(setattr, GH, "pr_author", GH.pr_author); self.addCleanup(setattr, GH, "whoami", GH.whoami)
+        GH.whoami = lambda tok: "paul"
+        GH.pr_author = lambda repo, base, tok, login, touches_workflows=False: ("app", "app-tok", "the agent App opens it")
+        main_budgets = {"text": None}
+
+        def call(m, path, tok=None, body=None):
+            """Fake GitHub: the repository, its default branch and (when set) budgets.json."""
+            if path.startswith("/repos/acme/shop/contents/.story-gate/budgets.json"):
+                t = main_budgets["text"]
+                return (404, None, {}) if t is None else (200, {"encoding": "base64", "content": base64_of(t.encode())}, {})
+            return 200, {"/repos/acme/shop": {"default_branch": "main"}, "/repos/acme/shop/git/ref/heads/main": {"object": {"sha": "abc"}}}[path], {}
+        sent = []
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: sent.append((a, k)) or {"number": 3, "url": "u", "branch": k["branch"]}):
+            self.assertEqual(SET.cli(g, ["budget", "add", "SAT-1", "lines"]), 0)
+            added = json.loads(sent[-1][0][2][".story-gate/budgets.json"])
+            self.assertEqual((added["budgets"][0]["name"], added["budgets"][0]["status"]), ("lines", "proposed"))
+            self.assertEqual(list(sent[-1][0][2]), [".story-gate/budgets.json"])
+            main_budgets["text"] = json.dumps(added)
+            self.assertEqual(SET.cli(g, ["budget", "decide", "lines"]), 0)
+            self.assertEqual(json.loads(sent[-1][0][2][".story-gate/budgets.json"])["budgets"][0]["status"], "decided")
+            main_budgets["text"] = sent[-1][0][2][".story-gate/budgets.json"].decode()
+            self.assertEqual(SET.cli(g, ["budget", "set", "lines", "limit", "20"]), 0)
+            self.assertIn("looser than main", sent[-1][1]["body"])
+            self.assertEqual(SET.cli(g, ["budget", "set", "lines", "pins", "scripts/a.py,package.json"]), 0)
+            self.assertIn("Not looser", sent[-1][1]["body"])
+            self.assertEqual(SET.cli(g, ["budget", "set", "lines", "unit", "seconds"]), 1)  # refused before any PR
+            self.assertEqual(SET.cli(g, ["budget", "set", "lines", "colour", "red"]), 1)
+            import contextlib, io
+            for bad in ("NaN", "Infinity", "-Infinity", "true", "ten"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(SET.cli(g, ["budget", "set", "lines", "limit", bad]), 1, bad)
+                self.assertIn("story-gate settings: limit must be a number", buf.getvalue())  # refused as typed, before GitHub
+            self.assertEqual(SET.cli(g, ["budget", "remove", "nope"]), 1)
+            n = len(sent)
+            self.assertEqual(SET.cli(g, ["budget", "decide", "lines"]), 0)  # already decided: no pull request
+            self.assertEqual(len(sent), n)
+            self.assertEqual(SET.cli(g, ["budget", "remove", "lines"]), 0)
+            self.assertIn("budget lines removed", sent[-1][1]["body"])
+        self.assertFalse((self.repo / ".story-gate/budgets.json").exists())
+
+    def test_dashboard_shows_budget_history_from_merged_stories(self):
+        """The dashboard lists each default-branch budget with its limit, latest value and the values merged stories
+        recorded; odd records are dropped, not shown."""
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_dashboard as D
+        D = importlib.reload(D)
+        rows = [{"id": "SAT-%d" % i, "merged": True, "budgets": D.budget_results({"results": {
+                    "widgets": {"value": str(v), "state": "checked", "source": "ci", "unit": "count", "at": "2026-10-0%dT00:00:00Z" % i},
+                    "bad name!": {"value": "1"}, "odd": {"value": "1e9", "state": "checked"}}})} for i, v in ((1, 3), (2, 7), (3, 4))]
+        rows.append({"id": "SAT-9", "merged": False, "budgets": D.budget_results({"results": {"widgets": {"value": "99", "at": "2026-10-09"}}})})
+        hist, why = D.budget_history(json.dumps({"version": 1, "budgets": [self.budget()]}).encode(), rows)
+        self.assertEqual(why, "")
+        self.assertEqual([e["value"] for e in hist[0]["history"]], ["3", "7", "4"])  # merged only, oldest first
+        self.assertEqual([e["within"] for e in hist[0]["history"]], [True, False, True])
+        self.assertEqual(rows[0]["budgets"][-1]["value"], None)  # "1e9" isn't a plain number
+        for src in ("local", "ci"):
+            self.assertEqual(D.budget_results({"results": {"w": {"value": "1", "state": "checked", "source": src}}})[0]["state"], "reported")
+        old_unit = [{"id": "SAT-0", "merged": True, "budgets": D.budget_results({"results": {"widgets": {"value": "900", "unit": "KB", "at": "2026-09-01"}}})}]
+        self.assertEqual([e["value"] for e in D.budget_history(json.dumps({"version": 1, "budgets": [self.budget()]}).encode(), old_unit + rows)[0][0]["history"]],
+                         ["3", "7", "4"])  # a value recorded in another unit isn't this budget's history
+        d = {"generated_at": "2026-10-12T00:00:00Z", "stories": [], "metrics": [], "budgets": hist}
+        md = D.to_markdown(d)
+        self.assertIn("## Budgets", md); self.assertIn("| widgets | at most 5 count | 4 count in SAT-3 (reported) | 3 → 7 → 4 | 1 of 3 |", md)
+        self.assertNotIn("checked by CI", md)  # CI never commits its runs, so a merged record can't claim one
+        self.assertIn("Budgets</h3>", D.to_html(d))
+        self.assertEqual(D.budget_history(b"{bad", rows)[0], [])
+        self.assertIn("can't be read", D.budget_history(b"{bad", rows)[1])

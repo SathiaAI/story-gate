@@ -132,6 +132,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - If a scenario can't run in CI (it needs a desktop app, a device or a paid service), add `--local-only "<reason>"`. Your run then counts, but DONE in CI is CONCERNS, which blocks the merge unless the owner turned on `accept_concerns`. Prefer a scenario CI can run (headless browser, test double).
    - After any code change, run `gate.py scenarios <ID>` to run them all again.
    - When a scenario finds a bug: fix it, run the scenario again, and list the bug in validation.md.
+   - **Budgets** (limits the owner set, in `.story-gate/budgets.json`): run `gate.py measure <ID>` after your last code change. It measures every budget that applies. A decided budget you miss fails DONE: fix the work, never the measuring script (a change to a pinned file fails it too). To suggest a new limit, propose one: `gate.py measure <ID> --budget NAME --unit U --limit N --source "why" -- <command that prints one number>`. It stays proposed until the owner adds it (docs/budgets.md).
 
 3. ∥ **Validation writer** (model: `handoff`). Fill in `stories/<ID>/validation.md` (`start` creates the template). The owner reads it to decide if the story is done:
    - Sections: Result · Acceptance criteria · Scenarios run · Bugs found and fixed · Lessons learnt · Known limits · Demo.

@@ -138,34 +138,69 @@ def fingerprint_of(state):
     return h.hexdigest()[:16]
 
 
-def run(s, root, work_state, source, timeout=None):
-    """Run one scenario without a shell. Returns the result record. work_state() -> {path: digest} of the work.
-    A run that creates or changes files in the work is void: it would be testing code that isn't the code under review."""
-    before = work_state()
-    argv = list(s["argv"])
+FILE_LIMIT = 1 << 30  # bytes: the largest file a measuring command may write (Linux and macOS)
+
+
+def _file_limit():
+    """In the measuring command's process, before it starts: the system refuses any file write past FILE_LIMIT (or past
+    a lower limit this process already has: a limit can only be lowered here, never raised)."""
+    import resource
+    hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    cap = FILE_LIMIT if hard == resource.RLIM_INFINITY else min(FILE_LIMIT, hard)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
+
+
+def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
+    """Run argv without a shell in root for at most `limit` seconds; the whole process tree ends with it.
+    Returns (exit code or None, the last `keep` bytes of output as text, total output bytes, note). Output goes to a file,
+    not a pipe, so a server the command leaves running can't hold the run open. With max_bytes, the output is checked
+    every 50 ms and the command stopped once it passes that size; on Linux and macOS the system also refuses any file the
+    command writes past FILE_LIMIT, a hard bound on the disk it can fill. Shared by scenarios and measures."""
+    argv = list(argv)
     exe = shutil.which(argv[0], path=os.environ.get("PATH")) if not os.path.dirname(argv[0]) else None
     if exe:
         argv[0] = exe  # Windows: finds npm.cmd, pytest.exe; elsewhere the same program the shell would run
-    t0, limit = time.time(), int(timeout or s["timeout"])
-    out, code, note = "", None, ""
+    out, code, note, size = "", None, "", 0
     try:
         kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-        with tempfile.TemporaryFile() as buf:  # a file, not a pipe: a server the scenario leaves running can't hold the run open
+        if max_bytes and os.name != "nt":
+            kw["preexec_fn"] = _file_limit
+        with tempfile.TemporaryFile() as buf:
             p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=buf, stderr=subprocess.STDOUT, **kw)
-            try:
-                code = p.wait(timeout=limit)
-            except subprocess.TimeoutExpired:
-                note = "stopped after %d seconds (timeout)" % limit
-            _kill(p)  # the scenario's whole process group ends with it (servers it started, stray children)
+            end = time.monotonic() + limit
+            while True:
+                left = max(0.0, end - time.monotonic())
+                try:
+                    code = p.wait(timeout=min(0.05, left) if max_bytes else left)
+                    if max_bytes and time.monotonic() > end:  # finished after the time limit: no credit
+                        code, note = None, "stopped after %d seconds (timeout)" % limit
+                    break
+                except subprocess.TimeoutExpired:
+                    if max_bytes and os.fstat(buf.fileno()).st_size > max_bytes:
+                        note = "stopped: the output passed %d bytes" % max_bytes
+                        break
+                    if time.monotonic() >= end:
+                        note = "stopped after %d seconds (timeout)" % limit
+                        break
+            _kill(p)  # the command's whole process group ends with it (servers it started, stray children)
             try:
                 p.wait(timeout=10)
             except Exception:
                 pass
             size = buf.seek(0, 2)
-            buf.seek(max(0, size - MATCH_LIMIT))  # the end of the output: where results and errors are
-            out = buf.read(MATCH_LIMIT).decode("utf-8", "replace").replace("\r\n", "\n")  # Windows line ends: '$' still matches
-    except OSError as e:
+            buf.seek(max(0, size - keep))  # the end of the output: where results and errors are
+            out = buf.read(keep).decode("utf-8", "replace").replace("\r\n", "\n")  # Windows line ends: '$' still matches
+    except (OSError, subprocess.SubprocessError) as e:  # SubprocessError: the set-up before the command failed
         note = "could not start: %s" % e
+    return code, out, size, note
+
+
+def run(s, root, work_state, source, timeout=None):
+    """Run one scenario without a shell. Returns the result record. work_state() -> {path: digest} of the work.
+    A run that creates or changes files in the work is void: it would be testing code that isn't the code under review."""
+    before = work_state()
+    t0, limit = time.time(), int(timeout or s["timeout"])
+    code, out, _, note = execute(s["argv"], root, limit)
     matched = bool(code is not None and re.search(s["expect_output"], out))
     after = work_state()
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
