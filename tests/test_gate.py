@@ -7918,7 +7918,8 @@ class TestReusableWorkflow(Base):
             rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": required}]}}]
             with patch.object(GH, "call", lambda *a, rules=rules, **k: (200, rules, {})):
                 missing = GH.protection("o/r", "main", "t", name)[1]
-            self.assertEqual(any("status check" in m for m in missing), not ok, required)
+            want = f"the story-gate check is not a required status check (this repository's workflow reports `{name}`)"
+            self.assertEqual(want in missing, not ok, (required, missing))
 
     def test_doctor_checks_the_short_workflows_and_a_plain_install_keeps_the_mode(self):
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
