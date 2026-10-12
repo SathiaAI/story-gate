@@ -1380,6 +1380,17 @@ def ci_account(c, protect):
     return None, why
 
 
+def teardown_warnings(acc, I):
+    """Clean up after the throwaway account; print each problem as a GitHub warning and return them."""
+    try:
+        warn = acc.teardown()
+    except I.IsolationError as e:
+        warn = ["%s; the runner may still have its processes" % e]
+    for w in warn:
+        print("::warning title=story-gate: clean-up::%s" % w)
+    return warn
+
+
 def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False, write=True):
     """Structural (non-judge) DONE checks: the ready gate, tests, handoff, learnings and now validation evidence."""
     out = {}
@@ -3143,12 +3154,8 @@ def cmd_ci_tests(out_dir):
         junit = scen = None
     finally:
         if acc is not None:
-            try:
-                acc.teardown()
-            except I.IsolationError as e:
-                rec.update({"exit_code": None, "isolated": False, "error": "story-gate couldn't clean up after the pull "
-                                                                            "request's code (%s), so nothing counts" % e})
-                junit = scen = None
+            for w in teardown_warnings(acc, I):  # results were read after verified stops: clean-up can't change them
+                rec.setdefault("warnings", []).append(w)
     # Written last, by story-gate's own account, into a folder the pull request's code can't write.
     wj(out / "results.json", rec)
     if junit is not None:
@@ -3191,11 +3198,7 @@ def cmd_ci_measure(out_dir):
         return 0
     finally:
         if acc is not None:
-            try:
-                acc.teardown()
-            except I.IsolationError as e:
-                print("story-gate budgets: not counted (%s)" % e)
-                return 0
+            teardown_warnings(acc, I)
     (out / "measures").mkdir(exist_ok=True)
     for n, (r, raw) in measured.items():
         (out / "measures" / (n + ".raw")).write_bytes(raw)
@@ -3215,8 +3218,11 @@ def ci_budgets(measures_dir, base, files_of):
     meta = load_json(Path(measures_dir) / "measures.json") if measures_dir else {}
     runs = meta.get("runs") if isinstance(meta.get("runs"), dict) and meta.get("head") == git("rev-parse", "HEAD").strip() else {}
     fp, out = work_fingerprint(), {}
+    unisolated = isolation_required() and meta.get("isolated") is not True
+    if unisolated and cfg().get("ci_isolation") == "strict":
+        runs = {}  # strict: a run not known to be isolated is no run at all (not_run), whatever the file says
     loose = ["measured as story-gate's own account, not a separate one (ci_isolation is \"relaxed\", or isolation "
-             "couldn't be set up)"] if isolation_required() and meta.get("isolated") is not True else []
+             "couldn't be set up)"] if unisolated else []
     for b in budgets_policy():
         if not M.applies(b, files_of):
             continue

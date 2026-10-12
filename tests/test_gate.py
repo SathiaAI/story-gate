@@ -9478,13 +9478,15 @@ class TestCiIsolation(Base):
         env = {"PATH": "/usr/bin", "JAVA_HOME_17_X64": "/j", "GITHUB_SHA": "abc", "GITHUB_TOKEN": "t", "ACTIONS_RUNTIME_TOKEN": "t",
                "ACTIONS_ID_TOKEN_REQUEST_URL": "u", "OPENROUTER_API_KEY": "k", "AWS_SECRET_ACCESS_KEY": "k", "RUNNER_TEMP": "/r",
                "HOME": "/home/runner", "GITHUB_ACTIONS": "true", "LC_ALL": "C", "SSH_AUTH_SOCK": "/s", "GITHUB_ENV": "/e",
-               "ANDROID_KEYSTORE_PASSWORD": "p", "DOTNET_NUGET_TOKEN": "t", "ANDROID_HOME": "/a"}
+               "ANDROID_KEYSTORE_PASSWORD": "p", "DOTNET_NUGET_TOKEN": "t", "ANDROID_HOME": "/a", "JAVA_HOME_API": "k",
+               "RUNNER_NAME": "box-7", "GOROOT_1_22_X64": "/g"}
         out = I.env_for("/home/sgpr-1", env)
         self.assertEqual(out["PATH"], "/usr/bin"); self.assertEqual(out["JAVA_HOME_17_X64"], "/j"); self.assertEqual(out["GITHUB_SHA"], "abc")
-        self.assertEqual(out["ANDROID_HOME"], "/a")  # a toolchain family is allowed, but never its secret-named settings
+        self.assertEqual((out["ANDROID_HOME"], out["GOROOT_1_22_X64"]), ("/a", "/g"))  # exact toolchain names only
         self.assertEqual((out["HOME"], out["TMPDIR"]), ("/home/sgpr-1", "/home/sgpr-1/tmp"))
         for k in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "OPENROUTER_API_KEY", "AWS_SECRET_ACCESS_KEY",
-                  "RUNNER_TEMP", "SSH_AUTH_SOCK", "GITHUB_ENV", "ANDROID_KEYSTORE_PASSWORD", "DOTNET_NUGET_TOKEN"):
+                  "RUNNER_TEMP", "SSH_AUTH_SOCK", "GITHUB_ENV", "ANDROID_KEYSTORE_PASSWORD", "DOTNET_NUGET_TOKEN", "JAVA_HOME_API",
+                  "RUNNER_NAME"):
             self.assertNotIn(k, out, k)  # GITHUB_ENV / RUNNER_TEMP point at the runner's own files: never handed over
 
     def test_the_wrapped_command_drops_privileges_for_good(self):
@@ -9559,8 +9561,43 @@ class TestCiIsolation(Base):
         b = M.load((self.repo / ".story-gate/budgets.json").read_text())[0]
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
         (md / "measures/w.raw").write_bytes(b"3\n")
-        for iso, want in ((False, "reported"), (True, "checked")):
-            (md / "measures.json").write_text(json.dumps({"head": head, "isolated": iso, "runs": {"w": {"spec": M.spec_hash(b), "exit_code": 0}}}))
+        for mode, iso, want in (("strict", False, "not_run"), ("strict", None, "not_run"), ("relaxed", False, "reported"),
+                                ("relaxed", True, "checked"), ("strict", True, "checked")):
+            self.cfg(ci_isolation=mode)
+            meta = {"head": head, "runs": {"w": {"spec": M.spec_hash(b), "exit_code": 0}}}
+            if iso is not None:
+                meta["isolated"] = iso
+            (md / "measures.json").write_text(json.dumps(meta))
             with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
                 r = g.ci_budgets(str(md), "main", ["app.py"])["w"]
-            self.assertEqual(r["state"], want, iso)
+            self.assertEqual(r["state"], want, (mode, iso))  # strict: a run not known to be isolated is no run
+
+    def test_clean_up_problems_are_warnings_not_a_lost_result(self):
+        """When clean-up after the run doesn't finish (the account can't be removed), the verified result is kept, the
+        problem is a GitHub warning, and it's recorded with the result."""
+        self.cfg(test_command="%s -c \"print('ok')\"" % PY)
+        run(self.repo, "start", "SAT-1")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+
+        class Fake:
+            """Stands in for sg_isolate.Account: runs the command as is, and its clean-up reports a problem."""
+            def wrap(self, argv, max_file=None):
+                """The command unchanged."""
+                return list(argv)
+
+            def stop(self):
+                """Nothing to stop."""
+
+            def teardown(self):
+                """Clean-up that couldn't remove the account."""
+                return ["couldn't remove the throwaway account sgpr-x and its home folder; remove them by hand"]
+        out = self.repo.parent / (self.repo.name + "-out"); self.addCleanup(shutil.rmtree, out, True)
+        import io, contextlib
+        buf = io.StringIO()
+        with patch.object(g, "ci_account", return_value=(Fake(), "")), patch.dict(os.environ, {"STORY_GATE_ISOLATE": "1"}), \
+                contextlib.redirect_stdout(buf):
+            g.cmd_ci_tests(str(out))
+        rec = json.loads((out / "results.json").read_text())
+        self.assertEqual((rec["exit_code"], rec["isolated"]), (0, True))
+        self.assertIn("remove them by hand", rec["warnings"][0])
+        self.assertIn("::warning title=story-gate: clean-up::couldn't remove", buf.getvalue())

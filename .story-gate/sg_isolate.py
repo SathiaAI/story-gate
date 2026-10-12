@@ -23,13 +23,16 @@ NAME_PREFIX = "sgpr-"
 KILL_WAIT = 15            # seconds to wait for the account's processes to end before failing closed
 ADMIN_GROUPS = {"sudo", "admin", "adm", "wheel", "docker", "root", "lxd", "libvirt", "kvm", "disk", "systemd-journal"}
 # Environment the pull request's code gets: toolchain locations and plain CI facts, never tokens or credentials.
-ENV_ALLOW = re.compile(r"^(?:PATH|LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|CI|DEBIAN_FRONTEND|RUNNER_(?:OS|ARCH|TOOL_CACHE|NAME|ENVIRONMENT)|"
+# Exact names (no open-ended families), as GitHub's ubuntu runner image sets them.
+ENV_ALLOW = re.compile(r"^(?:PATH|LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|CI|DEBIAN_FRONTEND|RUNNER_(?:OS|ARCH|TOOL_CACHE)|"
                        r"GITHUB_(?:REPOSITORY|REPOSITORY_OWNER|SHA|REF|REF_NAME|HEAD_REF|BASE_REF|EVENT_NAME|SERVER_URL|RUN_ID|"
-                       r"RUN_NUMBER|RUN_ATTEMPT|WORKFLOW|JOB|ACTIONS)|JAVA_HOME(?:_\w+)?|GOROOT(?:_\w+)?|ANDROID_\w+|DOTNET_\w+|"
-                       r"CONDA|PIPX_\w+|NVM_DIR|CHROME_BIN|CHROMEWEBDRIVER|EDGEWEBDRIVER|GECKOWEBDRIVER|SELENIUM_JAR_PATH|"
-                       r"BOOTSTRAP_HASKELL_NONINTERACTIVE|GHCUP_INSTALL_BASE_PREFIX|ACCEPT_EULA|POWERSHELL_\w+|VCPKG_\w+|"
-                       r"SWIFT_PATH|LEIN_\w+|M2_HOME|GRADLE_HOME|ANT_HOME|CHROMEDRIVER_\w+|PLAYWRIGHT_\w+|AGENT_TOOLSDIRECTORY)$")
-SECRET_NAME = re.compile(r"(?i)token|secret|password|passwd|credential|key|auth|cookie|session|private")
+                       r"RUN_NUMBER|RUN_ATTEMPT|WORKFLOW|JOB|ACTIONS)|JAVA_HOME(?:_\d+_(?:X64|ARM64))?|GOROOT(?:_\d+_\d+_(?:X64|ARM64))?|"
+                       r"ANDROID_(?:HOME|SDK_ROOT|NDK|NDK_HOME|NDK_ROOT|NDK_LATEST_HOME)|DOTNET_(?:ROOT|NOLOGO|MULTILEVEL_LOOKUP|"
+                       r"SKIP_FIRST_TIME_EXPERIENCE)|CONDA|PIPX_(?:HOME|BIN_DIR)|NVM_DIR|CHROME_BIN|CHROMEWEBDRIVER|EDGEWEBDRIVER|"
+                       r"GECKOWEBDRIVER|SELENIUM_JAR_PATH|BOOTSTRAP_HASKELL_NONINTERACTIVE|GHCUP_INSTALL_BASE_PREFIX|ACCEPT_EULA|"
+                       r"POWERSHELL_DISTRIBUTION_CHANNEL|VCPKG_INSTALLATION_ROOT|SWIFT_PATH|LEIN_HOME|LEIN_JAR|M2_HOME|GRADLE_HOME|"
+                       r"ANT_HOME|PLAYWRIGHT_BROWSERS_PATH|AGENT_TOOLSDIRECTORY)$")
+SECRET_NAME = re.compile(r"(?i)token|secret|password|passwd|credential|key|auth|cookie|session|private|api|cert|conn")
 
 
 class IsolationError(RuntimeError):
@@ -175,14 +178,22 @@ class Account:
             time.sleep(0.2)
 
     def teardown(self):
-        """Stop everything, give the checkout back to the runner's account and remove the throwaway account."""
+        """Stop everything, give the checkout back to the runner's account and remove the throwaway account.
+        Returns warnings (plain words) for clean-up that didn't finish; results were already read after verified stops,
+        so these don't change them. IsolationError when the account's processes can't be stopped."""
         self.stop()
         P = _priv()
+        warn = []
         _run(P + ["chown", "-hR", "%d:%d" % (os.getuid(), os.getgid()), self.root])
         _run(P + ["chmod", "%o" % (self.root_mode if self.root_mode is not None else 0o755), self.root])
         for d in reversed(self.opened):  # what this run opened, closed again (a self-hosted runner keeps its folders)
-            _run(P + ["chmod", "o-x", d], check=False)
-        _run(P + ["userdel", "--remove", self.name], check=False)  # best effort: the runner is thrown away after the job
+            if _run(P + ["chmod", "o-x", d], check=False).returncode != 0:
+                warn.append("couldn't close %s again" % d)
+        r = _run(P + ["userdel", "--remove", self.name], check=False)
+        if r.returncode != 0:  # on a runner that is kept, its home could hold what the code cached: say so, loudly
+            warn.append("couldn't remove the throwaway account %s and its home folder; remove them by hand (%s)"
+                        % (self.name, (r.stderr or "").strip()[:120]))
+        return warn
 
 
 def read_regular(path, cap):
