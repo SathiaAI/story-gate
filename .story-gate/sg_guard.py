@@ -156,8 +156,8 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
     """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
     possibly filtered under an older approval. `smudged` is the note of what the filter last wrote here (None when there
     is none): an exact match is always our copy, current or stale. A guarded setting is never "taken out" by the filter,
-    so with a note, a guarded value that is neither the stored one, the approved one nor the one the filter wrote is the
-    user's own edit, and the clean filter must keep it. Without a note that can't be told apart from an approval since
+    so with a note, a guarded value that is neither the stored one nor the one the filter wrote is the user's own edit
+    (even when it equals the current approval), and the clean filter must keep it. Without a note that can't be told apart from an approval since
     revoked, so it is treated as the filter's copy (fail closed; filter_main says how to make the edit stick)."""
     try:
         if smudged is not None and smudged.get("sha") == hashlib.sha256(on_disk).hexdigest():
@@ -176,7 +176,7 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
             return any(k in g and d.get(k) == g[k] and d.get(k) != a.get(k) for k in GUARDED_KEYS)
         if isinstance(g, dict) and isinstance(d, dict):
             for k in GUARDED_KEYS:
-                if d.get(k) != s.get(k) and d.get(k) != a.get(k) and (k not in g or d.get(k) != g[k]):
+                if d.get(k) != s.get(k) and (k not in g or d.get(k) != g[k]):  # not stored, not what the filter wrote
                     return False
         return _load(sanitize(stored, on_disk, allowed)[0]) == d
     except (ValueError, UnicodeDecodeError):
@@ -319,7 +319,7 @@ def filter_main(mode, path):
             plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
             out = plain
             note = last_smudge(top, path)
-            if idx is not None and (PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data
+            if idx is not None and ((note is None and PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data)
                                     or is_filtered_form(idx, plain, allowed, approved, note)):
                 out = idx
                 if note is None and _guarded_differ(idx, plain):

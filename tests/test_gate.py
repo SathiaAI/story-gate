@@ -2035,6 +2035,9 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertFalse(G.is_filtered_form(stored, edited, smudged=wrote))
         self.assertTrue(G.is_filtered_form(stored, edited, approved=stored))  # no note: treated as the filter's copy
         self.assertTrue(G.is_filtered_form(stored, stored, approved=stored, smudged=wrote))
+        z = json.dumps({"permissions": {"allow": ["z"]}}).encode()  # the branch's value; the filter wrote "a" here
+        to_approved = json.dumps({"permissions": {"allow": ["new"]}}).encode()  # you set it to what main approves now
+        self.assertFalse(G.is_filtered_form(z, to_approved, approved=to_approved, smudged=wrote))
         listed = json.dumps(["not", "settings"]).encode()  # a branch that stored a non-object
         self.assertFalse(G.is_filtered_form(listed, edited, approved=stored, smudged=wrote))  # your edit: kept
         self.assertTrue(G.is_filtered_form(listed, edited, approved=stored))  # no note: keep the stored copy
@@ -2083,6 +2086,27 @@ class TestRepoHookGuard(RuntimeFixture):
         os.utime(f)
         r = self.git("add", ".claude/settings.json")
         self.assertEqual(self.git("diff", "--cached").stdout, ""); self.assertIn("git checkout --", r.stderr)
+
+    def test_setting_a_guarded_value_to_the_new_approval_is_staged(self):
+        """After the default branch moves from A to B, writing exactly the filter's B output by hand is your edit (the
+        filter wrote A here), so git add stages it instead of matching it against what the filter would write now."""
+        a, b, z = {"permissions": {"allow": ["a"]}}, {"permissions": {"allow": ["b"]}}, {"permissions": {"allow": ["z"]}}
+        self.approve_on_main(a)
+        self.git("checkout", "-qb", "tob")
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps(z, indent=2)); self.git("add", ".claude/settings.json"); self.git("commit", "-qm", "z")
+        self.git("checkout", "-q", "main"); self.git("checkout", "-q", "tob")  # the filter writes A and notes it
+        other = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, other, True)
+        subprocess.run(["git", "clone", "-q", self.git("remote", "get-url", "origin").stdout.strip(), str(other / "c")],
+                       check=True, capture_output=True)
+        (other / "c/.claude/settings.json").write_text(json.dumps(b, indent=2))
+        for c in (("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "b"), ("push", "-q", "origin", "HEAD:main")):
+            subprocess.run(["git", *c], cwd=other / "c", check=True, capture_output=True)
+        self.git("fetch", "-q", "origin")
+        G = self.guard()
+        f.write_bytes(G.sanitize(json.dumps(z).encode(), json.dumps(b).encode())[0])  # byte for byte what smudge would write now
+        self.git("add", ".claude/settings.json")
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
 
     def test_git_status_before_add_does_not_swallow_an_edit(self):
         """Looking at an edit (git status / git diff run the clean filter) never changes what git add then stages."""
@@ -2843,6 +2867,18 @@ class TestPinnedHooks(RuntimeFixture):
         self.assertFalse(P._mounts_working_folder(["run", "-v", "cache:/c", "-v", "/opt/x:/x", "--mount", "type=volume,src=v,dst=/v", "img"]))
         keep = {"mcpServers": {"s": {"command": "docker", "args": ["run", "-i", "--rm", "acme-mcp"]}}}
         self.assertEqual(self.smudge_json(keep), (keep, []))
+
+    def test_a_program_file_given_to_awk_sed_or_jq_is_repository_code(self):
+        """`awk -f prog` runs prog as code even when prog is a new file the default branch doesn't have, so it is never
+        plain; a pinned program file still works as a pinned hook."""
+        for cmd, args in (("awk", ["-f", "evil"]), ("sed", ["-f", "edit", "x.txt"]), ("jq", ["--from-file", "filter"])):
+            with self.subTest(cmd=cmd):
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": cmd, "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        P = self.pin_module()
+        self.assertIn("evil", P.analyse("awk -f evil", str(self.repo), None)["refs"])
+        tier, _ = P.classify("awk -f evil", str(self.repo), None, {"pins": ["evil"]})
+        self.assertEqual(tier, "pinned")
 
     def test_our_runner_command_with_extra_arguments_is_dropped(self):
         """This computer's runner call never comes with args or env; one that does is not ours to keep."""

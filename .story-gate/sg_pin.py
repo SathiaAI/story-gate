@@ -29,6 +29,8 @@ RUNNERS = {"npm", "npx", "yarn", "pnpm", "bun", "bunx", "make", "just", "task", 
 CONFIG_LOADERS = {"docker-compose", "podman-compose", "pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
                   "babel", "gulp", "grunt", "rspec", "phpunit", "playwright", "cypress", "stylelint", "commitlint", "lint-staged",
                   "tsx", "ts-node", "nodemon", "rails", "django-admin"}  # load code from repository config (conftest.py, *.config.js)
+PROGRAM_FILE_TOOLS = {"awk", "gawk", "mawk", "nawk", "busybox", "sed", "gsed", "jq", "gojq", "yq", "dc", "bc", "m4"}
+PROGRAM_FILE_FLAGS = {"-f", "--file", "--from-file", "--script-file"}  # glued forms (-fprog, --file=prog) are options analyse() refuses
 CONTAINER_TOOLS = {"docker", "podman", "nerdctl"}
 CONTAINER_CONFIG_VERBS = {"compose", "build", "buildx", "bake"}  # subcommands that read compose.yaml, a Dockerfile, ...
 WRAPPERS = {"env", "time", "nice", "exec", "command", "sudo", "doas", "xargs", "nohup", "stdbuf", "timeout", "caffeinate",
@@ -156,6 +158,9 @@ def analyse(cmd, top, sha):
         if script is None:
             info["runner"] = True
             info["reasons"].append("interpreter without a script file")
+    program_files = set()  # awk -f FILE, sed -f FILE, jq --from-file FILE: the file is the program, so it's a path
+    if head in PROGRAM_FILE_TOOLS:
+        program_files = {tokens[i + 1] for i, t in enumerate(tokens[:-1]) if t in PROGRAM_FILE_FLAGS}
     cands, whole = [], set()
     for i, tok in enumerate(tokens):
         parts = [tok] + [x for x in re.split(r"[=,:]", tok) if x and x != tok]
@@ -170,7 +175,7 @@ def analyse(cmd, top, sha):
                 continue
             if rel.startswith("/") or re.match(r"^[A-Za-z]:/", rel) or rel.startswith("-"):
                 continue  # this computer's own absolute paths, and plain options
-            pathlike = explicit or "/" in rel or bool(SCRIPT_EXT.search(rel)) or (interp and i > 0 and part == next(
+            pathlike = explicit or "/" in rel or bool(SCRIPT_EXT.search(rel)) or part in program_files or (interp and i > 0 and part == next(
                 (t for t in tokens[1:] if not t.startswith("-")), None))
             cands.append((rel.rstrip("/"), pathlike, j == 0))
     if cands:
