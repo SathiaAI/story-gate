@@ -71,7 +71,8 @@ def policy(top):
     """(ref, commit, config) for an enrolled repository, read from the default branch; (None, None, {}) otherwise."""
     e = T.enrollment(top) or {}
     ref = e.get("policy_ref")
-    sha = T.policy_commit(top, ref) if ref and e.get("enrolled") else None
+    trusted = e.get("enrolled") and T.policy_source_problem(e) is None  # a movable local branch can't pick the policy
+    sha = T.policy_commit(top, ref) if ref and trusted else None
     if not sha:
         return ref, None, {}
     try:
@@ -221,12 +222,14 @@ def unwrap_cmd(c, launcher=None):
 
 
 def _walk_commands(data, fn):
-    """Apply fn(command) -> new command | None (drop entry) to every hook entry's "command" string."""
+    """Apply fn(command, entry) -> new command | None (drop entry) to every hook entry's "command" string. `entry` is
+    the whole dict, so a callback can see sibling keys such as MCP "args"."""
     dropped = []
     def walk(x, depth):
+        """Rebuild x with fn applied to each nested entry's command; entries fn drops come back as None."""
         if isinstance(x, dict):
             if depth and isinstance(x.get("command"), str):
-                new = fn(x["command"])
+                new = fn(x["command"], x)
                 if new is None:
                     dropped.append(x["command"])
                     return None
@@ -260,9 +263,24 @@ def smudge(data_bytes, top, path, py=None, launcher=None):
     py = py or sys.executable
     launcher = launcher or T.launcher_path()
     notes = []
-    def fn(cmd):
-        if unwrap_cmd(cmd) is not None or T.HOOK_SIGNATURE.search(cmd):
-            return cmd  # already a story-gate command
+    def fn(cmd, entry):
+        """New command for one hook entry: unchanged, the runner call, or None to drop it. An entry with sibling `args`
+        is classified as the whole command line and never wrapped (the runner takes no arguments)."""
+        if unwrap_cmd(cmd) is not None or T.is_our_hook_command(cmd):
+            return cmd  # already a story-gate command (exactly this computer's launcher, not a repository copy)
+        args = entry.get("args")
+        if args is not None:
+            if not (isinstance(args, list) and all(isinstance(a, str) for a in args)):
+                notes.append(cmd)
+                return None  # unknown argument shape: can't vouch for it
+            line = f"{cmd} {shlex.join(args)}" if args else cmd
+            tier, _ = classify(line, top, sha, ents.get(line))
+            if tier == "pinned":
+                tier = "blocked"  # the runner can't carry arguments
+            if tier == "blocked":
+                notes.append(line)
+                return None
+            return cmd
         tier, info = classify(cmd, top, sha, ents.get(cmd))
         if tier == "pinned":
             return wrap(cmd, py, launcher)
@@ -285,7 +303,8 @@ def unwrap_bytes(data_bytes):
     if not isinstance(data, (dict, list)):
         return data_bytes
     changed = []
-    def fn(cmd):
+    def fn(cmd, entry=None):
+        """Original command for a runner call, else the command unchanged."""
         orig = unwrap_cmd(cmd)
         if orig is not None:
             changed.append(1)
@@ -636,7 +655,7 @@ def report(top, default_hook_commands=()):
     ents = entries(cfg)
     rows = []
     for cmd in sorted(set(ents) | set(default_hook_commands)):
-        if T.HOOK_SIGNATURE.search(cmd) or unwrap_cmd(cmd) is not None:
+        if T.is_our_hook_command(cmd) or unwrap_cmd(cmd) is not None:
             continue
         tier, info = classify(cmd, top, sha, ents.get(cmd))
         hint = ""

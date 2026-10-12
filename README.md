@@ -109,7 +109,7 @@ Already use skills? `npx skills add SathiaAI/story-gate` adds the story-gate ski
 | You need | Details |
 |---|---|
 | A GitHub account and your project on GitHub | Your AI installs everything else |
-| A judge key (step 4) | Make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add some credit. Each check is one small call. The key goes straight into a GitHub secret; your AI never sees it. No key yet? Click **Skip for now** (see the FAQ) |
+| A judge key (step 4) | Make one at [openrouter.ai/keys](https://openrouter.ai/keys) and add some credit. Each check is one small call. Setup does not hand the key to your AI. It goes into a GitHub secret, and a copy stays on your computer that anything running as you can read, so give it a spending limit. No key yet? Click **Skip for now** (see the FAQ) |
 | Who approves | You, plus anyone you add in step 5. Working alone is fine: the AI opens pull requests under its own login, so your approval counts |
 | Teammates | Each person pastes the same sentence once on their own computer |
 

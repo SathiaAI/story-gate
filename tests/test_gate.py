@@ -1080,6 +1080,16 @@ class TestGitHubLogic(unittest.TestCase):
         G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]", "2026-10-02T10:00:00Z", 3), ev("labeled", "Paul", "2026-10-01T10:00:00Z", 1)]
         self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "agent-bot[bot]")
 
+    def test_protection_accepts_reusable_workflow_check_name(self):
+        """A required check named 'story-gate / story-gate' (the reusable workflow's name) counts as the story-gate check."""
+        G = self.G
+        for name, ok in (("story-gate", True), ("story-gate / story-gate", True), ("other", False)):
+            with self.subTest(check=name):
+                rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": name}]}}]
+                G.call = lambda *a, rules=rules, **k: (200, rules, {})
+                _, missing = G.protection("o/r", "main", "t")
+                self.assertEqual("the story-gate check is not a required status check" in missing, not ok, missing)
+
     def test_ruleset_shape(self):
         """Require human approval without extra AI approval and keep the importable ruleset in sync."""
         r = self.G.ruleset_json()
@@ -1552,6 +1562,12 @@ class TestTrustedRuntime(RuntimeFixture):
         self.cfg(mode="warn", enforce_points=[])  # the branch tries to switch to warn
         self.assertEqual(self.hook().returncode, 2)
 
+    def test_malformed_local_settings_cannot_open_the_pre_edit_gate(self):
+        """A branch config with a wrong-shaped enforce_points or judge must not crash cfg() and turn the block into a warning."""
+        for bad in ({"enforce_points": 1}, {"judge": 1}):
+            self.cfg(mode="enforce", **bad)
+            self.assertEqual(self.hook().returncode, 2, bad)
+
     def test_branch_can_tighten_policy(self):
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
@@ -1966,6 +1982,7 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotIn("evil", G.sanitize(cursor, None)[0].decode())  # a new hook file with no approved version keeps no commands
 
     def test_sanitize_covers_every_way_a_settings_file_runs_something(self):
+        """sanitize() takes out every branch setting that can run something (env, permissions, MCP, tools, hooks) unless main approved it."""
         G = self.guard()
         approved = json.dumps({"mcpServers": {"docs": {"command": "npx", "args": ["docs-server"]}},
                                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo ok"}]}]}}).encode()
@@ -1983,7 +2000,29 @@ class TestRepoHookGuard(RuntimeFixture):
             self.assertNotIn(bad, text, bad)
         self.assertEqual(data["mcpServers"], {"docs": {"command": "npx", "args": ["docs-server"]}})  # back to the approved server
         self.assertEqual(data["hooks"]["Stop"][0]["hooks"], [{"type": "command", "command": "echo ok", "timeout": 30}])
-        self.assertTrue(G.is_filtered_form(json.dumps(branch).encode(), out))
+        self.assertTrue(G.is_filtered_form(json.dumps(branch).encode(), out, approved=approved))
+
+    def test_user_edit_to_a_guarded_setting_is_not_a_filtered_form(self):
+        """The clean filter must keep an edit to a guarded setting, not restore the stored copy (git status must show it)."""
+        G = self.guard()
+        stored = json.dumps({"permissions": {"allow": ["a"]}, "theme": "x"}).encode()
+        edited = json.dumps({"permissions": {"allow": ["a", "b"]}, "theme": "x"}).encode()
+        self.assertFalse(G.is_filtered_form(stored, edited, approved=stored))
+        self.assertFalse(G.is_filtered_form(stored, edited))
+        self.assertTrue(G.is_filtered_form(stored, stored, approved=stored))
+        # our own filtered copy (guarded value is the approved one, an entry was dropped) is still recognised
+        branch = json.dumps({"permissions": {"allow": ["branch"]}, "apiKeyHelper": "evil"}).encode()
+        approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
+        out = G.sanitize(branch, approved)[0]
+        self.assertTrue(G.is_filtered_form(branch, out, approved=approved))
+
+    def test_editing_a_guarded_setting_on_the_default_branch_can_be_committed(self):
+        """On the default branch, a user's edit to a guarded setting survives the clean filter and is staged."""
+        self.approve_on_main({"permissions": {"allow": ["a"]}})
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps({"permissions": {"allow": ["a", "b"]}}))
+        self.git("add", ".claude/settings.json")  # runs the clean filter
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
 
     def test_local_branch_named_like_the_remote_cant_approve_hooks(self):
         self.approve_on_main({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": self.APPROVED}]}]}})
@@ -2645,6 +2684,70 @@ class TestPinnedHooks(RuntimeFixture):
         finally:
             sys.path.remove(str(SRC))
 
+    def pin_module(self):
+        """sg_pin freshly imported from the source folder."""
+        import importlib
+        sys.path.insert(0, str(SRC))
+        try:
+            import sg_pin
+            return importlib.reload(sg_pin)
+        finally:
+            sys.path.remove(str(SRC))
+
+    def smudge_json(self, data, cfg=None):
+        """Run the checkout filter's pin step on a JSON hook/MCP file with a fixed policy; -> (parsed result, notes)."""
+        P = self.pin_module()
+        cfg = cfg or {"project_hooks_allowed": [{"command": self.CHECK, "pins": ["scripts/check.sh"]}]}
+        with patch.object(P, "policy", lambda top: ("origin/main", None, cfg)):
+            out, notes = P.smudge(json.dumps(data).encode(), str(self.repo), ".mcp.json", py="/py", launcher="/l.py")
+        return json.loads(out), notes
+
+    def test_mcp_entry_args_are_classified_with_the_command(self):
+        """An MCP server whose args name repository files (docker compose -f mcp/compose.yml) is not 'plain', and a pinned
+        command with args is never wrapped (the runner would lose the args)."""
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": ["compose", "-f", "mcp/compose.yml", "run", "srv"]}}})
+        self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}})
+        self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": [["nested"]]}}})
+        self.assertEqual(out, {})  # unknown argument shape: dropped
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"]}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))  # nothing from the repository: untouched
+
+    def test_repository_copy_of_the_hook_command_is_not_ours(self):
+        """Only this computer's launcher command skips classification; a checked-out gate.py (older project installs) or
+        text that merely mentions `gate.py hook --client` goes through the pin check."""
+        for cmd in ("python3 .story-gate/gate.py hook --client claude --event pre", "bash evil.sh # gate.py hook --client x"):
+            out, notes = self.smudge_json({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd}]}]}})
+            self.assertEqual(out, {}, cmd); self.assertEqual(notes, [cmd])
+        P = self.pin_module()
+        rows = {c: t for c, t, _ in self.report_rows(P, ["python3 .story-gate/gate.py hook --client claude --event pre"])}
+        self.assertEqual(rows.get("python3 .story-gate/gate.py hook --client claude --event pre"), "blocked")
+
+    def report_rows(self, P, cmds):
+        """P.report() for a repository whose policy resolves, listing `cmds` as the default branch's hook commands."""
+        with patch.object(P, "policy", lambda top: ("origin/main", "0" * 40, {})):
+            return P.report(str(self.repo), cmds)
+
+    def test_local_policy_ref_without_consent_is_not_a_policy_source(self):
+        """An enrollment whose policy ref is a local branch (no allow_local_policy) must not select the policy commit for
+        pinning or hook filtering: sg_pin.policy and sg_guard.approved_for fail closed like gate.py's policy_json."""
+        P = self.pin_module()
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib
+            G = importlib.reload(importlib.import_module("sg_guard"))
+        finally:
+            sys.path.remove(str(SRC))
+        top = str(self.repo)
+        local = {"toplevel": top, "identity": "x", "enrolled": True, "policy_ref": "main"}
+        with patch.object(P.T, "enrollment", lambda t: dict(local)), patch.object(G.T, "enrollment", lambda t: dict(local)):
+            self.assertEqual(P.policy(top), ("main", None, {}))
+            self.assertEqual(G.approved_for(top, ".claude/settings.json"), (None, []))
+        remote = dict(local, policy_ref="origin/main")
+        with patch.object(P.T, "enrollment", lambda t: dict(remote)):
+            self.assertTrue(P.policy(top)[1])  # a remote's branch still works
+
 
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
 class TestReleaseSignatures(unittest.TestCase):
@@ -3053,6 +3156,28 @@ class TestLiveDashboard(Base):
         """A minimal story row for building dashboard data."""
         return {"id": "SAT-%d" % i, "title": title, "feature": feature, "status": status, "ready": None, "done": None, "checkpoint": None, "coder": None,
                 "trace": [], "ref": ref, "merged": True, "acs": 0, "stale": False, "last_reported": None}
+
+    def test_last_dates_are_utc_so_string_order_is_time_order(self):
+        """last_dates returns every commit time as UTC 'YYYY-MM-DDTHH:MM:SSZ', so commits made from different time zones compare correctly as strings."""
+        sd = self.repo / ".story-gate/stories"
+        for sid, when in (("SAT-1", "2026-10-01T10:00:00+05:00"), ("SAT-2", "2026-10-01T08:00:00+00:00")):  # 05:00Z is earlier than 08:00Z
+            (sd / sid).mkdir(parents=True, exist_ok=True); (sd / sid / "story.md").write_text("x\n")
+            subprocess.run(["git", "add", "."], cwd=self.repo, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-qm", sid], cwd=self.repo, capture_output=True, check=True,
+                           env=dict(os.environ, GIT_COMMITTER_DATE=when, GIT_AUTHOR_DATE=when))
+        out, files = self.D.Repo(self.repo).last_dates("HEAD")
+        self.assertEqual(out["SAT-1"], "2026-10-01T05:00:00Z")
+        self.assertEqual(out["SAT-2"], "2026-10-01T08:00:00Z")
+        self.assertLess(out["SAT-1"], out["SAT-2"])
+        self.assertEqual(files[".story-gate/stories/SAT-1/story.md"], "2026-10-01T05:00:00Z")
+
+    def test_html_all_stories_ci_text_has_no_markdown_escapes(self):
+        """The HTML 'All stories' table shows CI text from the raw fields, so in_progress has no Markdown backslash or &amp; double escape."""
+        st = self.story(1, status="in_progress")
+        st["ci"] = {"pr": 12, "result": "in_progress", "source": "a&b"}
+        page = self.D.to_html(self.data([st]))
+        self.assertIn("origin/main · #12 in_progress · source a&amp;b", page)
+        self.assertNotIn("in\\_progress", page); self.assertNotIn("&amp;amp;", page)
 
     def data(self, stories, **kw):
         """Dashboard data around the given stories."""
@@ -3815,6 +3940,22 @@ class TestGuidedSetup(unittest.TestCase):
         wz.save_key("not a key")
         self.assertEqual(wz.st["key"]["status"], "error")
 
+    def test_background_failure_lands_on_its_own_step(self):
+        """A failed background job shows its error on the step that owns it, even while an earlier step is still "working"."""
+        S = self.S
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.set("agent", "working", "Click Create on GitHub")
+        wz.set("key", "working", "Saving")
+        def boom():
+            """Fail the way a rejected GitHub call would."""
+            raise RuntimeError("secret rejected")
+        wz._guard(boom, "key")
+        self.assertEqual(wz.st["key"], {"status": "error", "msg": "secret rejected"})
+        self.assertEqual(wz.st["agent"]["status"], "working")
+        wz.set("merge", "working", "Preparing")
+        wz._guard(boom)  # no step given: the first working step, as before
+        self.assertEqual(wz.st["agent"]["status"], "error")
+
     def test_signin_checks_admin_rights(self):
         G, S = self.G, self.S
         G.whoami = lambda tok: "me"
@@ -4559,6 +4700,19 @@ class TestPlainWriting(Base):
         c["writing"] = dict(c["writing"], enforce=True)
         self.assertNotEqual(a, g.policy_fingerprint(c))
 
+    def test_tighten_ignores_wrong_shaped_enforce_points_and_judge(self):
+        """Malformed local enforce_points/judge add nothing and never raise (a raise would fail a hook open)."""
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib
+            T = importlib.reload(importlib.import_module("sg_trust"))
+        finally:
+            sys.path.remove(str(SRC))
+        base = {"enforce_points": ["stop"], "judge": {"emulated_allow_pass": True}}
+        for bad in ({"enforce_points": 1}, {"enforce_points": "stop"}, {"judge": 1}, {"judge": ["x"]}):
+            out = T.tighten(base, bad)
+            self.assertEqual((out["enforce_points"], out["judge"]), (["stop"], {"emulated_allow_pass": True}), bad)
+
     def test_branch_can_only_tighten_writing_policy(self):
         sys.path.insert(0, str(SRC))
         try:
@@ -4902,6 +5056,22 @@ class TestValidationPage(Base):
         sys.path.insert(0, str(SRC))
         import importlib, sg_report
         return importlib.reload(sg_report)
+
+    def test_stale_passing_test_run_is_not_shown_as_fail(self):
+        """The Tests card shows FAIL only for a fresh non-zero run; a passing run on older code shows no verdict (out of date)."""
+        R = self.R()
+        self.ready()
+        import sg_dashboard as D
+        g = load_gate(self.repo)
+        try:
+            base = g.report_facts("SAT-1")
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        card = lambda tr: R.to_html(dict(base, tests=tr)).split('<div class="subheader">Tests</div>', 1)[1].split("</div></div></div>", 1)[0]
+        stale = card({"exit_code": 0, "fresh": False})
+        self.assertNotIn(D.pill("FAIL"), stale); self.assertIn("out of date", stale)
+        self.assertIn(D.pill("FAIL"), card({"exit_code": 1, "fresh": True}))
+        self.assertIn(D.pill("PASS"), card({"exit_code": 0, "fresh": True}))
 
     def ready(self):
         """Create and score a ready story, keeping its directory for validation page tests."""

@@ -226,7 +226,7 @@ def protection(repo, branch, token):
             missing.append("approval of the most recent push is not required")
         if int(p.get("required_approving_review_count") or 0) < 1:
             missing.append("no approving review is required")
-    if "story-gate" not in checks:
+    if not {"story-gate", "story-gate / story-gate"} & set(checks):  # copied workflow / reusable workflow check names
         missing.append("the story-gate check is not a required status check")
     return not missing, missing
 

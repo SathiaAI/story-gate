@@ -152,11 +152,20 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed
 
 
-def is_filtered_form(stored, on_disk, allowed=()):
+def is_filtered_form(stored, on_disk, allowed=(), approved=None):
     """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
-    possibly filtered under an older approval."""
+    possibly filtered under an older approval. A guarded setting is never "taken out" by the filter (smudge only writes
+    the default branch's value), so a guarded value on disk that is neither the stored nor the approved one is the
+    user's own edit: not a filtered form, so the clean filter must keep it instead of restoring the stored copy."""
     try:
-        return _load(sanitize(stored, on_disk, allowed)[0]) == _load(on_disk)
+        s, d = _load(stored), _load(on_disk)
+        a = _load(approved) if approved else {}
+        a = a if isinstance(a, dict) else {}
+        if isinstance(s, dict) and isinstance(d, dict):
+            for k in GUARDED_KEYS:
+                if d.get(k) != s.get(k) and d.get(k) != a.get(k):
+                    return False
+        return _load(sanitize(stored, on_disk, allowed)[0]) == d
     except (ValueError, UnicodeDecodeError):
         return False
 
@@ -171,6 +180,8 @@ def approved_for(top, path):
     """The default branch's version of `path` and its project_hooks_allowed, read from the commit the policy ref points
     at right now (resolved unambiguously, so a local branch called origin/main can't stand in for it)."""
     e = T.enrollment(top) or {}
+    if T.policy_source_problem(e) is not None:
+        return None, []  # a movable local branch can't pick the policy: fail closed
     sha = T.policy_commit(top, e.get("policy_ref")) if e.get("policy_ref") else None
     if not sha:
         return None, []
@@ -220,7 +231,7 @@ def filter_main(mode, path):
             plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
             out = plain
             if idx is not None and (PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data
-                                    or is_filtered_form(idx, plain, allowed)):
+                                    or is_filtered_form(idx, plain, allowed, approved)):
                 out = idx
             elif idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
                 try:
