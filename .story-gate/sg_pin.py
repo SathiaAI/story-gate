@@ -247,6 +247,33 @@ def _walk_commands(data, fn):
     return walk(data, 0), dropped
 
 
+INVOCATION_KEYS = ("args", "env", "cwd", "envFile", "env_file")
+# env values that can't name code: a reference to your own variable, a number or boolean, a web address
+SAFE_ENV_VALUE = re.compile(r"^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|-?[0-9]+(?:\.[0-9]+)?|true|false|https?://[^\s]*)$", re.IGNORECASE)
+
+
+def invocation_line(cmd, entry):
+    """The command line an MCP-style entry really runs, for classification and for project_hooks_allowed: environment
+    values that could name code as KEY=value prefixes, then `cd DIR &&` for a working folder, then command and args.
+    None when the entry loads an env file or has arguments/environment of an unknown shape."""
+    if "envFile" in entry or "env_file" in entry:
+        return None
+    args, env, cwd = entry.get("args", []), entry.get("env", {}), entry.get("cwd")
+    if not (isinstance(args, list) and all(isinstance(a, str) for a in args)):
+        return None
+    if not (isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())):
+        return None
+    if cwd is not None and not isinstance(cwd, str):
+        return None
+    line = f"{cmd} {shlex.join(args)}" if args else cmd
+    risky = [f"{k}={v}" for k, v in sorted(env.items()) if not SAFE_ENV_VALUE.match(v)]
+    if risky:
+        line = f"{shlex.join(risky)} {line}"
+    if cwd is not None:
+        line = f"cd {shlex.quote(cwd)} && {line}"
+    return line
+
+
 def smudge(data_bytes, top, path, py=None, launcher=None):
     """After the sanitizer: swap pinned commands for the runner, drop repository-code commands that aren't pinned or
     accepted. Returns (bytes, notes)."""
@@ -264,16 +291,20 @@ def smudge(data_bytes, top, path, py=None, launcher=None):
     launcher = launcher or T.launcher_path()
     notes = []
     def fn(cmd, entry):
-        """New command for one hook entry: unchanged, the runner call, or None to drop it. An entry with sibling `args`
-        is classified as the whole command line and never wrapped (the runner takes no arguments)."""
+        """New command for one hook entry: unchanged, the runner call, or None to drop it. An entry with sibling `args`,
+        `env`, `cwd` or an env file (MCP servers) is classified as the whole invocation and never wrapped (the runner
+        takes no arguments)."""
+        invocation = any(k in entry for k in INVOCATION_KEYS)
         if unwrap_cmd(cmd) is not None or T.is_our_hook_command(cmd):
-            return cmd  # already a story-gate command (exactly this computer's launcher, not a repository copy)
-        args = entry.get("args")
-        if args is not None:
-            if not (isinstance(args, list) and all(isinstance(a, str) for a in args)):
+            if invocation:
                 notes.append(cmd)
-                return None  # unknown argument shape: can't vouch for it
-            line = f"{cmd} {shlex.join(args)}" if args else cmd
+                return None  # our own command never comes with extra arguments or environment
+            return cmd  # already a story-gate command (exactly this computer's launcher, not a repository copy)
+        if invocation:
+            line = invocation_line(cmd, entry)
+            if line is None:
+                notes.append(cmd)
+                return None  # an env file, or an argument/env shape we can't read: can't vouch for it
             tier, _ = classify(line, top, sha, ents.get(line))
             if tier == "pinned":
                 tier = "blocked"  # the runner can't carry arguments

@@ -152,18 +152,20 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed
 
 
-def is_filtered_form(stored, on_disk, allowed=(), approved=None):
+def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
     """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
     possibly filtered under an older approval. A guarded setting is never "taken out" by the filter (smudge only writes
-    the default branch's value), so a guarded value on disk that is neither the stored nor the approved one is the
-    user's own edit: not a filtered form, so the clean filter must keep it instead of restoring the stored copy."""
+    the default branch's value), so a guarded value on disk that is neither the stored one, the approved one, nor the one
+    the filter last wrote here (`smudged`: a copy filtered under an approval since revoked) is the user's own edit: not
+    a filtered form, so the clean filter must keep it instead of restoring the stored copy."""
     try:
         s, d = _load(stored), _load(on_disk)
         a = _load(approved) if approved else {}
         a = a if isinstance(a, dict) else {}
+        m = smudged if isinstance(smudged, dict) else {}
         if isinstance(s, dict) and isinstance(d, dict):
             for k in GUARDED_KEYS:
-                if d.get(k) != s.get(k) and d.get(k) != a.get(k):
+                if d.get(k) != s.get(k) and d.get(k) != a.get(k) and (k not in m or d.get(k) != m[k]):
                     return False
         return _load(sanitize(stored, on_disk, allowed)[0]) == d
     except (ValueError, UnicodeDecodeError):
@@ -171,6 +173,42 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None):
 
 
 # ------------------------------------------------------------------ the git filter
+def _smudge_record(top, path):
+    """Where the checkout filter notes the guarded values it last wrote to `path` (inside the git folder, never committed)."""
+    d = _git(top, "rev-parse", "--git-path", "story-gate-smudged")
+    if not d:
+        return None
+    return Path(top) / d.decode("utf-8", "replace").strip() / (hashlib.sha256(path.encode("utf-8")).hexdigest() + ".json")
+
+
+def remember_smudge(top, path, out):
+    """Note the guarded values the filter just wrote, so a later clean can tell its own (possibly stale) copy from an edit."""
+    try:
+        d = _load(PIN.unwrap_bytes(out))
+    except (ValueError, UnicodeDecodeError):
+        return
+    f = _smudge_record(top, path)
+    if f is None or not isinstance(d, dict):
+        return
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps({k: d[k] for k in GUARDED_KEYS if k in d}), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        pass  # without the note a stale copy is only treated like before (restored to the stored version)
+
+
+def last_smudge(top, path):
+    """The guarded values the filter last wrote to `path` ({} when unknown)."""
+    f = _smudge_record(top, path)
+    try:
+        v = json.loads(f.read_text(encoding="utf-8")) if f else {}
+    except (OSError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
 def _git(top, *args, data=None):
     r = subprocess.run(["git", *args], cwd=top, input=data, capture_output=True)
     return r.stdout if r.returncode == 0 else None
@@ -217,6 +255,7 @@ def filter_main(mode, path):
             else:
                 out, removed = sanitize(data, approved, allowed)
                 out, blocked = PIN.smudge(out, top, path)  # repo scripts: run only the default branch's copy, or not at all
+                remember_smudge(top, path, out)
                 if blocked:
                     log(top, "filtered %s: %d hook(s) run repository code without pins" % (path, len(blocked)))
                     sys.stderr.write("story-gate: %d hook(s) in %s run repository code that isn't pinned, so they won't run "
@@ -231,13 +270,18 @@ def filter_main(mode, path):
             plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
             out = plain
             if idx is not None and (PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data
-                                    or is_filtered_form(idx, plain, allowed, approved)):
+                                    or is_filtered_form(idx, plain, allowed, approved, last_smudge(top, path))):
                 out = idx
             elif idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
                 try:
                     lost = exec_strings(_load(idx)) - exec_strings(_load(plain))
+                    i, d = _load(idx), _load(plain)
+                    changed = sorted(k for k in GUARDED_KEYS if isinstance(i, dict) and isinstance(d, dict) and i.get(k) != d.get(k))
                 except (ValueError, UnicodeDecodeError):
-                    lost = set()
+                    lost, changed = set(), []
+                if changed:
+                    sys.stderr.write(f"story-gate: staging your change to {', '.join(changed)} in {path}. Other computers use it "
+                                     "only after it is approved on the default branch.\n")
                 if lost:
                     sys.stderr.write("story-gate: %s on disk is the filtered copy, so committing it drops %d hook command(s) this branch "
                                      "added. Get new hook commands approved on the default branch first.\n" % (path, len(lost)))

@@ -1824,6 +1824,13 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertTrue(list((self.user / ".claude").glob("settings.json.story-gate-backup-*")))
         self.assertFalse((self.home / "runtime").exists())
 
+    def test_uninstall_says_where_the_local_judge_key_is(self):
+        """uninstall --user keeps the local judge key file but names it, so the key is never left behind unsaid."""
+        kf = self.home / "judge.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        self.assertTrue(kf.exists()); self.assertIn(f"Kept your local judge key: {kf}", r.stdout)
+        self.assertNotIn("sk-or-test", r.stdout + r.stderr)
+
     def test_invalid_user_json_is_never_clobbered(self):
         p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
         r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
@@ -2015,6 +2022,27 @@ class TestRepoHookGuard(RuntimeFixture):
         approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
         out = G.sanitize(branch, approved)[0]
         self.assertTrue(G.is_filtered_form(branch, out, approved=approved))
+
+    def test_a_copy_filtered_under_a_revoked_approval_is_not_staged_as_an_edit(self):
+        """A working copy the filter wrote under approval X, after the default branch moved to Y, is still the filter's
+        own copy: git add keeps the branch's stored value instead of staging the revoked X."""
+        x, y, z = {"permissions": {"allow": ["x"]}}, {"permissions": {"allow": ["y"]}}, {"permissions": {"allow": ["z"]}}
+        self.approve_on_main(x)
+        self.git("checkout", "-qb", "revoked")
+        (self.repo / ".claude/settings.json").write_text(json.dumps(z, indent=2))
+        self.git("add", ".claude/settings.json"); self.git("commit", "-qm", "branch value")
+        self.git("checkout", "-q", "main"); self.git("checkout", "-q", "revoked")  # the filter writes X to disk
+        self.assertIn('"x"', (self.repo / ".claude/settings.json").read_text())
+        other = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, other, True)
+        origin = self.git("remote", "get-url", "origin").stdout.strip()
+        subprocess.run(["git", "clone", "-q", origin, str(other / "c")], check=True, capture_output=True)
+        (other / "c/.claude/settings.json").write_text(json.dumps(y, indent=2))
+        for a in (("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve y"), ("push", "-q", "origin", "HEAD:main")):
+            subprocess.run(["git", *a], cwd=other / "c", check=True, capture_output=True)
+        self.git("fetch", "-q", "origin")  # the policy is now Y; the working copy still holds X
+        os.utime(self.repo / ".claude/settings.json")
+        self.git("add", ".claude/settings.json")
+        self.assertEqual(self.git("diff", "--cached").stdout, "")  # neither X nor anything else is staged
 
     def test_editing_a_guarded_setting_on_the_default_branch_can_be_committed(self):
         """On the default branch, a user's edit to a guarded setting survives the clean filter and is staged."""
@@ -2719,6 +2747,33 @@ class TestPinnedHooks(RuntimeFixture):
         self.assertEqual(out, {})  # unknown argument shape: dropped
         keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"]}}}
         self.assertEqual(self.smudge_json(keep), (keep, []))  # nothing from the repository: untouched
+
+    def test_mcp_env_cwd_and_env_files_are_part_of_what_is_checked(self):
+        """env values that could name code, a working folder, or an env file make an MCP entry run repository code
+        the pin check never saw: dropped unless a code owner accepted that exact line. Plain variable references,
+        numbers and web addresses don't count."""
+        for entry in ({"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}},
+                      {"command": "node", "args": ["--version"], "env": {"NODE_OPTIONS": "--require ./pwn.js"}},
+                      {"command": "echo", "args": ["hello"], "cwd": "tools"},
+                      {"command": "echo", "envFile": ".env.mcp"},
+                      {"command": "echo", "env": {"X": ["not", "a", "string"]}}):
+            with self.subTest(entry=entry):
+                out, notes = self.smudge_json({"mcpServers": {"s": entry}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"],
+                                     "env": {"TOKEN": "${GITHUB_TOKEN}", "PORT": "8080", "API": "https://api.example.com"}}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))
+        risky = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}}}}
+        accepted = {"project_hooks_allowed": [{"command": "LD_PRELOAD=./evil.so echo hello", "runs_repo_code": "accepted"}]}
+        self.assertEqual(self.smudge_json(risky, accepted), (risky, []))  # the code owner accepted exactly this line
+
+    def test_our_runner_command_with_extra_arguments_is_dropped(self):
+        """This computer's runner call never comes with args or env; one that does is not ours to keep."""
+        P = self.pin_module()
+        ours = P.wrap(self.CHECK, "/py", "/l.py")
+        with patch.object(P.T, "launcher_path", lambda: "/l.py"):
+            out, notes = self.smudge_json({"mcpServers": {"s": {"command": ours, "args": ["--", "evil"]}}})
+            self.assertEqual(out, {}); self.assertEqual(notes, [ours])
 
     def test_repository_copy_of_the_hook_command_is_not_ours(self):
         """Only this computer's launcher command skips classification; a checked-out gate.py (older project installs) or

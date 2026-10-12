@@ -47,6 +47,13 @@ In `.story-gate/config.json` **on the default branch** (a branch can't approve i
 - `gate.py doctor` warns when a pinned script seems to use a repository file that isn't pinned (for example `source scripts/lib.sh`). This is a best-effort hint, not proof.
 - Pinned commands must be simple: a program, then plain words and paths. Use forward slashes.
 
+**MCP servers** (`command` plus `args`, `env`, `cwd`) are checked as the whole line they run. Environment values count
+too, unless they are a reference to your own variable (`${GITHUB_TOKEN}`), a number, `true`/`false` or a web address.
+So `{"command": "node", "args": ["server.js"], "env": {"NODE_OPTIONS": "--require ./x.js"}}` is checked as
+`'NODE_OPTIONS=--require ./x.js' node server.js`, and a working folder adds `cd <folder> && ` in front. Such lines can't be
+pinned (the runner can't carry arguments), so a server that uses repository code runs only if a code owner accepts that
+exact line (`"runs_repo_code": "accepted"`). A server that loads an env file (`envFile`) is always removed.
+
 ## The runner, step by step
 
 Each time the AI tool fires a pinned hook, story-gate's signed runtime:

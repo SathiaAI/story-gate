@@ -3789,6 +3789,10 @@ def cmd_user(cmd, kv, rest):
         if not dry and T.runtime_root().exists():
             shutil_rmtree(T.runtime_root())
             print("Removed the runtime: %s (enrollment and agent key are kept)" % T.runtime_root())
+        kf = J.key_file()
+        if kf and os.path.isfile(kf):  # never deleted for you (you may still use it), but never left behind unsaid
+            print(f"Kept your local judge key: {kf}. Delete that file to remove the key from this computer "
+                  "(the copy in your GitHub secrets is separate).")
         if not dry and not any(T.read_json(T.manifest_path()).get(k) for k in ("files", "repos")):
             try:
                 T.manifest_path().unlink()

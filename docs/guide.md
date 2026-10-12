@@ -686,7 +686,7 @@ Every number in the issue and the report says how it's calculated, and estimates
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
 - **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
-- **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets.
+- **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets. To remove it from this computer, delete that file; `uninstall --user` keeps it and prints where it is.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests
