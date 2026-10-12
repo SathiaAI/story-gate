@@ -453,7 +453,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.9.0")
+        self.assertEqual(g.VERSION, "0.9.1")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -8705,6 +8705,24 @@ class TestReviewLessons(unittest.TestCase):
     TEST_MISSING_DOCSTRINGS = 575
     # lesson 6: run lines known to put a GitHub value straight into the shell. Only remove entries; never add.
     KNOWN_RUN_INTERPOLATIONS = frozenset()  # (file, expression) pairs still inline in run:; may only shrink
+
+    def test_lesson_5_every_release_pin_names_the_same_version(self):
+        """Lesson 5 (numbers in docs match the code): every file that pins the current release (manifests, installers,
+        SKILL.md copies, install lines in the README and guide) names gate.py's VERSION, so a bump can't miss one."""
+        import re
+        root = SRC.parent
+        version = re.search(r'^VERSION = "([^"]+)"', (SRC / "gate.py").read_text(encoding="utf-8"), re.M).group(1)
+        pats = (r'"version":\s*"([^"]+)"', r'^version = "([^"]+)"', r'story-gate@v(\d[\w.-]*)', r'story-gate/v(\d[\w.-]*)/install',
+                r'STORY_GATE_REF:-v([^}]+)\}', r'else \{ "v([^"]+)" \}')
+        files = ("plugin.json", ".claude-plugin/plugin.json", "plugin/.claude-plugin/plugin.json", "gemini-extension.json",
+                 "pyproject.toml", "install.sh", "install.ps1", "README.md", "docs/guide.md", ".story-gate/SKILL.md",
+                 "skills/story-gate/SKILL.md", "plugin/skills/story-gate/SKILL.md")
+        for name in files:
+            with self.subTest(file=name):
+                text = (root / name).read_text(encoding="utf-8")
+                found = [v for p in pats for v in re.findall(p, text, re.M)]
+                self.assertTrue(found, f"{name} pins no release")
+                self.assertEqual(set(found), {version}, name)
 
     def gate(self):
         """story-gate's own gate.py, loaded the way the tests load a repository's copy."""
