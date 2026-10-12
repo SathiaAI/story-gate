@@ -8783,6 +8783,7 @@ class TestReviewLessons(unittest.TestCase):
         checks += [(budgets, "wrote more than %d MB" % (M.OUTPUT_CAP // 1000000)), (budgets, "(%d minutes for all budgets)" % (M.CI_TOTAL // 60)),
                    (budgets, "%d seconds by default (`--timeout`, at most %d)" % (M.DEFAULT_TIMEOUT, M.MAX_TIMEOUT)),
                    (budgets, "the last %d values from merged stories" % D.BUDGET_HISTORY), (budgets, "cut to {:,} characters".format(V.TAIL)),
+                   (budgets, "larger than %d GB" % (V.FILE_LIMIT >> 30)),
                    (design, "at most %d MB" % (M.OUTPUT_CAP // 1000000)), (design, "inside a %d-second total" % M.CI_TOTAL),
                    (design, "the last %d per budget" % D.BUDGET_HISTORY)]
         for text, phrase in checks:
@@ -9130,6 +9131,14 @@ class TestBudgets(Base):
             with self.subTest(n=n):
                 self.assertEqual(res[n]["state"], "not_run"); self.assertIn(why, res[n]["why"])
         self.assertEqual(res["anyexit"]["value"], "3")  # any exit code is fine when the output has the number
+        self.M()  # puts .story-gate on sys.path
+        import sg_validation as V
+        code, _, _, note = V.execute([PY, "-c", "import time; time.sleep(1.3); print(3)"], str(self.repo), 1, max_bytes=100)
+        self.assertEqual((code, note), (None, "stopped after 1 seconds (timeout)"))  # finishing late is never a pass
+        if os.name != "nt":  # the system's own file-size limit bounds what a measuring command can write
+            code, out, _, _ = V.execute([PY, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])"],
+                                        str(self.repo), 30, max_bytes=100)
+            self.assertEqual((code, int(out.strip())), (0, V.FILE_LIMIT))
 
     def test_measure_reads_a_junit_report_the_run_writes(self):
         """A junit budget reads the report its command writes (to an ignored path); an old report never counts."""

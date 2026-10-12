@@ -98,6 +98,8 @@ right in the first place. Read a budget's command before you decide it.
 - **Exit codes:** any exit code is fine as long as the output has the number (many tools exit 1 when they find
   something). Add `--exit 0` if another exit code means the tool broke.
 - Time limit: 120 seconds by default (`--timeout`, at most 600).
+- Size limits: the command is stopped once its output passes 5 MB, and on Linux and macOS it can't write any file
+  larger than 1 GB (a build that needs bigger files can't be a budget's command).
 
 ## Fields in `.story-gate/budgets.json`
 

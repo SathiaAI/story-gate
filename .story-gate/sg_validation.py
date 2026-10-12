@@ -138,11 +138,21 @@ def fingerprint_of(state):
     return h.hexdigest()[:16]
 
 
+FILE_LIMIT = 1 << 30  # bytes: the largest file a measuring command may write (Linux and macOS)
+
+
+def _file_limit():
+    """In the measuring command's process, before it starts: the system refuses any file write past FILE_LIMIT."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT, FILE_LIMIT))
+
+
 def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
     """Run argv without a shell in root for at most `limit` seconds; the whole process tree ends with it.
     Returns (exit code or None, the last `keep` bytes of output as text, total output bytes, note). Output goes to a file,
-    not a pipe, so a server the command leaves running can't hold the run open. With max_bytes, the command is stopped
-    as soon as its output passes that size (it can't fill the disk). Shared by scenarios and measures."""
+    not a pipe, so a server the command leaves running can't hold the run open. With max_bytes, the output is checked
+    every 50 ms and the command stopped once it passes that size; on Linux and macOS the system also refuses any file the
+    command writes past FILE_LIMIT, a hard bound on the disk it can fill. Shared by scenarios and measures."""
     argv = list(argv)
     exe = shutil.which(argv[0], path=os.environ.get("PATH")) if not os.path.dirname(argv[0]) else None
     if exe:
@@ -150,12 +160,17 @@ def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
     out, code, note, size = "", None, "", 0
     try:
         kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        if max_bytes and os.name != "nt":
+            kw["preexec_fn"] = _file_limit
         with tempfile.TemporaryFile() as buf:
             p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=buf, stderr=subprocess.STDOUT, **kw)
             end = time.monotonic() + limit
             while True:
+                left = max(0.0, end - time.monotonic())
                 try:
-                    code = p.wait(timeout=0.2 if max_bytes else max(0.0, end - time.monotonic()))
+                    code = p.wait(timeout=min(0.05, left) if max_bytes else left)
+                    if max_bytes and time.monotonic() > end:  # finished after the time limit: no credit
+                        code, note = None, "stopped after %d seconds (timeout)" % limit
                     break
                 except subprocess.TimeoutExpired:
                     if max_bytes and os.fstat(buf.fileno()).st_size > max_bytes:
