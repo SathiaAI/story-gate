@@ -9142,8 +9142,12 @@ class TestBudgets(Base):
             beat = self.repo.parent / (self.repo.name + "-beat"); self.addCleanup(lambda: beat.unlink() if beat.exists() else None)
             child = "import time\nwhile True:\n    open(%r, 'a').write('x'); time.sleep(0.05)" % str(beat)
             for extra in ({}, {"max_bytes": 100}):  # timeout, with and without the output check: the command's children stop too
+                if beat.exists():
+                    beat.unlink()
                 V.execute([PY, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); time.sleep(30)" % child],
                           str(self.repo), 1, **extra)
+                n = beat.stat().st_size if beat.exists() else 0
+                self.assertGreater(n, 0, extra)  # this run's child really started and wrote
                 time.sleep(0.4); n = beat.stat().st_size; time.sleep(0.5)
                 self.assertEqual(beat.stat().st_size, n, extra)
             probe = ("import resource, sys; sys.path.insert(0, %r); import sg_validation as V\n"
