@@ -2709,6 +2709,12 @@ class TestPinnedHooks(RuntimeFixture):
         self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
         out, notes = self.smudge_json({"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}})
         self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        line_pinned = {"project_hooks_allowed": [{"command": self.CHECK + " x", "pins": ["scripts/check.sh"]}]}
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}}, line_pinned)
+        self.assertEqual(out, {}); self.assertEqual(notes, [self.CHECK + " x"])  # pinned in full, but can't be wrapped
+        accepted = {"project_hooks_allowed": [{"command": self.CHECK + " x", "runs_repo_code": "accepted"}]}
+        kept = {"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}}
+        self.assertEqual(self.smudge_json(kept, accepted), (kept, []))  # a code owner accepted the full line
         out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": [["nested"]]}}})
         self.assertEqual(out, {})  # unknown argument shape: dropped
         keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"]}}}
@@ -2732,6 +2738,7 @@ class TestPinnedHooks(RuntimeFixture):
     def test_local_policy_ref_without_consent_is_not_a_policy_source(self):
         """An enrollment whose policy ref is a local branch (no allow_local_policy) must not select the policy commit for
         pinning or hook filtering: sg_pin.policy and sg_guard.approved_for fail closed like gate.py's policy_json."""
+        self.setup_main(["echo ok"], [])  # the default branch has a settings file approved_for could otherwise return
         P = self.pin_module()
         sys.path.insert(0, str(SRC))
         try:
@@ -2741,7 +2748,9 @@ class TestPinnedHooks(RuntimeFixture):
             sys.path.remove(str(SRC))
         top = str(self.repo)
         local = {"toplevel": top, "identity": "x", "enrolled": True, "policy_ref": "main"}
-        with patch.object(P.T, "enrollment", lambda t: dict(local)), patch.object(G.T, "enrollment", lambda t: dict(local)):
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, capture_output=True, text=True, check=True).stdout.strip()
+        with patch.object(P.T, "enrollment", lambda t: dict(local)), patch.object(G.T, "enrollment", lambda t: dict(local)), \
+                patch.object(G.T, "policy_commit", lambda t, r: head):  # even when the local ref resolves
             self.assertEqual(P.policy(top), ("main", None, {}))
             self.assertEqual(G.approved_for(top, ".claude/settings.json"), (None, []))
         remote = dict(local, policy_ref="origin/main")
