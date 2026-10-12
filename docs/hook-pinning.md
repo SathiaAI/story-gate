@@ -27,7 +27,7 @@ Anything story-gate can't read with certainty is **blocked**, never plain:
 - **Wrappers:** `env`, `time`, `xargs`.
 - **Environment settings:** `VAR=...`.
 - **Code given inline:** `-c`, `-e`, `-m`.
-- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`.
+- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`, `docker compose` / `docker build`.
 - **Shell features:** pipes, `&&`, `$VARS`.
 - **Repository paths hidden inside options.**
 
@@ -48,7 +48,8 @@ In `.story-gate/config.json` **on the default branch** (a branch can't approve i
 - Pinned commands must be simple: a program, then plain words and paths. Use forward slashes.
 
 **MCP servers** (`command` plus `args`, `env`, `cwd`) are checked as the whole line they run. Environment values count
-too, unless they are a reference to your own variable (`${GITHUB_TOKEN}`), a number, `true`/`false` or a web address.
+too, unless they are only a reference to one of your own variables (`${GITHUB_TOKEN}`; not the project folder).
+Any literal value counts, even `1` or `true`: in a variable like `PATH` it names a folder.
 So `{"command": "node", "args": ["server.js"], "env": {"NODE_OPTIONS": "--require ./x.js"}}` is checked as
 `'NODE_OPTIONS=--require ./x.js' node server.js`, and a working folder adds `cd <folder> && ` in front. Such lines can't be
 pinned (the runner can't carry arguments), so a server that uses repository code runs only if a code owner accepts that

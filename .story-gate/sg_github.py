@@ -206,8 +206,9 @@ def reviewed_by(ctx, token, reviewers):
                    if r.get("commit_id") == ctx["head_sha"] and ((r.get("user") or {}).get("login", "").lower().replace("[bot]", "")) in want})
 
 
-def protection(repo, branch, token):
-    """Best-effort read of the rules that apply to the base branch. -> (enforced: bool, missing: [str])."""
+def protection(repo, branch, token, check=None):
+    """Best-effort read of the rules that apply to the base branch. -> (enforced: bool, missing: [str]). `check` is the
+    name this repository's workflow reports (ci_check_name); without it either story-gate check name counts."""
     st, rules, _ = call("GET", "/repos/%s/rules/branches/%s" % (repo, urllib.parse.quote(branch, safe="")), token)
     if st != 200 or not isinstance(rules, list):
         return False, ["could not read branch rules (HTTP %s)" % st]
@@ -226,7 +227,9 @@ def protection(repo, branch, token):
             missing.append("approval of the most recent push is not required")
         if int(p.get("required_approving_review_count") or 0) < 1:
             missing.append("no approving review is required")
-    if not {"story-gate", "story-gate / story-gate"} & set(checks):  # copied workflow / reusable workflow check names
+    if check and check not in checks:  # a rule on the other name waits for a check this workflow never reports
+        missing.append(f"the story-gate check is not a required status check (this repository's workflow reports `{check}`)")
+    elif not check and not {"story-gate", "story-gate / story-gate"} & set(checks):  # copied / reusable workflow names
         missing.append("the story-gate check is not a required status check")
     return not missing, missing
 

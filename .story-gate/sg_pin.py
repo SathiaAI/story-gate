@@ -26,9 +26,11 @@ import sg_trust as T
 RUNNERS = {"npm", "npx", "yarn", "pnpm", "bun", "bunx", "make", "just", "task", "gradle", "gradlew", "mvn", "mvnw", "rake",
            "bundle", "poetry", "uv", "uvx", "pipenv", "tox", "nox", "cargo", "go", "deno", "dotnet", "composer", "pre-commit",
            "lefthook", "husky", "turbo", "nx"}  # run code chosen by repository files (package.json, Makefile, ...)
-CONFIG_LOADERS = {"pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
+CONFIG_LOADERS = {"docker-compose", "podman-compose", "pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
                   "babel", "gulp", "grunt", "rspec", "phpunit", "playwright", "cypress", "stylelint", "commitlint", "lint-staged",
                   "tsx", "ts-node", "nodemon", "rails", "django-admin"}  # load code from repository config (conftest.py, *.config.js)
+CONTAINER_TOOLS = {"docker", "podman", "nerdctl"}
+CONTAINER_CONFIG_VERBS = {"compose", "build", "buildx", "bake"}  # subcommands that read compose.yaml, a Dockerfile, ...
 WRAPPERS = {"env", "time", "nice", "exec", "command", "sudo", "doas", "xargs", "nohup", "stdbuf", "timeout", "caffeinate",
             "start", "call"}  # run another program named later in the line
 INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "py", "pythonw", "node", "deno", "bun", "ruby",
@@ -125,6 +127,9 @@ def analyse(cmd, top, sha):
     if head in WRAPPERS or head in RUNNERS or head in CONFIG_LOADERS:
         info["runner"] = True
         info["reasons"].append("%s runs code chosen by repository files" % head)
+    elif head in CONTAINER_TOOLS and CONTAINER_CONFIG_VERBS & {t.lower() for t in tokens[1:]}:
+        info["runner"] = True  # compose.yaml / Dockerfile / bake files are read from the working folder by default
+        info["reasons"].append(f"{head} reads its configuration from repository files")
     interp = head in INTERPRETERS or bool(re.match(r"^python\d", head))
     if interp:
         if any(t.lower() in CODE_FLAGS or re.match(r"^-[a-z]*[cem]$", t.lower()) for t in tokens[1:]):
@@ -248,8 +253,17 @@ def _walk_commands(data, fn):
 
 
 INVOCATION_KEYS = ("args", "env", "cwd", "envFile", "env_file")
-# env values that can't name code: a reference to your own variable, a number or boolean, a web address
-SAFE_ENV_VALUE = re.compile(r"^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|-?[0-9]+(?:\.[0-9]+)?|true|false|https?://[^\s]*)$", re.IGNORECASE)
+# the only env value that can't name repository code: a reference to one of your own variables (a literal, even `true`
+# or `1`, can be a folder name in PATH-like variables; project-folder variables point into the repository)
+SAFE_ENV_VALUE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+
+
+def _safe_env_value(v):
+    """True only for `$VAR` / `${VAR}` naming a variable that can't point into the repository: not a project,
+    workspace or current folder (`${workspaceFolder}`, `$PWD`), nor any folder- or path-like name."""
+    m = SAFE_ENV_VALUE.match(v)
+    name = m and (m.group(1) or m.group(2))
+    return bool(name) and not re.search(r"project|workspace|pwd|cwd|root|dir|folder|path|file", name, re.IGNORECASE)
 
 
 def invocation_line(cmd, entry):
@@ -266,7 +280,7 @@ def invocation_line(cmd, entry):
     if cwd is not None and not isinstance(cwd, str):
         return None
     line = f"{cmd} {shlex.join(args)}" if args else cmd
-    risky = [f"{k}={v}" for k, v in sorted(env.items()) if not SAFE_ENV_VALUE.match(v)]
+    risky = [f"{k}={v}" for k, v in sorted(env.items()) if not _safe_env_value(v)]
     if risky:
         line = f"{shlex.join(risky)} {line}"
     if cwd is not None:

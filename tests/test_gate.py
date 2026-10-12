@@ -1,4 +1,4 @@
-import base64, json, os, shutil, subprocess, sys, tempfile, time, types, unittest
+import base64, hashlib, json, os, shutil, subprocess, sys, tempfile, time, types, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -851,7 +851,7 @@ class TestStoryGateOnlyPullRequests(Base):
         G.acceptance = lambda ctx, token, owners, approvers=(): seen.append(1) or (
             {"accepted": True, "approver": "paul", "why": "approved by paul"} if accepted
             else {"accepted": False, "why": "waiting for a code owner (paul) to approve the latest commit abc1234"})
-        G.protection = lambda repo, branch, token: (True, [])
+        G.protection = lambda repo, branch, token, check=None: (True, [])
         import io, contextlib
         out = io.StringIO()
         # like run(): never read the CI runner's own pull request (GitHub sets GITHUB_BASE_REF on pull_request runs)
@@ -1090,6 +1090,10 @@ class TestGitHubLogic(unittest.TestCase):
                 G.call = lambda *a, rules=rules, **k: (200, rules, {})
                 _, missing = G.protection("o/r", "main", "t")
                 self.assertEqual("the story-gate check is not a required status check" in missing, not ok, missing)
+        rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "story-gate"}]}}]
+        G.call = lambda *a, **k: (200, rules, {})
+        self.assertTrue(any("story-gate / story-gate" in m for m in G.protection("o/r", "main", "t", "story-gate / story-gate")[1]))
+        self.assertFalse(any("status check" in m for m in G.protection("o/r", "main", "t", "story-gate")[1]))
 
     def test_ruleset_shape(self):
         """Require human approval without extra AI approval and keep the importable ruleset in sync."""
@@ -1832,6 +1836,16 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertTrue(kf.exists()); self.assertIn(f"Kept your local judge key: {kf}", r.stdout)
         self.assertNotIn("sk-or-test", r.stdout + r.stderr)
 
+    def test_uninstall_moves_a_judge_key_kept_inside_the_runtime(self):
+        """A key file under the runtime folder (STORY_GATE_ENV_FILE) is moved out before the runtime is removed."""
+        rt = self.home / "runtime"; self.assertTrue(rt.is_dir())
+        kf = rt / "my.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        self.assertFalse(rt.exists())
+        kept = [p for p in self.home.rglob("judge.env*") if p.read_text() == "OPENROUTER_API_KEY=sk-or-test\n"]
+        self.assertEqual(len(kept), 1, r.stdout); self.assertIn("Moved your local judge key", r.stdout)
+        self.assertNotIn("sk-or-test", r.stdout + r.stderr)
+
     def test_invalid_user_json_is_never_clobbered(self):
         p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
         r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
@@ -2011,16 +2025,21 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertTrue(G.is_filtered_form(json.dumps(branch).encode(), out, approved=approved))
 
     def test_user_edit_to_a_guarded_setting_is_not_a_filtered_form(self):
-        """The clean filter must keep an edit to a guarded setting, not restore the stored copy (git status must show it)."""
+        """With a note of what the filter wrote, the clean filter keeps an edit to a guarded setting instead of restoring the
+        stored copy. Without a note (a copy from before notes existed) it can't tell an edit from an old approval: fail closed."""
         G = self.guard()
         stored = json.dumps({"permissions": {"allow": ["a"]}, "theme": "x"}).encode()
         edited = json.dumps({"permissions": {"allow": ["a", "b"]}, "theme": "x"}).encode()
-        self.assertFalse(G.is_filtered_form(stored, edited, approved=stored))
-        self.assertFalse(G.is_filtered_form(stored, edited))
-        self.assertTrue(G.is_filtered_form(stored, stored, approved=stored))
+        wrote = {"sha": hashlib.sha256(stored).hexdigest(), "guarded": {k: json.loads(stored).get(k) for k in G.GUARDED_KEYS}}
+        self.assertFalse(G.is_filtered_form(stored, edited, approved=stored, smudged=wrote))
+        self.assertFalse(G.is_filtered_form(stored, edited, smudged=wrote))
+        self.assertTrue(G.is_filtered_form(stored, edited, approved=stored))  # no note: treated as the filter's copy
+        self.assertTrue(G.is_filtered_form(stored, stored, approved=stored, smudged=wrote))
         listed = json.dumps(["not", "settings"]).encode()  # a branch that stored a non-object
         self.assertFalse(G.is_filtered_form(listed, edited, approved=stored))  # your edit: kept
         self.assertTrue(G.is_filtered_form(listed, stored, approved=stored))  # the approved copy the filter wrote
+        older = json.dumps({"permissions": {"allow": ["old"]}}).encode()  # written under an approval since revoked
+        self.assertTrue(G.is_filtered_form(listed, older, approved=stored, smudged={"sha": hashlib.sha256(older).hexdigest()}))
         # our own filtered copy (guarded value is the approved one, an entry was dropped) is still recognised
         branch = json.dumps({"permissions": {"allow": ["branch"]}, "apiKeyHelper": "evil"}).encode()
         approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
@@ -2047,6 +2066,16 @@ class TestRepoHookGuard(RuntimeFixture):
         os.utime(self.repo / ".claude/settings.json")
         self.git("add", ".claude/settings.json")
         self.assertEqual(self.git("diff", "--cached").stdout, "")  # neither X nor anything else is staged
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps(dict(x, theme="dark"), indent=2))  # an edit elsewhere in the stale copy
+        self.git("add", ".claude/settings.json")
+        staged = self.git("diff", "--cached").stdout
+        self.assertIn('"theme"', staged); self.assertNotIn('"x"', staged)  # the edit goes in, the revoked X doesn't
+        self.git("reset", "-q"); f.write_text(json.dumps(x, indent=2))
+        shutil.rmtree(self.repo / ".git/story-gate-smudged")  # no note: can't tell X from an edit, so it's not staged
+        os.utime(f)
+        r = self.git("add", ".claude/settings.json")
+        self.assertEqual(self.git("diff", "--cached").stdout, ""); self.assertIn("git checkout --", r.stderr)
 
     def test_editing_a_guarded_setting_on_the_default_branch_can_be_committed(self):
         """On the default branch, a user's edit to a guarded setting survives the clean filter and is staged."""
@@ -2754,8 +2783,8 @@ class TestPinnedHooks(RuntimeFixture):
 
     def test_mcp_env_cwd_and_env_files_are_part_of_what_is_checked(self):
         """env values that could name code, a working folder, or an env file make an MCP entry run repository code
-        the pin check never saw: dropped unless a code owner accepted that exact line. Plain variable references,
-        numbers and web addresses don't count."""
+        the pin check never saw: dropped unless a code owner accepted that exact line. Only a reference to one of your
+        own variables (not the project folder) doesn't count."""
         for entry in ({"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}},
                       {"command": "node", "args": ["--version"], "env": {"NODE_OPTIONS": "--require ./pwn.js"}},
                       {"command": "echo", "args": ["hello"], "cwd": "tools"},
@@ -2764,12 +2793,28 @@ class TestPinnedHooks(RuntimeFixture):
             with self.subTest(entry=entry):
                 out, notes = self.smudge_json({"mcpServers": {"s": entry}})
                 self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
-        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"],
-                                     "env": {"TOKEN": "${GITHUB_TOKEN}", "PORT": "8080", "API": "https://api.example.com"}}}}
+        for env in ({"PATH": "true"}, {"PATH": "1"}, {"PATH": "http://bin"}, {"PYTHONPATH": "${CLAUDE_PROJECT_DIR}"},
+                    {"NODE_PATH": "$PWD"}, {"X": "${workspaceFolder}"}, {"PORT": "8080"}):  # literals can name a folder; project variables point inside
+            with self.subTest(env=env):
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "echo", "args": ["ok"], "env": env}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"TOKEN": "${GITHUB_TOKEN}", "HOME_DIR": "$HOME"}}}}
         self.assertEqual(self.smudge_json(keep), (keep, []))
         risky = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}}}}
         accepted = {"project_hooks_allowed": [{"command": "LD_PRELOAD=./evil.so echo hello", "runs_repo_code": "accepted"}]}
         self.assertEqual(self.smudge_json(risky, accepted), (risky, []))  # the code owner accepted exactly this line
+
+    def test_container_tools_that_read_repository_config_are_not_plain(self):
+        """docker compose / build read compose.yaml or a Dockerfile from the working folder even with no file named, so
+        a branch could change what runs; a plain `docker run` of an image uses nothing from the repository."""
+        for args in (["compose", "run", "srv"], ["--context", "x", "compose", "up"], ["build", "."], ["buildx", "bake"]):
+            with self.subTest(args=args):
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker-compose", "args": ["up"]}}})
+        self.assertEqual(out, {})
+        keep = {"mcpServers": {"s": {"command": "docker", "args": ["run", "-i", "--rm", "acme-mcp"]}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))
 
     def test_our_runner_command_with_extra_arguments_is_dropped(self):
         """This computer's runner call never comes with args or env; one that does is not ours to keep."""
@@ -2783,6 +2828,7 @@ class TestPinnedHooks(RuntimeFixture):
         """story-gate's own hook commands (exactly this computer's launcher) are kept as they are by smudge and left out
         of doctor's list, for every tool's hook format; otherwise the filter would switch the gate itself off."""
         P = self.pin_module()
+        sys.path.insert(0, str(SRC)); self.addCleanup(sys.path.remove, str(SRC))  # launcher_path() imports lazily
         py = "/usr/bin/python3" if os.name != "nt" else "C:/Python/python.exe"
         launcher = str(P.T.launcher_path())
         for client, data in P.T.hook_entries(py, launcher).items():
@@ -7151,7 +7197,7 @@ class TestTrackerLinear(Base):
         with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf), \
                 mock.patch.object(G, "pr_context", return_value=ctx), \
                 mock.patch.object(G, "acceptance", side_effect=lambda c_, tok, o, a=(): seen.setdefault("acceptance", tok) and {"accepted": False, "why": "x"}), \
-                mock.patch.object(G, "protection", side_effect=lambda r, b, tok: seen.setdefault("protection", tok) and (True, [])), \
+                mock.patch.object(G, "protection", side_effect=lambda r, b, tok, check=None: seen.setdefault("protection", tok) and (True, [])), \
                 mock.patch.object(G, "label_added_by", return_value=None), \
                 mock.patch.object(TR, "live_status", side_effect=lambda *a: seen.setdefault("tracker", a[-1]) and ("unchanged", "same")):
             g.cmd_ci()
