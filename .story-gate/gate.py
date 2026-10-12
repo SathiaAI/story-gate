@@ -432,9 +432,27 @@ def sdir(sid):
     return STORIES / sid
 
 
+# Once pull request code has run as the throwaway account (CI), the checkout holds files that code wrote. story-gate's
+# own git commands then read no global or system configuration, never run hooks, fsmonitor, external diffs or
+# submodule commands, and so never run anything that code chose (as story-gate's own account).
+GIT_LOCKED = False
+GIT_LOCK_ARGS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull, "-c", "diff.external=", "-c",
+                 "submodule.recurse=false", "-c", "diff.ignoreSubmodules=all", "-c", "status.submoduleSummary=false", "-c",
+                 "core.untrackedCache=false", "-c", "protocol.allow=never")
+
+
+def git_env():
+    """The environment for story-gate's own git commands (locked down once pull request code ran; see GIT_LOCKED)."""
+    if not GIT_LOCKED:
+        return None
+    return dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+
+
 def git(*args):
     try:
-        r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        args = (GIT_LOCK_ARGS + args) if GIT_LOCKED else args
+        r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                           env=git_env())
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -1374,7 +1392,10 @@ def ci_account(c, protect):
     if not why:
         try:
             runtime = [str(HERE)] if not str(HERE.resolve()).startswith(str(ROOT.resolve()) + os.sep) else []  # CI: $RUNNER_TEMP/sg
-            return I.Account(str(ROOT), [str(p) for p in protect] + runtime).setup(), ""
+            acc = I.Account(str(ROOT), [str(p) for p in protect] + runtime).setup()
+            global GIT_LOCKED
+            GIT_LOCKED = True  # from here on, the checkout holds what pull request code wrote
+            return acc, ""
         except I.IsolationError as e:
             why = str(e)
     return None, why
@@ -1732,6 +1753,9 @@ def work_state():
         if is_record(n):
             continue
         f = ROOT / n
+        if GIT_LOCKED:  # files the pull request's code wrote: never follow a link, open a pipe or run git inside them
+            state[n] = locked_digest(f)
+            continue
         mode = b"x" if f.is_file() and os.access(f, os.X_OK) else b"-"  # executable bit is part of the evidence
         if f.is_file():
             body = hashlib.sha256(f.read_bytes()).digest()
@@ -1747,6 +1771,31 @@ def work_state():
             body = b"DELETED"
         state[n] = mode + body
     return state
+
+
+def locked_digest(f):
+    """Evidence for one path without trusting it (GIT_LOCKED): a link's target text, a file's content, a folder's
+    files (each the same way, no git), anything else only its kind. Nothing is followed or executed."""
+    import stat
+    try:
+        st = os.lstat(f)
+    except OSError:
+        return b"-DELETED"
+    if stat.S_ISLNK(st.st_mode):
+        return b"-LINK:" + os.readlink(f).encode("utf-8", "replace")
+    if stat.S_ISREG(st.st_mode):
+        import sg_isolate as I
+        body = I.read_regular(str(f), 1 << 30)
+        return (b"x" if st.st_mode & 0o111 else b"-") + (hashlib.sha256(body).digest() if body is not None else b"UNREADABLE")
+    if stat.S_ISDIR(st.st_mode):
+        h = hashlib.sha256()
+        for top, dirs, files in os.walk(f):  # never follows links
+            dirs.sort()
+            for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(top, d))]):
+                p = os.path.join(top, name)
+                h.update(os.path.relpath(p, f).encode("utf-8", "replace") + b"\0" + locked_digest(p))
+        return b"-DIR:" + h.digest()
+    return b"-SPECIAL"
 
 
 def is_record(path):
@@ -2181,8 +2230,8 @@ def resolve_base(base):
                     mb = git("merge-base", "HEAD", up).strip()
                 else:  # no upstream: compare with the commit where the active story started, so committed work stays visible
                     act = rd(ACTIVE).split()
-                    if len(act) >= 3 and subprocess.run(["git", "merge-base", "--is-ancestor", act[2], "HEAD"], cwd=ROOT,
-                                                        capture_output=True).returncode == 0:
+                    if len(act) >= 3 and subprocess.run(["git", *(GIT_LOCK_ARGS if GIT_LOCKED else ()), "merge-base", "--is-ancestor", act[2], "HEAD"],
+                                                        cwd=ROOT, capture_output=True, env=git_env()).returncode == 0:
                         mb = act[2]
             return mb or b
     raise RuntimeError("base branch %r not found (set base_branch in .story-gate/config.json)" % base)

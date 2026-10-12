@@ -9627,3 +9627,28 @@ class TestCiIsolation(Base):
         (td / "scenarios.json").write_text(json.dumps({"results": {name: {"passed": True, "spec": "s"}}}))
         run(self.repo, "ci", "--tests", str(td), env=env)
         self.assertIs(json.loads((sd / "scenario_results.json").read_text())["results"][name]["isolated"], False)
+
+    def test_after_pull_request_code_ran_story_gates_git_trusts_nothing_it_wrote(self):
+        """GIT_LOCKED: git reads no global or system config and runs no hook, fsmonitor, external diff or submodule
+        command; work_state reads links, pipes and nested repositories without following or running anything."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.addCleanup(setattr, g, "GIT_LOCKED", False)
+        g.GIT_LOCKED = True
+        env = g.git_env()
+        self.assertEqual((env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"]), ("1", os.devnull))
+        for opt in ("core.fsmonitor=false", "core.hooksPath=" + os.devnull, "diff.external=", "diff.ignoreSubmodules=all"):
+            self.assertIn(opt, g.GIT_LOCK_ARGS)
+        self.assertTrue(g.git("rev-parse", "HEAD").strip())  # still works on the checkout itself
+        (self.repo / "data.txt").write_text("x")
+        self.assertEqual(g.locked_digest(self.repo / "data.txt")[1:], hashlib.sha256(b"x").digest())
+        if os.name != "nt":
+            os.symlink("/etc/passwd", self.repo / "link")
+            self.assertEqual(g.locked_digest(self.repo / "link"), b"-LINK:/etc/passwd")
+            os.mkfifo(self.repo / "pipe")
+            self.assertEqual(g.locked_digest(self.repo / "pipe"), b"-SPECIAL")  # never opened, so it can't hang the job
+            nested = self.repo / "evil"; nested.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+            (nested / "f").write_text("1")
+            a = g.locked_digest(nested); (nested / "f").write_text("2")
+            self.assertTrue(a.startswith(b"-DIR:")); self.assertNotEqual(a, g.locked_digest(nested))
+            self.assertIn("evil/", g.work_state())  # recorded without running git inside it

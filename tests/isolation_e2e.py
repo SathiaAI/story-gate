@@ -73,6 +73,9 @@ sudo -n true 2>/dev/null && echo SUDO-WORKED || echo sudo-denied
 mv .git .git-moved 2>/dev/null && echo GIT-REPLACED || echo git-kept
 ln -s /tmp .git 2>/dev/null && echo GIT-LINKED || true
 cat "$SG_SECRET_FILE" 2>/dev/null && echo SECRET-READ || echo secret-unreadable
+mkdir -p evil && (cd evil && git init -q && printf '#!/bin/sh\nid -u > "%s/fsmonitor-ran"\n' "$SG_MARK_DIR" > hook.sh && chmod +x hook.sh && \
+  git config core.fsmonitor "$PWD/hook.sh" && git config core.hooksPath "$PWD" && git config diff.external "$PWD/hook.sh" && \
+  git config alias.status '!sh hook.sh') && echo nested-repo-planted
 ''' + "python3 attack.py " + " ".join(targets) + "\nexit 1\n")
     tests.chmod(0o755)
     (repo / ".gitignore").write_text("reports/\n")
@@ -100,12 +103,16 @@ cat "$SG_SECRET_FILE" 2>/dev/null && echo SECRET-READ || echo secret-unreadable
     gate_bytes = (rt / "gate.py").read_bytes()
     env = dict(os.environ, STORY_GATE_ROOT=str(repo), STORY_GATE_ISOLATE="1", STORY_GATE_ID="SAT-1",
                SG_E2E_SECRET_TOKEN="do-not-leak", SG_RUNNER_UID=str(os.getuid()))
+    gcfg = work / "runner-gitconfig"  # like GitHub's runners: git trusts every folder, whoever owns it
+    gcfg.write_text("[safe]\n\tdirectory = *\n[user]\n\temail = e@e\n\tname = e\n")
+    env["GIT_CONFIG_GLOBAL"] = str(gcfg)
     for k in ("GITHUB_TOKEN", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF"):
         env.pop(k, None)  # this throwaway repository is compared with its own main, not the pull request's
     env["PATH"] = env.get("PATH", "")
     # SG_RUNNER_UID isn't on the allowlist, so pass it through the test command itself
     secret = work / "runner-secret.txt"; secret.write_text("do-not-leak"); os.chmod(secret, 0o600)
-    cfg["test_command"] = "SG_RUNNER_UID=%d SG_SECRET_FILE=%s ./tests.sh" % (os.getuid(), secret)
+    mark = Path(tempfile.mkdtemp(prefix="sg-mark-")); os.chmod(mark, 0o1777)  # where a hook run as anyone could leave a trace
+    cfg["test_command"] = "SG_RUNNER_UID=%d SG_SECRET_FILE=%s SG_MARK_DIR=%s ./tests.sh" % (os.getuid(), secret, mark)
     (repo / ".story-gate/config.json").write_text(json.dumps(cfg))
     git(repo, "commit", "-qam", "uid")
     out.mkdir(); os.chmod(out, 0o777)  # as a careless runner set-up might leave it: story-gate must lock it down itself
@@ -116,13 +123,15 @@ cat "$SG_SECRET_FILE" 2>/dev/null && echo SECRET-READ || echo secret-unreadable
     tail = res.get("output_tail", "")
     check(res.get("isolated") is True, "tests ran as a separate account")
     check(res.get("exit_code") == 1 and not res.get("forged"), "the real exit code (1) was kept, not the forged 0")
-    for word in ("uid-ok", "env-ok", "home-ok", "server-ok", "sudo-denied", "git-kept", "secret-unreadable"):
+    for word in ("uid-ok", "env-ok", "home-ok", "server-ok", "sudo-denied", "git-kept", "secret-unreadable", "nested-repo-planted"):
         check(word in tail, "honest work and limits inside the run: %s" % word)
     for bad in ("SUDO-WORKED", "GIT-REPLACED", "GIT-LINKED", "SECRET-READ", "do-not-leak"):
         check(bad not in tail, "the account could not: %s" % bad)
     check((out / "junit.xml").is_file() and b"forged" not in (out / "junit.xml").read_bytes(), "the JUnit report was read and not forged")
     check(git_cfg.read_bytes() == cfg_hash, ".git/config was not changed")
     check((rt / "gate.py").read_bytes() == gate_bytes, "story-gate's runtime copy was not changed")
+    ran = mark / "fsmonitor-ran"
+    check(not ran.exists() or ran.stat().st_uid != os.getuid(), "story-gate's git never ran a hook the pull request planted")
     sc = json.loads((out / "scenarios.json").read_text())
     check(sc.get("isolated") is True and "hostile" in sc.get("results", {}), "the scenario ran isolated and was recorded")
     left = subprocess.run(["pgrep", "-f", "attack.py"], capture_output=True, text=True).stdout.split()
