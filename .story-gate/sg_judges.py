@@ -79,11 +79,51 @@ def available(c):
     return s["provider"] != "none" and bool(env_key(s["key_env"])) and bool(s["url"])
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the Authorization header (the key) to wherever it points."""
+
+    def redirect_request(self, *args, **kwargs):
+        """Refuse every redirect (return None), so urllib raises instead of following it."""
+        return
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+_LOCAL_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))  # never via a proxy
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def endpoint_error(url):
+    """None when `url` may be sent a key: https://, or http:// to this computer (a local model). Otherwise why not."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+        host = u.hostname
+    except ValueError:
+        return "it isn't a valid address"
+    if u.username is not None or u.password is not None:  # user@host hides the real host from a quick read
+        return "addresses with a user name or password in them aren't allowed"
+    if u.scheme == "https" and host:
+        return None
+    if u.scheme == "http" and host in LOOPBACK:
+        return None
+    return "only https:// addresses (or http:// on localhost) are allowed"
+
+
+def open_url(req, timeout):
+    """urlopen that follows no redirect, for requests that carry a key. A request to this computer never goes through a
+    proxy (an http:// one would see the key in clear text)."""
+    host = urllib.parse.urlsplit(req.full_url).hostname
+    return (_LOCAL_OPENER if host in LOOPBACK else _OPENER).open(req, timeout=timeout)
+
+
 def _post(url, key, body, timeout):
+    """POST JSON to the judge with its key, only to an allowed address and without following redirects. -> parsed reply, or {error}."""
+    why = endpoint_error(url)
+    if why:  # the key never goes to an address that isn't encrypted or that we can't name
+        return {"error": f"judge address refused: {why}"}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
         "Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "story-gate"})
     try:
-        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+        return json.loads(open_url(req, timeout).read().decode())
     except urllib.error.HTTPError as e:
         return {"error": "HTTP %s %s" % (e.code, e.read().decode(errors="ignore")[:300])}
     except Exception as e:

@@ -234,13 +234,15 @@ def policy_ref(G):
 
 
 def read_local(G):
+    """This folder's .story-gate/config.json -> (path, text, parsed object); a missing file or anything but a JSON object is a SettingsError."""
     p = G.GATE / "config.json"
     if not p.is_file():
         raise SettingsError("story-gate isn't set up in this folder (no %s). Run `story-gate init` first" % CONFIG)
     text = p.read_text(encoding="utf-8-sig")
     try:
         doc = json.loads(text)
-        assert isinstance(doc, dict)
+        if not isinstance(doc, dict):  # not assert: python -O would skip it
+            raise TypeError("not a JSON object")
     except Exception:
         raise SettingsError("%s is unreadable JSON. Fix it by hand first (or restore it with git)" % CONFIG)
     return p, text, doc
@@ -361,7 +363,8 @@ def open_pr(G, key, value, remove):
     try:
         text = base64.b64decode(f.get("content") or "").decode("utf-8-sig")
         doc = json.loads(text)
-        assert isinstance(doc, dict)
+        if not isinstance(doc, dict):  # not assert: python -O would skip it
+            raise TypeError("not a JSON object")
     except Exception:
         raise SettingsError("%s on %s is unreadable JSON. Fix it by hand in a pull request of its own" % (CONFIG, base))
     new = changed(doc, key, value, remove)

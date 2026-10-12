@@ -255,6 +255,52 @@ class TestInstallCI(Base):
         self.assertIn("nothing new delivered", run(self.repo, "publish").stdout)
         self.assertEqual(out.read_text().count("story_gate.started"), 1)  # no duplicates
 
+    def test_publish_webhook_refuses_an_unencrypted_address(self):
+        """A webhook sink pointed at plain http:// on another host fails (nothing sent) and is retried later, not skipped."""
+        run(self.repo, "start", "SAT-1")
+        self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
+        r = run(self.repo, "publish", env={"SG_TEST_HOOK": "http://169.254.169.254/latest/meta-data"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("webhook address refused", r.stdout); self.assertIn("sink webhook FAILED", r.stdout)
+
+    def test_publish_webhook_that_redirects_counts_as_failed(self):
+        """A webhook that answers with a redirect is not followed and the sink FAILS, so its events are sent again later."""
+        import http.server
+        import threading
+
+        hits = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            """Where the redirect points: records any request that reaches it."""
+            def do_GET(self):
+                """Record the hit."""
+                hits.append(self.path); self.send_response(200); self.end_headers()
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                """Stay quiet in test output."""
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        self.addCleanup(target.shutdown)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            """Answers every POST with a redirect to the target above."""
+            def do_POST(self):
+                """Redirect instead of accepting the event."""
+                self.send_response(302); self.send_header("Location", f"http://127.0.0.1:{target.server_port}/steal"); self.end_headers()
+
+            def log_message(self, *a):
+                """Stay quiet in test output."""
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        run(self.repo, "start", "SAT-1")
+        self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
+        r = run(self.repo, "publish", env={"SG_TEST_HOOK": f"http://127.0.0.1:{srv.server_port}/hook"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("sink webhook FAILED", r.stdout)
+        self.assertNotIn(str(target.server_port), r.stdout); self.assertNotIn(str(srv.server_port), r.stdout)  # no address in the log
+        self.assertEqual(hits, [])  # the redirect was never followed
+
 
 class TestHardening(Base):
     def test_traversal_and_gate_files_not_exempt(self):
@@ -2647,20 +2693,39 @@ class TestReleaseSignatures(unittest.TestCase):
             self.T.verify_release(self.rel, other)
 
     def test_release_archive_cannot_escape_its_folder(self):
+        """A downloaded archive whose entries point outside its folder is refused, and plain http:// downloads are refused."""
         import io, tarfile, urllib.request
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as t:
             info = tarfile.TarInfo("../../evil.txt"); payload = b"x"; info.size = len(payload)
             t.addfile(info, io.BytesIO(payload))
-        orig = urllib.request.urlopen
-        urllib.request.urlopen = lambda *a, **k: io.BytesIO(buf.getvalue())
+        handlers = []
+
+        class FakeOpener:
+            """Stands in for the download: returns the archive above."""
+            def open(self, *a, **k):
+                """Return the test archive instead of downloading."""
+                return io.BytesIO(buf.getvalue())
+        orig = urllib.request.build_opener
+        urllib.request.build_opener = lambda *h: handlers.extend(h) or FakeOpener()
         try:
             with self.assertRaises(self.T.TrustError):
                 self.T.fetch_release("https://example.invalid/r.tgz", self.d / "dl")
             with self.assertRaises(self.T.TrustError):
                 self.T.fetch_release("http://example.invalid/r.tgz", self.d / "dl")
         finally:
-            urllib.request.urlopen = orig
+            urllib.request.build_opener = orig
+        self.assertIn(self.T._HttpsOnlyRedirect, handlers)  # downloads follow redirects only to https
+
+    def test_release_download_follows_redirects_only_to_https(self):
+        """A release download may be redirected (GitHub sends it to a CDN), but never to a plain http:// address."""
+        import urllib.request
+        h = self.T._HttpsOnlyRedirect()
+        req = urllib.request.Request("https://github.com/o/r/releases/download/v1/r.tgz")
+        self.assertIsNotNone(h.redirect_request(req, None, 302, "Found", {}, "https://objects.githubusercontent.com/x"))
+        for bad in ("http://evil.example/x", "https:/evil.example/x", "httpsx://evil.example/x", "https:///x"):
+            with self.subTest(to=bad), self.assertRaises(self.T.TrustError):
+                h.redirect_request(req, None, 302, "Found", {}, bad)
 
     def test_fingerprint_matches_ssh_keygen(self):
         out = subprocess.run(["ssh-keygen", "-lf", str(self.d / "key.pub")], capture_output=True, text=True).stdout
@@ -8291,6 +8356,14 @@ class TestReviewLessons(unittest.TestCase):
         for text, phrase in checks:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+    def test_lesson_10_no_assert_for_checks(self):
+        """story-gate's code never uses assert for a check: python -O skips asserts, so the check would vanish."""
+        import ast
+        found = []
+        for f in sorted(SRC.glob("*.py")):
+            found += [f"{f.name}:{n.lineno}" for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
+        self.assertEqual(found, [])
 
     def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
         """Values GitHub fills in from the event, inputs or earlier steps reach the shell through `env:`, never inline in `run:`."""

@@ -346,7 +346,8 @@ def cfg():
     if text is not None:
         try:
             user = json.loads(text)
-            assert isinstance(user, dict)
+            if not isinstance(user, dict):  # not assert: python -O would skip it
+                raise TypeError("not a JSON object")
         except Exception as ex:
             raise ConfigError(".story-gate/config.json is unreadable (%s) - fix it; the gate fails closed until then" % ex.__class__.__name__)
         if e:  # the working tree may only tighten the default branch's policy
@@ -3295,6 +3296,7 @@ def cmd_audit():
 
 # ------------------------------------------------------------------ sinks
 def cmd_publish():
+    """`publish`: send new story events to the sinks configured in config.json (command, webhook, control-hub), each from where it left off."""
     c = cfg()
     lines = [l for l in rd(OUTBOX).splitlines() if l.strip()]
     sent_p = GATE / ".outbox.sent"
@@ -3312,15 +3314,20 @@ def cmd_publish():
                                    encoding="utf-8", errors="replace", capture_output=True, timeout=120)
                 ok = r.returncode == 0
             elif t == "webhook" and os.environ.get(s.get("url_env", "")):
+                hook = os.environ[s["url_env"]]
+                if J.endpoint_error(hook):
+                    raise RuntimeError(f"webhook address refused: {J.endpoint_error(hook)}")
                 for l in todo:
-                    urllib.request.urlopen(urllib.request.Request(os.environ[s["url_env"]], data=l.encode(), headers={"Content-Type": "application/json"}), timeout=30)
+                    J.open_url(urllib.request.Request(hook, data=l.encode(), headers={"Content-Type": "application/json"}), 30)
                 ok = True
             elif t == "control-hub" and os.environ.get(s.get("url_env", "")) and os.environ.get(s.get("key_env", "")):
                 ok = publish_control_hub(s, todo)
             else:
                 print("story-gate: sink %s not configured here, skipped" % t); continue
         except Exception as e:
-            print("story-gate: sink %s FAILED %r" % (t, e)); ok = False
+            # no addresses in the log: a webhook URL often carries its own secret (e.g. chat-app incoming webhooks)
+            reason = re.sub(r"[a-z][a-z0-9+.-]*://\S+", "<address>", str(e), flags=re.IGNORECASE)[:200]
+            print(f"story-gate: sink {t} FAILED ({type(e).__name__}: {reason})"); ok = False
         print("story-gate: sink %s %s (%d events)" % (t, "OK" if ok else "FAILED", len(todo)))
         if ok:
             sent[key] = len(lines); delivered += 1
@@ -3333,15 +3340,18 @@ def cmd_publish():
 
 
 def publish_control_hub(s, todo):
+    """Send events to a control-hub (Supabase REST) endpoint over https with its key; never follows a redirect. -> True on success."""
     url, key = os.environ[s["url_env"]].rstrip("/"), os.environ[s["key_env"]]
+    if J.endpoint_error(url):  # the key goes in the headers: never to an unencrypted or redirected address
+        raise RuntimeError(f"control-hub address refused: {J.endpoint_error(url)}")
     h = {"apikey": key, "Authorization": "Bearer " + key, "Content-Type": "application/json"}
     pid = None
     if s.get("project_slug"):
         q = urllib.request.Request(url + "/rest/v1/projects?select=id&slug=eq." + urllib.request.quote(s["project_slug"]), headers=h)
-        rows = json.loads(urllib.request.urlopen(q, timeout=30).read().decode())
+        rows = json.loads(J.open_url(q, 30).read().decode())
         pid = rows[0]["id"] if rows else None
     body = [{"project_id": pid, "event_type": e["event_type"], "actor": "story-gate", "payload": e} for e in map(json.loads, todo)]
-    r = urllib.request.urlopen(urllib.request.Request(url + "/rest/v1/events", data=json.dumps(body).encode(), headers=h, method="POST"), timeout=30)
+    r = J.open_url(urllib.request.Request(url + "/rest/v1/events", data=json.dumps(body).encode(), headers=h, method="POST"), 30)
     return 200 <= r.status < 300
 
 

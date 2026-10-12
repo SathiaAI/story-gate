@@ -13,6 +13,7 @@ Mistakes that reviewers kept finding in story-gate's own pull requests, and how 
 | 7 | **A one-person repository must be able to finish every flow.** GitHub never counts an approval from whoever opened a pull request. | Fixed: setup-repo waits for CODEOWNERS before the ruleset (#75); one author policy for every pull request story-gate opens (#76). |
 | 8 | **Running a setup command twice is safe, and one failed step doesn't stop the rest.** A random branch name opened a second CODEOWNERS pull request on a re-run; a refused pull request skipped the ruleset and Actions steps. | Pre-PR checklist; setup-repo uses one fixed branch and reports a failed step (#76). |
 | 9 | **Data from GitHub or a tracker can have any shape; an odd shape means "unknown, play safe", never a crash.** A non-numeric approval count would have stopped setup-repo; a non-object `parameters` would have crashed it. | Pre-PR checklist; `approval_required` treats an unreadable rule as "approval needed" (#76). |
+| 10 | **Checks raise errors, never `assert`; keys go only to https (or localhost) and never follow a redirect; XML is parsed with DTDs refused.** A security scan found `assert` used as a check (python -O removes it), urllib forwarding the Authorization header on redirect, and an XML parse that relied on a byte check. | Automatic: no `assert` in `.story-gate/` (`test_lesson_10_no_assert_for_checks`). Pre-PR checklist for the rest; `sg_judges.endpoint_error` / `open_url` and `sg_github._parse_xml_without_dtd` are the helpers to use. |
 
 Also learned the hard way:
 
