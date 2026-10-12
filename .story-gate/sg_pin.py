@@ -102,23 +102,18 @@ def _head(tok):
     return re.sub(r"\.(exe|cmd|bat|ps1|com)$", "", os.path.basename(tok.replace("\\", "/")).lower())
 
 
+def _relative_source(s):
+    """True for a bind-mount source inside the working folder: `.`, `./x`, `~`, or a relative path with a slash."""
+    return s in (".", "..") or s.startswith((".", "~")) or ("/" in s and not s.startswith("/") and not re.match(r"^[A-Za-z]:", s))
+
+
 def _mounts_working_folder(args):
-    """True when container arguments bind-mount a relative host folder (`-v .:/w`, `--mount type=bind,src=./x,...`).
-    A source without a slash is a named volume; an absolute one is this computer's own folder."""
-    srcs = []
-    for i, a in enumerate(args):
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        if a in ("-v", "--volume"):
-            srcs.append(nxt.split(":", 1)[0])
-        elif a.startswith("--volume="):
-            srcs.append(a.split("=", 1)[1].split(":", 1)[0])
-        elif a.startswith("-v") and len(a) > 2:
-            srcs.append(a[2:].split(":", 1)[0])
-        elif a == "--mount" or a.startswith("--mount="):
-            spec = nxt if a == "--mount" else a.split("=", 1)[1]
-            srcs += [kv.split("=", 1)[1] for kv in spec.split(",") if kv.split("=", 1)[0] in ("source", "src") and "=" in kv]
-    return any(s in (".", "..") or s.startswith((".", "~")) or ("/" in s and not s.startswith("/") and not re.match(r"^[A-Za-z]:", s))
-               for s in srcs)
+    """True when a container argument bind-mounts a folder inside the working folder: `<source>:<target>` with the
+    source `.`, `./x`, `~` or a relative path, given on its own or glued to its flag (`-v .:/w`, `-dv .:/w`, `-v./x:/w`,
+    `--volume=./x:/w`). A source without a slash is a named volume; an absolute one is this computer's own folder.
+    (`--mount ...,src=./x` is a repository path inside an option, which analyse() already refuses to call plain.)"""
+    specs = (re.sub(r"^(?:--[A-Za-z-]+=|-[A-Za-z]+(?=[.~/]))", "", a) for a in args)
+    return any(_relative_source(s.split(":", 1)[0]) for s in specs if ":" in s and not s.startswith("-"))
 
 
 def analyse(cmd, top, sha):
@@ -279,9 +274,9 @@ INVOCATION_KEYS = ("args", "env", "cwd", "envFile", "env_file")
 LOADER_ENV_KEY = re.compile(
     r"PATH|^LD_|^DYLD_|PRELOAD|OPTIONS$|OPTS$|^PYTHON|^PERL|^RUBY|^GEM_|^BUNDLE_|^NPM_CONFIG|^YARN_|^PNPM_|^PIP_|^UV_|"
     r"^CARGO|^RUSTUP|^RUSTC|^GO(?:PATH|ROOT|FLAGS|BIN|ENV|PROXY|TOOLCHAIN|EXPERIMENT|CACHE|MODCACHE)$|^GIT_|^BASH_ENV$|"
-    r"^ENV$|^SHELL|^PS4$|^PROMPT_COMMAND$|^IFS$|HOME|^XDG_|CONFIG|RC$|^EDITOR$|^VISUAL$|^PAGER$|^BROWSER$|^DOCKER_|"
-    r"^KUBE|^SSH_|^JAVA|^JDK_|^CLASSPATH$|^MAVEN_|^GRADLE_|^DENO_|^BUN_|^PHP|^COMPOSER_|^LUA_|^TCL|^R_|PLUGIN|"
-    r"INCLUDE|LIB|^TMPDIR$", re.IGNORECASE)
+    r"^ENV$|^SHELL|^PS4$|^PROMPT_COMMAND$|^IFS$|(?:^|_)HOME(?:_|$)|^XDG_|CONFIG|RC$|^EDITOR$|^VISUAL$|^PAGER$|"
+    r"^BROWSER$|^DOCKER_|^KUBE|^SSH_|^JAVA|^JDK_|^CLASSPATH$|^MAVEN_|^GRADLE_|^DENO_|^BUN_|^PHP|^COMPOSER_|^LUA_|^TCL|"
+    r"^R_|PLUGIN|INCLUDE|(?:^|_)LIB(?:_|$)|^TMPDIR$", re.IGNORECASE)
 _FOLDER_VAR = re.compile(r"project|workspace|pwd|cwd|root|dir|folder|path|file", re.IGNORECASE)
 
 

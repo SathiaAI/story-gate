@@ -171,7 +171,9 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
                 return True
             if not isinstance(g, dict) or not isinstance(d, dict):
                 return smudged is None  # no note: can't tell an old approval from an edit, so keep the stored copy
-            return all(d.get(k) == g.get(k) for k in GUARDED_KEYS)  # still the guarded settings the filter wrote: ours
+            # a guarded setting still as the filter wrote it but no longer approved can't be split out of a file the
+            # branch never stored as an object: keep the stored copy rather than re-commit a revoked approval
+            return any(k in g and d.get(k) == g[k] and d.get(k) != a.get(k) for k in GUARDED_KEYS)
         if isinstance(g, dict) and isinstance(d, dict):
             for k in GUARDED_KEYS:
                 if d.get(k) != s.get(k) and d.get(k) != a.get(k) and (k not in g or d.get(k) != g[k]):
