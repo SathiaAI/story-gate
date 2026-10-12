@@ -138,10 +138,11 @@ def fingerprint_of(state):
     return h.hexdigest()[:16]
 
 
-def execute(argv, root, limit, keep=MATCH_LIMIT):
+def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
     """Run argv without a shell in root for at most `limit` seconds; the whole process tree ends with it.
     Returns (exit code or None, the last `keep` bytes of output as text, total output bytes, note). Output goes to a file,
-    not a pipe, so a server the command leaves running can't hold the run open. Shared by scenarios and measures."""
+    not a pipe, so a server the command leaves running can't hold the run open. With max_bytes, the command is stopped
+    as soon as its output passes that size (it can't fill the disk). Shared by scenarios and measures."""
     argv = list(argv)
     exe = shutil.which(argv[0], path=os.environ.get("PATH")) if not os.path.dirname(argv[0]) else None
     if exe:
@@ -151,10 +152,18 @@ def execute(argv, root, limit, keep=MATCH_LIMIT):
         kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         with tempfile.TemporaryFile() as buf:
             p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=buf, stderr=subprocess.STDOUT, **kw)
-            try:
-                code = p.wait(timeout=limit)
-            except subprocess.TimeoutExpired:
-                note = "stopped after %d seconds (timeout)" % limit
+            end = time.monotonic() + limit
+            while True:
+                try:
+                    code = p.wait(timeout=0.2 if max_bytes else max(0.0, end - time.monotonic()))
+                    break
+                except subprocess.TimeoutExpired:
+                    if max_bytes and os.fstat(buf.fileno()).st_size > max_bytes:
+                        note = "stopped: the output passed %d bytes" % max_bytes
+                        break
+                    if time.monotonic() >= end:
+                        note = "stopped after %d seconds (timeout)" % limit
+                        break
             _kill(p)  # the command's whole process group ends with it (servers it started, stray children)
             try:
                 p.wait(timeout=10)

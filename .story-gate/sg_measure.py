@@ -317,7 +317,9 @@ def run(b, root, work_state, timeout=None):
     elif rep and os.path.isfile(rep) and inside(rep):
         os.remove(rep)  # only a report this run writes can count
     t0, limit = time.time(), int(timeout or b["timeout"])
-    code, out, size, note = V.execute(b["command"], root, limit, keep=OUTPUT_CAP + 1)
+    code, out, size, note = V.execute(b["command"], root, limit, keep=OUTPUT_CAP + 1, max_bytes=OUTPUT_CAP)
+    if note.startswith("stopped: the output passed"):
+        note = "the output is larger than 5 MB"
     raw = out.encode("utf-8")
     if not note and size > OUTPUT_CAP:
         note = "the output is larger than 5 MB"

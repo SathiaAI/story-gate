@@ -9111,6 +9111,7 @@ class TestBudgets(Base):
                  "exit": dict(command=[PY, "-c", "print(3); raise SystemExit(2)"], expect_exit=0),
                  "two": dict(command=[PY, "-c", "print('v2 3')"]),
                  "huge": dict(command=[PY, "-c", "import sys; sys.stdout.write('x' * 5000001 + ' 3')"]),
+                 "flood": dict(command=[PY, "-c", "import sys\nwhile True: sys.stdout.write('x' * 65536)"], timeout=60),
                  "edits": dict(command=[PY, "-c", "open('app.py','a').write('#'); print(3)"])}
         if os.name != "nt":  # a crash: the process kills itself with a signal after printing a number
             cases["crash"] = dict(command=[PY, "-c", "import os, signal, sys; print(3); sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)"])
@@ -9118,7 +9119,11 @@ class TestBudgets(Base):
                     self.budget(name="anyexit", command=[PY, "-c", "print(3); raise SystemExit(1)"]))
         run(self.repo, "measure", "SAT-1")
         res = self.results()
-        for n, why in (("slow", "timeout"), ("exit", "expected 0"), ("two", "2 numbers"), ("huge", "5 MB"), ("edits", "changed files"),
+        t0 = time.time()
+        run(self.repo, "measure", "SAT-1", "--budget", "flood")
+        self.assertLess(time.time() - t0, 30)  # stopped at 5 MB, not left to fill the disk until its 60-second limit
+        res = self.results()
+        for n, why in (("slow", "timeout"), ("exit", "expected 0"), ("two", "2 numbers"), ("huge", "5 MB"), ("flood", "5 MB"), ("edits", "changed files"),
                        ("crash", "signal")):
             if n not in cases:
                 continue
