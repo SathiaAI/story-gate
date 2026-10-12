@@ -585,6 +585,8 @@ def tighten(policy, local):
     out["judge"] = j
     if local.get("require_independent_review"):
         out["require_independent_review"] = True
+    if local.get("ci_isolation") == "strict":
+        out["ci_isolation"] = "strict"
     if local.get("judge_mode") == "full":  # this computer may insist on the judge, never drop it
         out["judge_mode"] = "full"
     if local.get("require_spec_link") is True:
@@ -685,6 +687,8 @@ def weaker(old, new):
         out.append("stories no longer have to link the spec they build (require_spec_link)")
     if (o.get("judge_mode") or "full") == "full" and n.get("judge_mode") == "objective":
         out.append("the AI judge no longer checks the work (judge_mode: objective)")
+    if (o.get("ci_isolation") or "strict") == "strict" and n.get("ci_isolation") == "relaxed":
+        out.append("CI may run pull request code as story-gate's own account (ci_isolation: relaxed); those results count as reported")
     if (o.get("validation") or {}).get("required", True) and not (n.get("validation") or {}).get("required", True):
         out.append("validation (validation.md and scenario runs for every acceptance criterion) no longer required")
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))

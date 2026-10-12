@@ -8147,7 +8147,7 @@ class TestSettings(Base):
                   "judge.allow_self_judge_pass": (False, True), "approvers": ([], ["x"]), "reviewers": ([], ["bot"]),
                   "require_independent_review": (True, False), "checkpoint.every_edits": (10, 0),
                   "writing.enforce": (True, False), "writing.target": (0.8, 0.5), "writing.diagram_min_files": (5, 9),
-                  "validation.required": (True, False)}
+                  "validation.required": (True, False), "ci_isolation": ("strict", "relaxed")}
         self.assertEqual(set(SET.SETTINGS) - set(loosen), {"dashboard_issue"})  # the dashboard issue only says where a summary goes
         for k, (strict, loose) in loosen.items():
             base = {"writing": {"enforce": True}} if k.startswith("writing.") and k != "writing.enforce" else {}
@@ -9459,3 +9459,108 @@ class TestBudgets(Base):
         self.assertIn("Budgets</h3>", D.to_html(d))
         self.assertEqual(D.budget_history(b"{bad", rows)[0], [])
         self.assertIn("can't be read", D.budget_history(b"{bad", rows)[1])
+
+
+class TestCiIsolation(Base):
+    """T1: in CI the pull request's code runs as a separate throwaway account (sg_isolate), so it can't change the
+    results story-gate reads. The real boundary is exercised on Linux by tests/isolation_e2e.py (its own CI job);
+    these tests cover the rules around it."""
+
+    def I(self):
+        """sg_isolate from the source tree, freshly imported."""
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_isolate
+        return importlib.reload(sg_isolate)
+
+    def test_the_account_gets_toolchains_but_no_secrets(self):
+        """env_for(): toolchain paths and plain CI facts pass; tokens, keys and anything not on the allowlist don't."""
+        I = self.I()
+        env = {"PATH": "/usr/bin", "JAVA_HOME_17_X64": "/j", "GITHUB_SHA": "abc", "GITHUB_TOKEN": "t", "ACTIONS_RUNTIME_TOKEN": "t",
+               "ACTIONS_ID_TOKEN_REQUEST_URL": "u", "OPENROUTER_API_KEY": "k", "AWS_SECRET_ACCESS_KEY": "k", "RUNNER_TEMP": "/r",
+               "HOME": "/home/runner", "GITHUB_ACTIONS": "true", "LC_ALL": "C", "SSH_AUTH_SOCK": "/s", "GITHUB_ENV": "/e",
+               "ANDROID_KEYSTORE_PASSWORD": "p", "DOTNET_NUGET_TOKEN": "t", "ANDROID_HOME": "/a"}
+        out = I.env_for("/home/sgpr-1", env)
+        self.assertEqual(out["PATH"], "/usr/bin"); self.assertEqual(out["JAVA_HOME_17_X64"], "/j"); self.assertEqual(out["GITHUB_SHA"], "abc")
+        self.assertEqual(out["ANDROID_HOME"], "/a")  # a toolchain family is allowed, but never its secret-named settings
+        self.assertEqual((out["HOME"], out["TMPDIR"]), ("/home/sgpr-1", "/home/sgpr-1/tmp"))
+        for k in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "OPENROUTER_API_KEY", "AWS_SECRET_ACCESS_KEY",
+                  "RUNNER_TEMP", "SSH_AUTH_SOCK", "GITHUB_ENV", "ANDROID_KEYSTORE_PASSWORD", "DOTNET_NUGET_TOKEN"):
+            self.assertNotIn(k, out, k)  # GITHUB_ENV / RUNNER_TEMP point at the runner's own files: never handed over
+
+    def test_the_wrapped_command_drops_privileges_for_good(self):
+        """wrap(): a new uid and gid, no groups, no way to gain privileges back (no_new_privs), an empty environment
+        refilled from the allowlist, and the file-size limit set inside when asked."""
+        I = self.I()
+        a = I.Account(str(self.repo), [])
+        a.uid, a.gid, a.home = 4242, 4242, "/home/sgpr-x"
+        argv = a.wrap(["python3", "x.py"], max_file=100)
+        i = argv.index("setpriv")
+        self.assertEqual(argv[i:i + 6], ["setpriv", "--reuid=4242", "--regid=4242", "--clear-groups", "--no-new-privs", "--"])
+        self.assertEqual(argv[i + 6:i + 8], ["/usr/bin/env", "-i"])
+        self.assertIn('ulimit -f 100 && exec "$@"', argv); self.assertEqual(argv[-2:], ["python3", "x.py"])
+        self.assertNotIn("ulimit", " ".join(a.wrap(["true"])))
+
+    def test_reports_are_read_only_as_plain_files(self):
+        """read_regular(): a regular file is read (capped); a link, a folder or a missing file is refused."""
+        I = self.I()
+        f = self.repo / "r.xml"; f.write_bytes(b"x" * 10)
+        self.assertEqual(I.read_regular(str(f), 4), b"xxxxx"); self.assertIsNone(I.read_regular(str(self.repo), 4))
+        self.assertIsNone(I.read_regular(str(self.repo / "nope"), 4))
+        if os.name != "nt":
+            os.symlink(f, self.repo / "link.xml")
+            self.assertIsNone(I.read_regular(str(self.repo / "link.xml"), 4))
+
+    def test_strict_runs_nothing_when_isolation_is_unavailable(self):
+        """ci-tests with isolation required but impossible: strict runs no pull request code and says why; relaxed runs
+        it and marks every result not isolated."""
+        self.cfg(test_command="%s -c \"open('ran.txt','w').write('1')\"" % PY)
+        run(self.repo, "start", "SAT-1")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        import sg_isolate
+        out = self.repo.parent / (self.repo.name + "-out"); self.addCleanup(shutil.rmtree, out, True)
+        with patch.object(sg_isolate, "available", return_value="the runner's account can't use sudo without a password"), \
+                patch.dict(os.environ, {"STORY_GATE_ISOLATE": "1", "STORY_GATE_ID": "SAT-1"}):
+            g.cmd_ci_tests(str(out))
+            rec = json.loads((out / "results.json").read_text())
+            self.assertEqual((rec["exit_code"], rec["isolated"]), (None, False)); self.assertIn("sudo without a password", rec["error"])
+            self.assertFalse((self.repo / "ran.txt").exists())  # nothing of the pull request ran
+            self.cfg(ci_isolation="relaxed")
+            g.cmd_ci_tests(str(out))
+            rec = json.loads((out / "results.json").read_text())
+            self.assertEqual((rec["exit_code"], rec["isolated"]), (0, False)); self.assertTrue((self.repo / "ran.txt").exists())
+
+    def test_unisolated_ci_results_never_count_as_checked(self):
+        """struct_done(): CI tests or scenarios run without isolation fail under strict and are CONCERNS under relaxed;
+        budgets measured without isolation are reported, so a decided budget fails."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+        self.fill_validation()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        res = json.loads((sd / "scenario_results.json").read_text())["results"]
+        for mode, want in (("strict", "FAIL"), ("relaxed", "CONCERNS")):
+            self.cfg(ci_isolation=mode)
+            fp = g.work_fingerprint()  # config.json is part of the work in this test repository
+            (sd / "test_results.json").write_text(json.dumps({"exit_code": 0, "fingerprint": fp, "source": "ci", "isolated": False}))
+            for r in res.values():
+                r.update(source="ci", isolated=False, fingerprint=fp)
+            (sd / "scenario_results.json").write_text(json.dumps({"results": res}))
+            out = g.struct_done(sd, "SAT-1", ["app.py"], g.cfg(), in_ci=True)
+            self.assertEqual(out["tests_ran_green"][0], want, mode); self.assertIn("reported, not checked", out["tests_ran_green"][1])
+            self.assertEqual(out["scenarios_prove_acs"][0], want, mode)
+        (sd / "test_results.json").write_text(json.dumps({"exit_code": 0, "fingerprint": fp, "source": "ci", "isolated": True}))
+        self.assertIs(g.struct_done(sd, "SAT-1", ["app.py"], g.cfg(), in_ci=True)["tests_ran_green"][0], True)
+        (self.repo / ".story-gate/budgets.json").write_text(json.dumps({"version": 1, "budgets": [
+            {"name": "w", "unit": "count", "limit": 5, "status": "decided", "source": "t", "measure": "number",
+             "command": [PY, "-c", "print(3)"], "pins": ["scripts"]}]}))
+        md = self.repo.parent / (self.repo.name + "-m"); (md / "measures").mkdir(parents=True); self.addCleanup(shutil.rmtree, md, True)
+        import sg_measure as M
+        b = M.load((self.repo / ".story-gate/budgets.json").read_text())[0]
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+        (md / "measures/w.raw").write_bytes(b"3\n")
+        for iso, want in ((False, "reported"), (True, "checked")):
+            (md / "measures.json").write_text(json.dumps({"head": head, "isolated": iso, "runs": {"w": {"spec": M.spec_hash(b), "exit_code": 0}}}))
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                r = g.ci_budgets(str(md), "main", ["app.py"])["w"]
+            self.assertEqual(r["state"], want, iso)

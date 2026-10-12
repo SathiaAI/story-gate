@@ -48,6 +48,8 @@ SETTINGS = {
     "writing.target": ("number01", "plain-writing score needed"),
     "writing.diagram_min_files": ("int1", "a change touching this many files needs a diagram"),
     "validation.required": ("bool", "DONE needs validation.md and a passing scenario for every acceptance criterion"),
+    "ci_isolation": ("choice:strict|relaxed", "strict: CI runs pull request code as a separate account, or not at all; relaxed: "
+                     "where it can't (e.g. tests that need Docker), results count as reported"),
 }
 # Shown by `settings`, changed another way.
 ELSEWHERE = {

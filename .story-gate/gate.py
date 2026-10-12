@@ -236,6 +236,10 @@ DEFAULT_CONFIG = {
     # DONE needs validation.md (the owner's summary) and, for every acceptance criterion, a scenario run that passed
     # on the current code; in CI, CI's own run of it (sg_validation.py).
     "validation": {"required": True},
+    # CI runs the pull request's code (tests, scenarios, budgets) as a separate throwaway account, so that code can't
+    # change story-gate's results (sg_isolate.py). "strict": where that can't be set up, CI runs nothing and says so.
+    # "relaxed": it runs as before, and those results count as reported, not checked. Choosing relaxed is a weaker rule.
+    "ci_isolation": "strict",
 }
 
 # ------------------------------------------------------------------ checks
@@ -390,6 +394,8 @@ def check_config(c):
                 raise ConfigError('.story-gate/config.json: "trackers" > "%s" %s - the gate fails closed until fixed' % (str(k)[:20], why))
     if c.get("spec_source_check") not in ("warn", "block"):
         raise ConfigError('.story-gate/config.json: "spec_source_check" must be "warn" or "block" (got %r) - the gate fails closed until fixed' % c.get("spec_source_check"))
+    if c.get("ci_isolation") not in ("strict", "relaxed"):
+        raise ConfigError('.story-gate/config.json: "ci_isolation" must be "strict" or "relaxed" (got %r) - the gate fails closed until fixed' % c.get("ci_isolation"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
@@ -1351,6 +1357,29 @@ def wj_text(p, text):
     Path(p).write_text(text, encoding="utf-8")
 
 
+UNISOLATED = ("CI ran %s as story-gate's own account, not as a separate one, so their result counts as reported, not "
+              "checked (ci_isolation is \"relaxed\", or isolation couldn't be set up on this runner)")
+
+
+def isolation_required():
+    """True in GitHub Actions (and in tests that ask for it): the pull request's code must run as a separate account."""
+    return os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("STORY_GATE_ISOLATE") == "1"
+
+
+def ci_account(c, protect):
+    """(account, "") when the pull request's code can run as a throwaway account here (sg_isolate); else (None, why).
+    protect: folders that account must never be able to write, besides story-gate's own runtime."""
+    import sg_isolate as I
+    why = I.available()
+    if not why:
+        try:
+            runtime = [str(HERE)] if not str(HERE.resolve()).startswith(str(ROOT.resolve()) + os.sep) else []  # CI: $RUNNER_TEMP/sg
+            return I.Account(str(ROOT), [str(p) for p in protect] + runtime).setup(), ""
+        except I.IsolationError as e:
+            why = str(e)
+    return None, why
+
+
 def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=False, in_ci=False, write=True):
     """Structural (non-judge) DONE checks: the ready gate, tests, handoff, learnings and now validation evidence."""
     out = {}
@@ -1374,6 +1403,8 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
                               "no recorded test run (use record-tests)" if not tr else
                               "last recorded test run failed (exit %s)" % tr.get("exit_code") if tr.get("exit_code") != 0 else
                               "code changed after the last green test run — run record-tests again")
+    if out["tests_ran_green"][0] is True and tr.get("source") == "ci" and tr.get("isolated") is False:
+        out["tests_ran_green"] = ("FAIL" if c.get("ci_isolation") == "strict" else "CONCERNS", UNISOLATED % "the tests")
     code = [f for f in diff_files if not exempt(f, c)]
     out["code_changed"] = (bool(code), "no code changes found against base")
     miss = trace(sd, c, tr, results, write)
@@ -1407,7 +1438,11 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
         if local and not why:
             why.append("ACs proved only on the agent's computer (local-only scenarios; CI did not run them): %s. This blocks "
                        "unless accept_concerns is on; better, make the scenario runnable in CI" % ", ".join(local))
-        out["scenarios_prove_acs"] = ("FAIL" if gone or not ids or broken else "CONCERNS" if local else "PASS", " | ".join(why))
+        st = "FAIL" if gone or not ids or broken else "CONCERNS" if local else "PASS"
+        if st != "FAIL" and in_ci and any(r.get("source") == "ci" and r.get("isolated") is False for r in res.values() if isinstance(r, dict)):
+            st = "FAIL" if c.get("ci_isolation") == "strict" else "CONCERNS"
+            why.append(UNISOLATED % "the scenarios")
+        out["scenarios_prove_acs"] = (st, " | ".join(why))
     rows = budget_rows(sd, c, in_ci)
     if rows:  # only when a budget applies: repositories without budgets.json score exactly as before
         import sg_measure as M
@@ -3038,7 +3073,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -3052,38 +3087,69 @@ def summary(lines):
 
 
 def cmd_ci_tests(out_dir):
-    """Job 1 (no secrets): run the base branch's pinned test command on the PR code; save exit code + JUnit as data."""
+    """Job 1 (no secrets): run the base branch's pinned test command and the story's scenarios on the PR code, as a
+    separate throwaway account in CI (sg_isolate), and save exit code, JUnit and scenario results as data."""
+    import sg_isolate as I, sg_validation as V
     c = cfg()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cmd = c.get("test_command")
-    rec, junit = {"command": cmd, "at": now()}, None
-    if not cmd:
-        rec.update({"exit_code": None, "error": "no test_command configured"})
-    else:
-        jf = junit_file(c)
-        if jf and jf.is_file():
-            jf.unlink()  # a report committed in the PR never counts: only the one this test run writes
-        t0 = time.time()
-        try:
-            r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3000)
-            rec.update({"exit_code": r.returncode, "output_tail": (r.stdout + r.stderr)[-4000:]})
-        except Exception as e:
-            rec.update({"exit_code": -1, "output_tail": repr(e)})
-        rec["seconds"] = round(time.time() - t0, 1)
-        jf = junit_file(c)
-        if jf and jf.is_file():
-            junit = jf.read_bytes()[:5_000_000]  # kept in memory: the scenarios below run PR code too
-    print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
-    scen = None
-    sid = story_id(c)  # the story's scenarios run here too: PR code, no secrets
-    if sid and (STORIES / sid / "scenarios.json").is_file():
-        import sg_validation as V
-        res = V.run_all(V.specs_of(load_json(STORIES / sid / "scenarios.json")), str(ROOT), work_state, "ci",
-                        [a for a, _, _ in acs(STORIES / sid)], skip_local_only=True)
-        scen = {"story": sid, "results": res}
-        print("story-gate scenarios: %d of %d passed" % (len([r for r in res.values() if r.get("passed")]), len(res)))
-    # Written last, after all PR code ran, so neither the tests nor a scenario can replace these files.
+    rec, junit, scen = {"command": cmd, "at": now()}, None, None
+    sid = story_id(c)
+    jf = junit_file(c)
+    if cmd and jf and jf.is_file():
+        jf.unlink()  # a report committed in the PR never counts: only the one this test run writes
+    acc, why = (ci_account(c, [out]) if isolation_required() else (None, ""))
+    if isolation_required():
+        rec["isolated"] = acc is not None
+    if isolation_required() and acc is None and c.get("ci_isolation") == "strict":
+        rec.update({"exit_code": None, "error": "story-gate couldn't run the pull request's code as a separate account (%s), "
+                                               "so it ran nothing (ci_isolation is \"strict\")" % why})
+        print("story-gate tests: not run - %s" % rec["error"])
+        wj(out / "results.json", rec)
+        return 0
+    if why:
+        print("story-gate: running the pull request's code as story-gate's own account (%s); its results count as "
+              "reported, not checked" % why)
+    try:
+        if not cmd:
+            rec.update({"exit_code": None, "error": "no test_command configured"})
+        else:
+            t0 = time.time()
+            if acc is not None:
+                code, text, _, note = V.execute(["/bin/sh", "-c", cmd], str(ROOT), 3000, account=acc)
+                rec.update({"exit_code": code, "output_tail": (text + ("\n" + note if note else ""))[-4000:]})
+            else:
+                try:
+                    r = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3000)
+                    rec.update({"exit_code": r.returncode, "output_tail": (r.stdout + r.stderr)[-4000:]})
+                except Exception as e:
+                    rec.update({"exit_code": -1, "output_tail": repr(e)})
+            rec["seconds"] = round(time.time() - t0, 1)
+            jf = junit_file(c)
+            if jf:  # read now, after the test run's processes are stopped: the scenarios below run PR code too
+                junit = I.read_regular(str(jf), 5_000_000) if acc is not None else (jf.read_bytes()[:5_000_000] if jf.is_file() else None)
+        print("story-gate tests: %s" % ("exit %s" % rec.get("exit_code") if cmd else "no test_command configured"))
+        if sid and (STORIES / sid / "scenarios.json").is_file():
+            res = V.run_all(V.specs_of(load_json(STORIES / sid / "scenarios.json")), str(ROOT), work_state, "ci",
+                            [a for a, _, _ in acs(STORIES / sid)], skip_local_only=True, account=acc)
+            scen = {"story": sid, "results": res}
+            if isolation_required():
+                scen["isolated"] = acc is not None
+            print("story-gate scenarios: %d of %d passed" % (len([r for r in res.values() if r.get("passed")]), len(res)))
+    except I.IsolationError as e:  # couldn't verify every process stopped: nothing from this run counts
+        rec.update({"exit_code": None, "isolated": False, "error": "story-gate couldn't confirm the pull request's code had "
+                                                                    "stopped (%s), so nothing from this run counts" % e})
+        junit = scen = None
+    finally:
+        if acc is not None:
+            try:
+                acc.teardown()
+            except I.IsolationError as e:
+                rec.update({"exit_code": None, "isolated": False, "error": "story-gate couldn't clean up after the pull "
+                                                                            "request's code (%s), so nothing counts" % e})
+                junit = scen = None
+    # Written last, by story-gate's own account, into a folder the pull request's code can't write.
     wj(out / "results.json", rec)
     if junit is not None:
         (out / "junit.xml").write_bytes(junit)
@@ -3111,15 +3177,29 @@ def cmd_ci_measure(out_dir):
         print("story-gate budgets: not measured (%s)" % e)
         return 0
     head = git("rev-parse", "HEAD").strip()
+    import sg_isolate as I
+    acc, why = (ci_account(c, [out]) if isolation_required() and todo else (None, ""))
+    meta = {"head": head, "isolated": acc is not None} if isolation_required() else {"head": head}
+    if isolation_required() and todo and acc is None and c.get("ci_isolation") == "strict":
+        print("story-gate budgets: not measured - story-gate couldn't run the pull request's code as a separate account (%s)" % why)
+        wj(out / "measures.json", dict(meta, runs={}, error=why))
+        return 0
     try:
-        measured = M.run_all(todo, str(ROOT), work_state)
+        measured = M.run_all(todo, str(ROOT), work_state, account=acc)
     except Exception as e:  # the story-gate job then sees every budget as not run (never a pass)
         print("story-gate budgets: not measured (%s: %s)" % (e.__class__.__name__, str(e)[:200]))
         return 0
+    finally:
+        if acc is not None:
+            try:
+                acc.teardown()
+            except I.IsolationError as e:
+                print("story-gate budgets: not counted (%s)" % e)
+                return 0
     (out / "measures").mkdir(exist_ok=True)
     for n, (r, raw) in measured.items():
         (out / "measures" / (n + ".raw")).write_bytes(raw)
-    wj(out / "measures.json", {"head": head, "runs": {n: r for n, (r, _) in measured.items()}})
+    wj(out / "measures.json", dict(meta, runs={n: r for n, (r, _) in measured.items()}))
     print("story-gate budgets: measured %d" % len(measured))
     return 0
 
@@ -3135,6 +3215,8 @@ def ci_budgets(measures_dir, base, files_of):
     meta = load_json(Path(measures_dir) / "measures.json") if measures_dir else {}
     runs = meta.get("runs") if isinstance(meta.get("runs"), dict) and meta.get("head") == git("rev-parse", "HEAD").strip() else {}
     fp, out = work_fingerprint(), {}
+    loose = ["measured as story-gate's own account, not a separate one (ci_isolation is \"relaxed\", or isolation "
+             "couldn't be set up)"] if isolation_required() and meta.get("isolated") is not True else []
     for b in budgets_policy():
         if not M.applies(b, files_of):
             continue
@@ -3146,7 +3228,7 @@ def ci_budgets(measures_dir, base, files_of):
             if f.is_file() and not f.is_symlink():
                 with open(f, "rb") as fh:
                     raw = fh.read(M.OUTPUT_CAP + 1)
-        out[b["name"]] = M.evaluate(b, rec, raw, fp, "ci", M.trust_problems(b, str(ROOT), files_of))
+        out[b["name"]] = M.evaluate(b, rec, raw, fp, "ci", M.trust_problems(b, str(ROOT), files_of) + loose)
     return out
 
 
@@ -3343,13 +3425,18 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                     results = G.junit(junit) if junit.is_file() else None
                 except Exception as e:
                     problems.append("JUnit report rejected: %s" % e)
+                if isolation_required():
+                    tr["isolated"] = tr.get("isolated") is True
                 if sd.exists():  # CI's own run replaces anything the agent recorded
                     wj(sd / "test_results.json", dict(tr, fingerprint=work_fingerprint(), head=git("rev-parse", "HEAD").strip(), source="ci"))
                 if tr.get("exit_code") != 0:
                     problems.append("tests failed or did not run in CI (%s)" % (tr.get("error") or "exit %s" % tr.get("exit_code")))
             if sd.exists():  # scenario results: CI's own runs only; the agent's runs count only for local-only scenarios
                 import sg_validation as V
-                ci_runs = V.results_of(load_json(Path(tests_dir) / "scenarios.json")) if tests_dir else {}
+                ci_doc = load_json(Path(tests_dir) / "scenarios.json") if tests_dir else {}
+                ci_runs = V.results_of(ci_doc)
+                if isolation_required():  # stamped here from the tests job's own record, never from the story folder
+                    ci_runs = {n: dict(r, isolated=ci_doc.get("isolated") is True) for n, r in ci_runs.items() if isinstance(r, dict)}
                 specs = V.specs_of(load_json(sd / "scenarios.json"))
                 local_only = {s.get("name") for s in specs if s.get("local_only")}
                 if tests_dir and any(not s.get("local_only") for s in specs) and not (Path(tests_dir) / "scenarios.json").is_file():

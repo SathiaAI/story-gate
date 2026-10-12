@@ -10,7 +10,7 @@ unchanged), "reported" (a value CI can't vouch for) or "not_run" (no usable valu
 here, in story-gate's own code, against the current policy: a stored value is evidence, a stored verdict is not.
 Stdlib only.
 """
-import fnmatch, hashlib, json, os, re, shutil, time
+import fnmatch, hashlib, json, os, re, shutil, subprocess, time
 from decimal import Decimal
 
 SCHEMA = 1
@@ -305,19 +305,30 @@ def met(b, value):
 
 
 # ------------------------------------------------------------------ running a measurement
-def run(b, root, work_state, timeout=None):
-    """Run a budget's command once (sg_validation.execute: no shell, time limit, process tree killed).
-    Returns (run record, raw bytes to parse). The raw bytes are the output, or the JUnit report the run wrote."""
-    import sg_validation as V
+def _remove(path, account):
+    """Delete a file (or a link itself), as the throwaway account when it owns the folder (CI)."""
+    try:
+        os.remove(path)
+    except PermissionError:
+        if account is None:
+            raise
+        subprocess.run(account.wrap(["rm", "-f", "--", path]), capture_output=True, timeout=60)
+        account.stop()
+
+
+def run(b, root, work_state, timeout=None, account=None):
+    """Run a budget's command once (sg_validation.execute: no shell, time limit, process tree killed; in CI as the
+    throwaway account). Returns (run record, raw bytes to parse): the output, or the JUnit report the run wrote."""
+    import sg_isolate as I, sg_validation as V
     before = work_state()
     rep = os.path.join(root, b["report"]) if b.get("report") else None
     inside = lambda p: os.path.realpath(p).startswith(os.path.realpath(root) + os.sep)
     if rep and os.path.islink(rep) and inside(os.path.dirname(rep)):
-        os.remove(rep)  # the link itself, never what it points to
+        _remove(rep, account)  # the link itself, never what it points to
     elif rep and os.path.isfile(rep) and inside(rep):
-        os.remove(rep)  # only a report this run writes can count
+        _remove(rep, account)  # only a report this run writes can count
     t0, limit = time.time(), int(timeout or b["timeout"])
-    code, out, size, note = V.execute(b["command"], root, limit, keep=OUTPUT_CAP + 1, max_bytes=OUTPUT_CAP)
+    code, out, size, note = V.execute(b["command"], root, limit, keep=OUTPUT_CAP + 1, max_bytes=OUTPUT_CAP, account=account)
     if note.startswith("stopped: the output passed"):
         note = "the output is larger than 5 MB"
     raw = out.encode("utf-8")
@@ -333,9 +344,10 @@ def run(b, root, work_state, timeout=None):
         if os.path.islink(rep) or not os.path.isfile(rep) or not inside(rep):
             note = "the command did not write its report %s" % b["report"]
         else:
-            with open(rep, "rb") as f:
-                raw = f.read(OUTPUT_CAP + 1)
-            if len(raw) > OUTPUT_CAP:
+            raw = I.read_regular(rep, OUTPUT_CAP)
+            if raw is None:
+                note, raw = "story-gate couldn't read the report %s (not a plain readable file)" % b["report"], b""
+            elif len(raw) > OUTPUT_CAP:
                 note = "the report is larger than 5 MB"
     after = work_state()
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
@@ -349,7 +361,7 @@ def run(b, root, work_state, timeout=None):
              "output_tail": V.redact(out)[-V.TAIL:]}, b"" if note else raw)
 
 
-def run_all(budgets, root, work_state, total=CI_TOTAL):
+def run_all(budgets, root, work_state, total=CI_TOTAL, account=None):
     """CI order: decided budgets first, then proposed, each by name, inside one time budget. -> {name: (record, raw)}."""
     out, t0 = {}, time.monotonic()  # a clock change can't stretch or cut the time
     for b in sorted(budgets, key=lambda x: (x["status"] != "decided", x["name"])):
@@ -357,7 +369,7 @@ def run_all(budgets, root, work_state, total=CI_TOTAL):
         if left < 5:
             out[b["name"]] = ({"spec": spec_hash(b), "note": "not run: the %d-second time for all budgets ran out" % total}, b"")
             continue
-        out[b["name"]] = run(b, root, work_state, timeout=min(b["timeout"], int(left)))
+        out[b["name"]] = run(b, root, work_state, timeout=min(b["timeout"], int(left)), account=account)
     return out
 
 
