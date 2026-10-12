@@ -146,7 +146,7 @@ jobs:
 | Proof it's a real release | Before anything runs, it checks the release signature, and that the release key is the one your file names (`release-key-fingerprint`). A commit that isn't a signed release stops the check, unless you set `allow-unsigned: true` for a development copy |
 | Your rules | Always from your main branch's `.story-gate/config.json`, never from the pull request |
 | Secrets | Passed by name, one by one (never `secrets: inherit`). The job that runs the pull request's tests gets none |
-| The check's name | GitHub names it `story-gate / story-gate`. `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
+| The check's name | GitHub names it `story-gate / story-gate` (after the job in your short workflow, so keep that job called `story-gate`, with no `name:`; doctor checks). `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
 | Upgrading | Change the SHA and the version comment to a newer release, in a pull request of its own. A code owner approves it |
 | Your own steps | The reusable workflow can't run steps you added between the "your steps" markers. `install --ci reusable` stops if you have some; move them out first, or use `--force` to drop them |
 
@@ -686,7 +686,7 @@ Every number in the issue and the report says how it's calculated, and estimates
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
 - **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
-- **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets.
+- **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets. To remove it from this computer, delete that file; `uninstall --user` keeps it and prints where it is.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests

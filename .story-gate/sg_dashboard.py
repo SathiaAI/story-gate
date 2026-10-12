@@ -101,10 +101,13 @@ class Repo:
     def last_dates(self, ref):
         """{story_id: latest commit time touching it} and {path: latest commit time} on ref."""
         out, files, cur = {}, {}, None
-        log = self.git("log", "-n", "3000", "--format=@%cI", "--name-only", ref, "--", ".story-gate/stories")
+        log = self.git("log", "-n", "3000", "--format=@%ct", "--name-only", ref, "--", ".story-gate/stories")
         for line in log.splitlines():
             if line.startswith("@"):
-                cur = line[1:]
+                try:
+                    cur = datetime.fromtimestamp(int(line[1:]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except (ValueError, OverflowError, OSError):
+                    cur = None
             elif line.startswith(".story-gate/stories/") and cur:
                 files.setdefault(line, cur)
                 parts = line.split("/")
@@ -653,7 +656,7 @@ def to_html(d, artifact_note="", live=False, issue=None):
         or '<tr><td colspan="4" class="text-secondary">No features yet. Add one with gate.py feature &lt;ID&gt; --title "…"</td></tr>'
     rows = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (
         h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], pill((s.get("ready") or {}).get("overall"), s.get("ready")),
-        pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80) + (h(" · " + ci_cell(s), 80) if s.get("ci") else "")) for s in d["stories"]) \
+        pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80) + (h(f" · #{s['ci'].get('pr')} {s['ci'].get('result')}" + (" · source " + s["ci"]["source"] if s["ci"].get("source") else ""), 80) if s.get("ci") else "")) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
     notes = ""
     if any((s.get("ci") or {}).get("source") for s in d["stories"]):

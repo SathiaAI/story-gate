@@ -27,7 +27,7 @@ Anything story-gate can't read with certainty is **blocked**, never plain:
 - **Wrappers:** `env`, `time`, `xargs`.
 - **Environment settings:** `VAR=...`.
 - **Code given inline:** `-c`, `-e`, `-m`.
-- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`.
+- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`, `docker compose` / `docker build`.
 - **Shell features:** pipes, `&&`, `$VARS`.
 - **Repository paths hidden inside options.**
 
@@ -46,6 +46,19 @@ In `.story-gate/config.json` **on the default branch** (a branch can't approve i
 - `pins` lists every file or folder the hook uses. Folders are compared in full, including extra and ignored files.
 - `gate.py doctor` warns when a pinned script seems to use a repository file that isn't pinned (for example `source scripts/lib.sh`). This is a best-effort hint, not proof.
 - Pinned commands must be simple: a program, then plain words and paths. Use forward slashes.
+
+**MCP servers** (`command` plus `args`, `env`, `cwd`) are checked as the whole line they run. These `env` entries count
+as part of it: any variable that steers what a program loads (`PATH` and anything with `PATH`, `LD_*`, `*_OPTIONS`,
+`PYTHON*`, `GIT_*`, `HOME` and config folders, `EDITOR` and the like), any value written like a path, and references to
+the project or workspace folder. Ordinary settings (`API_KEY`, `NODE_ENV=production`, `DEBUG=1`, a web address, `${TOKEN}`)
+don't. So `{"command": "node", "args": ["server.js"], "env": {"NODE_OPTIONS": "--require ./x.js"}}` is checked as
+`'NODE_OPTIONS=--require ./x.js' node server.js`, and a working folder adds `cd <folder> && ` in front. Such lines can't
+be pinned (the runner can't carry arguments), so a server that uses repository code runs only if a code owner accepts that
+exact line (`"runs_repo_code": "accepted"`). A server that loads an env file (`envFile`) is always removed, and so is a
+container that mounts a repository folder (`docker run -v .:/w`).
+
+This covers what the line names. A program can still read repository files on its own (a server that loads a config
+file from its working folder, say): approve servers on the default branch with that in mind.
 
 ## The runner, step by step
 

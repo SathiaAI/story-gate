@@ -565,7 +565,9 @@ def tighten(policy, local):
         return out
     if local.get("mode") == "enforce":
         out["mode"] = "enforce"
-    out["enforce_points"] = sorted(set(out.get("enforce_points") or []) | set(x for x in (local.get("enforce_points") or []) if isinstance(x, str)))
+    lep = local.get("enforce_points")
+    lep = lep if isinstance(lep, list) else []  # a malformed local value adds nothing; it must not raise (a hook would then fail open)
+    out["enforce_points"] = sorted(set(out.get("enforce_points") or []) | set(x for x in lep if isinstance(x, str)))
     out["accept_concerns"] = bool(out.get("accept_concerns")) and bool(local.get("accept_concerns", out.get("accept_concerns")))
     th, lt = dict(out.get("thresholds") or {}), local.get("thresholds") or {}
     for k in ("pass", "concerns"):
@@ -575,7 +577,8 @@ def tighten(policy, local):
         except (TypeError, ValueError):
             pass
     out["thresholds"] = th
-    j, lj = dict(out.get("judge") or {}), local.get("judge") or {}
+    j, lj = dict(out.get("judge") or {}), local.get("judge")
+    lj = lj if isinstance(lj, dict) else {}
     for k in ("emulated_allow_pass", "allow_self_judge_pass"):
         if k in lj:
             j[k] = bool(j.get(k)) and bool(lj[k])

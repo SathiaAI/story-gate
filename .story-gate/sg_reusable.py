@@ -151,6 +151,25 @@ jobs:
             ".github/workflows/story-gate-dashboard.yml": dash}
 
 
+def _caller_jobs(text):
+    """(job ids, whether any job sets its own `name:`) under `jobs:` in an active workflow text. GitHub names a reusable
+    workflow's check `<caller job> / <called job>`, so the caller job's id and name decide the required check's name."""
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines) if re.match(r"^jobs:\s*$", l)), None)
+    if start is None:
+        return [], False
+    body = [l for l in lines[start + 1:] if l.strip()]
+    body = body[:next((i for i, l in enumerate(body) if not l.startswith((" ", "\t"))), len(body))]  # up to the next top-level key
+    if not body:
+        return [], False
+    ind = len(body[0]) - len(body[0].lstrip())
+    ids = [l.strip()[:-1] for l in body if len(l) - len(l.lstrip()) == ind and l.rstrip().endswith(":")]
+    kids = [len(l) - len(l.lstrip()) for l in body if len(l) - len(l.lstrip()) > ind]
+    child = min(kids) if kids else None
+    named = child is not None and any(len(l) - len(l.lstrip()) == child and re.match(r"^name:", l.strip()) for l in body)
+    return ids, named
+
+
 def check_callers(G):
     """[(file, status)] for the three short workflows, for `doctor`. 'ok' or 'ok (...)' passes; anything else fails."""
     out, pins = [], set()
@@ -174,6 +193,9 @@ def check_callers(G):
             st = ("has %d `uses:` lines; it must call only story-gate's %s.yml" % (len(uses), called) if len(uses) > 1 else
                   "runs its own steps next to story-gate's; keep this file to the one call" if extra else
                   "doesn't call story-gate's %s.yml - run `story-gate install --ci reusable`" % called)
+        elif called == "gate" and _caller_jobs(text) != (["story-gate"], False):
+            st = ("its job must be called `story-gate`, with no `name:` (GitHub names the check after it, and branch rules "
+                  "require `story-gate / story-gate`)")
         elif not SHA.fullmatch(m.group(3)):
             st = "pinned to %r, not a full commit SHA (a tag or branch can be moved)" % m.group(3)[:50]
         elif "secrets: inherit" in text:

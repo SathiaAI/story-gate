@@ -3182,7 +3182,7 @@ def cmd_ci(tests_dir=None):
                     problems.append("could not read reviews: %s" % e)
             if not accepted["accepted"]:
                 problems.append("human acceptance: " + accepted["why"])
-            enforced, missing = (G.protection(ctx["repo"], ctx["base"], token) if ctx and token else (False, ["not running on a pull request"]))
+            enforced, missing = (G.protection(ctx["repo"], ctx["base"], token, G.ci_check_name(ROOT)) if ctx and token else (False, ["not running on a pull request"]))
             if not enforced:
                 notes.insert(0, "ADVISORY - NOT ENFORCED: GitHub will not block this merge (%s). Run `gate.py setup-repo` or see the README." % "; ".join(missing))
     except ConfigError as e:
@@ -3786,9 +3786,23 @@ def cmd_user(cmd, kv, rest):
         print("User-level hooks:")
         out = T.unregister_user_hooks(dry)
         print("\n".join(out) or "  no story-gate hooks in your user settings")
+        kf = J.key_file()  # resolved before the runtime goes: STORY_GATE_ENV_FILE may point inside it
+        if not dry and kf and os.path.isfile(kf) and Path(os.path.realpath(kf)).is_relative_to(Path(os.path.realpath(T.runtime_root()))):
+            import sg_github as G
+            dest = G.config_dir() / "judge.env"
+            n = 1
+            while os.path.lexists(dest):  # never overwrite a key that's already there
+                dest = dest.with_name("judge.env.from-runtime" + ("" if n == 1 else f"-{n}"))
+                n += 1
+            G.write_private(dest, Path(kf).read_text(encoding="utf-8"))  # your key is never removed with the runtime
+            print(f"Moved your local judge key out of the runtime to {dest}; point STORY_GATE_ENV_FILE there.")
+            kf = str(dest)
         if not dry and T.runtime_root().exists():
             shutil_rmtree(T.runtime_root())
             print("Removed the runtime: %s (enrollment and agent key are kept)" % T.runtime_root())
+        if kf and os.path.isfile(kf):  # never deleted for you (you may still use it), but never left behind unsaid
+            print(f"Kept your local judge key: {kf}. Delete that file to remove the key from this computer "
+                  "(the copy in your GitHub secrets is separate).")
         if not dry and not any(T.read_json(T.manifest_path()).get(k) for k in ("files", "repos")):
             try:
                 T.manifest_path().unlink()
@@ -4224,7 +4238,7 @@ def cmd_doctor(repo=None, strict=False, prove=False):
     if repo:
         tok = G.human_token()
         if tok:
-            enforced, missing = G.protection(repo, c["base_branch"], tok)
+            enforced, missing = G.protection(repo, c["base_branch"], tok, G.ci_check_name(ROOT))
             print("  branch rules: %s" % ("ENFORCED" if enforced else "NOT ENFORCED - " + "; ".join(missing)))
             if not enforced:
                 fails.append("rules")

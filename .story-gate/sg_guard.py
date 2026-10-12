@@ -152,16 +152,112 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed
 
 
-def is_filtered_form(stored, on_disk, allowed=()):
+def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
     """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
-    possibly filtered under an older approval."""
+    possibly filtered under an older approval. `smudged` is the note of what the filter last wrote here (None when there
+    is none): an exact match is always our copy, current or stale. A guarded setting is never "taken out" by the filter,
+    so with a note, a guarded value that is neither the stored one nor the one the filter wrote is the user's own edit
+    (even when it equals the current approval), and the clean filter must keep it. Without a note that can't be told apart from an approval since
+    revoked, so it is treated as the filter's copy (fail closed; filter_main says how to make the edit stick)."""
     try:
-        return _load(sanitize(stored, on_disk, allowed)[0]) == _load(on_disk)
+        if smudged is not None and smudged.get("sha") == hashlib.sha256(on_disk).hexdigest():
+            return True
+        s, d = _load(stored), _load(on_disk)
+        a = _load(approved) if approved else {}
+        a = a if isinstance(a, dict) else {}
+        g = (smudged or {}).get("guarded")
+        if not isinstance(s, dict):  # the branch stored something that isn't a settings object: the filter only ever
+            if d == s or d == a:     # writes it back or an approved version
+                return True
+            if not isinstance(g, dict) or not isinstance(d, dict):
+                return smudged is None  # no note: can't tell an old approval from an edit, so keep the stored copy
+            # a guarded setting still as the filter wrote it but no longer approved can't be split out of a file the
+            # branch never stored as an object: keep the stored copy rather than re-commit a revoked approval
+            return any(k in g and d.get(k) == g[k] and d.get(k) != a.get(k) for k in GUARDED_KEYS)
+        if isinstance(g, dict) and isinstance(d, dict):
+            for k in GUARDED_KEYS:
+                if d.get(k) != s.get(k) and (k not in g or d.get(k) != g[k]):  # not stored, not what the filter wrote
+                    return False
+        return _load(sanitize(stored, on_disk, allowed)[0]) == d
     except (ValueError, UnicodeDecodeError):
         return False
 
 
+def _guarded_differ(a, b):
+    """True when two settings files disagree on any guarded setting (or one of them isn't a settings object)."""
+    try:
+        x, y = _load(a), _load(b)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not (isinstance(x, dict) and isinstance(y, dict)):
+        return x != y
+    return any(x.get(k) != y.get(k) for k in GUARDED_KEYS)
+
+
+def restore_filtered_keys(stored, on_disk, smudged):
+    """on_disk with each guarded setting the filter wrote (still equal to its note, but not the stored value) put back
+    to the stored value: an edit elsewhere in a stale filtered copy must not also commit an approval since revoked.
+    Returns on_disk unchanged when there is nothing to put back."""
+    g = (smudged or {}).get("guarded")
+    try:
+        s, d = _load(stored), _load(on_disk)
+    except (ValueError, UnicodeDecodeError):
+        return on_disk
+    if not (isinstance(g, dict) and isinstance(s, dict) and isinstance(d, dict)):
+        return on_disk
+    ours = [k for k in GUARDED_KEYS if k in g and d.get(k) == g[k] and d.get(k) != s.get(k)]
+    if not ours:
+        return on_disk
+    for k in ours:
+        if k in s:
+            d[k] = s[k]
+        else:
+            d.pop(k, None)
+    return (json.dumps(d, indent=2) + "\n").encode("utf-8")
+
+
 # ------------------------------------------------------------------ the git filter
+def _smudge_record(top, path):
+    """Where the checkout filter notes the guarded values it last wrote to `path` (inside the git folder, never committed)."""
+    d = _git(top, "rev-parse", "--git-path", "story-gate-smudged")
+    if not d:
+        return None
+    return Path(top) / d.decode("utf-8", "replace").strip() / (hashlib.sha256(path.encode("utf-8")).hexdigest() + ".json")
+
+
+def remember_smudge(top, path, out):
+    """Note what the filter just wrote (a hash of the file and each guarded setting, absent ones as null), so a later
+    clean can tell its own copy, even a stale one, from your edit."""
+    f = _smudge_record(top, path)
+    if f is None:
+        return
+    plain = PIN.unwrap_bytes(out)
+    note = {"sha": hashlib.sha256(plain).hexdigest()}
+    try:
+        d = _load(plain)
+    except (ValueError, UnicodeDecodeError):
+        d = None
+    if isinstance(d, dict):
+        note["guarded"] = {k: d.get(k) for k in GUARDED_KEYS}
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(note), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        pass  # no note: clean treats a changed guarded setting as the filter's copy and says how to make an edit stick
+
+
+def last_smudge(top, path):
+    """The note of what the filter last wrote to `path`, or None when there is none."""
+    f = _smudge_record(top, path)
+    try:
+        v = json.loads(f.read_text(encoding="utf-8")) if f else None
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
 def _git(top, *args, data=None):
     r = subprocess.run(["git", *args], cwd=top, input=data, capture_output=True)
     return r.stdout if r.returncode == 0 else None
@@ -171,6 +267,8 @@ def approved_for(top, path):
     """The default branch's version of `path` and its project_hooks_allowed, read from the commit the policy ref points
     at right now (resolved unambiguously, so a local branch called origin/main can't stand in for it)."""
     e = T.enrollment(top) or {}
+    if T.policy_source_problem(e) is not None:
+        return None, []  # a movable local branch can't pick the policy: fail closed
     sha = T.policy_commit(top, e.get("policy_ref")) if e.get("policy_ref") else None
     if not sha:
         return None, []
@@ -206,6 +304,7 @@ def filter_main(mode, path):
             else:
                 out, removed = sanitize(data, approved, allowed)
                 out, blocked = PIN.smudge(out, top, path)  # repo scripts: run only the default branch's copy, or not at all
+                remember_smudge(top, path, out)
                 if blocked:
                     log(top, "filtered %s: %d hook(s) run repository code without pins" % (path, len(blocked)))
                     sys.stderr.write("story-gate: %d hook(s) in %s run repository code that isn't pinned, so they won't run "
@@ -219,17 +318,30 @@ def filter_main(mode, path):
             idx = idx if idx is not None else _git(top, "show", "HEAD:%s" % path)
             plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
             out = plain
-            if idx is not None and (PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data
-                                    or is_filtered_form(idx, plain, allowed)):
+            note = last_smudge(top, path)
+            if idx is not None and ((note is None and PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data)
+                                    or is_filtered_form(idx, plain, allowed, approved, note)):
                 out = idx
+                if note is None and _guarded_differ(idx, plain):
+                    sys.stderr.write(f"story-gate: kept the committed settings in {path}: this copy was written before story-gate "
+                                     f"noted its checkouts, so a change there can't be told from an old approval. Run `git "
+                                     f"checkout -- {path}`, make the change again, then add it.\n")
             elif idx is not None:  # you edited the filtered copy: say so if committing it would drop branch commands
+                out = restore_filtered_keys(idx, plain, note)
                 try:
-                    lost = exec_strings(_load(idx)) - exec_strings(_load(plain))
+                    lost = exec_strings(_load(idx)) - exec_strings(_load(out))
+                    i, d = _load(idx), _load(out)
+                    changed = sorted(k for k in GUARDED_KEYS if isinstance(i, dict) and isinstance(d, dict) and i.get(k) != d.get(k))
                 except (ValueError, UnicodeDecodeError):
-                    lost = set()
+                    lost, changed = set(), []
+                if changed:
+                    sys.stderr.write(f"story-gate: staging your change to {', '.join(changed)} in {path}. Other computers use it "
+                                     "only after it is approved on the default branch.\n")
                 if lost:
                     sys.stderr.write("story-gate: %s on disk is the filtered copy, so committing it drops %d hook command(s) this branch "
                                      "added. Get new hook commands approved on the default branch first.\n" % (path, len(lost)))
+            if idx is None:  # a new file goes in as you wrote it: note it, so your later edits are recognised as yours
+                remember_smudge(top, path, plain)
     except Exception as ex:  # fail closed: never pass the branch's hook file through unchecked
         sys.stderr.write("story-gate filter error on %s: %r\n" % (path, ex))
         out = (b"{}\n" if path.endswith(".json") else b"") if mode == "smudge" else data

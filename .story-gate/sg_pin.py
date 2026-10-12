@@ -26,9 +26,13 @@ import sg_trust as T
 RUNNERS = {"npm", "npx", "yarn", "pnpm", "bun", "bunx", "make", "just", "task", "gradle", "gradlew", "mvn", "mvnw", "rake",
            "bundle", "poetry", "uv", "uvx", "pipenv", "tox", "nox", "cargo", "go", "deno", "dotnet", "composer", "pre-commit",
            "lefthook", "husky", "turbo", "nx"}  # run code chosen by repository files (package.json, Makefile, ...)
-CONFIG_LOADERS = {"pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
+CONFIG_LOADERS = {"docker-compose", "podman-compose", "pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
                   "babel", "gulp", "grunt", "rspec", "phpunit", "playwright", "cypress", "stylelint", "commitlint", "lint-staged",
                   "tsx", "ts-node", "nodemon", "rails", "django-admin"}  # load code from repository config (conftest.py, *.config.js)
+PROGRAM_FILE_TOOLS = {"awk", "gawk", "mawk", "nawk", "busybox", "sed", "gsed", "jq", "gojq", "yq", "dc", "bc", "m4"}
+PROGRAM_FILE_FLAGS = {"-f", "--file", "--from-file", "--script-file"}  # glued forms (-fprog, --file=prog) are options analyse() refuses
+CONTAINER_TOOLS = {"docker", "podman", "nerdctl"}
+CONTAINER_CONFIG_VERBS = {"compose", "build", "buildx", "bake"}  # subcommands that read compose.yaml, a Dockerfile, ...
 WRAPPERS = {"env", "time", "nice", "exec", "command", "sudo", "doas", "xargs", "nohup", "stdbuf", "timeout", "caffeinate",
             "start", "call"}  # run another program named later in the line
 INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "py", "pythonw", "node", "deno", "bun", "ruby",
@@ -71,7 +75,8 @@ def policy(top):
     """(ref, commit, config) for an enrolled repository, read from the default branch; (None, None, {}) otherwise."""
     e = T.enrollment(top) or {}
     ref = e.get("policy_ref")
-    sha = T.policy_commit(top, ref) if ref and e.get("enrolled") else None
+    trusted = e.get("enrolled") and T.policy_source_problem(e) is None  # a movable local branch can't pick the policy
+    sha = T.policy_commit(top, ref) if ref and trusted else None
     if not sha:
         return ref, None, {}
     try:
@@ -99,6 +104,20 @@ def _head(tok):
     return re.sub(r"\.(exe|cmd|bat|ps1|com)$", "", os.path.basename(tok.replace("\\", "/")).lower())
 
 
+def _relative_source(s):
+    """True for a bind-mount source inside the working folder: `.`, `./x`, `~`, or a relative path with a slash."""
+    return s in (".", "..") or s.startswith((".", "~")) or ("/" in s and not s.startswith("/") and not re.match(r"^[A-Za-z]:", s))
+
+
+def _mounts_working_folder(args):
+    """True when a container argument bind-mounts a folder inside the working folder: `<source>:<target>` with the
+    source `.`, `./x`, `~` or a relative path, given on its own or glued to its flag (`-v .:/w`, `-dv .:/w`, `-v./x:/w`,
+    `--volume=./x:/w`). A source without a slash is a named volume; an absolute one is this computer's own folder.
+    (`--mount ...,src=./x` is a repository path inside an option, which analyse() already refuses to call plain.)"""
+    specs = (re.sub(r"^(?:--[A-Za-z-]+=|-[A-Za-z]+(?=[.~/]))", "", a) for a in args)
+    return any(_relative_source(s.split(":", 1)[0]) for s in specs if ":" in s and not s.startswith("-"))
+
+
 def analyse(cmd, top, sha):
     """Default-deny reading of a hook command. -> dict(parse_ok, simple, runner, refs, outside, reasons).
     refs = repository paths the command uses (existing on the default branch, or written like a path/script);
@@ -124,6 +143,12 @@ def analyse(cmd, top, sha):
     if head in WRAPPERS or head in RUNNERS or head in CONFIG_LOADERS:
         info["runner"] = True
         info["reasons"].append("%s runs code chosen by repository files" % head)
+    elif head in CONTAINER_TOOLS and CONTAINER_CONFIG_VERBS & {t.lower() for t in tokens[1:]}:
+        info["runner"] = True  # compose.yaml / Dockerfile / bake files are read from the working folder by default
+        info["reasons"].append(f"{head} reads its configuration from repository files")
+    elif head in CONTAINER_TOOLS and _mounts_working_folder(tokens[1:]):
+        info["runner"] = True  # the container runs whatever the branch put in the mounted folder
+        info["reasons"].append(f"{head} mounts a folder from the repository")
     interp = head in INTERPRETERS or bool(re.match(r"^python\d", head))
     if interp:
         if any(t.lower() in CODE_FLAGS or re.match(r"^-[a-z]*[cem]$", t.lower()) for t in tokens[1:]):
@@ -133,6 +158,9 @@ def analyse(cmd, top, sha):
         if script is None:
             info["runner"] = True
             info["reasons"].append("interpreter without a script file")
+    program_files = set()  # awk -f FILE, sed -f FILE, jq --from-file FILE: the file is the program, so it's a path
+    if head in PROGRAM_FILE_TOOLS:
+        program_files = {tokens[i + 1] for i, t in enumerate(tokens[:-1]) if t in PROGRAM_FILE_FLAGS}
     cands, whole = [], set()
     for i, tok in enumerate(tokens):
         parts = [tok] + [x for x in re.split(r"[=,:]", tok) if x and x != tok]
@@ -147,7 +175,7 @@ def analyse(cmd, top, sha):
                 continue
             if rel.startswith("/") or re.match(r"^[A-Za-z]:/", rel) or rel.startswith("-"):
                 continue  # this computer's own absolute paths, and plain options
-            pathlike = explicit or "/" in rel or bool(SCRIPT_EXT.search(rel)) or (interp and i > 0 and part == next(
+            pathlike = explicit or "/" in rel or bool(SCRIPT_EXT.search(rel)) or part in program_files or (interp and i > 0 and part == next(
                 (t for t in tokens[1:] if not t.startswith("-")), None))
             cands.append((rel.rstrip("/"), pathlike, j == 0))
     if cands:
@@ -221,12 +249,14 @@ def unwrap_cmd(c, launcher=None):
 
 
 def _walk_commands(data, fn):
-    """Apply fn(command) -> new command | None (drop entry) to every hook entry's "command" string."""
+    """Apply fn(command, entry) -> new command | None (drop entry) to every hook entry's "command" string. `entry` is
+    the whole dict, so a callback can see sibling keys such as MCP "args"."""
     dropped = []
     def walk(x, depth):
+        """Rebuild x with fn applied to each nested entry's command; entries fn drops come back as None."""
         if isinstance(x, dict):
             if depth and isinstance(x.get("command"), str):
-                new = fn(x["command"])
+                new = fn(x["command"], x)
                 if new is None:
                     dropped.append(x["command"])
                     return None
@@ -242,6 +272,52 @@ def _walk_commands(data, fn):
             return [w for w in (walk(v, depth + 1) for v in x) if not (w is None or (w in ({}, [])))]
         return x
     return walk(data, 0), dropped
+
+
+INVOCATION_KEYS = ("args", "env", "cwd", "envFile", "env_file")
+# environment variables that steer what a program loads or runs: any value for these is part of the checked line
+LOADER_ENV_KEY = re.compile(
+    r"PATH|^LD_|^DYLD_|PRELOAD|OPTIONS$|OPTS$|^PYTHON|^PERL|^RUBY|^GEM_|^BUNDLE_|^NPM_CONFIG|^YARN_|^PNPM_|^PIP_|^UV_|"
+    r"^CARGO|^RUSTUP|^RUSTC|^GO(?:PATH|ROOT|FLAGS|BIN|ENV|PROXY|TOOLCHAIN|EXPERIMENT|CACHE|MODCACHE)$|^GIT_|^BASH_ENV$|"
+    r"^ENV$|^SHELL|^PS4$|^PROMPT_COMMAND$|^IFS$|(?:^|_)HOME(?:_|$)|^XDG_|CONFIG|RC$|^EDITOR$|^VISUAL$|^PAGER$|"
+    r"^BROWSER$|^DOCKER_|^KUBE|^SSH_|^JAVA|^JDK_|^CLASSPATH$|^MAVEN_|^GRADLE_|^DENO_|^BUN_|^PHP|^COMPOSER_|^LUA_|^TCL|"
+    r"^R_|PLUGIN|INCLUDE|(?:^|_)LIB(?:_|$)|^TMPDIR$", re.IGNORECASE)
+_FOLDER_VAR = re.compile(r"project|workspace|pwd|cwd|root|dir|folder|path|file", re.IGNORECASE)
+
+
+def _risky_env(k, v):
+    """True when an MCP env entry could make the server load repository code: a loader/path/config variable (any
+    value, even `true` or `$FOO`: an empty or unexpanded value can name the working folder), a value written like a
+    path, or a reference to a project/workspace/folder variable. Tokens, words, numbers and web addresses are fine."""
+    if LOADER_ENV_KEY.search(k):
+        return True
+    if re.match(r"^https?://[^\s]*$", v):
+        return False
+    if re.search(r"[/\\]", v) or v.startswith((".", "~")):
+        return True
+    return any(_FOLDER_VAR.search(n) for n in re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", v))
+
+
+def invocation_line(cmd, entry):
+    """The command line an MCP-style entry really runs, for classification and for project_hooks_allowed: environment
+    values that could name code as KEY=value prefixes, then `cd DIR &&` for a working folder, then command and args.
+    None when the entry loads an env file or has arguments/environment of an unknown shape."""
+    if "envFile" in entry or "env_file" in entry:
+        return None
+    args, env, cwd = entry.get("args", []), entry.get("env", {}), entry.get("cwd")
+    if not (isinstance(args, list) and all(isinstance(a, str) for a in args)):
+        return None
+    if not (isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())):
+        return None
+    if cwd is not None and not isinstance(cwd, str):
+        return None
+    line = f"{cmd} {shlex.join(args)}" if args else cmd
+    risky = [f"{k}={v}" for k, v in sorted(env.items()) if _risky_env(k, v)]
+    if risky:
+        line = f"{shlex.join(risky)} {line}"
+    if cwd is not None:
+        line = f"cd {shlex.quote(cwd)} && {line}"
+    return line
 
 
 def smudge(data_bytes, top, path, py=None, launcher=None):
@@ -260,9 +336,28 @@ def smudge(data_bytes, top, path, py=None, launcher=None):
     py = py or sys.executable
     launcher = launcher or T.launcher_path()
     notes = []
-    def fn(cmd):
-        if unwrap_cmd(cmd) is not None or T.HOOK_SIGNATURE.search(cmd):
-            return cmd  # already a story-gate command
+    def fn(cmd, entry):
+        """New command for one hook entry: unchanged, the runner call, or None to drop it. An entry with sibling `args`,
+        `env`, `cwd` or an env file (MCP servers) is classified as the whole invocation and never wrapped (the runner
+        takes no arguments)."""
+        invocation = any(k in entry for k in INVOCATION_KEYS)
+        if unwrap_cmd(cmd) is not None or T.is_our_hook_command(cmd):
+            if invocation:
+                notes.append(cmd)
+                return None  # our own command never comes with extra arguments or environment
+            return cmd  # already a story-gate command (exactly this computer's launcher, not a repository copy)
+        if invocation:
+            line = invocation_line(cmd, entry)
+            if line is None:
+                notes.append(cmd)
+                return None  # an env file, or an argument/env shape we can't read: can't vouch for it
+            tier, _ = classify(line, top, sha, ents.get(line))
+            if tier == "pinned":
+                tier = "blocked"  # the runner can't carry arguments
+            if tier == "blocked":
+                notes.append(line)
+                return None
+            return cmd
         tier, info = classify(cmd, top, sha, ents.get(cmd))
         if tier == "pinned":
             return wrap(cmd, py, launcher)
@@ -285,7 +380,8 @@ def unwrap_bytes(data_bytes):
     if not isinstance(data, (dict, list)):
         return data_bytes
     changed = []
-    def fn(cmd):
+    def fn(cmd, entry=None):
+        """Original command for a runner call, else the command unchanged."""
         orig = unwrap_cmd(cmd)
         if orig is not None:
             changed.append(1)
@@ -636,7 +732,7 @@ def report(top, default_hook_commands=()):
     ents = entries(cfg)
     rows = []
     for cmd in sorted(set(ents) | set(default_hook_commands)):
-        if T.HOOK_SIGNATURE.search(cmd) or unwrap_cmd(cmd) is not None:
+        if T.is_our_hook_command(cmd) or unwrap_cmd(cmd) is not None:
             continue
         tier, info = classify(cmd, top, sha, ents.get(cmd))
         hint = ""

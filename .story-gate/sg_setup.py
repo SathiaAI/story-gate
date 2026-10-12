@@ -221,18 +221,21 @@ class Wizard:
             self.clients = [cl for cl in known if cl in want]
         return True
 
-    def background(self, fn):
-        threading.Thread(target=self._guard, args=(fn,), daemon=True).start()
+    def background(self, fn, step=None):
+        """Run fn on a thread; a failure is shown on `step`'s card (when given), else on the first step still working."""
+        threading.Thread(target=self._guard, args=(fn, step), daemon=True).start()
 
-    def _guard(self, fn):
+    def _guard(self, fn, step=None):
+        """Run fn; any exception becomes a plain message on the step that owns the work, not whichever step is "working"."""
         try:
             fn()
         except Exception as e:  # every failure becomes a plain message on the page
-            step = next((s for s in STEPS if self.st[s]["status"] == "working"), "signin")
+            step = step or next((s for s in STEPS if self.st[s]["status"] == "working"), "signin")
             self.set(step, "error", str(e)[:400])
 
     # ---- step 1: sign in
     def start_signin(self):
+        """Sign-in step: reuse a working GitHub token, else start the device sign-in flow."""
         tok = self.token or G.human_token()
         if tok and G.whoami(tok):
             return self._signed_in(tok)
@@ -240,7 +243,7 @@ class Wizard:
             self.set("signin", "error", "Sign in with the GitHub CLI first: run `gh auth login` in a terminal, then press Start again.")
             return
         self.set("signin", "working", "Waiting for you to enter the code on GitHub")
-        self.background(lambda: self._signed_in(G.device_flow(OAUTH_CLIENT_ID, on_code=self._show_code)))
+        self.background(lambda: self._signed_in(G.device_flow(OAUTH_CLIENT_ID, on_code=self._show_code)), "signin")
 
     def _show_code(self, code, uri):
         with self.lock:
@@ -300,13 +303,14 @@ class Wizard:
                 '</form><script>document.getElementById("f").submit()</script>' % (G.WEB, where, self.agent_state, html.escape(mf, quote=True)))
 
     def agent_callback(self, state, code):
+        """Finish the agent App setup from GitHub's redirect; False when the state or code doesn't match."""
         if state != self.agent_state or not code:
             return False
         rec = G.setup_agent(code=code, open_browser=False)
         self.set("agent", "working", "Now click Install and choose %s" % self.repo)
         if self.open_browser:
             webbrowser.open(rec["install_url"])
-        self.background(self._wait_install)
+        self.background(self._wait_install, "agent")
         return True
 
     def _wait_install(self):
@@ -417,7 +421,7 @@ class Wizard:
         # running init again before that pull request is merged brings the open one up to date instead of leaving it stale
         self.pr = G.open_setup_pr(tok, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base, update_existing=True)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
-        self.background(lambda: self._wait_merge(base))
+        self.background(lambda: self._wait_merge(base), "merge")
 
     def _wait_merge(self, base):
         for _ in range(1800):
@@ -480,6 +484,7 @@ def signed_or_not(here):
 
 # ------------------------------------------------------------------ the page
 def make_handler(wz):
+    """The local web server's request handler, bound to this setup wizard."""
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -498,6 +503,7 @@ def make_handler(wz):
             self.wfile.write(data)
 
         def do_GET(self):
+            """Serve the setup page, its fonts and the status feed to this computer's own browser only."""
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(u.query)
             if not self._host_ok():
@@ -521,13 +527,14 @@ def make_handler(wz):
                 if has_agent() and wz.agent_installed():
                     wz.set("agent", "ok", "Your AI already has its own GitHub login on %s" % wz.repo)
                     if wz.already:
-                        wz.background(lambda: wz.finish(wz.base))
+                        wz.background(lambda: wz.finish(wz.base), "done")
                     return self._send(200, page_shell("<h1>Already done.</h1><p>Go back to the setup page.</p>"))
                 wz.set("agent", "working", "Click Create on GitHub")
                 return self._send(200, page_shell(wz.agent_form(self.server.server_address[1])))
             return self._send(404, "not found")
 
         def do_POST(self):
+            """Run a setup action posted by the page; refused without the session secret and a loopback origin."""
             u = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(u.query)
             origin = self.headers.get("Origin", "")
@@ -540,11 +547,11 @@ def make_handler(wz):
                 wz.start_signin()
             elif act == "key" and wz.token:
                 wz.set("key", "working", "Saving")
-                wz.background(lambda: wz.save_key(form.get("key", [""])[0]))
+                wz.background(lambda: wz.save_key(form.get("key", [""])[0]), "key")
             elif act == "nokey" and wz.token:
                 wz.skip_key()
             elif act == "merge" and wz.token:
-                wz.background(lambda: wz.open_pr(form.get("approvers", [""])[0]))
+                wz.background(lambda: wz.open_pr(form.get("approvers", [""])[0]), "merge")
             elif act == "tools":
                 if not wz.set_clients(form.get("clients", [""])[0]):
                     return self._send(400, json.dumps({"error": "Tick at least one tool."}), "application/json")
@@ -644,11 +651,11 @@ def page(wz):
         ("agent", "Give your AI its own GitHub login", "Click <b>Create</b>, then <b>Install</b> on this repository. Your AI never uses your login.",
          "<a class=btn id=agentbtn href='/agent/start?t=%s' target=_blank>Open GitHub</a>" % t),
         ("key", "Add the judge key", "Make a key at <a href='https://openrouter.ai/keys' target=_blank>openrouter.ai/keys</a> and paste it here. "
-         "It goes straight into a GitHub secret; your AI never sees it.",
+         "Setup does not give it to your AI. It goes into a GitHub secret, and the copy on this computer is readable by anything running as you.",
          "<form onsubmit=\"event.preventDefault();go('key',new URLSearchParams(new FormData(this)))\"><label class=lbl>Judge key"
          + info("judgekey", "the judge key", "An <b>OpenRouter</b> API key. It starts with <code>sk-or-</code>. story-gate's AI judge "
                 "uses it to check that the code really does what the story asks. Make one at openrouter.ai/keys and copy it right "
-                "away. It's encrypted into a GitHub secret and saved only on this computer; your AI never sees it.")
+                "away. It's encrypted into a GitHub secret and saved on this computer. Setup does not give it to your AI, but anything running as you can read the saved copy.")
          + "<input name=key type=password autocomplete=new-password placeholder='sk-or-...' aria-describedby=msg-key></label> <button>Save</button></form>"
          "<p class=hint>No key? <button class=link onclick=\"go('nokey')\">Skip for now</button> and story-gate runs without an AI "
          "judge: it still checks the plan, runs your tests and needs your approval, but nothing checks that the code really does "

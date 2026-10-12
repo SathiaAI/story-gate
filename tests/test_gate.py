@@ -1,4 +1,4 @@
-import base64, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import base64, hashlib, json, os, shutil, subprocess, sys, tempfile, time, types, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -851,7 +851,7 @@ class TestStoryGateOnlyPullRequests(Base):
         G.acceptance = lambda ctx, token, owners, approvers=(): seen.append(1) or (
             {"accepted": True, "approver": "paul", "why": "approved by paul"} if accepted
             else {"accepted": False, "why": "waiting for a code owner (paul) to approve the latest commit abc1234"})
-        G.protection = lambda repo, branch, token: (True, [])
+        G.protection = lambda repo, branch, token, check=None: (True, [])
         import io, contextlib
         out = io.StringIO()
         # like run(): never read the CI runner's own pull request (GitHub sets GITHUB_BASE_REF on pull_request runs)
@@ -1079,6 +1079,21 @@ class TestGitHubLogic(unittest.TestCase):
         ev = lambda kind, who, at, i: {"event": kind, "label": {"name": "story-gate-change"}, "actor": {"login": who}, "created_at": at, "id": i}
         G.paged = lambda p, t: [ev("labeled", "agent-bot[bot]", "2026-10-02T10:00:00Z", 3), ev("labeled", "Paul", "2026-10-01T10:00:00Z", 1)]
         self.assertEqual(G.label_added_by({"repo": "o/r", "number": 1}, "t", "story-gate-change"), "agent-bot[bot]")
+
+    def test_protection_accepts_reusable_workflow_check_name(self):
+        """A required check named 'story-gate / story-gate' (the reusable workflow's name) counts as the story-gate check."""
+        G = self.G
+        for name, ok in (("story-gate", True), ("story-gate / story-gate", True), ("other", False), ("my-story-gate", False),
+                         ("story-gate / lint", False), ("Story-Gate", False)):
+            with self.subTest(check=name):
+                rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": name}]}}]
+                G.call = lambda *a, rules=rules, **k: (200, rules, {})
+                _, missing = G.protection("o/r", "main", "t")
+                self.assertEqual("the story-gate check is not a required status check" in missing, not ok, missing)
+        rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "story-gate"}]}}]
+        G.call = lambda *a, **k: (200, rules, {})
+        self.assertTrue(any("story-gate / story-gate" in m for m in G.protection("o/r", "main", "t", "story-gate / story-gate")[1]))
+        self.assertFalse(any("status check" in m for m in G.protection("o/r", "main", "t", "story-gate")[1]))
 
     def test_ruleset_shape(self):
         """Require human approval without extra AI approval and keep the importable ruleset in sync."""
@@ -1552,6 +1567,12 @@ class TestTrustedRuntime(RuntimeFixture):
         self.cfg(mode="warn", enforce_points=[])  # the branch tries to switch to warn
         self.assertEqual(self.hook().returncode, 2)
 
+    def test_malformed_local_settings_cannot_open_the_pre_edit_gate(self):
+        """A branch config with a wrong-shaped enforce_points or judge must not crash cfg() and turn the block into a warning."""
+        for bad in ({"enforce_points": 1}, {"judge": 1}):
+            self.cfg(mode="enforce", **bad)
+            self.assertEqual(self.hook().returncode, 2, bad)
+
     def test_branch_can_tighten_policy(self):
         g = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
         g("checkout", "-q", "main"); self.cfg(mode="warn"); g("commit", "-qam", "warn"); g("push", "-q", "origin", "main")
@@ -1808,6 +1829,36 @@ class TestTrustedRuntime(RuntimeFixture):
         self.assertTrue(list((self.user / ".claude").glob("settings.json.story-gate-backup-*")))
         self.assertFalse((self.home / "runtime").exists())
 
+    def test_uninstall_says_where_the_local_judge_key_is(self):
+        """uninstall --user keeps the local judge key file but names it, so the key is never left behind unsaid."""
+        kf = self.home / "judge.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        self.assertTrue(kf.exists()); self.assertIn(f"Kept your local judge key: {kf}", r.stdout)
+        self.assertNotIn("sk-or-test", r.stdout + r.stderr)
+
+    def test_uninstall_moves_a_judge_key_kept_inside_the_runtime(self):
+        """A key file under the runtime folder (STORY_GATE_ENV_FILE) is moved out before the runtime is removed."""
+        rt = self.home / "runtime"; self.assertTrue(rt.is_dir())
+        kf = rt / "my.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        self.assertFalse(rt.exists())
+        kept = [p for p in self.home.rglob("judge.env*") if p.read_text() == "OPENROUTER_API_KEY=sk-or-test\n"]
+        self.assertEqual(len(kept), 1, r.stdout); self.assertIn("Moved your local judge key", r.stdout)
+        self.assertNotIn("sk-or-test", r.stdout + r.stderr)
+
+    def test_uninstall_never_overwrites_a_kept_judge_key(self):
+        """Moving a runtime key out picks a new name when judge.env and judge.env.from-runtime already exist."""
+        rt = self.home / "runtime"
+        cfg = self.home  # STORY_GATE_HOME: story-gate's user folder in these tests
+        existing = {cfg / "judge.env": "A\n", cfg / "judge.env.from-runtime": "B\n"}
+        for f, body in existing.items():
+            f.write_text(body)
+        kf = rt / "my.env"; kf.write_text("OPENROUTER_API_KEY=sk-or-test\n")
+        r = run(self.repo, "uninstall", "--user", env=dict(self.env, STORY_GATE_ENV_FILE=str(kf)))
+        for f, body in existing.items():
+            self.assertEqual(f.read_text(), body, r.stdout)
+        self.assertEqual((cfg / "judge.env.from-runtime-2").read_text(), "OPENROUTER_API_KEY=sk-or-test\n")
+
     def test_invalid_user_json_is_never_clobbered(self):
         p = self.user / ".gemini/settings.json"; p.write_text("{ // comments are not JSON\n}")
         r = run(self.repo, "install", "--user", "--unsigned", env=self.env)
@@ -1966,6 +2017,7 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertNotIn("evil", G.sanitize(cursor, None)[0].decode())  # a new hook file with no approved version keeps no commands
 
     def test_sanitize_covers_every_way_a_settings_file_runs_something(self):
+        """sanitize() takes out every branch setting that can run something (env, permissions, MCP, tools, hooks) unless main approved it."""
         G = self.guard()
         approved = json.dumps({"mcpServers": {"docs": {"command": "npx", "args": ["docs-server"]}},
                                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo ok"}]}]}}).encode()
@@ -1983,7 +2035,109 @@ class TestRepoHookGuard(RuntimeFixture):
             self.assertNotIn(bad, text, bad)
         self.assertEqual(data["mcpServers"], {"docs": {"command": "npx", "args": ["docs-server"]}})  # back to the approved server
         self.assertEqual(data["hooks"]["Stop"][0]["hooks"], [{"type": "command", "command": "echo ok", "timeout": 30}])
-        self.assertTrue(G.is_filtered_form(json.dumps(branch).encode(), out))
+        self.assertTrue(G.is_filtered_form(json.dumps(branch).encode(), out, approved=approved))
+
+    def test_user_edit_to_a_guarded_setting_is_not_a_filtered_form(self):
+        """With a note of what the filter wrote, the clean filter keeps an edit to a guarded setting instead of restoring the
+        stored copy. Without a note (a copy from before notes existed) it can't tell an edit from an old approval: fail closed."""
+        G = self.guard()
+        stored = json.dumps({"permissions": {"allow": ["a"]}, "theme": "x"}).encode()
+        edited = json.dumps({"permissions": {"allow": ["a", "b"]}, "theme": "x"}).encode()
+        wrote = {"sha": hashlib.sha256(stored).hexdigest(), "guarded": {k: json.loads(stored).get(k) for k in G.GUARDED_KEYS}}
+        self.assertFalse(G.is_filtered_form(stored, edited, approved=stored, smudged=wrote))
+        self.assertFalse(G.is_filtered_form(stored, edited, smudged=wrote))
+        self.assertTrue(G.is_filtered_form(stored, edited, approved=stored))  # no note: treated as the filter's copy
+        self.assertTrue(G.is_filtered_form(stored, stored, approved=stored, smudged=wrote))
+        z = json.dumps({"permissions": {"allow": ["z"]}}).encode()  # the branch's value; the filter wrote "a" here
+        to_approved = json.dumps({"permissions": {"allow": ["new"]}}).encode()  # you set it to what main approves now
+        self.assertFalse(G.is_filtered_form(z, to_approved, approved=to_approved, smudged=wrote))
+        listed = json.dumps(["not", "settings"]).encode()  # a branch that stored a non-object
+        self.assertFalse(G.is_filtered_form(listed, edited, approved=stored, smudged=wrote))  # your edit: kept
+        self.assertTrue(G.is_filtered_form(listed, edited, approved=stored))  # no note: keep the stored copy
+        self.assertTrue(G.is_filtered_form(listed, stored, approved=stored))  # the approved copy the filter wrote
+        older = json.dumps({"permissions": {"allow": ["old"]}}).encode()  # written under an approval since revoked
+        self.assertTrue(G.is_filtered_form(listed, older, approved=stored, smudged={"sha": hashlib.sha256(older).hexdigest()}))
+        noted = {"sha": "0" * 64, "guarded": {k: json.loads(older).get(k) for k in G.GUARDED_KEYS}}
+        self.assertTrue(G.is_filtered_form(listed, older + b"\n", approved=stored, smudged=noted))  # bytes differ, settings ours
+        mixed = json.dumps({"permissions": {"allow": ["old"]}, "env": {"MINE": "1"}}).encode()  # stale X plus an edit
+        self.assertTrue(G.is_filtered_form(listed, mixed, approved=stored, smudged=noted))  # X can't be split out: keep stored
+        mine = json.dumps({"permissions": {"allow": ["a"]}, "env": {"MINE": "1"}}).encode()  # nothing stale left
+        self.assertFalse(G.is_filtered_form(listed, mine, approved=stored, smudged=noted))
+        # our own filtered copy (guarded value is the approved one, an entry was dropped) is still recognised
+        branch = json.dumps({"permissions": {"allow": ["branch"]}, "apiKeyHelper": "evil"}).encode()
+        approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
+        out = G.sanitize(branch, approved)[0]
+        self.assertTrue(G.is_filtered_form(branch, out, approved=approved))
+
+    def test_a_copy_filtered_under_a_revoked_approval_is_not_staged_as_an_edit(self):
+        """A working copy the filter wrote under approval X, after the default branch moved to Y, is still the filter's
+        own copy: git add keeps the branch's stored value instead of staging the revoked X."""
+        x, y, z = {"permissions": {"allow": ["x"]}}, {"permissions": {"allow": ["y"]}}, {"permissions": {"allow": ["z"]}}
+        self.approve_on_main(x)
+        self.git("checkout", "-qb", "revoked")
+        (self.repo / ".claude/settings.json").write_text(json.dumps(z, indent=2))
+        self.git("add", ".claude/settings.json"); self.git("commit", "-qm", "branch value")
+        self.git("checkout", "-q", "main"); self.git("checkout", "-q", "revoked")  # the filter writes X to disk
+        self.assertIn('"x"', (self.repo / ".claude/settings.json").read_text())
+        other = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, other, True)
+        origin = self.git("remote", "get-url", "origin").stdout.strip()
+        subprocess.run(["git", "clone", "-q", origin, str(other / "c")], check=True, capture_output=True)
+        (other / "c/.claude/settings.json").write_text(json.dumps(y, indent=2))
+        for a in (("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve y"), ("push", "-q", "origin", "HEAD:main")):
+            subprocess.run(["git", *a], cwd=other / "c", check=True, capture_output=True)
+        self.git("fetch", "-q", "origin")  # the policy is now Y; the working copy still holds X
+        os.utime(self.repo / ".claude/settings.json")
+        self.git("add", ".claude/settings.json")
+        self.assertEqual(self.git("diff", "--cached").stdout, "")  # neither X nor anything else is staged
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps(dict(x, theme="dark"), indent=2))  # an edit elsewhere in the stale copy
+        self.git("add", ".claude/settings.json")
+        staged = self.git("diff", "--cached").stdout
+        self.assertIn('"theme"', staged); self.assertNotIn('"x"', staged)  # the edit goes in, the revoked X doesn't
+        self.git("reset", "-q"); f.write_text(json.dumps(x, indent=2))
+        shutil.rmtree(self.repo / ".git/story-gate-smudged")  # no note: can't tell X from an edit, so it's not staged
+        os.utime(f)
+        r = self.git("add", ".claude/settings.json")
+        self.assertEqual(self.git("diff", "--cached").stdout, ""); self.assertIn("git checkout --", r.stderr)
+
+    def test_setting_a_guarded_value_to_the_new_approval_is_staged(self):
+        """After the default branch moves from A to B, writing exactly the filter's B output by hand is your edit (the
+        filter wrote A here), so git add stages it instead of matching it against what the filter would write now."""
+        a, b, z = {"permissions": {"allow": ["a"]}}, {"permissions": {"allow": ["b"]}}, {"permissions": {"allow": ["z"]}}
+        self.approve_on_main(a)
+        self.git("checkout", "-qb", "tob")
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps(z, indent=2)); self.git("add", ".claude/settings.json"); self.git("commit", "-qm", "z")
+        self.git("checkout", "-q", "main"); self.git("checkout", "-q", "tob")  # the filter writes A and notes it
+        other = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, other, True)
+        subprocess.run(["git", "clone", "-q", self.git("remote", "get-url", "origin").stdout.strip(), str(other / "c")],
+                       check=True, capture_output=True)
+        (other / "c/.claude/settings.json").write_text(json.dumps(b, indent=2))
+        for c in (("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "b"), ("push", "-q", "origin", "HEAD:main")):
+            subprocess.run(["git", *c], cwd=other / "c", check=True, capture_output=True)
+        self.git("fetch", "-q", "origin")
+        G = self.guard()
+        f.write_bytes(G.sanitize(json.dumps(z).encode(), json.dumps(b).encode())[0])  # byte for byte what smudge would write now
+        self.git("add", ".claude/settings.json")
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
+
+    def test_git_status_before_add_does_not_swallow_an_edit(self):
+        """Looking at an edit (git status / git diff run the clean filter) never changes what git add then stages."""
+        self.approve_on_main({"permissions": {"allow": ["a"]}})
+        self.git("checkout", "-q", "-B", "look"); self.git("checkout", "-q", "main"); self.git("checkout", "-q", "look")
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps({"permissions": {"allow": ["a", "b"]}}, indent=2))
+        self.git("status"); self.git("diff")
+        self.git("add", ".claude/settings.json")
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
+
+    def test_editing_a_guarded_setting_on_the_default_branch_can_be_committed(self):
+        """On the default branch, a user's edit to a guarded setting survives the clean filter and is staged."""
+        self.approve_on_main({"permissions": {"allow": ["a"]}})
+        f = self.repo / ".claude/settings.json"
+        f.write_text(json.dumps({"permissions": {"allow": ["a", "b"]}}))
+        self.git("add", ".claude/settings.json")  # runs the clean filter
+        self.assertIn('"b"', self.git("diff", "--cached").stdout)
 
     def test_local_branch_named_like_the_remote_cant_approve_hooks(self):
         self.approve_on_main({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": self.APPROVED}]}]}})
@@ -2645,6 +2799,165 @@ class TestPinnedHooks(RuntimeFixture):
         finally:
             sys.path.remove(str(SRC))
 
+    def pin_module(self):
+        """sg_pin freshly imported from the source folder."""
+        import importlib
+        sys.path.insert(0, str(SRC))
+        try:
+            import sg_pin
+            return importlib.reload(sg_pin)
+        finally:
+            sys.path.remove(str(SRC))
+
+    def smudge_json(self, data, cfg=None):
+        """Run the checkout filter's pin step on a JSON hook/MCP file with a fixed policy; -> (parsed result, notes)."""
+        P = self.pin_module()
+        cfg = cfg or {"project_hooks_allowed": [{"command": self.CHECK, "pins": ["scripts/check.sh"]}]}
+        with patch.object(P, "policy", lambda top: ("origin/main", None, cfg)):
+            out, notes = P.smudge(json.dumps(data).encode(), str(self.repo), ".mcp.json", py="/py", launcher="/l.py")
+        return json.loads(out), notes
+
+    def test_mcp_entry_args_are_classified_with_the_command(self):
+        """An MCP server whose args name repository files (docker compose -f mcp/compose.yml) is not 'plain', and a pinned
+        command with args is never wrapped (the runner would lose the args)."""
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": ["compose", "-f", "mcp/compose.yml", "run", "srv"]}}})
+        self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}})
+        self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        line_pinned = {"project_hooks_allowed": [{"command": self.CHECK + " x", "pins": ["scripts/check.sh"]}]}
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}}, line_pinned)
+        self.assertEqual(out, {}); self.assertEqual(notes, [self.CHECK + " x"])  # pinned in full, but can't be wrapped
+        accepted = {"project_hooks_allowed": [{"command": self.CHECK + " x", "runs_repo_code": "accepted"}]}
+        kept = {"mcpServers": {"s": {"command": self.CHECK, "args": ["x"]}}}
+        self.assertEqual(self.smudge_json(kept, accepted), (kept, []))  # a code owner accepted the full line
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": [["nested"]]}}})
+        self.assertEqual(out, {})  # unknown argument shape: dropped
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"]}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))  # nothing from the repository: untouched
+
+    def test_mcp_env_cwd_and_env_files_are_part_of_what_is_checked(self):
+        """env values that could name code, a working folder, or an env file make an MCP entry run repository code
+        the pin check never saw: dropped unless a code owner accepted that exact line. Ordinary settings (tokens,
+        words, numbers, web addresses) in other variables don't count."""
+        for entry in ({"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}},
+                      {"command": "node", "args": ["--version"], "env": {"NODE_OPTIONS": "--require ./pwn.js"}},
+                      {"command": "echo", "args": ["hello"], "cwd": "tools"},
+                      {"command": "echo", "envFile": ".env.mcp"},
+                      {"command": "echo", "env": {"X": ["not", "a", "string"]}}):
+            with self.subTest(entry=entry):
+                out, notes = self.smudge_json({"mcpServers": {"s": entry}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        for env in ({"PATH": "true"}, {"PATH": "1"}, {"PATH": "http://bin"}, {"PATH": "$FOO"}, {"GIT_DIR": "${FOO}"},
+                    {"PYTHONPATH": "${CLAUDE_PROJECT_DIR}"}, {"X": "${workspaceFolder}"}, {"NODE_OPTIONS": "--inspect"},
+                    {"HOME": "true"}, {"APP_CONFIG": "app.json"}, {"DATA": "./data"}, {"BASE": "${PWD}/x"}):
+            with self.subTest(env=env):  # loader/path/config variables (any value), path-like values, project folders
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "echo", "args": ["ok"], "env": env}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        keep = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {
+            "TOKEN": "${GITHUB_TOKEN}", "API_KEY": "sk-abc", "NODE_ENV": "production", "DEBUG": "1", "PORT": "8080",
+            "API_URL": "https://api.example.com/v1", "HOMEPAGE": "acme", "LIBRARY_ID": "7"}}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))
+        risky = {"mcpServers": {"s": {"command": "echo", "args": ["hello"], "env": {"LD_PRELOAD": "./evil.so"}}}}
+        accepted = {"project_hooks_allowed": [{"command": "LD_PRELOAD=./evil.so echo hello", "runs_repo_code": "accepted"}]}
+        self.assertEqual(self.smudge_json(risky, accepted), (risky, []))  # the code owner accepted exactly this line
+
+    def test_container_tools_that_read_repository_config_are_not_plain(self):
+        """docker compose / build read compose.yaml or a Dockerfile from the working folder even with no file named, so
+        a branch could change what runs; a plain `docker run` of an image uses nothing from the repository."""
+        for args in (["compose", "run", "srv"], ["--context", "x", "compose", "up"], ["build", "."], ["buildx", "bake"]):
+            with self.subTest(args=args):
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker-compose", "args": ["up"]}}})
+        self.assertEqual(out, {})
+        for args in (["run", "--rm", "-v", ".:/w", "alpine", "/w/evil.sh"], ["run", "--volume=./src:/w", "img"],
+                     ["run", "-v./x:/w", "img"], ["run", "--mount", "type=bind,source=./tools,target=/t", "img"],
+                     ["run", "--rm", "-dv", ".:/w", "img"], ["run", "-itv.:/w", "img"]):
+            with self.subTest(args=args):  # a bind mount of a repository folder runs what the branch put there
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": "docker", "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        P = self.pin_module()  # a named volume or this computer's own folder isn't a repository mount
+        self.assertFalse(P._mounts_working_folder(["run", "-v", "cache:/c", "-v", "/opt/x:/x", "--mount", "type=volume,src=v,dst=/v", "img"]))
+        keep = {"mcpServers": {"s": {"command": "docker", "args": ["run", "-i", "--rm", "acme-mcp"]}}}
+        self.assertEqual(self.smudge_json(keep), (keep, []))
+
+    def test_a_program_file_given_to_awk_sed_or_jq_is_repository_code(self):
+        """`awk -f prog` runs prog as code even when prog is a new file the default branch doesn't have, so it is never
+        plain; a pinned program file still works as a pinned hook."""
+        for cmd, args in (("awk", ["-f", "evil"]), ("sed", ["-f", "edit", "x.txt"]), ("jq", ["--from-file", "filter"])):
+            with self.subTest(cmd=cmd):
+                out, notes = self.smudge_json({"mcpServers": {"s": {"command": cmd, "args": args}}})
+                self.assertEqual(out, {}); self.assertEqual(len(notes), 1)
+        P = self.pin_module()
+        self.assertIn("evil", P.analyse("awk -f evil", str(self.repo), None)["refs"])
+        tier, _ = P.classify("awk -f evil", str(self.repo), None, {"pins": ["evil"]})
+        self.assertEqual(tier, "pinned")
+
+    def test_our_runner_command_with_extra_arguments_is_dropped(self):
+        """This computer's runner call never comes with args or env; one that does is not ours to keep."""
+        P = self.pin_module()
+        ours = P.wrap(self.CHECK, "/py", "/l.py")
+        with patch.object(P.T, "launcher_path", lambda: "/l.py"):
+            out, notes = self.smudge_json({"mcpServers": {"s": {"command": ours, "args": ["--", "evil"]}}})
+            self.assertEqual(out, {}); self.assertEqual(notes, [ours])
+
+    def test_this_computers_own_hook_commands_survive_the_filter(self):
+        """story-gate's own hook commands (exactly this computer's launcher) are kept as they are by smudge and left out
+        of doctor's list, for every tool's hook format; otherwise the filter would switch the gate itself off."""
+        P = self.pin_module()
+        sys.path.insert(0, str(SRC)); self.addCleanup(sys.path.remove, str(SRC))  # launcher_path() imports lazily
+        py = "/usr/bin/python3" if os.name != "nt" else "C:/Python/python.exe"
+        launcher = str(P.T.launcher_path())
+        for client, data in P.T.hook_entries(py, launcher).items():
+            with self.subTest(client=client):
+                out, notes = self.smudge_json(data)
+                self.assertEqual((out, notes), (data, []))
+        cmd = P.T.hook_entries(py, launcher)["claude"]["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertTrue(P.T.is_our_hook_command(cmd))
+        self.assertEqual(self.report_rows(P, [cmd]), [])
+
+    def test_repository_copy_of_the_hook_command_is_not_ours(self):
+        """Only this computer's launcher command skips classification; a checked-out gate.py (older project installs) or
+        text that merely mentions `gate.py hook --client` goes through the pin check."""
+        for cmd in ("python3 .story-gate/gate.py hook --client claude --event pre", "bash evil.sh # gate.py hook --client x"):
+            out, notes = self.smudge_json({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd}]}]}})
+            self.assertEqual(out, {}, cmd); self.assertEqual(notes, [cmd])
+        P = self.pin_module()
+        rows = {c: t for c, t, _ in self.report_rows(P, ["python3 .story-gate/gate.py hook --client claude --event pre"])}
+        self.assertEqual(rows.get("python3 .story-gate/gate.py hook --client claude --event pre"), "blocked")
+
+    def report_rows(self, P, cmds):
+        """P.report() for a repository whose policy resolves, listing `cmds` as the default branch's hook commands."""
+        with patch.object(P, "policy", lambda top: ("origin/main", "0" * 40, {})):
+            return P.report(str(self.repo), cmds)
+
+    def test_local_policy_ref_without_consent_is_not_a_policy_source(self):
+        """An enrollment whose policy ref is a local branch (no allow_local_policy) must not select the policy commit for
+        pinning or hook filtering: sg_pin.policy and sg_guard.approved_for fail closed like gate.py's policy_json."""
+        self.setup_main(["echo ok"], [])  # the default branch has a settings file approved_for could otherwise return
+        P = self.pin_module()
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib
+            G = importlib.reload(importlib.import_module("sg_guard"))
+        finally:
+            sys.path.remove(str(SRC))
+        top = str(self.repo)
+        local = {"toplevel": top, "identity": "x", "enrolled": True, "policy_ref": "main"}
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, capture_output=True, text=True, check=True).stdout.strip()
+        with patch.object(P.T, "enrollment", lambda t: dict(local)), patch.object(G.T, "enrollment", lambda t: dict(local)), \
+                patch.object(G.T, "policy_commit", lambda t, r: head):  # even when the local ref resolves
+            self.assertEqual(P.policy(top), ("main", None, {}))
+            self.assertEqual(G.approved_for(top, ".claude/settings.json"), (None, []))
+        remote = dict(local, policy_ref="origin/main")
+        with patch.object(P.T, "enrollment", lambda t: dict(remote)):
+            self.assertTrue(P.policy(top)[1])  # a remote's branch still works
+        consented = dict(local, allow_local_policy=True)  # a repository with no remote, by the human's explicit choice
+        with patch.object(P.T, "enrollment", lambda t: dict(consented)), patch.object(G.T, "enrollment", lambda t: dict(consented)), \
+                patch.object(G.T, "policy_commit", lambda t, r: head):
+            self.assertTrue(P.policy(top)[1])
+            self.assertIsNotNone(G.approved_for(top, ".claude/settings.json")[0])
+
 
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
 class TestReleaseSignatures(unittest.TestCase):
@@ -3053,6 +3366,28 @@ class TestLiveDashboard(Base):
         """A minimal story row for building dashboard data."""
         return {"id": "SAT-%d" % i, "title": title, "feature": feature, "status": status, "ready": None, "done": None, "checkpoint": None, "coder": None,
                 "trace": [], "ref": ref, "merged": True, "acs": 0, "stale": False, "last_reported": None}
+
+    def test_last_dates_are_utc_so_string_order_is_time_order(self):
+        """last_dates returns every commit time as UTC 'YYYY-MM-DDTHH:MM:SSZ', so commits made from different time zones compare correctly as strings."""
+        sd = self.repo / ".story-gate/stories"
+        for sid, when in (("SAT-1", "2026-10-01T10:00:00+05:00"), ("SAT-2", "2026-10-01T08:00:00+00:00")):  # 05:00Z is earlier than 08:00Z
+            (sd / sid).mkdir(parents=True, exist_ok=True); (sd / sid / "story.md").write_text("x\n")
+            subprocess.run(["git", "add", "."], cwd=self.repo, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-qm", sid], cwd=self.repo, capture_output=True, check=True,
+                           env=dict(os.environ, GIT_COMMITTER_DATE=when, GIT_AUTHOR_DATE=when))
+        out, files = self.D.Repo(self.repo).last_dates("HEAD")
+        self.assertEqual(out["SAT-1"], "2026-10-01T05:00:00Z")
+        self.assertEqual(out["SAT-2"], "2026-10-01T08:00:00Z")
+        self.assertLess(out["SAT-1"], out["SAT-2"])
+        self.assertEqual(files[".story-gate/stories/SAT-1/story.md"], "2026-10-01T05:00:00Z")
+
+    def test_html_all_stories_ci_text_has_no_markdown_escapes(self):
+        """The HTML 'All stories' table shows CI text from the raw fields, so in_progress has no Markdown backslash or &amp; double escape."""
+        st = self.story(1, status="in_progress")
+        st["ci"] = {"pr": 12, "result": "in_progress", "source": "a&b"}
+        page = self.D.to_html(self.data([st]))
+        self.assertIn("origin/main · #12 in_progress · source a&amp;b", page)
+        self.assertNotIn("in\\_progress", page); self.assertNotIn("&amp;amp;", page)
 
     def data(self, stories, **kw):
         """Dashboard data around the given stories."""
@@ -3815,6 +4150,26 @@ class TestGuidedSetup(unittest.TestCase):
         wz.save_key("not a key")
         self.assertEqual(wz.st["key"]["status"], "error")
 
+    def test_background_failure_lands_on_its_own_step(self):
+        """A failed background job shows its error on the step that owns it, even while an earlier step is still "working"."""
+        S = self.S
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.set("agent", "working", "Click Create on GitHub")
+        wz.set("key", "working", "Saving")
+        def boom():
+            """Fail the way a rejected GitHub call would."""
+            raise RuntimeError("secret rejected")
+        wz._guard(boom, "key")
+        self.assertEqual(wz.st["key"], {"status": "error", "msg": "secret rejected"})
+        self.assertEqual(wz.st["agent"]["status"], "working")
+        wz.set("merge", "working", "Preparing")
+        wz._guard(boom)  # no step given: the first working step, as before
+        self.assertEqual(wz.st["agent"]["status"], "error")
+        wz.set("agent", "working", "Click Create on GitHub"); wz.set("key", "working", "Saving")
+        with patch.object(S.threading, "Thread", lambda target, args, daemon: types.SimpleNamespace(start=lambda: target(*args))):
+            wz.background(boom, "key")  # background() hands its step to the guard
+        self.assertEqual(wz.st["key"]["status"], "error"); self.assertEqual(wz.st["agent"]["status"], "working")
+
     def test_signin_checks_admin_rights(self):
         G, S = self.G, self.S
         G.whoami = lambda tok: "me"
@@ -4559,6 +4914,19 @@ class TestPlainWriting(Base):
         c["writing"] = dict(c["writing"], enforce=True)
         self.assertNotEqual(a, g.policy_fingerprint(c))
 
+    def test_tighten_ignores_wrong_shaped_enforce_points_and_judge(self):
+        """Malformed local enforce_points/judge add nothing and never raise (a raise would fail a hook open)."""
+        sys.path.insert(0, str(SRC))
+        try:
+            import importlib
+            T = importlib.reload(importlib.import_module("sg_trust"))
+        finally:
+            sys.path.remove(str(SRC))
+        base = {"enforce_points": ["stop"], "judge": {"emulated_allow_pass": True}}
+        for bad in ({"enforce_points": 1}, {"enforce_points": "stop"}, {"judge": 1}, {"judge": ["x"]}):
+            out = T.tighten(base, bad)
+            self.assertEqual((out["enforce_points"], out["judge"]), (["stop"], {"emulated_allow_pass": True}), bad)
+
     def test_branch_can_only_tighten_writing_policy(self):
         sys.path.insert(0, str(SRC))
         try:
@@ -4902,6 +5270,22 @@ class TestValidationPage(Base):
         sys.path.insert(0, str(SRC))
         import importlib, sg_report
         return importlib.reload(sg_report)
+
+    def test_stale_passing_test_run_is_not_shown_as_fail(self):
+        """The Tests card shows FAIL only for a fresh non-zero run; a passing run on older code shows no verdict (out of date)."""
+        R = self.R()
+        self.ready()
+        import sg_dashboard as D
+        g = load_gate(self.repo)
+        try:
+            base = g.report_facts("SAT-1")
+        finally:
+            os.environ.pop("STORY_GATE_ROOT", None)
+        card = lambda tr: R.to_html(dict(base, tests=tr)).split('<div class="subheader">Tests</div>', 1)[1].split("</div></div></div>", 1)[0]
+        stale = card({"exit_code": 0, "fresh": False})
+        self.assertNotIn(D.pill("FAIL"), stale); self.assertIn("out of date", stale)
+        self.assertIn(D.pill("FAIL"), card({"exit_code": 1, "fresh": True}))
+        self.assertIn(D.pill("PASS"), card({"exit_code": 0, "fresh": True}))
 
     def ready(self):
         """Create and score a ready story, keeping its directory for validation page tests."""
@@ -6890,7 +7274,7 @@ class TestTrackerLinear(Base):
         with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf), \
                 mock.patch.object(G, "pr_context", return_value=ctx), \
                 mock.patch.object(G, "acceptance", side_effect=lambda c_, tok, o, a=(): seen.setdefault("acceptance", tok) and {"accepted": False, "why": "x"}), \
-                mock.patch.object(G, "protection", side_effect=lambda r, b, tok: seen.setdefault("protection", tok) and (True, [])), \
+                mock.patch.object(G, "protection", side_effect=lambda r, b, tok, check=None: seen.setdefault("protection", tok) and (True, [])), \
                 mock.patch.object(G, "label_added_by", return_value=None), \
                 mock.patch.object(TR, "live_status", side_effect=lambda *a: seen.setdefault("tracker", a[-1]) and ("unchanged", "same")):
             g.cmd_ci()
@@ -7514,6 +7898,28 @@ class TestReusableWorkflow(Base):
         with mock.patch.object(GH, "call", side_effect=[(200, both, {}), (200, {}, {})]) as c:
             self.assertIn("now requires", GH.require_check("o/r", 7, "t", "story-gate / story-gate"))
         self.assertEqual(c.call_args_list[1][0][3]["rules"][0]["parameters"]["required_status_checks"], [{"context": "story-gate / story-gate"}])
+
+    def test_a_renamed_caller_job_is_refused_so_the_required_check_name_holds(self):
+        """GitHub names the reusable check `<caller job> / story-gate`, and branch rules require `story-gate / story-gate`.
+        doctor refuses a caller job with another id or its own `name:`, and protection() checks that exact name."""
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
+        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        for bad in (t.replace("\n  story-gate:\n", "\n  gate:\n", 1),
+                    t.replace("\n  story-gate:\n", "\n  story-gate:\n    name: Gate\n", 1)):
+            g.write_text(bad)
+            self.assertIn("its job must be called `story-gate`", run(self.repo, "doctor").stdout)
+        g.write_text(t)
+        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        import sg_github as GH
+        name = GH.ci_check_name(self.repo)
+        for required, ok in (("story-gate / story-gate", True), ("gate / story-gate", False)):
+            rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": required}]}}]
+            with patch.object(GH, "call", lambda *a, rules=rules, **k: (200, rules, {})):
+                missing = GH.protection("o/r", "main", "t", name)[1]
+            want = f"the story-gate check is not a required status check (this repository's workflow reports `{name}`)"
+            self.assertEqual(want in missing, not ok, (required, missing))
 
     def test_doctor_checks_the_short_workflows_and_a_plain_install_keeps_the_mode(self):
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)

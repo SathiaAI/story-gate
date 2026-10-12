@@ -226,7 +226,7 @@ def to_html(f):
               '<div class="h1">%d/%d</div><div class="sg-est">by a scenario run on this code</div></div></div></div>' % (proved, len(f["acs"]))
             + '<div class="col-6 col-md-3"><div class="card sg-kpi"><div class="card-body"><div class="subheader">Tests</div>'
               '<div class="h1">%s</div><div class="sg-est">%s</div></div></div></div>' % (
-                  D.pill("PASS" if tr.get("exit_code") == 0 and tr.get("fresh") else ("FAIL" if tr else None)), tests_line))
+                  D.pill(None if not tr or not tr.get("fresh") else ("PASS" if tr.get("exit_code") == 0 else "FAIL")), tests_line))
     by_ac = {}
     for s in f["scenarios"]:
         for a in [a for a in (s.get("acs") if isinstance(s.get("acs"), list) else []) if isinstance(a, str)]:
