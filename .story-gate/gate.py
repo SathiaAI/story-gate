@@ -445,7 +445,10 @@ def git_env():
     """The environment for story-gate's own git commands (locked down once pull request code ran; see GIT_LOCKED)."""
     if not GIT_LOCKED:
         return None
-    return dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    # No inherited GIT_* variable either: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_CONFIG_* would point git at
+    # another repository or add configuration. Locked git only reads this checkout (protocol.allow=never).
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    return dict(env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
 
 
 def git(*args):
@@ -1785,8 +1788,8 @@ def locked_digest(f):
         return b"-LINK:" + os.readlink(f).encode("utf-8", "replace")
     if stat.S_ISREG(st.st_mode):
         import sg_isolate as I
-        body = I.read_regular(str(f), 1 << 30)
-        return (b"x" if st.st_mode & 0o111 else b"-") + (hashlib.sha256(body).digest() if body is not None else b"UNREADABLE")
+        digest = I.sha256_regular(str(f))  # the whole file, however large
+        return (b"x" if st.st_mode & 0o111 else b"-") + (digest if digest is not None else b"UNREADABLE")
     if stat.S_ISDIR(st.st_mode):
         h = hashlib.sha256()
         for top, dirs, files in os.walk(f):  # never follows links

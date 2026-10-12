@@ -17,7 +17,7 @@ Where isolation can't be set up (not Linux, no root and no password-free sudo), 
 `ci_isolation: "strict"` (the default) CI then runs nothing and says so; with "relaxed" it runs as before and every
 result counts as reported, not checked. Stdlib only.
 """
-import grp, os, pwd, re, secrets, shutil, subprocess, time
+import hashlib, os, re, secrets, shutil, stat, subprocess, time
 
 NAME_PREFIX = "sgpr-"
 KILL_WAIT = 15            # seconds to wait for the account's processes to end before failing closed
@@ -99,6 +99,7 @@ class Account:
         self.name = NAME_PREFIX + secrets.token_hex(4)
         self.uid = self.gid = None
         self.home = "/home/" + self.name
+        import pwd  # Unix only: imported here so the module (read_regular, available) loads on Windows too
         self.runner = pwd.getpwuid(os.getuid()).pw_name
         self.opened, self.root_mode = [], None  # folders given o+x, and the checkout's own mode: put back at the end
 
@@ -120,6 +121,7 @@ class Account:
 
     def _setup(self):
         """setup()'s steps; see there."""
+        import grp, pwd
         P = _priv()
         _run(P + ["useradd", "--create-home", "--user-group", "--no-log-init", "--shell", "/bin/sh", self.name])
         pw = pwd.getpwnam(self.name)
@@ -198,19 +200,44 @@ class Account:
         return warn
 
 
-def read_regular(path, cap):
-    """The bytes of a regular file (never through a symbolic link), at most cap+1 of them; None when it isn't one."""
+def _open_regular(path):
+    """A read-only descriptor for a regular file, never through a symbolic link; None when it isn't one."""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return None
     try:
-        import stat
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+def read_regular(path, cap):
+    """The bytes of a regular file (never through a symbolic link), at most cap+1 of them; None when it isn't one."""
+    fd = _open_regular(path)
+    if fd is None:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        return f.read(cap + 1)
+
+
+CHUNK = 1 << 20
+
+
+def sha256_regular(path):
+    """SHA-256 of a regular file's whole content (never through a symbolic link), read in chunks so any size fits in
+    memory; None when it isn't a regular file or can't be read to the end."""
+    fd = _open_regular(path)
+    if fd is None:
+        return None
+    h = hashlib.sha256()
+    try:
         with os.fdopen(fd, "rb") as f:
-            fd = None
-            return f.read(cap + 1)
-    finally:
-        if fd is not None:
-            os.close(fd)
+            for block in iter(lambda: f.read(CHUNK), b""):
+                h.update(block)
+    except OSError:
+        return None
+    return h.digest()

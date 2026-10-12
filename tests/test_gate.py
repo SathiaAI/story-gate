@@ -9511,6 +9511,31 @@ class TestCiIsolation(Base):
         if os.name != "nt":
             os.symlink(f, self.repo / "link.xml")
             self.assertIsNone(I.read_regular(str(self.repo / "link.xml"), 4))
+            self.assertIsNone(I.sha256_regular(str(self.repo / "link.xml")))
+
+    def test_file_evidence_covers_the_whole_file(self):
+        """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
+        still changes the digest; a folder or a missing file has none."""
+        I = self.I()
+        f = self.repo / "big.bin"; f.write_bytes(b"a" * 100)
+        with patch.object(I, "CHUNK", 7):
+            a = I.sha256_regular(str(f))
+            self.assertEqual(a, hashlib.sha256(b"a" * 100).digest())
+            f.write_bytes(b"a" * 99 + b"b")
+            self.assertNotEqual(I.sha256_regular(str(f)), a)
+        self.assertIsNone(I.sha256_regular(str(self.repo))); self.assertIsNone(I.sha256_regular(str(self.repo / "nope")))
+
+    def test_the_isolation_module_loads_where_unix_account_modules_dont_exist(self):
+        """Windows has no grp or pwd: sg_isolate still imports (story-gate measure and ci-tests load it there), and
+        read_regular works; only creating an account needs them."""
+        import importlib, sg_isolate
+        self.addCleanup(importlib.reload, sg_isolate)
+        with patch.dict(sys.modules, {"grp": None, "pwd": None}):
+            I = importlib.reload(sg_isolate)
+            f = self.repo / "r.txt"; f.write_bytes(b"ok")
+            self.assertEqual(I.read_regular(str(f), 10), b"ok")
+            with self.assertRaises(ImportError):
+                I.Account(str(self.repo), [])
 
     def test_strict_runs_nothing_when_isolation_is_unavailable(self):
         """ci-tests with isolation required but impossible: strict runs no pull request code and says why; relaxed runs
@@ -9572,6 +9597,7 @@ class TestCiIsolation(Base):
                 r = g.ci_budgets(str(md), "main", ["app.py"])["w"]
             self.assertEqual(r["state"], want, (mode, iso))  # strict: a run not known to be isolated is no run
 
+    @unittest.skipIf(os.name == "nt", "the account path runs /bin/sh; isolation is never available on Windows")
     def test_clean_up_problems_are_warnings_not_a_lost_result(self):
         """When clean-up after the run doesn't finish (the account can't be removed), the verified result is kept, the
         problem is a GitHub warning, and it's recorded with the result."""
@@ -9639,6 +9665,13 @@ class TestCiIsolation(Base):
         for opt in ("core.fsmonitor=false", "core.hooksPath=" + os.devnull, "diff.external=", "diff.ignoreSubmodules=all"):
             self.assertIn(opt, g.GIT_LOCK_ARGS)
         self.assertTrue(g.git("rev-parse", "HEAD").strip())  # still works on the checkout itself
+        other = self.repo.parent / (self.repo.name + "-other"); self.addCleanup(shutil.rmtree, other, True)
+        other.mkdir(); subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        inherited = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other), "GIT_INDEX_FILE": str(other / "idx"),
+                     "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "true"}
+        with patch.dict(os.environ, inherited):
+            self.assertFalse(set(inherited) & set(g.git_env()))  # git can't be pointed at another repository
+            self.assertEqual(Path(g.git("rev-parse", "--show-toplevel").strip()).resolve(), self.repo.resolve())
         (self.repo / "data.txt").write_text("x")
         self.assertEqual(g.locked_digest(self.repo / "data.txt")[1:], hashlib.sha256(b"x").digest())
         if os.name != "nt":
