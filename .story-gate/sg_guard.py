@@ -163,7 +163,9 @@ def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
         a = _load(approved) if approved else {}
         a = a if isinstance(a, dict) else {}
         m = smudged if isinstance(smudged, dict) else {}
-        if isinstance(s, dict) and isinstance(d, dict):
+        if not isinstance(s, dict):  # the branch stored something that isn't a settings object: the filter only ever
+            return d == s or d == a  # writes it back or the approved version, so anything else is the user's own edit
+        if isinstance(d, dict):
             for k in GUARDED_KEYS:
                 if d.get(k) != s.get(k) and d.get(k) != a.get(k) and (k not in m or d.get(k) != m[k]):
                     return False

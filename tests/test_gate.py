@@ -1,4 +1,4 @@
-import base64, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import base64, json, os, shutil, subprocess, sys, tempfile, time, types, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1083,7 +1083,8 @@ class TestGitHubLogic(unittest.TestCase):
     def test_protection_accepts_reusable_workflow_check_name(self):
         """A required check named 'story-gate / story-gate' (the reusable workflow's name) counts as the story-gate check."""
         G = self.G
-        for name, ok in (("story-gate", True), ("story-gate / story-gate", True), ("other", False)):
+        for name, ok in (("story-gate", True), ("story-gate / story-gate", True), ("other", False), ("my-story-gate", False),
+                         ("story-gate / lint", False), ("Story-Gate", False)):
             with self.subTest(check=name):
                 rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": name}]}}]
                 G.call = lambda *a, rules=rules, **k: (200, rules, {})
@@ -2017,6 +2018,9 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertFalse(G.is_filtered_form(stored, edited, approved=stored))
         self.assertFalse(G.is_filtered_form(stored, edited))
         self.assertTrue(G.is_filtered_form(stored, stored, approved=stored))
+        listed = json.dumps(["not", "settings"]).encode()  # a branch that stored a non-object
+        self.assertFalse(G.is_filtered_form(listed, edited, approved=stored))  # your edit: kept
+        self.assertTrue(G.is_filtered_form(listed, stored, approved=stored))  # the approved copy the filter wrote
         # our own filtered copy (guarded value is the approved one, an entry was dropped) is still recognised
         branch = json.dumps({"permissions": {"allow": ["branch"]}, "apiKeyHelper": "evil"}).encode()
         approved = json.dumps({"permissions": {"allow": ["a"]}}).encode()
@@ -2775,6 +2779,20 @@ class TestPinnedHooks(RuntimeFixture):
             out, notes = self.smudge_json({"mcpServers": {"s": {"command": ours, "args": ["--", "evil"]}}})
             self.assertEqual(out, {}); self.assertEqual(notes, [ours])
 
+    def test_this_computers_own_hook_commands_survive_the_filter(self):
+        """story-gate's own hook commands (exactly this computer's launcher) are kept as they are by smudge and left out
+        of doctor's list, for every tool's hook format; otherwise the filter would switch the gate itself off."""
+        P = self.pin_module()
+        py = "/usr/bin/python3" if os.name != "nt" else "C:/Python/python.exe"
+        launcher = str(P.T.launcher_path())
+        for client, data in P.T.hook_entries(py, launcher).items():
+            with self.subTest(client=client):
+                out, notes = self.smudge_json(data)
+                self.assertEqual((out, notes), (data, []))
+        cmd = P.T.hook_entries(py, launcher)["claude"]["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertTrue(P.T.is_our_hook_command(cmd))
+        self.assertEqual(self.report_rows(P, [cmd]), [])
+
     def test_repository_copy_of_the_hook_command_is_not_ours(self):
         """Only this computer's launcher command skips classification; a checked-out gate.py (older project installs) or
         text that merely mentions `gate.py hook --client` goes through the pin check."""
@@ -2811,6 +2829,11 @@ class TestPinnedHooks(RuntimeFixture):
         remote = dict(local, policy_ref="origin/main")
         with patch.object(P.T, "enrollment", lambda t: dict(remote)):
             self.assertTrue(P.policy(top)[1])  # a remote's branch still works
+        consented = dict(local, allow_local_policy=True)  # a repository with no remote, by the human's explicit choice
+        with patch.object(P.T, "enrollment", lambda t: dict(consented)), patch.object(G.T, "enrollment", lambda t: dict(consented)), \
+                patch.object(G.T, "policy_commit", lambda t, r: head):
+            self.assertTrue(P.policy(top)[1])
+            self.assertIsNotNone(G.approved_for(top, ".claude/settings.json")[0])
 
 
 @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
@@ -4019,6 +4042,10 @@ class TestGuidedSetup(unittest.TestCase):
         wz.set("merge", "working", "Preparing")
         wz._guard(boom)  # no step given: the first working step, as before
         self.assertEqual(wz.st["agent"]["status"], "error")
+        wz.set("agent", "working", "Click Create on GitHub"); wz.set("key", "working", "Saving")
+        with patch.object(S.threading, "Thread", lambda target, args, daemon: types.SimpleNamespace(start=lambda: target(*args))):
+            wz.background(boom, "key")  # background() hands its step to the guard
+        self.assertEqual(wz.st["key"]["status"], "error"); self.assertEqual(wz.st["agent"]["status"], "working")
 
     def test_signin_checks_admin_rights(self):
         G, S = self.G, self.S

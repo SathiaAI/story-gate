@@ -104,7 +104,7 @@ class Build(unittest.TestCase):
         expect |= {"story_gate/_payload/" + f for f in ("release.json", "release.json.sig") if (SRC / f).is_file()}
         self.assertIn("story_gate/_payload/gate.py", expect)
         self.assertEqual(sorted(expect - names), [])
-        extra = {n for n in names if n.startswith("story_gate/") and n not in expect}
+        extra = {n for n in names if n not in expect and not n.split("/")[0].endswith(".dist-info")}
         self.assertEqual(sorted(extra), [], "files in the wheel that the source tree does not have")
         for n in names:
             self.assertFalse(n.endswith("config.json"), n)
