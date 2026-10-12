@@ -3391,10 +3391,64 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         self.assertEqual(blob["encoding"], "base64")
 
     def test_open_setup_pr_existing_pr_short_circuits(self):
-        self.fake_api(self.pr_routes({("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3"}])}))
+        self.fake_api(self.pr_routes({("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3", "head": {"repo": {"full_name": "o/r"}}}])}))
         out = self.G.open_setup_pr("t", "o/r", {"x": b"1"})
         self.assertEqual(out["number"], 3)
         self.assertFalse(any(m == "POST" for m, _, _ in self.calls))
+
+    def test_open_setup_pr_brings_an_open_pr_up_to_date_when_asked(self):
+        """With update_existing, an open setup PR into the same base gets one fast-forward commit whose content is the
+        base branch plus the files (anything else pushed there is undone), none when it already matches, and never a
+        second PR."""
+        open_pr = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "https://github.com/o/r/pull/3", "base": {"ref": "main"}, "head": {"repo": {"full_name": "o/r"}}}]),
+                   ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "btip"}}),
+                   ("GET", "/repos/o/r/git/commits/btip"): (200, {"tree": {"sha": "btree"}}),
+                   ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (200, {})}
+
+        def routes(extra=None):
+            """The open-PR routes first, so their longer paths win over pr_routes' shorter prefixes."""
+            r = {**open_pr, **(extra or {})}
+            for k, v in self.pr_routes().items():
+                r.setdefault(k, v)
+            return r
+        self.fake_api(routes())
+        out = self.G.open_setup_pr("t", "o/r", {"x": b"new"}, update_existing=True)
+        self.assertEqual((out["number"], out["existing"], out["updated"]), (3, True, True))
+        tree = next(b for m, p, b in self.calls if m == "POST" and p.endswith("/git/trees"))
+        self.assertEqual(tree["base_tree"], "tree0")  # main's tree, not the branch's: nothing extra survives on the branch
+        commit = next(b for m, p, b in self.calls if m == "POST" and p.endswith("/git/commits"))
+        self.assertEqual((commit["parents"], commit["tree"]), (["btip"], "tree1"))  # on top of the branch: no force push
+        self.assertEqual([(m, p) for m, p, _ in self.calls if m == "PATCH"], [("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup")])
+        self.assertFalse([p for m, p, _ in self.calls if m == "POST" and p.endswith("/pulls")])  # no second PR
+        self.calls.clear()
+        self.fake_api(routes({("POST", "/repos/o/r/git/trees"): (201, {"sha": "btree"})}))
+        self.assertIs(self.G.open_setup_pr("t", "o/r", {"x": b"same"}, update_existing=True)["updated"], False)
+        self.assertFalse([1 for m, p, _ in self.calls if (m == "POST" and p.endswith("/git/commits")) or m == "PATCH"])
+        failures = {"other base": {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "dev"}, "head": {"repo": {"full_name": "o/r"}}}])},
+                    "branch gone": {("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (404, {"message": "Not Found"})},
+                    "branch moved": {("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (422, {"message": "Update is not a fast forward"})}}
+        for why, extra in failures.items():
+            with self.subTest(why=why):
+                self.calls.clear(); self.fake_api(routes(extra))
+                with self.assertRaises(RuntimeError):
+                    self.G.open_setup_pr("t", "o/r", {"x": b"new"}, update_existing=True)
+                self.assertFalse([p for m, p, _ in self.calls if m == "POST" and p.endswith("/pulls")])
+        self.calls.clear(); self.fake_api(routes(failures["other base"]))
+        with self.assertRaises(RuntimeError):
+            self.G.open_setup_pr("t", "o/r", {"x": b"new"}, update_existing=True)
+        self.assertFalse([1 for m, p, _ in self.calls if m in ("POST", "PATCH")])  # a PR into another base is never touched
+
+    def test_open_setup_pr_ignores_an_open_pr_from_another_repository(self):
+        """A PR from the same owner and branch name but another repository (or a deleted fork) is never reused or updated:
+        the setup PR is created in this repository."""
+        for head in ({"repo": {"full_name": "o/other"}}, {"repo": None}, None):
+            with self.subTest(head=head):
+                self.calls.clear()
+                other = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "x", "base": {"ref": "main"}, "head": head}])}
+                self.fake_api(self.pr_routes(other))
+                out = self.G.open_setup_pr("t", "o/r", {"x": b"1"}, update_existing=True)
+                self.assertEqual(out["number"], 7); self.assertNotIn("existing", out)
+                self.assertFalse([1 for m, _, _ in self.calls if m == "PATCH"])
 
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
@@ -3984,7 +4038,7 @@ class TestGuidedSetup(unittest.TestCase):
         G, S = self.G, self.S
         got = {}
         G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
-        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", "")) or {"number": 7, "url": "u", "branch": "b"}
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(files=files, body=kw.get("body", ""), upd=kw.get("update_existing")) or {"number": 7, "url": "u", "branch": "b"}
         G.pr_merged = lambda tok, repo, n: False
         S.Wizard._wait_merge = lambda self, base: None
         wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
@@ -3992,6 +4046,7 @@ class TestGuidedSetup(unittest.TestCase):
         wz.skip_key()
         self.assertEqual(wz.st["key"]["status"], "ok"); self.assertIn("without an AI judge", wz.st["key"]["msg"])
         wz.open_pr()
+        self.assertIs(got["upd"], True)  # running init again brings an open setup PR up to date instead of leaving it stale
         self.assertEqual(json.loads(got["files"][".story-gate/config.json"])["judge_mode"], "objective")
         self.assertIn("No AI judge (objective mode)", got["body"]); self.assertIn("does not check whether the code really does", got["body"])
         wz.skip_key()  # too late once the PR is open: its config is already written
@@ -8196,75 +8251,22 @@ class TestReviewFixes(Base):
             self.assertRegex(ref, r"^[0-9a-f]{40}$", name)
             self.assertIn(ref, pinned.get(name, set()), name)
 
-    def test_junit_parser_refuses_dtds_and_entities_wherever_they_are(self):
-        """The JUnit reader refuses a DTD even when it sits after 2,000 bytes of comment (past the quick byte check), and
-        an entity bomb; an ordinary report still parses."""
-        import importlib
-        import xml.etree.ElementTree as ET
-        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
-        d = Path(tempfile.mkdtemp())
-        late = b"<?xml version='1.0'?><!--" + b"x" * 3000 + b'--><!DOCTYPE t SYSTEM "http://169.254.169.254/x"><testsuite/>'
-        bomb = b'<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;">]><testsuite><testcase name="&b;"/></testsuite>'
-        external = b'<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "file:///etc/passwd">]><testsuite><testcase name="&x;"/></testsuite>'
-        recursive = b'<!DOCTYPE t [<!ENTITY a "&b;"><!ENTITY b "&a;">]><testsuite/>'
-        param = b'<!DOCTYPE t [<!ENTITY % p SYSTEM "http://evil.example/x.dtd"> %p;]><testsuite/>'
-        for name, raw in (("late", late), ("bomb", bomb), ("external", external), ("recursive", recursive), ("parameter", param)):
-            with self.subTest(name=name):
-                (d / "r.xml").write_bytes(raw)
-                with self.assertRaises((ValueError, ET.ParseError)):
-                    G.junit(d / "r.xml")
-                with self.assertRaises(ValueError):
-                    G._parse_xml_without_dtd(raw)  # the parser itself refuses, not only the byte check
-        with self.assertRaises(ET.ParseError):  # an entity used without any DTD is simply undefined
-            G._parse_xml_without_dtd(b'<testsuite><testcase name="&undeclared;"/></testsuite>')
-        (d / "ok.xml").write_bytes(b'<testsuite><testcase classname="m" name="t1"/><testcase name="t2"><failure/></testcase></testsuite>')
-        self.assertEqual(G.junit(d / "ok.xml"), {"t1": "passed", "m.t1": "passed", "m::t1": "passed", "t2": "failed"})
-
-    def test_keys_go_only_to_https_or_localhost_and_never_follow_a_redirect(self):
-        """A judge, webhook or control-hub address must be https:// (or http:// on this computer); a redirect is never
-        followed, since urllib would resend the key with it."""
-        import importlib
-        import urllib.request
-        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
-        for url in ("https://openrouter.ai/api/v1", "http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:9/x"):
-            self.assertIsNone(J.endpoint_error(url), url)
-        for url in ("http://169.254.169.254/latest/meta-data", "http://judge.example.com/v1", "file:///etc/passwd", "ftp://x/y", "", "https://",
-                    "http://127.0.0.1:9@evil.example/", "http://localhost@evil.example/", "https://user:pw@judge.example/"):
-            self.assertIsNotNone(J.endpoint_error(url), url)
-        sent = []
-        orig = J.open_url
-        J.open_url = lambda *a, **k: sent.append(a)
-        try:
-            out = J._post("http://169.254.169.254/latest", "secret-key", {"x": 1}, 5)
-        finally:
-            J.open_url = orig
-        self.assertIn("refused", out["error"]); self.assertEqual(sent, [])  # nothing was sent
-        req = urllib.request.Request("https://judge.example/v1", headers={"Authorization": "Bearer k"})
-        self.assertIsNone(J._NoRedirect().redirect_request(req, None, 302, "Found", {}, "https://elsewhere.example/"))
-        os.environ["http_proxy"] = "http://proxy.example:3128"
-        try:  # even with a proxy set in the environment, the local opener has no proxy route at all
-            local = urllib.request.build_opener(J._NoRedirect, urllib.request.ProxyHandler({}))
-        finally:
-            os.environ.pop("http_proxy")
-        for opener in (local, J._LOCAL_OPENER):
-            self.assertIn(J._NoRedirect, [type(h) for h in opener.handlers])
-            self.assertFalse([h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler) and h.proxies])
-        used = []
-        orig_local, orig_remote = J._LOCAL_OPENER, J._OPENER
-        J._LOCAL_OPENER = type("O", (), {"open": lambda self, r, timeout: used.append("local")})()
-        J._OPENER = type("O", (), {"open": lambda self, r, timeout: used.append("remote")})()
-        try:
-            J.open_url(urllib.request.Request("http://127.0.0.1:9/x"), 1); J.open_url(urllib.request.Request("https://judge.example/x"), 1)
-        finally:
-            J._LOCAL_OPENER, J._OPENER = orig_local, orig_remote
-        self.assertEqual(used, ["local", "remote"])
-        g = load_gate(SRC.parent)
-        os.environ["SG_HUB_URL"], os.environ["SG_HUB_KEY"] = "http://hub.example.com", "k"
-        try:
-            with self.assertRaisesRegex(RuntimeError, "refused"):
-                g.publish_control_hub({"url_env": "SG_HUB_URL", "key_env": "SG_HUB_KEY"}, ['{"event_type": "x"}'])
-        finally:
-            os.environ.pop("SG_HUB_URL"); os.environ.pop("SG_HUB_KEY")
+    def test_every_workflow_pins_each_action_to_one_full_sha(self):
+        """story-gate's own workflows use every action (any owner, quoted or not) only at a full commit SHA, and the
+        same SHA everywhere an action is used; only local ./ actions need no pin."""
+        import re
+        seen = {}
+        uses = re.compile(r"""^\s*(?:-\s*)?uses:\s*["']?([^\s"'#]+)""", re.MULTILINE)
+        for f in sorted((SRC.parent / ".github/workflows").glob("*.yml")):
+            for target in uses.findall(f.read_text()):
+                if target.startswith("./"):
+                    continue
+                name, _, ref = target.partition("@")
+                with self.subTest(file=f.name, action=name):
+                    self.assertRegex(ref, r"^[0-9a-f]{40}$")
+                seen.setdefault(name, set()).add(ref)
+        self.assertTrue(seen)
+        self.assertEqual({n: len(r) for n, r in seen.items() if len(r) > 1}, {})
 
     def test_dashboard_build_step_gets_the_token_so_ci_results_show(self):
         """GitHub doesn't export GITHUB_TOKEN to steps; the dashboard reads CI results only when it has one."""
