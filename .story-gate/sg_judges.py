@@ -88,6 +88,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+_LOCAL_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))  # never via a proxy
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
 
 
 def endpoint_error(url):
@@ -101,14 +103,16 @@ def endpoint_error(url):
         return "addresses with a user name or password in them aren't allowed"
     if u.scheme == "https" and host:
         return None
-    if u.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+    if u.scheme == "http" and host in LOOPBACK:
         return None
     return "only https:// addresses (or http:// on localhost) are allowed"
 
 
 def open_url(req, timeout):
-    """urlopen that follows no redirect, for requests that carry a key."""
-    return _OPENER.open(req, timeout=timeout)
+    """urlopen that follows no redirect, for requests that carry a key. A request to this computer never goes through a
+    proxy (an http:// one would see the key in clear text)."""
+    host = urllib.parse.urlsplit(req.full_url).hostname
+    return (_LOCAL_OPENER if host in LOOPBACK else _OPENER).open(req, timeout=timeout)
 
 
 def _post(url, key, body, timeout):

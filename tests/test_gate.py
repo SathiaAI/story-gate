@@ -268,11 +268,26 @@ class TestInstallCI(Base):
         import http.server
         import threading
 
+        hits = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            """Where the redirect points: records any request that reaches it."""
+            def do_GET(self):
+                """Record the hit."""
+                hits.append(self.path); self.send_response(200); self.end_headers()
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                """Stay quiet in test output."""
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        self.addCleanup(target.shutdown)
+
         class Redirect(http.server.BaseHTTPRequestHandler):
-            """Answers every POST with a redirect to another host."""
+            """Answers every POST with a redirect to the target above."""
             def do_POST(self):
                 """Redirect instead of accepting the event."""
-                self.send_response(302); self.send_header("Location", "http://evil.example/steal"); self.end_headers()
+                self.send_response(302); self.send_header("Location", f"http://127.0.0.1:{target.server_port}/steal"); self.end_headers()
 
             def log_message(self, *a):
                 """Stay quiet in test output."""
@@ -283,7 +298,8 @@ class TestInstallCI(Base):
         self.cfg(sinks=[{"type": "webhook", "url_env": "SG_TEST_HOOK"}])
         r = run(self.repo, "publish", env={"SG_TEST_HOOK": f"http://127.0.0.1:{srv.server_port}/hook"})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("sink webhook FAILED", r.stdout)
-        self.assertNotIn("evil.example", r.stdout); self.assertNotIn(str(srv.server_port), r.stdout)  # no address in the log
+        self.assertNotIn(str(target.server_port), r.stdout); self.assertNotIn(str(srv.server_port), r.stdout)  # no address in the log
+        self.assertEqual(hits, [])  # the redirect was never followed
 
 
 class TestHardening(Base):
@@ -8225,6 +8241,23 @@ class TestReviewFixes(Base):
         self.assertIn("refused", out["error"]); self.assertEqual(sent, [])  # nothing was sent
         req = urllib.request.Request("https://judge.example/v1", headers={"Authorization": "Bearer k"})
         self.assertIsNone(J._NoRedirect().redirect_request(req, None, 302, "Found", {}, "https://elsewhere.example/"))
+        os.environ["http_proxy"] = "http://proxy.example:3128"
+        try:  # even with a proxy set in the environment, the local opener has no proxy route at all
+            local = urllib.request.build_opener(J._NoRedirect, urllib.request.ProxyHandler({}))
+        finally:
+            os.environ.pop("http_proxy")
+        for opener in (local, J._LOCAL_OPENER):
+            self.assertIn(J._NoRedirect, [type(h) for h in opener.handlers])
+            self.assertFalse([h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler) and h.proxies])
+        used = []
+        orig_local, orig_remote = J._LOCAL_OPENER, J._OPENER
+        J._LOCAL_OPENER = type("O", (), {"open": lambda self, r, timeout: used.append("local")})()
+        J._OPENER = type("O", (), {"open": lambda self, r, timeout: used.append("remote")})()
+        try:
+            J.open_url(urllib.request.Request("http://127.0.0.1:9/x"), 1); J.open_url(urllib.request.Request("https://judge.example/x"), 1)
+        finally:
+            J._LOCAL_OPENER, J._OPENER = orig_local, orig_remote
+        self.assertEqual(used, ["local", "remote"])
         g = load_gate(SRC.parent)
         os.environ["SG_HUB_URL"], os.environ["SG_HUB_KEY"] = "http://hub.example.com", "k"
         try:
