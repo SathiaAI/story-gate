@@ -106,7 +106,34 @@ Results are committed with the story, so the dashboard reads them from merged st
 and date per budget, the last 50 per budget. Output tails are redacted (secret-named variables and token shapes) before
 they are stored. They live as long as the story folder.
 
-## PR 2 (not in this release)
+## Guardrail areas (G1 part 2)
 
-Guardrail areas with off/warn/enforce, path and content triggers (length-capped patterns, no backreferences), SARIF
-results, and the price-age limit with its source, date and time-zone rules. They reuse this contract unchanged.
+Owner's guide: [guardrails.md](guardrails.md). Areas live in the default branch's `config.json` (`guardrails.areas`), not
+in `budgets.json`, and reuse this contract through an adapter (`sg_areas.records`): each check becomes a decided record
+with direction `max` and tolerance 0, keyed `area/check`, plus its area and mode. Nothing above changes for budgets.
+
+- **Modes.** `off`: no record. `warn`: problems are a `WARN` status on the DONE check `guardrails_met`, shown and never
+  counted in the overall verdict. `enforce`: same rule as a decided budget: `checked` and within the limit in CI, or it
+  fails, whatever `accept_concerns` says. Area results never enter `budgets_met`.
+- **Applicability.** From the trusted merge-base diff (the same one budgets use), worked out in the measure job and again
+  in the story-gate job: no triggers means every change; `paths` match changed paths (fnmatch); `content` patterns match
+  added or removed lines outside story records. Patterns are validated (<=200 characters, no backreferences or
+  lookaround, no nested repeats) and matched in a separate Python process with a 10-second limit. A diff that can't be
+  read, is over 5 MB, or can't be matched in time makes the areas apply.
+- **Order and time.** One 900-second budget for everything the measure job runs: decided budgets, enforce-area checks,
+  warn-area checks, proposed budgets; each by name. A check reached after the time ran out is `not_run` with that reason.
+- **Parsers.** `sarif` (SARIF 2.1.0 JSON; kind `fail` or absent; level from the result, its rule's
+  `defaultConfiguration`, else `warning`; `baselineState: absent` never counts; suppressions in effect are counted
+  unless the check says `suppressed: exclude`; `executionSuccessful: false`, a missing `results` list, another version
+  or any malformed field is `not_run`) and `date` (one ISO-8601 date or date-time, UTC when no zone; the value is the
+  age in whole UTC calendar days, recomputed from the stored `as_of` date whenever it is read; a future date is
+  `not_run`). `levels` and `suppressed` are part of the record's `spec` hash. `junit` and `number` as above.
+- **Records.** `.story-gate/stories/<ID>/guardrail_results.json`: `{"v": 1, "story", "results": {"area/check": result}}`,
+  the same result shape as budgets plus `findings`/`suppressed` (SARIF) or `as_of` (date). The measure job saves raw
+  output under `measures/areas/<area>/<check>.raw`.
+- **Weaker rules** (`sg_areas.weaker`, reported through `sg_trust.weaker`): an area removed or its mode lowered; any
+  glob or pattern removed (containment of a new pattern can't be proven); a check removed; a limit raised; fewer SARIF
+  levels; `suppressed` count to exclude; a pin dropped; command, report, unit, exit rule or time limit changed. Local
+  settings may only raise an area's mode. Stories can't add area checks (they propose budgets instead).
+- **What it can't prove.** A date check proves the recorded date's age, not that the prices are correct; pins keep a
+  pull request from changing the price data and its date without its own review.

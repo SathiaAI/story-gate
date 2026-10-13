@@ -240,6 +240,10 @@ DEFAULT_CONFIG = {
     # change story-gate's results (sg_isolate.py). "strict": where that can't be set up, CI runs nothing and says so.
     # "relaxed": it runs as before, and those results count as reported, not checked. Choosing relaxed is a weaker rule.
     "ci_isolation": "strict",
+    # Guardrail areas (sg_areas.py, docs/guardrails.md): {"areas": {"security": {"mode": "warn", "paths": [...],
+    # "content": [...], "checks": [...]}}}. Each area is off, warn (shown, never blocks) or enforce. Lowering an area,
+    # narrowing its triggers or loosening a check is a weaker rule.
+    "guardrails": {},
 }
 
 # ------------------------------------------------------------------ checks
@@ -398,6 +402,11 @@ def check_config(c):
         raise ConfigError('.story-gate/config.json: "ci_isolation" must be "strict" or "relaxed" (got %r) - the gate fails closed until fixed' % c.get("ci_isolation"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
+    try:
+        import sg_areas as A
+        A.load(c.get("guardrails"))
+    except ValueError as e:
+        raise ConfigError('.story-gate/config.json: "guardrails" %s - the gate fails closed until fixed' % e)
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:
         raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)
@@ -626,10 +635,15 @@ def inputs_hash(sd, phase, c=None):
                  if isinstance(r, dict)}, sort_keys=True)
         except ConfigError:
             blob += "<budgets unreadable>"
+        gr = load_json(sd / "guardrail_results.json").get("results")  # the policy itself is in policy_fingerprint below
+        blob += json.dumps({n: [r.get(k) for k in ("spec", "value", "as_of", "fingerprint")] for n, r in
+                            (gr if isinstance(gr, dict) else {}).items() if isinstance(r, dict)}, sort_keys=True)
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
         blob += policy_fingerprint(c)
+        if phase == "done" and c.get("guardrails"):  # a guardrail policy change makes DONE out of date (only DONE reads it)
+            blob += json.dumps(c["guardrails"], sort_keys=True)
     except ConfigError:
         blob += "<config unreadable>"
     if phase == "done":
@@ -1183,6 +1197,7 @@ SOURCE_LEGEND = ("verified: CI compared the copy with the live issue in this com
                  "at the next check")
 CI_SOURCES = {}  # story id -> [{path, issue, state, detail}] from this CI run, for the validation page
 CI_MEASURED = {}  # story id -> {budget: result} the story-gate job worked out from the tests job's runs (never from the PR)
+CI_AREAS = {}  # story id -> ({"area/check": result}, {area: why it applies}, notes), worked out the same way
 
 
 def snapshot_links(story_text):
@@ -1483,6 +1498,11 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
         import sg_measure as M
         st, why = M.verdict(rows, in_ci)
         out["budgets_met"] = (st, why + (". Measure again with `%s`" % gate_cmd("measure " + sid) if st != "PASS" and not in_ci else ""))
+    rows, _, _ = area_rows(sd, c, in_ci)
+    if rows:  # only when an area applies: repositories without guardrails score exactly as before
+        import sg_areas as A
+        st, why = A.verdict(rows, in_ci)
+        out["guardrails_met"] = (st, why + (". Measure again with `%s`" % gate_cmd("measure " + sid) if st != "PASS" and not in_ci else ""))
     if truncated and not objective(c):  # the size limit is the judge's; without one a person reviews the whole diff anyway
         out["evidence_complete"] = ("CONCERNS", "the change is too large for one judge pass; split the story or get a human review of the whole diff")
     return out
@@ -1520,9 +1540,9 @@ def verdict(structural, judged, decisions, waivers, c):
         else:
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
     for k, w in waivers.items():
-        if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED") and checks[k]["kind"] != "structural":
+        if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED", "WARN") and checks[k]["kind"] != "structural":
             checks[k]["status"], checks[k]["why"] = "WAIVED", "waived by %s: %s%s" % (w["by"], w["reason"], "" if w.get("_trusted") else " (proposal: needs a code owner's approval in CI)")
-    sts = [v["status"] for v in checks.values()]
+    sts = [v["status"] for v in checks.values()]  # WARN (a warn-mode guardrail) is shown and never changes the overall verdict
     overall = ("FAIL" if "FAIL" in sts else "ESCALATED" if "ESCALATED" in sts else
                "CONCERNS" if "CONCERNS" in sts else "WAIVED" if "WAIVED" in sts else "PASS")
     return {"overall": overall, "drift": drift, "checks": checks}
@@ -1852,6 +1872,51 @@ def budget_rows(sd, c, in_ci=False, files=None):
     return rows
 
 
+def areas_policy(c):
+    """The guardrail areas from the merged config (check_config already refused an invalid section)."""
+    import sg_areas as A
+    return A.load(c.get("guardrails"))
+
+
+def areas_that_apply(c, base):
+    """({area: why it applies}, notes, changed paths) for this work against the merge base. When the change can't be read,
+    every area that isn't off applies (a trigger story-gate couldn't evaluate never switches a check off)."""
+    import sg_areas as A
+    areas = areas_policy(c)
+    if not any(a["mode"] != "off" for a in areas.values()):
+        return {}, [], None
+    try:
+        _, files, diff = diff_against(base)
+        files = [f for f in files if not is_record(f)]
+    except Exception:
+        files, diff = None, ""
+    why, notes = A.applicable(areas, files, diff, is_record)
+    return why, notes, files
+
+
+def area_rows(sd, c, in_ci=False):
+    """([(record, result)], {area: why it applies}, notes) for the checks of every guardrail area that applies to this
+    work. In CI only what the story-gate job worked out from the measure job's raw runs counts (CI_AREAS)."""
+    import sg_areas as A, sg_measure as M
+    if in_ci:
+        res, why, notes = CI_AREAS.get(sd.name) or ({}, {}, [])
+        recs = A.records(areas_policy(c), set(why))
+        return [(b, res.get(b["_key"]) or {"state": "not_run", "value": None, "why": "CI did not measure it"}) for b in recs], why, notes
+    why, notes, files = areas_that_apply(c, c["base_branch"])
+    if not why:
+        return [], why, notes
+    stored = load_json(sd / "guardrail_results.json").get("results")
+    stored = stored if isinstance(stored, dict) else {}
+    fp, rows = work_fingerprint(), []
+    for b in A.records(areas_policy(c), set(why)):
+        r = M.current(b, stored.get(b["_key"]), fp)
+        if r.get("value") is not None and r.get("state") != "not_run":
+            trust = M.trust_problems(b, str(ROOT), files or [])  # worked out again here: a stored "why" can't clear a pin
+            r = dict(r, state="reported", why="; ".join(trust + ["measured on the agent's computer"]))
+        rows.append((b, A.refresh(b, r)))
+    return rows, why, notes
+
+
 def partially_staged():
     """Files whose staged version differs from both the last commit and the working copy (git add -p)."""
     staged = set(zlist("diff", "--cached", "--name-only"))
@@ -2007,26 +2072,62 @@ def cmd_measure(sid, kv, flags_, argv):
             return 0
     every = main + [dict(b, _origin="story") for b in mine if b["name"] not in names]
     files = changed_paths(c["base_branch"])
+    check = kv.get("check")
     if name:
         todo = [b for b in every if b["name"] == name]
         if not todo:
             sys.exit("story-gate: no budget called %s. Budgets here: %s" % (name, ", ".join(b["name"] for b in every) or "none"))
     else:
-        todo = [b for b in every if M.applies(b, files)]
-        if not todo:
-            print("story-gate: no budget applies to this change%s." % ("" if every else " (there are no budgets)"))
-            return 0
-    stored = load_json(sd / "budget_results.json").get("results")
+        todo = [] if check else [b for b in every if M.applies(b, files)]
+    code = 0
+    if todo:
+        stored = load_json(sd / "budget_results.json").get("results")
+        stored = stored if isinstance(stored, dict) else {}
+        for b in todo:
+            rec, raw = M.run(b, str(ROOT), work_state)
+            stored[b["name"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local", M.trust_problems(b, str(ROOT), files))
+        wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": stored})
+        rows = [(b, M.current(b, stored.get(b["name"]), work_fingerprint())) for b in todo]
+        print("\n".join(M.summary_lines(rows, False)).strip())
+        st, why = M.verdict(rows, False)
+        print("story-gate: budgets %s%s" % (st, (": " + why) if why else ""))
+        code = 0 if st == "PASS" else 1
+    elif not check and not name:
+        print("story-gate: no budget applies to this change%s." % ("" if every else " (there are no budgets)"))
+    if name:
+        return code
+    return max(code, measure_areas(sd, sid, c, check))
+
+
+def measure_areas(sd, sid, c, only=None):
+    """Run the checks of the guardrail areas that apply (or one check, 'area/name') on this computer and print them."""
+    import sg_areas as A, sg_measure as M
+    why, notes, files = areas_that_apply(c, c["base_branch"])
+    recs = A.records(areas_policy(c), None if only else set(why))
+    if only:
+        recs = [b for b in recs if b["_key"] == only]
+        if not recs:
+            sys.exit("story-gate: no guardrail check called %s. Checks here: %s" % (
+                only, ", ".join(b["_key"] for b in A.records(areas_policy(c))) or "none"))
+    for n in notes:
+        print("story-gate: " + n)
+    if not recs:
+        if A.records(areas_policy(c)):
+            print("story-gate: no guardrail area applies to this change.")
+        return 0
+    stored = load_json(sd / "guardrail_results.json").get("results")
     stored = stored if isinstance(stored, dict) else {}
-    for b in todo:
+    for b in recs:
         rec, raw = M.run(b, str(ROOT), work_state)
-        stored[b["name"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local", M.trust_problems(b, str(ROOT), files))
-    wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": stored})
-    rows = [(b, M.current(b, stored.get(b["name"]), work_fingerprint())) for b in todo]
-    print("\n".join(M.summary_lines(rows, False)).strip())
-    st, why = M.verdict(rows, False)
-    print("story-gate: budgets %s%s" % (st, (": " + why) if why else ""))
-    return 0 if st == "PASS" else 1
+        stored[b["_key"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local", M.trust_problems(b, str(ROOT), files or []))
+    wj(sd / "guardrail_results.json", {"v": M.SCHEMA, "story": sid, "results": stored})
+    rows, why, _ = area_rows(sd, c)
+    rows = [x for x in rows if x[0]["_key"] in {b["_key"] for b in recs}] or [
+        (b, A.refresh(b, M.current(b, stored.get(b["_key"]), work_fingerprint()))) for b in recs]
+    print("\n".join(A.summary_lines(rows, False, why)).strip())
+    st, w = A.verdict(rows, False)
+    print("story-gate: guardrails %s%s" % (st, (": " + w) if w else ""))
+    return 1 if st == "FAIL" else 0
 
 
 def report_facts(sid, in_ci=False):
@@ -2332,7 +2433,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
                                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
     wj(sd / ("%s.json" % phase), v)
-    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]
+    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
     if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
@@ -2603,13 +2704,15 @@ NEXT_DONE = (("spec_covered", "spec links", "Name every scenario of the linked s
              ("traceability", "test links", "Point each AC to its automated tests in tests.json (`test_refs`: the test function names), and make them pass"),
              ("scenarios_prove_acs", "scenarios", "{scenario}"),
              ("budgets_met", "budgets", "Measure the budgets and keep the work within them (fix the work, never the measuring script): `{measure}`"),
+             ("guardrails_met", "guardrails", "Run the guardrail checks and fix what they find (fix the work, never the check or its "
+              "settings): `{measure}`"),
              ("validation_written", "validation.md", "Fill in validation.md for the owner"),
              ("handoff_written", "handoff.md", "Write handoff.md with these sections: " + ", ".join(s.lstrip("# ") for s in HANDOFF_SECTIONS)),
              ("learnings_recorded", "learnings", "Record what you learnt: `{learn}`"))
 
 
 def _ok(x):
-    return x is True or x == "PASS" or x == "CONCERNS"
+    return x is True or x in ("PASS", "CONCERNS", "WARN")
 
 
 def next_step(sid, c):
@@ -2628,7 +2731,7 @@ def next_step(sid, c):
             done.append(label)
     rv = load_v(sid, "ready")
     if not passed(rv, c, sd):
-        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED")]
+        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
         if rv and not stale(rv, c, sd) and bad:
             return done, "READY is %s on: %s. Fix those (see `%s`), then run `%s`." % (
                 rv.get("overall"), ", ".join(bad), gate_cmd("status " + sid), gate_cmd("score %s ready" % sid))
@@ -2664,7 +2767,7 @@ def next_step(sid, c):
         done.append(label)
     dv = load_v(sid, "done")
     if not passed(dv, c, sd):
-        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED")]
+        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
         if dv and not stale(dv, c, sd) and bad:
             return done, "DONE is %s on: %s. Fix the cause (don't skip the check), then run `%s`." % (
                 dv.get("overall"), ", ".join(bad), gate_cmd("score %s done" % sid))
@@ -3136,7 +3239,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -3221,7 +3324,7 @@ def cmd_ci_measure(out_dir):
     """The measure job (no secrets, its own runner): measure the default branch's budgets that apply to this pull request
     and save only the raw output. It runs before, and apart from, the project's tests and scenarios, so their code can't
     touch these files. The story-gate job parses and compares; nothing here decides."""
-    import sg_measure as M
+    import sg_areas as A, sg_measure as M
     c = cfg()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -3230,8 +3333,10 @@ def cmd_ci_measure(out_dir):
         return 0
     try:
         bref = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF")
-        files = changed_paths(("origin/" + bref) if bref else c["base_branch"])
+        base = ("origin/" + bref) if bref else c["base_branch"]
+        files = changed_paths(base)
         todo = [b for b in budgets_policy() if M.applies(b, files)]
+        todo += A.records(areas_policy(c), set(areas_that_apply(c, base)[0]))  # guardrail checks: the same runner and rules
     except (ConfigError, RuntimeError) as e:  # the story-gate job reads the same policy and reports it
         print("story-gate budgets: not measured (%s)" % e)
         return 0
@@ -3251,9 +3356,10 @@ def cmd_ci_measure(out_dir):
     finally:
         if acc is not None:
             teardown_warnings(acc, I)
-    (out / "measures").mkdir(exist_ok=True)
     for n, (r, raw) in measured.items():
-        (out / "measures" / (n + ".raw")).write_bytes(raw)
+        f = raw_path(out, n)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(raw)
     wj(out / "measures.json", dict(meta, runs={n: r for n, (r, _) in measured.items()}))
     print("story-gate budgets: measured %d" % len(measured))
     return 0
@@ -3262,32 +3368,65 @@ def cmd_ci_measure(out_dir):
 CHANGE_LABEL = "story-gate-change"
 
 
-def ci_budgets(measures_dir, base, files_of):
-    """{budget: result} for the default branch's budgets that apply, from the tests job's raw runs. Everything is decided
-    here: which budgets apply, whether a pinned file changed, the parse and the comparison. A run for another command,
-    or from another commit, doesn't count."""
-    import sg_measure as M
+def raw_path(out_dir, key):
+    """Where the measure job saves one run's raw output: measures/<budget>.raw, or measures/areas/<area>/<check>.raw.
+    Names are validated (letters, digits, '.', '_', '-'), so a key can't leave the folder."""
+    return Path(out_dir) / "measures" / ("areas/%s.raw" % key if "/" in key else key + ".raw")
+
+
+def ci_runs(measures_dir):
+    """(runs, why every value is only reported) from the measure job's measures.json: nothing when it is for another
+    commit, or when strict isolation was required and the runs aren't known to be isolated."""
     meta = load_json(Path(measures_dir) / "measures.json") if measures_dir else {}
     runs = meta.get("runs") if isinstance(meta.get("runs"), dict) and meta.get("head") == git("rev-parse", "HEAD").strip() else {}
-    fp, out = work_fingerprint(), {}
     unisolated = isolation_required() and meta.get("isolated") is not True
     if unisolated and cfg().get("ci_isolation") == "strict":
         runs = {}  # strict: a run not known to be isolated is no run at all (not_run), whatever the file says
     loose = ["measured as story-gate's own account, not a separate one (ci_isolation is \"relaxed\", or isolation "
              "couldn't be set up)"] if unisolated else []
+    return runs, loose
+
+
+def ci_result(measures_dir, runs, key, b, fp, trust):
+    """One record's result from the measure job's run: parsed and compared here, never taken from the run."""
+    import sg_measure as M
+    rec = runs.get(key) if isinstance(runs.get(key), dict) else None
+    raw = b""
+    if rec:
+        rec = dict(rec, fingerprint=fp)  # the same commit as the tests job (its run may leave build files a clean checkout lacks)
+        f = raw_path(measures_dir, key)
+        if f.is_file() and not f.is_symlink():
+            with open(f, "rb") as fh:
+                raw = fh.read(M.OUTPUT_CAP + 1)
+    return M.evaluate(b, rec, raw, fp, "ci", trust)
+
+
+def ci_budgets(measures_dir, base, files_of):
+    """{budget: result} for the default branch's budgets that apply, from the tests job's raw runs. Everything is decided
+    here: which budgets apply, whether a pinned file changed, the parse and the comparison. A run for another command,
+    or from another commit, doesn't count."""
+    import sg_measure as M
+    runs, loose = ci_runs(measures_dir)
+    fp, out = work_fingerprint(), {}
     for b in budgets_policy():
-        if not M.applies(b, files_of):
-            continue
-        rec = runs.get(b["name"]) if isinstance(runs.get(b["name"]), dict) else None
-        raw = b""
-        if rec:
-            rec = dict(rec, fingerprint=fp)  # the same commit as the tests job (its run may leave build files a clean checkout lacks)
-            f = Path(measures_dir) / "measures" / (b["name"] + ".raw")
-            if f.is_file() and not f.is_symlink():
-                with open(f, "rb") as fh:
-                    raw = fh.read(M.OUTPUT_CAP + 1)
-        out[b["name"]] = M.evaluate(b, rec, raw, fp, "ci", M.trust_problems(b, str(ROOT), files_of) + loose)
+        if M.applies(b, files_of):
+            out[b["name"]] = ci_result(measures_dir, runs, b["name"], b, fp, M.trust_problems(b, str(ROOT), files_of) + loose)
     return out
+
+
+def ci_areas(measures_dir, base, c):
+    """({"area/check": result}, {area: why it applies}, notes) for the guardrail areas that apply, decided here from this
+    job's own checkout (triggers, pins) and the measure job's raw runs, exactly as ci_budgets does."""
+    import sg_areas as A, sg_measure as M
+    why, notes, files = areas_that_apply(c, base)
+    if not why:
+        return {}, why, notes
+    runs, loose = ci_runs(measures_dir)
+    fp, out = work_fingerprint(), {}
+    for b in A.records(areas_policy(c), set(why)):
+        r = ci_result(measures_dir, runs, b["_key"], b, fp, M.trust_problems(b, str(ROOT), files or []) + loose)
+        out[b["_key"]] = A.refresh(b, r)
+    return out, why, notes
 
 
 def cmd_ci(tests_dir=None, measures_dir=None):
@@ -3513,6 +3652,14 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 kept = load_json(sd / "budget_results.json").get("results")
                 kept = {n: r for n, r in (kept if isinstance(kept, dict) else {}).items() if n not in CI_MEASURED[sid]}
                 wj(sd / "budget_results.json", {"v": M.SCHEMA, "story": sid, "results": dict(kept, **CI_MEASURED[sid])})
+                CI_AREAS[sid] = ci_areas(measures_dir, base, c)
+                if CI_AREAS[sid][1] and not measures_dir:
+                    notes.append("No guardrail checks were run: this repository's story-gate workflow has no measure job yet. "
+                                 "A code owner runs `story-gate install` to update it; until then enforced areas fail.")
+                notes += CI_AREAS[sid][2]
+                kept = load_json(sd / "guardrail_results.json").get("results")
+                kept = {n: r for n, r in (kept if isinstance(kept, dict) else {}).items() if n not in CI_AREAS[sid][0]}
+                wj(sd / "guardrail_results.json", {"v": M.SCHEMA, "story": sid, "results": dict(kept, **CI_AREAS[sid][0])})
             accepted = {"accepted": False, "why": "not running on a pull request"}
             if ctx and token:
                 # Owners come only from the base branch: a PR can never name its own approvers.
@@ -3529,7 +3676,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                     cmd_score(sid, ph, base, ci_trust=accepted["accepted"], results=results if ph == "done" else None, quiet=True)
                     v = load_v(sid, ph)
                     if not passed(v, c):
-                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED")]
+                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
                         problems.append("%s %s gate is %s: %s" % (sid, ph.upper(), (v or {}).get("overall", "missing"), "; ".join(bad)[:900]))
             if ctx and token and c.get("require_independent_review"):
                 try:
@@ -3593,6 +3740,15 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             lines += M.summary_lines(budget_rows(STORIES / sid, c, True), True)
         except Exception as e:  # ConfigError is already a problem above
             lines += ["", "Budgets could not be shown: %s" % str(e)[:200]]
+        try:
+            import sg_areas as A
+            rows, why, _ = area_rows(STORIES / sid, c, True)
+            lines += A.summary_lines(rows, True, why)
+            st, w = A.verdict(rows, True)
+            if st == "WARN":
+                print("::warning title=story-gate: guardrails::%s" % w.replace("\n", " ")[:900])
+        except Exception as e:
+            lines += ["", "Guardrails could not be shown: %s" % str(e)[:200]]
     lines += writing_summary(sid)
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
@@ -4808,9 +4964,11 @@ def main(argv):
         head, argv_ = (args[:args.index("--")], args[args.index("--") + 1:]) if "--" in args else (args, [])
         kv_, rest_ = flags(head)
         if not rest_:
-            sys.exit("usage: measure <ID> [--budget NAME]   |   measure <ID> --budget NAME --unit U --limit N --source WHY "
+            sys.exit("usage: measure <ID> [--budget NAME | --check AREA/NAME]   |   measure <ID> --budget NAME --unit U --limit N --source WHY "
                      "[--direction max|min] [--tolerance N] [--measure number|junit] [--report PATH] [--pins A,B] "
                      "[--paths GLOB,GLOB] [--timeout S] [--exit N] -- <command...>   |   measure <ID> --budget NAME --remove")
+        if kv_.get("check") and (kv_.get("budget") or argv_ or "--remove" in rest_):
+            sys.exit("story-gate: --check runs one guardrail check; it doesn't go with --budget, --remove or a command")
         return cmd_measure(rest_[0], kv_, rest_[1:], argv_)
     if cmd == "jira-setup":
         import sg_trackers as TR

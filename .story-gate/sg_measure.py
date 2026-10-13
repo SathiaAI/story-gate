@@ -15,6 +15,9 @@ from decimal import Decimal
 
 SCHEMA = 1
 PARSERS = {"number": "number-1", "junit": "junit-1"}
+# Guardrail area checks (sg_areas.py) may also read a SARIF report or print a date. Budgets keep number and junit.
+AREA_PARSERS = dict(PARSERS, sarif="sarif-1", date="date-1")
+SARIF_LEVELS = ("error", "warning", "note")
 OUTPUT_CAP = 5_000_000            # bytes of output (or report) a measurement may produce; more is not_run
 MAX_BUDGETS, MAX_LIST, CI_TOTAL = 30, 20, 900
 DEFAULT_TIMEOUT, MAX_TIMEOUT = 120, 600
@@ -150,7 +153,10 @@ def policy_hash(budgets):
 def spec_hash(b):
     """The identity of a measurement: what runs and how its output is read. A result only counts for this identity."""
     keep = {k: b.get(k) for k in ("measure", "command", "report", "pins", "expect_exit", "timeout")}
-    keep["parser"] = PARSERS.get(b.get("measure"))
+    keep["parser"] = AREA_PARSERS.get(b.get("measure"))
+    for k in ("levels", "suppressed"):  # how a SARIF report is read (area checks only; budgets keep their old identity)
+        if b.get(k) is not None:
+            keep[k] = b[k]
     return hashlib.sha256(json.dumps(keep, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
@@ -298,6 +304,143 @@ def parse_junit(raw):
     return Decimal(failed), len(cases), ""
 
 
+def _sarif_rules(run):
+    """{(component, index) and ruleId: rule} for a SARIF run's driver (component -1) and its extensions."""
+    tool = run.get("tool") if isinstance(run.get("tool"), dict) else {}
+    comps = [tool.get("driver")] + (tool.get("extensions") if isinstance(tool.get("extensions"), list) else [])
+    out = {}
+    for ci, comp in enumerate(comps):
+        rules = comp.get("rules") if isinstance(comp, dict) and isinstance(comp.get("rules"), list) else []
+        for i, r in enumerate(rules):
+            if isinstance(r, dict):
+                out[(ci - 1, i)] = r
+                if isinstance(r.get("id"), str) and ci == 0:
+                    out.setdefault(r["id"], r)
+    return out
+
+
+def _sarif_level(res, rules):
+    """A result's level: its own, else its rule's default configuration, else "warning" (SARIF 2.1.0, 3.27.10)."""
+    if "level" in res:
+        return res["level"]
+    ref = res.get("rule") if isinstance(res.get("rule"), dict) else {}
+    comp = ref.get("toolComponent", {}).get("index", -1) if isinstance(ref.get("toolComponent"), dict) else -1
+    idx = ref.get("index", res.get("ruleIndex"))
+    rule = rules.get((comp, idx)) if isinstance(idx, int) and not isinstance(idx, bool) else None
+    if rule is None:
+        rule = rules.get(ref.get("id") or res.get("ruleId"))
+    cfg = (rule or {}).get("defaultConfiguration")
+    return cfg.get("level", "warning") if isinstance(cfg, dict) else "warning"
+
+
+def _suppressed(res):
+    """True when a result carries a suppression that is in effect (status absent or "accepted"); None when malformed."""
+    sup = res.get("suppressions", [])
+    if not isinstance(sup, list) or not all(isinstance(x, dict) and x.get("kind") in ("inSource", "external")
+                                            and x.get("status", "accepted") in ("accepted", "underReview", "rejected") for x in sup):
+        return None
+    return any(x.get("status", "accepted") == "accepted" for x in sup)
+
+
+def parse_sarif(raw, levels=("error",), suppressed="count"):
+    """(findings as Decimal, details, "") from SARIF 2.1.0 JSON bytes, else (None, {}, why).
+    Counts results whose kind is "fail" (or absent) and whose level is in levels, from every run; results whose
+    baselineState is "absent" (gone) never count. A result with a suppression in effect still counts unless the owner chose
+    suppressed: "exclude" (the AI writing the code can add a suppression comment). A run the tool says failed, a missing
+    results list, another SARIF version or anything malformed is not a usable report."""
+    if len(raw) > OUTPUT_CAP:
+        return None, {}, "the report is larger than 5 MB"
+    try:
+        doc = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError) as e:
+        return None, {}, "the report isn't readable SARIF JSON (%s)" % e.__class__.__name__
+    if not isinstance(doc, dict) or doc.get("version") != "2.1.0" or not isinstance(doc.get("runs"), list) or not doc["runs"]:
+        return None, {}, 'the report isn\'t SARIF 2.1.0 (it needs "version": "2.1.0" and a list of runs)'
+    count = supp = total = 0
+    for run in doc["runs"]:
+        if not isinstance(run, dict):
+            return None, {}, "a run in the report isn't an object"
+        inv = run.get("invocations", [])
+        if not isinstance(inv, list) or not all(isinstance(i, dict) and isinstance(i.get("executionSuccessful"), bool) for i in inv):
+            return None, {}, "the report's invocations are malformed (each needs executionSuccessful)"
+        if any(i["executionSuccessful"] is False for i in inv):
+            return None, {}, "the tool reported that its run failed (executionSuccessful: false)"
+        results = run.get("results")
+        if not isinstance(results, list):
+            return None, {}, "a run has no results list, so the tool didn't finish its analysis"
+        rules = _sarif_rules(run)
+        for res in results:
+            if not isinstance(res, dict):
+                return None, {}, "a result in the report isn't an object"
+            if res.get("kind", "fail") not in KINDS or res.get("baselineState", "new") not in BASELINE:
+                return None, {}, "a result has an unknown kind or baselineState"
+            if res.get("kind", "fail") != "fail" or res.get("baselineState") == "absent":
+                continue
+            level = _sarif_level(res, rules)
+            if level not in SARIF_LEVELS + ("none",):
+                return None, {}, "a result has an unknown level %r" % str(level)[:20]
+            off = _suppressed(res)
+            if off is None:
+                return None, {}, "a result's suppressions are malformed"
+            if level not in levels:
+                continue
+            total += 1
+            if off:
+                supp += 1
+                if suppressed == "exclude":
+                    continue
+            count += 1
+    return Decimal(count), {"findings": total, "suppressed": supp}, ""
+
+
+KINDS = ("pass", "open", "informational", "notApplicable", "review", "fail")
+BASELINE = ("new", "unchanged", "updated", "absent")
+DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?)?")
+
+
+def _today():
+    """Today's date in UTC: the one clock every age is measured against."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def parse_date(text):
+    """(the UTC calendar date, "") when the output is exactly one ISO-8601 date (2026-10-01) or date and time
+    (2026-10-01T09:30Z, 2026-10-01T09:30:00+02:00; no zone means UTC), else (None, why). A future date is refused."""
+    import datetime
+    words = ANSI.sub("", text).split()
+    if len(words) != 1:
+        return None, ("the output has no date" if not words else "the output must be one date, like 2026-10-01 (it has %d words)" % len(words))
+    m = DATE.fullmatch(words[0])
+    if not m:
+        return None, "%r is not a date like 2026-10-01 or 2026-10-01T09:30Z" % words[0][:30]
+    y, mo, d, hh, mi, ss, zone = m.groups()
+    try:
+        t = datetime.datetime(int(y), int(mo), int(d), int(hh or 0), int(mi or 0), int(ss or 0), tzinfo=datetime.timezone.utc)
+        if zone and zone != "Z":
+            sign = 1 if zone[0] == "+" else -1
+            off = datetime.timedelta(hours=int(zone[1:3]), minutes=int(zone[4:6]))
+            if off >= datetime.timedelta(hours=24):
+                raise ValueError("offset")
+            t -= sign * off
+    except (ValueError, OverflowError):
+        return None, "%r is not a real date" % words[0][:30]
+    if t.date() > _today():
+        return None, "the date %s is in the future (UTC)" % t.date().isoformat()
+    return t.date(), ""
+
+
+def age_days(as_of):
+    """Whole UTC calendar days from an ISO date (YYYY-MM-DD) to today; None when it can't be read or is in the future."""
+    import datetime
+    try:
+        d = datetime.date.fromisoformat(str(as_of))
+    except ValueError:
+        return None
+    n = (_today() - d).days
+    return n if n >= 0 else None
+
+
 def met(b, value):
     """True when value is within the budget's limit (plus tolerance), compared as exact decimals."""
     lim, tol = _num(b["limit"]), _num(b["tolerance"])
@@ -362,14 +505,16 @@ def run(b, root, work_state, timeout=None, account=None):
 
 
 def run_all(budgets, root, work_state, total=CI_TOTAL, account=None):
-    """CI order: decided budgets first, then proposed, each by name, inside one time budget. -> {name: (record, raw)}."""
+    """CI order: decided budgets, then enforce-area checks, then warn-area checks (their _rank), then proposed budgets,
+    each by name, inside one time budget. -> {key: (record, raw)}; the key is _key (area checks) or the name."""
     out, t0 = {}, time.monotonic()  # a clock change can't stretch or cut the time
-    for b in sorted(budgets, key=lambda x: (x["status"] != "decided", x["name"])):
+    for b in sorted(budgets, key=lambda x: (x.get("_rank", 0 if x["status"] == "decided" else 3), x.get("_key", x["name"]))):
+        key = b.get("_key", b["name"])
         left = total - (time.monotonic() - t0)
         if left < 5:
-            out[b["name"]] = ({"spec": spec_hash(b), "note": "not run: the %d-second time for all budgets ran out" % total}, b"")
+            out[key] = ({"spec": spec_hash(b), "note": "not run: the %d-second time for all measured checks ran out" % total}, b"")
             continue
-        out[b["name"]] = run(b, root, work_state, timeout=min(b["timeout"], int(left)), account=account)
+        out[key] = run(b, root, work_state, timeout=min(b["timeout"], int(left)), account=account)
     return out
 
 
@@ -390,7 +535,7 @@ def current(b, r, fingerprint):
 def evaluate(b, rec, raw, fingerprint, source, trust):
     """The result for one budget from one run record (or None). trust: why CI can't vouch for it ([] when it can).
     source: "ci" only for a run the story-gate job read from the tests job; everything else is "local"."""
-    base = {"v": SCHEMA, "unit": b["unit"], "parser": PARSERS[b["measure"]], "spec": spec_hash(b), "source": source,
+    base = {"v": SCHEMA, "unit": b["unit"], "parser": AREA_PARSERS[b["measure"]], "spec": spec_hash(b), "source": source,
             "value": None, "state": "not_run", "why": ""}
     if not rec:
         return dict(base, why="not measured on this code")
@@ -405,6 +550,15 @@ def evaluate(b, rec, raw, fingerprint, source, trust):
     if b["measure"] == "junit":
         value, n, why = parse_junit(raw)
         base["tests"] = n
+    elif b["measure"] == "sarif":
+        value, info, why = parse_sarif(raw, tuple(b.get("levels") or ("error",)), b.get("suppressed") or "count")
+        base.update(info)
+    elif b["measure"] == "date":
+        day, why = parse_date(raw.decode("utf-8", "replace"))
+        value = None
+        if day is not None:
+            base["as_of"] = day.isoformat()
+            value = Decimal(age_days(base["as_of"]))
     else:
         value, why = parse_number(raw.decode("utf-8", "replace"), b["unit"])
     if value is None:

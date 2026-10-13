@@ -9461,6 +9461,432 @@ class TestBudgets(Base):
         self.assertIn("can't be read", D.budget_history(b"{bad", rows)[1])
 
 
+class TestGuardrails(Base):
+    """G1 part 2: guardrail areas. The default branch's config.json turns areas off, warn or enforce; triggers decide which
+    apply; each check runs through the budget engine; warn shows and never blocks; enforce fails whatever accept_concerns
+    says; SARIF and date output are read by story-gate's own strict parsers (docs/guardrails.md)."""
+
+    def mods(self):
+        """(sg_areas, sg_measure) from the source tree, freshly imported."""
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_areas, sg_measure
+        return importlib.reload(sg_areas), importlib.reload(sg_measure)
+
+    def check(self, **kw):
+        """A valid number check whose command prints 3 (override any field)."""
+        ch = {"name": "count", "measure": "number", "command": [PY, "-c", "print(3)"], "pins": ["tools"], "limit": 5,
+              "source": "owner, for the test"}
+        ch.update(kw)
+        return ch
+
+    def areas(self, mode="warn", commit=False, **area):
+        """Write a guardrails section with one area ("quality") to config.json; commit=True makes it the base branch's."""
+        a = {"mode": mode, "checks": [self.check()]}
+        a.update(area)
+        self.cfg(guardrails={"areas": {"quality": a}}, judge_mode="objective")
+        if commit:
+            g = lambda *x: subprocess.run(["git", *x], cwd=self.repo, capture_output=True, check=True)
+            g("stash", "-u", "-q"); g("checkout", "-q", "main"); g("stash", "pop", "-q")
+            g("add", ".story-gate/config.json"); g("commit", "-qm", "guardrails"); g("checkout", "-q", "feature/SAT-1-thing")
+            g("merge", "-q", "main")
+
+    def ready(self):
+        """SAT-1 through READY, with a code change, so DONE-phase checks run."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        self.sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+
+    def sarif(self, results, **run_extra):
+        """SARIF 2.1.0 bytes with one run (rules R1 error, R2 warning by default)."""
+        r = {"tool": {"driver": {"name": "t", "rules": [{"id": "R1", "defaultConfiguration": {"level": "error"}}, {"id": "R2"}]}},
+             "invocations": [{"executionSuccessful": True}], "results": results}
+        r.update(run_extra)
+        return json.dumps({"version": "2.1.0", "runs": [r]}).encode()
+
+    # ---------------------------------------------------------------- records
+    def test_an_area_is_checked_field_by_field_and_a_bad_one_fails_closed(self):
+        """load() fills defaults and names each bad field; an invalid section stops the gate (ConfigError)."""
+        A, M = self.mods()
+        a = A.load({"areas": {"security": {"checks": [self.check(measure="sarif", report="out/s.sarif", unit=None)]}}})
+        ch = a["security"]["checks"][0]
+        self.assertEqual((a["security"]["mode"], ch["levels"], ch["suppressed"], ch["unit"], ch["limit"]), ("warn", ["error"], "count", "findings", 5))
+        self.assertEqual(A.load(None), {}); self.assertEqual(A.load({}), {})
+        bad = [({"mode": "loud"}, "mode"), ({"checks": []}, "1 to"), ({"paths": ["../x"]}, "paths"), ({"x": 1}, "unknown fields"),
+               ({"content": ["(a+)+"]}, "already repeats"), ({"checks": [self.check(), self.check()]}, "twice"),
+               ({"checks": [self.check(measure="sarif")]}, "report"), ({"checks": [self.check(levels=["error"])]}, "levels is only"),
+               ({"checks": [self.check(measure="sarif", report="o.sarif", levels=["fatal"])]}, "levels"),
+               ({"checks": [self.check(suppressed="exclude")]}, "suppressed is only"),
+               ({"checks": [self.check(measure="date", pins=[])]}, "date check needs pins"),
+               ({"checks": [self.check(measure="sarif", report="o.sarif", limit=0.5)]}, "whole number"),
+               ({"checks": [self.check(limit=-1)]}, "0 or more"), ({"checks": [self.check(unit="seconds")]}, "unit"),
+               ({"checks": [self.check(source="")]}, "source"), ({"checks": [self.check(command="ls")]}, "command"),
+               ({"checks": [self.check(report="o.xml")]}, "report is only"), ({"checks": [self.check(name="a/b")]}, "name"),
+               ({"checks": [self.check(colour=1)]}, "unknown fields")]
+        for change, why in bad:
+            with self.subTest(change=change):
+                area = dict({"checks": [self.check()]}, **change)
+                with self.assertRaises(ValueError) as cm:
+                    A.load({"areas": {"security": area}})
+                self.assertIn(why, str(cm.exception))
+        for section in ({"areas": {"Security": {"checks": [self.check()]}}}, {"areas": []}, {"rules": {}},
+                        {"areas": {"a%d" % i: {"checks": [self.check()]} for i in range(A.MAX_AREAS + 1)}}):
+            with self.subTest(section=str(section)[:40]):
+                with self.assertRaises(ValueError):
+                    A.load(section)
+        self.cfg(guardrails={"areas": {"security": {"mode": "on", "checks": [self.check()]}}})
+        r = run(self.repo, "status")
+        self.assertIn("guardrails", r.stdout + r.stderr); self.assertIn("fails closed", r.stdout + r.stderr)
+
+    def test_content_patterns_stay_small_and_simple(self):
+        """Backreferences, lookaround, a repeat inside a repeat and over-long patterns are refused; plain ones pass."""
+        A, _ = self.mods()
+        for p in ("password", r"\bexec\(", r"for .* in .*:", "(GET|POST) /api", r"[a-z]+\.(py|js)$", "a{2,3}b"):
+            self.assertEqual(A.pattern_problem(p), "", p)
+        for p, why in (("(a+)+", "already repeats"), ("(a|b*)*", "already repeats"), ("(?:x{2,})+", "already repeats"),
+                       ("(?=a)b", "lookaround"), ("(?<!a)b", "lookaround"), (r"(a)\1", "backreference"), ("(?P<x>a)(?P=x)", "backreference"),
+                       ("x" * 201, "1-200"), ("", "1-200"), ("(", "valid")):
+            with self.subTest(p=p[:20]):
+                self.assertIn(why, A.pattern_problem(p))
+
+    # ---------------------------------------------------------------- triggers
+    def test_which_areas_apply(self):
+        """No triggers: every change. Paths: a changed path (added, deleted, either side of a rename). Content: an added or
+        removed line, never a diff header, never a story record. Off areas never apply; an empty change applies nothing."""
+        A, _ = self.mods()
+        rec = lambda f: f.startswith(".story-gate/stories/")
+        base = {"mode": "warn", "paths": [], "content": [], "checks": []}
+        areas = {"always": dict(base), "web": dict(base, paths=["src/web/**"]), "secrets": dict(base, content=["passw(or)?d"]),
+                 "off": dict(base, mode="off")}
+        diff = ("diff --git a/lib/a.py b/lib/a.py\n--- a/lib/a.py\n+++ b/lib/a.py\n@@ -1 +1 @@\n-old\n+new\n")
+        why, _ = A.applicable(areas, ["lib/a.py"], diff, rec)
+        self.assertEqual(set(why), {"always"})
+        self.assertEqual(A.applicable(areas, [], "", rec)[0], {})
+        self.assertIn("web", A.applicable(areas, ["src/web/x/y.js"], "", rec)[0])
+        for d in ("diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n+password = 1\n", "diff --git a/x b/x\n+++ b/x\n@@ -1 +0,0 @@\n-password = 1\n"):
+            with self.subTest(d=d[-20:]):
+                self.assertIn("secrets", A.applicable(areas, ["x"], d, rec)[0])
+        header = "diff --git a/password b/password\n--- a/password\n+++ b/password\n@@ -1 +1 @@\n+ok\n"
+        self.assertNotIn("secrets", A.applicable(areas, ["password"], header, rec)[0])
+        story = "diff --git a/.story-gate/stories/S/x.md b/.story-gate/stories/S/x.md\n+++ b/.story-gate/stories/S/x.md\n@@\n+password\n"
+        self.assertNotIn("secrets", A.applicable(areas, ["x"], story, rec)[0])
+        untracked = "diff --git a/n.py b/n.py\nnew file (untracked)\n+++ b/n.py\n+password = 2\n"
+        self.assertIn("secrets", A.applicable(areas, ["n.py"], untracked, rec)[0])
+        everything, notes = A.applicable(areas, None, "", rec)
+        self.assertEqual(set(everything), {"always", "web", "secrets"})
+        with patch.object(A, "DIFF_CAP", 10):
+            why, notes = A.applicable(areas, ["x"], "diff --git a/x b/x\n+++ b/x\n+" + "y" * 50 + "\n", rec)
+        self.assertIn("secrets", why); self.assertIn("larger than", notes[0])
+        lines, _ = A.changed_lines("diff --git a/x b/x\n+++ b/x\n+" + "z" * 5000 + "\n", rec)
+        self.assertEqual(len(lines[0]), A.LINE_CAP)
+        self.assertTrue(A.applicable(areas, ["src/web\\x.js"], "", rec)[0].get("web") is None)  # globs are forward-slash paths
+
+    def test_unfinished_pattern_matching_never_switches_a_check_off(self):
+        """When the separate matcher times out or fails, every area with patterns applies, and a note says why."""
+        A, _ = self.mods()
+        with patch.object(A, "MATCHER", "import time; time.sleep(5)"):
+            hits, note = A.content_hits({"a": ["x"], "b": []}, ["nothing here"], timeout=1)
+        self.assertEqual(hits, {"a": True}); self.assertIn("couldn't be checked", note)
+        with patch.object(A, "MATCHER", "print('not json')"):
+            self.assertEqual(A.content_hits({"a": ["x"]}, ["y"])[0], {"a": True})
+        with patch.object(A, "MATCHER", "print('{\"a\": \"yes\"}')"):
+            self.assertEqual(A.content_hits({"a": ["x"]}, ["y"])[0], {"a": True})
+        self.assertEqual(A.content_hits({"a": ["x"]}, ["no match"])[0], {"a": False})
+
+    # ---------------------------------------------------------------- parsers
+    def test_the_sarif_parser_counts_what_the_owner_chose(self):
+        """parse_sarif(): rule defaults, rule index and extensions resolve the level; pass results and gone (absent)
+        results never count; suppressed findings count unless excluded, and only accepted suppressions are in effect."""
+        A, M = self.mods()
+        res = [{"ruleId": "R1"}, {"ruleId": "R2"}, {"ruleId": "R2", "level": "error"}, {"ruleId": "R1", "kind": "pass", "level": "none"},
+               {"ruleId": "R1", "baselineState": "absent"}, {"ruleId": "R1", "suppressions": [{"kind": "inSource"}]},
+               {"ruleId": "R1", "suppressions": [{"kind": "external", "status": "rejected"}]},
+               {"ruleIndex": 0}, {"rule": {"index": 0, "toolComponent": {"index": 0}}, "ruleId": "X"}]
+        ext = {"tool": {"driver": {"name": "t", "rules": [{"id": "R1", "defaultConfiguration": {"level": "error"}}, {"id": "R2"}]},
+                        "extensions": [{"name": "e", "rules": [{"id": "X", "defaultConfiguration": {"level": "note"}}]}]}}
+        raw = self.sarif(res, **ext)
+        v, info, why = M.parse_sarif(raw)
+        self.assertEqual((v, info, why), (5, {"findings": 5, "suppressed": 1}, ""))
+        self.assertEqual(M.parse_sarif(raw, ("error",), "exclude")[0], 4)
+        self.assertEqual(M.parse_sarif(raw, ("error", "warning", "note"))[0], 7)
+        self.assertEqual(M.parse_sarif(b"\xef\xbb\xbf" + raw)[0], 5)
+        for bad, why in ((self.sarif(res, invocations=[{"executionSuccessful": False}]), "failed"),
+                         (self.sarif(res, invocations=[{}]), "invocations"), (b'{"version": "2.1.0", "runs": [{"tool": {}}]}', "no results"),
+                         (b'{"version": "2.0.0", "runs": [{"results": []}]}', "2.1.0"), (b'{"version": "2.1.0", "runs": []}', "2.1.0"),
+                         (self.sarif([{"ruleId": "R1", "level": "fatal"}]), "unknown level"), (self.sarif([{"ruleId": "R1", "kind": "maybe"}]), "kind"),
+                         (self.sarif([{"ruleId": "R1", "suppressions": [{"kind": "inSource", "status": "sure"}]}]), "suppressions"),
+                         (self.sarif([{"ruleId": "R1", "suppressions": {}}]), "suppressions"), (self.sarif(["x"]), "isn't an object"),
+                         (b"{not json", "readable"), (b"\xff\xfe", "readable"), (b"[]", "2.1.0"), (b" " * (M.OUTPUT_CAP + 1), "5 MB")):
+            with self.subTest(why=why):
+                v, _, w = M.parse_sarif(bad)
+                self.assertIsNone(v); self.assertIn(why, w)
+        self.assertEqual(M.parse_sarif(self.sarif([]))[0], 0)
+
+    def test_the_date_parser_and_ages_use_one_utc_clock(self):
+        """parse_date(): one ISO date or date-time; offsets convert to UTC; future, impossible and extra words are refused.
+        Ages are whole UTC days to today, worked out again whenever a stored result is read."""
+        import datetime
+        A, M = self.mods()
+        with patch.object(M, "_today", return_value=datetime.date(2026, 10, 13)):
+            for text, want in (("2026-10-01", "2026-10-01"), ("2026-10-01T23:30-05:00\n", "2026-10-02"), ("2026-10-13T00:00Z", "2026-10-13"),
+                               ("2026-10-12T22:00:00.123+00:00", "2026-10-12"), ("\x1b[1m2026-09-30\x1b[0m", "2026-09-30")):
+                with self.subTest(text=text):
+                    self.assertEqual(M.parse_date(text)[0].isoformat(), want)
+            for text, why in (("2026-10-14", "future"), ("2026-10-13T23:00-05:00", "future"), ("2026-02-30", "real date"),
+                              ("2026-10-01T25:00Z", "real date"), ("2026-10-01T10:00+24:00", "real date"), ("", "no date"),
+                              ("2026-10-01 2026-10-02", "one date"), ("10/01/2026", "not a date"), ("2026-1-1", "not a date")):
+                with self.subTest(text=text):
+                    d, w = M.parse_date(text)
+                    self.assertIsNone(d); self.assertIn(why, w)
+            self.assertEqual((M.age_days("2026-10-13"), M.age_days("2026-09-13"), M.age_days("2026-10-20"), M.age_days("x")), (0, 30, None, None))
+            b = A.records(A.load({"areas": {"prices": {"checks": [self.check(measure="date", limit=30, pins=["data/prices.json"])]}}}))[0]
+            self.assertEqual(A.refresh(b, {"state": "checked", "value": "1", "as_of": "2026-09-01"})["value"], "42")
+            self.assertEqual(A.refresh(b, {"state": "checked", "value": "1", "as_of": "bad"})["state"], "not_run")
+            rec = {"spec": M.spec_hash(b), "fingerprint": "f", "note": ""}
+            r = M.evaluate(b, rec, b"2026-09-01\n", "f", "ci", [])
+            self.assertEqual((r["value"], r["as_of"], r["state"]), ("42", "2026-09-01", "checked"))
+            self.assertFalse(M.met(b, M.Decimal(r["value"])))
+
+    # ---------------------------------------------------------------- verdicts
+    def test_warn_never_blocks_and_enforce_ignores_accept_concerns(self):
+        """verdict(): enforce problems FAIL; warn problems are WARN, shown and never counted, so a DONE with only a WARN is
+        PASS, and accept_concerns never turns an enforce FAIL into a pass."""
+        A, M = self.mods()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        recs = {m: A.records(A.load({"areas": {"q": {"mode": m, "checks": [self.check(limit=1)]}}}))[0] for m in ("warn", "enforce")}
+        over, ok = {"state": "checked", "value": "3", "why": ""}, {"state": "checked", "value": "1", "why": ""}
+        local = {"state": "reported", "value": "1", "why": "measured on the agent's computer"}
+        nr = {"state": "not_run", "value": None, "why": "the command did not finish"}
+        self.assertEqual(A.verdict([(recs["warn"], over)], True)[0], "WARN")
+        self.assertEqual(A.verdict([(recs["enforce"], over)], True)[0], "FAIL")
+        self.assertEqual(A.verdict([(recs["enforce"], ok), (recs["warn"], ok)], True), ("PASS", ""))
+        self.assertEqual(A.verdict([(recs["enforce"], local)], False)[0], "PASS")
+        self.assertEqual(A.verdict([(recs["enforce"], local)], True)[0], "FAIL")  # CI needs its own run
+        self.assertEqual(A.verdict([(recs["enforce"], dict(local, why="this change edits files that decide how it is measured (x)"))], False)[0], "FAIL")
+        self.assertEqual(A.verdict([(recs["enforce"], nr)], True)[0], "FAIL")
+        self.assertEqual(A.verdict([(recs["warn"], nr)], True)[0], "WARN")
+        st, why = A.verdict([(recs["enforce"], over), (recs["warn"], nr)], True)
+        self.assertEqual(st, "FAIL"); self.assertIn("(warn)", why)
+        c = dict(g.cfg(), accept_concerns=True)
+        judged = {"judge": "none", "scores": {}, "not_judged": []}
+        v = g.verdict({"guardrails_met": ("WARN", "look"), "code_changed": (True, "")}, dict(judged, judge="jev"), [], {}, c)
+        self.assertEqual((v["overall"], v["checks"]["guardrails_met"]["status"]), ("PASS", "WARN"))
+        v = g.verdict({"guardrails_met": ("FAIL", "x")}, dict(judged, judge="jev"), [], {}, c)
+        self.assertEqual(v["overall"], "FAIL")
+        self.assertTrue(g._ok("WARN")); self.assertFalse(g._ok("FAIL"))
+
+    def test_ci_order_runs_enforced_checks_before_warned_ones(self):
+        """run_all(): decided budgets, then enforce-area checks, then warn-area checks, then proposed budgets; time that
+        runs out leaves the rest not run, each saying so, keyed by area/check."""
+        A, M = self.mods()
+        recs = A.records(A.load({"areas": {"a-warn": {"mode": "warn", "checks": [self.check(name="w")]},
+                                           "b-enf": {"mode": "enforce", "checks": [self.check(name="e")]},
+                                           "c-off": {"mode": "off", "checks": [self.check(name="o")]}}}))
+        self.assertEqual([r["_key"] for r in recs], ["a-warn/w", "b-enf/e"])
+        bud = {"name": "z", "unit": "count", "limit": 1, "status": "decided", "source": "s", "measure": "number",
+               "command": [PY, "-c", "print(1)"], "pins": ["t"]}
+        prop = M.normal(dict(bud, name="a", status="proposed"))
+        order = []
+        with patch.object(M, "run", side_effect=lambda b, *a, **k: order.append(b.get("_key", b["name"])) or ({"note": ""}, b"")):
+            out = M.run_all([prop, recs[0], recs[1], M.normal(bud)], str(self.repo), lambda: {})
+        self.assertEqual(order, ["z", "b-enf/e", "a-warn/w", "a"]); self.assertEqual(set(out), {"z", "b-enf/e", "a-warn/w", "a"})
+        out = M.run_all([recs[0]], str(self.repo), lambda: {}, total=3)
+        self.assertIn("ran out", out["a-warn/w"][0]["note"])
+
+    # ---------------------------------------------------------------- end to end
+    def test_measure_runs_the_checks_and_done_shows_them(self):
+        """`measure` runs the checks of areas that apply and stores them as reported; a warn miss is a WARN that doesn't
+        block DONE; the same miss in an enforce area fails DONE; an area that doesn't apply isn't shown."""
+        self.ready()
+        self.areas("warn", checks=[self.check(limit=1)])
+        r = run(self.repo, "measure", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("| quality (warn) | count | at most 1 count | 3 count | reported", r.stdout); self.assertIn("guardrails WARN", r.stdout)
+        res = json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/count"]
+        self.assertEqual((res["value"], res["state"], res["source"]), ("3", "reported", "local"))
+        self.fill_validation()
+        run(self.repo, "score", "SAT-1", "done")
+        done = json.loads((self.sd / "done.json").read_text())
+        self.assertEqual(done["checks"]["guardrails_met"]["status"], "WARN")
+        self.areas("enforce", checks=[self.check(limit=1)])
+        self.assertEqual(run(self.repo, "measure", "SAT-1").returncode, 1)
+        run(self.repo, "score", "SAT-1", "done")
+        self.assertEqual(json.loads((self.sd / "done.json").read_text())["checks"]["guardrails_met"]["status"], "FAIL")
+        self.areas("enforce", checks=[self.check(limit=1)], paths=["docs/**"])
+        self.assertIn("no guardrail area applies", run(self.repo, "measure", "SAT-1").stdout)
+        run(self.repo, "score", "SAT-1", "done")
+        self.assertNotIn("guardrails_met", json.loads((self.sd / "done.json").read_text())["checks"])
+        self.areas("enforce", checks=[self.check(limit=5)])
+        (self.repo / "tools").mkdir(); (self.repo / "tools/x.cfg").write_text("1")  # the change edits a pinned file
+        self.assertEqual(run(self.repo, "measure", "SAT-1").returncode, 1)
+        (self.sd / "guardrail_results.json").write_text(json.dumps({"results": {"quality/count": dict(
+            json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/count"], state="checked", why="", source="ci")}}))
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        rows, _, _ = g.area_rows(self.sd, g.cfg())
+        self.assertEqual(rows[0][1]["state"], "reported")  # a stored "checked" never counts on this computer
+        self.assertIn("edits files that decide", rows[0][1]["why"])  # worked out again: the stored "why" can't clear a pin
+        shutil.rmtree(self.repo / "tools")
+        r = run(self.repo, "measure", "SAT-1", "--check", "quality/count")  # one check runs even where its area doesn't apply
+        self.assertIn("3 count", r.stdout)
+        self.assertNotEqual(run(self.repo, "measure", "SAT-1", "--check", "quality/nope").returncode, 0)
+
+    def test_ci_measures_area_checks_and_the_gate_job_decides(self):
+        """ci-measure saves only the raw SARIF report; ci parses it with the base branch's rules, ignores what the PR wrote
+        in guardrail_results.json, and an enforce area over its limit fails DONE."""
+        (self.repo / "tools").mkdir()
+        (self.repo / "tools/scan.py").write_text(
+            "import json, os\nos.makedirs('out', exist_ok=True)\njson.dump({'version': '2.1.0', 'runs': [{'tool': {'driver': {'name': 't'}}, "
+            "'results': [{'ruleId': 'A', 'level': 'error'}, {'ruleId': 'B', 'level': 'warning'}]}]}, open('out/scan.sarif', 'w'))\n")
+        (self.repo / ".gitignore").write_text("out/\n")
+        g = lambda *x: subprocess.run(["git", *x], cwd=self.repo, capture_output=True, check=True)
+        g("add", "tools", ".gitignore"); g("commit", "-qm", "scanner"); g("checkout", "-q", "main"); g("merge", "-q", "feature/SAT-1-thing")
+        g("checkout", "-q", "feature/SAT-1-thing")
+        self.areas("enforce", commit=True, checks=[self.check(name="scan", measure="sarif", report="out/scan.sarif", limit=0,
+                                                              command=[PY, "tools/scan.py"], pins=[])])
+        self.ready(); self.fill_validation()
+        td, trust = TestBudgets.ci_dirs(self)
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
+        r = run(self.repo, "ci-measure", str(td), env=env)
+        self.assertIn("measured 1", r.stdout)
+        self.assertIn(b'"level": "error"', (td / "measures/areas/quality/scan.raw").read_bytes())
+        self.assertNotIn("value", json.loads((td / "measures.json").read_text())["runs"]["quality/scan"])
+        (self.sd / "guardrail_results.json").write_text(json.dumps({"results": {"quality/scan": {"state": "checked", "value": "0", "source": "ci"}}}))
+        summary = self.repo.parent / (self.repo.name + "-sum.md"); self.addCleanup(lambda: summary.unlink() if summary.exists() else None)
+        run(self.repo, "ci", "--measures", str(td), env=dict(env, GITHUB_STEP_SUMMARY=str(summary)))
+        done = json.loads((self.sd / "done.json").read_text())["checks"]["guardrails_met"]
+        self.assertEqual(done["status"], "FAIL"); self.assertIn("enforced guardrails not met", done["why"])
+        res = json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/scan"]
+        self.assertEqual((res["value"], res["state"], res["source"]), ("1", "checked", "ci"))
+        self.assertIn("| quality (enforce) | scan | at most 0 findings | 1 findings | checked by CI | OVER |", summary.read_text())
+        meta = json.loads((td / "measures.json").read_text())
+        (td / "measures.json").write_text(json.dumps(dict(meta, head="0" * 40)))
+        run(self.repo, "ci", "--measures", str(td), env=env)
+        self.assertEqual(json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/scan"]["state"], "not_run")
+        r = run(self.repo, "ci", env=env)
+        self.assertIn("no measure job yet", r.stdout)
+
+    def test_a_pull_request_that_edits_pinned_files_gets_no_credit(self):
+        """A check whose pinned files (a scanner config, the price data and its script) change in the same pull request is
+        'reported', so an enforce area fails in CI: change those in a pull request of their own."""
+        A, M = self.mods()
+        b = A.records(A.load({"areas": {"prices": {"mode": "enforce", "checks": [self.check(
+            measure="date", limit=30, pins=["data/prices.json", "tools/age.py"], command=[PY, "tools/age.py"])]}}}))[0]
+        self.assertIn("data/prices.json", M.trust_problems(b, str(self.repo), ["data/prices.json", "app.py"])[0])
+        self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
+        rec = {"spec": M.spec_hash(b), "fingerprint": "f", "note": ""}
+        today = M._today().isoformat()
+        r = M.evaluate(b, rec, today.encode(), "f", "ci", M.trust_problems(b, str(self.repo), ["data/prices.json"]))
+        self.assertEqual(r["state"], "reported"); self.assertEqual(A.verdict([(b, r)], True)[0], "FAIL")
+        self.assertNotEqual(M.spec_hash(b), M.spec_hash(dict(b, levels=["note"])))  # how a report is read is part of the identity
+
+    def test_looser_guardrails_are_named_and_a_computer_can_only_raise_an_area(self):
+        """weaker(): removed or lowered areas, fewer triggers, removed checks, raised limits, fewer levels, excluded
+        suppressions, dropped pins and other commands are named; tighten() lets local settings raise a mode, nothing else."""
+        A, M = self.mods()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        sar = self.check(name="scan", measure="sarif", report="o.sarif", limit=0, levels=["error", "warning"], pins=["cfg"])
+        old = A.load({"areas": {"sec": {"mode": "enforce", "paths": ["src/**"], "content": ["exec"], "checks": [sar, self.check()]},
+                                "perf": {"mode": "warn", "checks": [self.check()]}}})
+        self.assertEqual(A.weaker(old, old), [])
+        stricter = A.load({"areas": {"sec": {"mode": "enforce", "checks": [dict(sar, levels=["error", "warning", "note"]), self.check(limit=1)]},
+                                     "perf": {"mode": "enforce", "checks": [self.check()]}, "new": {"checks": [self.check()]}}})
+        self.assertEqual(A.weaker(old, stricter), [])
+        cases = [({"sec": {"mode": "warn"}}, "lowered from enforce to warn"), ({"sec": {"paths": ["src/a/**"]}}, "fewer changes"),
+                 ({"sec": {"content": ["eval"]}}, "fewer changes"), ({"sec": {"checks": [self.check()]}}, "scan removed"),
+                 ({"sec": {"checks": [dict(sar, limit=2), self.check()]}}, "limit raised"),
+                 ({"sec": {"checks": [dict(sar, levels=["error"]), self.check()]}}, "fewer levels"),
+                 ({"sec": {"checks": [dict(sar, suppressed="exclude"), self.check()]}}, "suppressed in the code"),
+                 ({"sec": {"checks": [dict(sar, pins=[]), self.check()]}}, "no longer pins"),
+                 ({"sec": {"checks": [dict(sar, command=["other"]), self.check()]}}, "measured differently"), (None, "perf removed")]
+        raw = {"sec": {"mode": "enforce", "paths": ["src/**"], "content": ["exec"], "checks": [sar, self.check()]},
+               "perf": {"mode": "warn", "checks": [self.check()]}}
+        for change, why in cases:
+            with self.subTest(why=why):
+                new = json.loads(json.dumps(raw))
+                if change is None:
+                    new.pop("perf")
+                else:
+                    new["sec"].update(change["sec"])
+                self.assertTrue(any(why in w for w in A.weaker(old, A.load({"areas": new}))), A.weaker(old, A.load({"areas": new})))
+        base = g.full_config(json.dumps({"guardrails": {"areas": raw}}))
+        self.assertTrue(g.T.weaker(base, g.full_config("{}")))
+        self.assertIn("invalid", " ".join(g.T.weaker(base, g.full_config(json.dumps({"guardrails": {"areas": {"sec": {"mode": "x"}}}})))))
+        t = A.tighten({"areas": raw}, {"areas": {"perf": {"mode": "enforce", "checks": []}, "sec": {"mode": "off"}, "x": {"mode": "enforce"}}})
+        self.assertEqual((t["areas"]["perf"]["mode"], t["areas"]["sec"]["mode"], set(t["areas"])), ("enforce", "enforce", {"sec", "perf"}))
+        self.assertEqual(t["areas"]["perf"]["checks"], raw["perf"]["checks"])
+        tg = g.T.tighten(base, {"guardrails": {"areas": {"perf": {"mode": "enforce"}}}})["guardrails"]["areas"]
+        self.assertEqual((tg["perf"]["mode"], tg["perf"]["checks"], tg["sec"]), ("enforce", raw["perf"]["checks"], raw["sec"]))
+        off = A.tighten({"areas": {"p": {"mode": "off", "checks": []}}}, {"areas": {"p": {"mode": "enforce"}}})
+        self.assertEqual(off["areas"]["p"]["mode"], "off")  # an area the owner turned off stays off
+        num = A.load({"areas": {"n": {"checks": [self.check(limit=0)]}}})
+        self.assertTrue(A.weaker(num, A.load({"areas": {"n": {"checks": [self.check(limit=0.5)]}}})))
+        self.assertEqual(g.T.tighten(base, {"guardrails": "x"})["guardrails"], base["guardrails"])
+
+    def test_settings_area_changes_go_through_a_pull_request(self):
+        """`settings area ...` changes only config.json on the default branch, in a PR, refuses invalid values before any PR,
+        and says when the change is looser."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        sys.path.insert(0, str(self.repo / ".story-gate"))
+        import sg_settings as SET, sg_github as GH, contextlib, io
+        from unittest import mock
+        self.addCleanup(setattr, GH, "pr_author", GH.pr_author); self.addCleanup(setattr, GH, "whoami", GH.whoami)
+        GH.whoami = lambda tok: "paul"
+        GH.pr_author = lambda repo, base, tok, login, touches_workflows=False: ("app", "app-tok", "the agent App opens it")
+        main = {"text": json.dumps({"mode": "warn"})}
+
+        def call(m, path, tok=None, body=None):
+            """Fake GitHub: the repository, its default branch and config.json."""
+            if path.startswith("/repos/acme/shop/contents/.story-gate/config.json"):
+                return 200, {"encoding": "base64", "content": base64_of(main["text"].encode())}, {}
+            return 200, {"/repos/acme/shop": {"default_branch": "main"}, "/repos/acme/shop/git/ref/heads/main": {"object": {"sha": "abc"}}}[path], {}
+        sent = []
+
+        def cli(*a):
+            """Run settings, capture its output, and make the last PR's config the default branch's."""
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = SET.cli(g, list(a))
+            if code == 0 and sent:
+                main["text"] = sent[-1][0][2][".story-gate/config.json"].decode()
+            return code, buf.getvalue()
+        with mock.patch.object(g, "origin_repo", return_value="acme/shop"), mock.patch.object(GH, "human_token", return_value="t"), \
+                mock.patch.object(GH, "call", side_effect=call), \
+                mock.patch.object(GH, "open_setup_pr", side_effect=lambda *a, **k: sent.append((a, k)) or {"number": 3, "url": "u", "branch": k["branch"]}):
+            code, out = cli("area", "security", "check", "scan", "add", "--measure", "sarif", "--report", "out/s.sarif", "--limit", "0",
+                            "--pins", "tools/scan.cfg", "--source", "owner: no new errors", "--", "./tools/scan.sh", "--all")
+            self.assertEqual(code, 0, out)
+            conf = json.loads(main["text"])
+            self.assertEqual(conf["mode"], "warn")
+            self.assertEqual(conf["guardrails"]["areas"]["security"], {"mode": "warn", "checks": [{
+                "name": "scan", "command": ["./tools/scan.sh", "--all"], "measure": "sarif", "report": "out/s.sarif", "limit": 0,
+                "pins": ["tools/scan.cfg"], "source": "owner: no new errors"}]})
+            self.assertEqual(list(sent[-1][0][2]), [".story-gate/config.json"]); self.assertIn("Not looser", sent[-1][1]["body"])
+            self.assertEqual(cli("area", "security", "mode", "enforce")[0], 0)
+            self.assertEqual(json.loads(main["text"])["guardrails"]["areas"]["security"]["mode"], "enforce")
+            self.assertEqual(cli("area", "security", "content", '["exec\\\\(", "a,b"]')[0], 0)
+            self.assertEqual(json.loads(main["text"])["guardrails"]["areas"]["security"]["content"], ["exec\\(", "a,b"])
+            self.assertEqual(cli("area", "security", "check", "scan", "limit", "3")[0], 0)
+            self.assertIn("looser than main", sent[-1][1]["body"]); self.assertIn("limit raised", sent[-1][1]["body"])
+            n = len(sent)
+            for bad, why in ((("area", "security", "mode", "loud"), "off, warn or enforce"), (("area", "Security", "mode", "warn"), "lowercase"),
+                             (("area", "security", "content", "(a+)+"), "already repeats"),
+                             (("area", "security", "check", "scan", "colour", "red"), "no field"),
+                             (("area", "security", "check", "scan", "limit", "-1"), "0 or more"),
+                             (("area", "security", "check", "scan", "remove"), "last check"), (("area", "nope", "mode", "warn"), "no guardrail area"),
+                             (("area", "security", "check", "scan", "add", "--measure", "number", "--source", "x", "--", "a"), "already has"),
+                             (("area", "x", "check", "c", "add", "--measure", "number", "--source", "x"), "after --"),
+                             (("area", "x", "check", "c", "add", "--measure", "number", "--source", "x", "--", "run", "ghp_" + "a" * 36), "key or token"),
+                             (("area", "security"), "usage")):
+                with self.subTest(bad=bad):
+                    code, out = cli(*bad)
+                    self.assertEqual(code, 1, out); self.assertIn(why, out)
+            self.assertEqual(len(sent), n)  # nothing refused reached GitHub
+            self.assertEqual(cli("area", "security", "remove")[0], 0)
+            self.assertNotIn("areas", json.loads(main["text"]).get("guardrails", {}))
+            self.assertIn("guardrail area security removed", sent[-1][1]["body"])
+        self.assertFalse((self.repo / ".story-gate/config.json").read_text().count("guardrails"))  # nothing local changed
+
+
 class TestCiIsolation(Base):
     """T1: in CI the pull request's code runs as a separate throwaway account (sg_isolate), so it can't change the
     results story-gate reads. The real boundary is exercised on Linux by tests/isolation_e2e.py (its own CI job);

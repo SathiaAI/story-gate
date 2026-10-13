@@ -622,6 +622,9 @@ def tighten(policy, local):
     lv = local.get("validation") or {}
     if isinstance(lv, dict) and lv.get("required") is True:
         out["validation"] = dict(out.get("validation") or {}, required=True)
+    if isinstance(local.get("guardrails"), dict) and isinstance(out.get("guardrails"), dict):
+        import sg_areas as A  # this computer may only raise an area's mode, never add or loosen a check
+        out["guardrails"] = A.tighten(out["guardrails"], local["guardrails"])
     return out
 
 
@@ -729,6 +732,16 @@ def weaker(old, new):
     added = sorted(set(map(key, n.get("project_hooks_allowed") or [])) - set(map(key, o.get("project_hooks_allowed") or [])))
     if added:
         out.append("project hooks newly allowed: %s" % "; ".join(added[:5]))
+    import sg_areas as A
+    try:
+        og = A.load(o.get("guardrails"))
+    except ValueError:
+        og = {}  # an invalid old section enforced nothing
+    try:
+        out += A.weaker(og, A.load(n.get("guardrails")))
+    except ValueError as e:  # the gate fails closed on it; say so here too
+        if og:
+            out.append("the guardrails setting is invalid (%s), so story-gate stops until it is fixed" % str(e)[:120])
     return out
 
 

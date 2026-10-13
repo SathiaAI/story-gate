@@ -294,6 +294,7 @@ The result is one of three: **ON_TRACK**; **AT_RISK** (fix the named cause); or 
 | `traceability` | Structural | Every AC's `test_refs` exist in the current test files and ran and passed (writes `trace.md`) |
 | `scenarios_prove_acs` | Structural | Every AC has a scenario (the feature run end to end) that passed on **this exact code**. In CI only CI's own runs count; a `--local-only` scenario gives CONCERNS |
 | `budgets_met` | Structural | Shown only when a budget applies. Every decided budget was measured by CI on this code and is within its limit; a missed or unmeasured decided budget fails, whatever `accept_concerns` says. A missed proposed budget is CONCERNS ([budgets.md](budgets.md)) |
+| `guardrails_met` | Structural | Shown only when a guardrail area applies. Every check of an **enforce** area was run by CI on this code and is within its limit, or it fails, whatever `accept_concerns` says. A **warn** area's problems show as WARN and never block ([guardrails.md](guardrails.md)) |
 | `validation_written` | Structural | All seven `validation.md` sections are filled in: result, ACs, scenarios, bugs, lessons, limits, demo |
 | `handoff_written` | Structural | All seven handoff sections, including release/rollback and drift decisions |
 | `learnings_recorded`, `code_changed`, `evidence_complete` | Structural | Learnings logged, real code in the diff, and the diff small enough for one judge pass |
@@ -349,6 +350,23 @@ CI measures it with the default branch's command and compares the number with yo
 
 The full guide, including how to write a measuring command and what CI can and can't prove, is [budgets.md](budgets.md).
 
+### Guardrails: areas you turn on
+
+A **guardrail area** groups checks for one kind of risk (security, performance, data, accessibility, ...). Each check
+is a command you bring: a scanner that writes SARIF, a JUnit test run, a script that prints a number, or a script that
+prints the date your prices were last checked.
+
+- `story-gate settings area security check scan add --measure sarif --report out/scan.sarif --source "..." -- ./scan.sh`
+  adds one (the area starts in **warn** mode: shown, never blocks). `settings area security mode enforce` makes a
+  problem fail DONE. Each opens a pull request of its own.
+- An area applies to every change, or only when a changed file matches its `paths` or a changed line matches its
+  `content` patterns.
+- `story-gate measure SAT-1` runs the checks that apply on your computer (the result is *reported*); CI runs them again.
+- Suppressed scanner findings still count unless you choose otherwise. A pull request that changes a check's pinned
+  files gets no credit for that check.
+
+The full guide is [guardrails.md](guardrails.md).
+
 ### Pull request code runs as a separate account in CI
 
 Your tests, scenarios and budgets run the pull request's own code. In CI, story-gate runs that code as a new,
@@ -370,7 +388,7 @@ what happens elsewhere:
 | `ci_isolation` | Where isolation can't be set up |
 |---|---|
 | `strict` (default) | CI runs none of the pull request's code and says why, so the check fails. |
-| `relaxed` | CI runs it as before, but tests and scenarios are CONCERNS and budgets *reported*, not *checked*. Use it for suites that need Docker: Docker access would make the account an admin. Choosing it is a weaker rule. |
+| `relaxed` | CI runs it as before, but tests and scenarios are CONCERNS and budgets and guardrail checks *reported*, not *checked*. Use it for suites that need Docker: Docker access would make the account an admin. Choosing it is a weaker rule. |
 
 ### ACCEPTANCE: in CI, on GitHub
 | Check | Question |
@@ -435,6 +453,7 @@ Lists are comma-separated (`settings set enforce_points ci,stop`); `""` empties 
 | `test_globs` | common patterns | Where tests live, so `test_refs` resolve only to real test files |
 | `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
 | `ci_isolation` | `"strict"` | In CI, pull request code runs as a separate account, or not at all. `"relaxed"`: where that can't be set up, it runs anyway and the results count as reported. A weaker rule |
+| `guardrails` | `{}` | Guardrail areas and their checks ([guardrails.md](guardrails.md)). Change them with `story-gate settings area ...` (opens a pull request). Lowering an area, narrowing its triggers or loosening a check is a weaker rule |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |

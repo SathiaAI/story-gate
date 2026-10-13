@@ -9,8 +9,15 @@
   settings budget decide NAME      make a budget decided: missing it then fails DONE
   settings budget set NAME FIELD VALUE   change one field (limit, tolerance, unit, source, pins, paths, ...)
   settings budget remove NAME      drop a budget
+  settings area                    the default branch's guardrail areas (docs/guardrails.md)
+  settings area AREA mode off|warn|enforce        turn an area off, on (warn: shown, never blocks) or enforce it
+  settings area AREA paths|content VALUE          its triggers: globs, or patterns for changed lines ("" = every change)
+  settings area AREA check NAME add --measure M --source WHY [--report PATH] [--limit N] [--pins A,B] -- <command>
+  settings area AREA check NAME FIELD VALUE       change one field of a check (limit, levels, suppressed, pins, ...)
+  settings area AREA check NAME remove            drop a check
+  settings area AREA remove                       drop the area
 
-Budgets always change through a pull request of their own; nothing in this folder changes.
+Budgets and guardrail areas always change through a pull request of their own; nothing in this folder changes.
 Without --pr the change is written to this folder's .story-gate/config.json. With --pr nothing here changes: the same
 change is made to the default branch's config.json on a new branch, as a pull request of its own that a code owner
 approves. Every value is checked with the rules the gate itself applies. Keys and tokens are never accepted: they belong
@@ -63,6 +70,8 @@ ELSEWHERE = {
     "models": "model size per task; edit config.json in a pull request of its own",
     "model_tiers": "what each model size means; edit config.json in a pull request of its own",
     "writing.standard": "the plain-writing standard; edit config.json in a pull request of its own",
+    "guardrails": "guardrail areas (security, performance, ...) and their checks: `story-gate settings area` "
+                  "(always opens a pull request)",
 }
 EXTRA_KNOWN = ("min_runtime_version",)  # top-level keys the gate reads that aren't in DEFAULT_CONFIG
 GH_USER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
@@ -77,7 +86,7 @@ SECRET = re.compile("|".join([
     r"-----BEGIN [A-Z ]*PRIVATE KEY", r"(?i:\b(?:bearer|basic)\s+[A-Za-z0-9+/=._~-]{16,})",
     r"://[^/\s:@]+:[^/\s@]+@",  # a password inside a link
 ]))
-DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers")
+DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers", "guardrails")
 CONFIG = ".story-gate/config.json"
 BUDGETS = ".story-gate/budgets.json"
 REPO = re.compile(r"$^")  # owner/repo names: gate.REPO_NAME, set in cli()
@@ -440,14 +449,15 @@ BUDGET_FIELDS = {"limit": "number", "tolerance": "number", "unit": "text", "dire
                  "timeout": "int", "expect_exit": "int", "command": "words"}
 
 
-def budget_value(field, raw):
-    """The JSON value for one budget field from the text typed on the command line."""
+def budget_value(field, raw, fields=None, what="a budget"):
+    """The JSON value for one budget field (or, with fields, another record's field) from the text typed on the command line."""
     import shlex
-    if field not in BUDGET_FIELDS:
-        raise SettingsError("a budget has no field %r (fields: %s)" % (field, ", ".join(sorted(BUDGET_FIELDS))))
+    fields = BUDGET_FIELDS if fields is None else fields
+    if field not in fields:
+        raise SettingsError("%s has no field %r (fields: %s)" % (what, field, ", ".join(sorted(fields))))
     if SECRET.search(raw or ""):
-        raise SettingsError("that value looks like a key or token; budgets never hold secrets")
-    s, kind = (raw or "").strip(), BUDGET_FIELDS[field]
+        raise SettingsError("that value looks like a key or token; settings never hold secrets")
+    s, kind = (raw or "").strip(), fields[field]
     if "\n" in s or len(s) > 500:
         raise SettingsError("%s must be one line of at most 500 characters" % field)
     if kind == "number":
@@ -569,6 +579,179 @@ def cmd_budget(G, a):
                         "budget remove NAME")
 
 
+# ------------------------------------------------------------------ guardrail areas (always through a pull request)
+CHECK_FIELDS = {"measure": "text", "report": "text", "pins": "list", "timeout": "int", "expect_exit": "int", "limit": "number",
+                "unit": "text", "levels": "list", "suppressed": "text", "source": "text", "command": "words"}
+
+
+def check_value(field, raw):
+    """The JSON value for one guardrail check field, read like a budget field."""
+    return budget_value(field, raw, CHECK_FIELDS, "a guardrail check")
+
+
+def trigger_value(raw):
+    """Globs or patterns typed on the command line: a JSON list (["a,b", "c"]) or comma-separated words."""
+    if SECRET.search(raw or ""):
+        raise SettingsError("that value looks like a key or token; settings never hold secrets")
+    s = (raw or "").strip()
+    if s.startswith("["):
+        try:
+            v = json.loads(s)
+        except ValueError:
+            raise SettingsError("that list isn't valid JSON")
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise SettingsError("give a list of text values")
+        return v
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def area_pr(G, edit, slug, title, what):
+    """Open a pull request that applies edit(areas dict) to the default branch's config.json guardrails."""
+    repo, base, tip, pr_tok, why, ok = pr_target(G)
+    text = remote_text(ok, repo, CONFIG, tip)
+    if text is None:
+        raise SettingsError("%s has no %s on %s yet. Set story-gate up first (`story-gate init`)" % (repo, CONFIG, base))
+    try:
+        doc = json.loads(text)
+        if not isinstance(doc, dict):
+            raise TypeError("not a JSON object")
+    except Exception:
+        raise SettingsError("%s on %s is unreadable JSON. Fix it by hand in a pull request of its own" % (CONFIG, base))
+    g = doc.get("guardrails") if isinstance(doc.get("guardrails"), dict) else {}
+    areas = json.loads(json.dumps(g.get("areas") if isinstance(g.get("areas"), dict) else {}))
+    new_areas = edit(areas)
+    new = dict(doc, guardrails=dict(g, areas=new_areas))
+    if not new_areas:
+        new["guardrails"].pop("areas", None)
+    new_full = validate(G, new)
+    if new == doc:
+        print("Nothing to change: %s on %s already says that. No pull request needed." % (CONFIG, base))
+        return 0
+    looser = looser_than(G, G.full_config(text), new_full)
+    body = ["story-gate settings: %s." % what, "", "Guardrails after the change:",
+            fence(json.dumps(new.get("guardrails"), indent=1, ensure_ascii=False), "json"), ""]
+    body += (["**This makes the rules looser than %s:**" % base, fence("\n".join("- " + x for x in looser), "text")]
+             if looser else ["Not looser than %s." % base])
+    res = send_pr(G, repo, base, tip, pr_tok, why, CONFIG, dump(new), slug, title, body)
+    print("Opened pull request #%s to %s: %s (%s)" % (res["number"], what, res["url"], why))
+    for line in strictness(looser, base):
+        print(line)
+    print("Nothing changed in this folder. A code owner approves the pull request; it takes effect when it's merged.")
+    return 0
+
+
+def _area(areas, name, create=False):
+    """The area called name (created as a warn area when create), or a SettingsError naming the ones there are."""
+    if name not in areas:
+        if not create:
+            raise SettingsError("there's no guardrail area called %r (areas: %s)" % (name, ", ".join(sorted(areas)) or "none"))
+        areas[name] = {"mode": "warn", "checks": []}
+    if not isinstance(areas[name], dict):
+        raise SettingsError("area %s in %s isn't an object. Fix it by hand first" % (name, CONFIG))
+    return areas[name]
+
+
+def _check(a, name):
+    """The check called name in an area, or a SettingsError."""
+    for ch in a.get("checks") or []:
+        if isinstance(ch, dict) and ch.get("name") == name:
+            return ch
+    raise SettingsError("there's no check called %r (checks: %s)" % (
+        name, ", ".join(str(c.get("name")) for c in a.get("checks") or [] if isinstance(c, dict)) or "none"))
+
+
+def cmd_area(G, a, cmd):
+    """settings area [AREA mode M | AREA paths|content V | AREA check NAME add ... -- CMD | AREA check NAME FIELD V |
+    AREA check NAME remove | AREA remove]. cmd: the words after --, for check add."""
+    import sg_areas as A
+    if not a:
+        try:
+            areas = A.load(G.cfg().get("guardrails"))
+        except (G.ConfigError, ValueError) as e:
+            raise SettingsError(str(e))
+        if not areas:
+            print("No guardrail areas yet. Add a check (the area starts in warn mode): story-gate settings area security check "
+                  "scan add --measure sarif --report out/scan.sarif --source \"owner: scan every change\" -- <command>")
+            return 0
+        for n, x in sorted(areas.items()):
+            print("%s: %s; applies to %s" % (n, x["mode"], "every change" if not x["paths"] and not x["content"] else
+                                              "changed files %s, changed lines matching %s" % (", ".join(x["paths"]) or "-", ", ".join(x["content"]) or "-")))
+            for ch in x["checks"]:
+                print("    %s: %s, at most %s %s (%s) - %s" % (ch["name"], ch["measure"], ch["limit"], ch["unit"],
+                                                            " ".join(ch["command"])[:60], ch["source"][:60]))
+        print("CI uses the copy on the default branch. Changes open a pull request: settings area AREA mode enforce, ...")
+        return 0
+    name = a[0]
+    if not A.AREA.fullmatch(name):
+        raise SettingsError('an area name is 1-32 lowercase letters, digits or "-" (like security or data)')
+    rest = a[1:]
+    if rest == ["remove"]:
+        return area_pr(G, lambda xs: (_area(xs, name), {k: v for k, v in xs.items() if k != name})[1], "area-remove-" + name,
+                       "story-gate settings: remove guardrail area %s" % name, "remove guardrail area %s" % name)
+    if len(rest) == 2 and rest[0] == "mode":
+        if rest[1] not in A.MODES:
+            raise SettingsError("mode is off, warn or enforce")
+        return area_pr(G, lambda xs: (_area(xs, name).update(mode=rest[1]), xs)[1], "area-%s-mode" % name,
+                       "story-gate settings: guardrail area %s %s" % (name, rest[1]), "set guardrail area %s to %s" % (name, rest[1]))
+    if len(rest) == 2 and rest[0] in ("paths", "content"):
+        v = trigger_value(rest[1])
+        return area_pr(G, lambda xs: (_area(xs, name).update({rest[0]: v}), xs)[1], "area-%s-%s" % (name, rest[0]),
+                       "story-gate settings: guardrail area %s %s" % (name, rest[0]), "set guardrail area %s %s to %s" % (name, rest[0], show(v)))
+    if len(rest) >= 3 and rest[0] == "check":
+        ck, op = rest[1], rest[2:]
+        if op == ["remove"]:
+            def drop(xs):
+                """The areas with one check removed (an area left with none must be removed instead)."""
+                ar = _area(xs, name)
+                _check(ar, ck)
+                ar["checks"] = [c for c in ar["checks"] if not (isinstance(c, dict) and c.get("name") == ck)]
+                if not ar["checks"]:
+                    raise SettingsError("that's the area's last check; remove the area instead: settings area %s remove" % name)
+                return xs
+            return area_pr(G, drop, "area-%s-%s-remove" % (name, ck), "story-gate settings: remove guardrail check %s/%s" % (name, ck),
+                           "remove guardrail check %s/%s" % (name, ck))
+        if op and op[0] == "add":
+            kv, i = {}, 1
+            while i < len(op):
+                if not op[i].startswith("--") or i + 1 >= len(op):
+                    raise SettingsError("check add takes --field value pairs, then -- and the command")
+                kv[op[i][2:].replace("-", "_")] = op[i + 1]
+                i += 2
+            if not cmd:
+                raise SettingsError("give the check's command after --, e.g. -- ./tools/scan.sh")
+            ch = {"name": ck, "command": cmd}
+            for f, raw in kv.items():
+                ch[f] = check_value(f, raw)
+            if SECRET.search(" ".join(cmd)):
+                raise SettingsError("that command looks like it holds a key or token; settings never hold secrets")
+
+            def add(xs):
+                """The areas with the new check added (never over an existing one)."""
+                ar = _area(xs, name, create=True)
+                if any(isinstance(c, dict) and c.get("name") == ck for c in ar.get("checks") or []):
+                    raise SettingsError("area %s already has a check called %s; change it with settings area %s check %s FIELD VALUE" % (name, ck, name, ck))
+                ar.setdefault("checks", []).append(ch)
+                return xs
+            return area_pr(G, add, "area-%s-%s-add" % (name, ck), "story-gate settings: add guardrail check %s/%s" % (name, ck),
+                           "add guardrail check %s/%s" % (name, ck))
+        if len(op) == 2:
+            v = check_value(op[0], op[1])
+
+            def put(xs):
+                """The areas with one field of one check changed (an empty value removes the field)."""
+                c = _check(_area(xs, name), ck)
+                if v is None:
+                    c.pop(op[0], None)
+                else:
+                    c[op[0]] = v
+                return xs
+            return area_pr(G, put, "area-%s-%s-%s" % (name, ck, op[0]), "story-gate settings: guardrail check %s/%s %s" % (name, ck, op[0]),
+                           "set guardrail check %s/%s %s to %s" % (name, ck, op[0], show(v)))
+    raise SettingsError("usage: settings area | area AREA mode off|warn|enforce | area AREA paths|content VALUE | "
+                        "area AREA check NAME add --measure M --source WHY [...] -- <command> | area AREA check NAME FIELD VALUE | "
+                        "area AREA check NAME remove | area AREA remove")
+
+
 def rows(G):
     """[(key, here, ci, effective, meaning, note)] for every setting."""
     p, _, doc = read_local(G)
@@ -622,6 +805,9 @@ def cli(G, args):
     try:
         if a and a[0] == "budget":
             return cmd_budget(G, a[1:])
+        if a and a[0] == "area":
+            cut = a.index("--") if "--" in a else len(a)
+            return cmd_area(G, a[1:cut], a[cut + 1:])
         if not a:
             return cmd_list(G)
         if a[0] == "set":
