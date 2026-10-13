@@ -471,7 +471,8 @@ def git(*args):
 
 
 def must(*args):
-    """git(), but a failure or a time-out raises RuntimeError instead of looking like empty output."""
+    """git(), but a failure or a time-out raises RuntimeError instead of looking like empty output. Only for commands
+    whose non-zero exit means failure (not `git diff --quiet` or `--exit-code`)."""
     try:
         args = (GIT_LOCK_ARGS + args) if GIT_LOCKED else args
         env = dict(git_env() or os.environ, LC_ALL="C", LANGUAGE="C")  # git's messages in English, whatever the runner's locale
@@ -1921,10 +1922,13 @@ def areas_that_apply(c, base):
         diff = must("diff", mb, "--", ".", *excl) + new
         binary = any(l.startswith("-\t-\t") for l in must("diff", "--numstat", "--no-renames", mb, "--", ".", *excl).splitlines())
         whole = read_all and not binary  # a binary file, or a new file story-gate didn't read: its content is unknown
-    except Exception:
+    except Exception as e:  # any failure, a bug included: every area applies, and the note says why
         files, diff, whole = None, "", False
+        err = ["story-gate couldn't read the change (%s), so every guardrail area applies" % e.__class__.__name__]
+    else:
+        err = []
     why, notes = A.applicable(areas, files, diff, is_record, whole)
-    return why, notes, files
+    return why, err + notes, files
 
 
 def area_rows(sd, c, in_ci=False):
@@ -2392,7 +2396,8 @@ UNTRACKED_MAX, UNTRACKED_BYTES = 200, 500_000  # new files read as evidence: how
 
 
 def untracked_diff(untracked):
-    """New files as diff text (they are evidence too, even before `git add`)."""
+    """New files as diff text (they are evidence too, even before `git add`). Files untracked_text skips are left out;
+    use untracked_text when you need to know whether every file was read."""
     return untracked_text(untracked)[0]
 
 

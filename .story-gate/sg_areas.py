@@ -13,7 +13,7 @@ applies when it isn't off and the change touches code: with no triggers always, 
 its globs or a changed line matches one of its patterns. Each check is run by the measured-check engine (sg_measure.py)
 exactly like a decided budget: same runner, isolation, pins, parsers, trust rules and CI time. Stdlib only.
 """
-import fnmatch, json, re, subprocess, sys
+import copy, fnmatch, json, re, subprocess, sys
 
 MODES = ("off", "warn", "enforce")
 AREA = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -28,13 +28,19 @@ UNIT_OF = {"sarif": "findings", "junit": "failed tests", "date": "days"}
 
 
 def _parser():
-    """The stdlib regular-expression parser (re._parser from 3.11, sre_parse before)."""
+    """The stdlib regular-expression parser (re._parser from 3.11, sre_parse before), or None when this Python has neither
+    (both are private modules). Without it a pattern is only compiled: the matcher's time limit still makes every area
+    with patterns apply when a pattern is too slow."""
     try:
         import re._parser as P  # noqa: F401  (3.11+)
         return P
     except ImportError:
+        pass
+    try:
         import sre_parse as P
         return P
+    except ImportError:
+        return None
 
 
 def pattern_problem(p):
@@ -42,12 +48,14 @@ def pattern_problem(p):
     no backreferences, no lookaround, no repeat inside a repeat."""
     if not isinstance(p, str) or not p or len(p) > MAX_PATTERN:
         return "a content pattern must be 1-%d characters" % MAX_PATTERN
+    P = _parser()
     try:
         re.compile(p)
-        tree = _parser().parse(p)
+        tree = P.parse(p) if P else None
     except (re.error, OverflowError, RecursionError) as e:
         return "%r isn't a valid pattern (%s)" % (p[:40], str(e)[:60])
-    P = _parser()
+    if P is None:
+        return ""
     bad = {getattr(P, n, None) for n in ("GROUPREF", "GROUPREF_EXISTS", "ASSERT", "ASSERT_NOT")} - {None}
     reps = {getattr(P, n, None) for n in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")} - {None}
 
@@ -173,8 +181,8 @@ def area_problems(name, a):
 
 
 def load(section):
-    """The areas from a config's guardrails section, every optional field filled in. Raises ValueError (plain words)
-    when anything is invalid: the gate fails closed."""
+    """The areas from a config's guardrails section, every optional field filled in, as new objects (section is never
+    changed). Raises ValueError (plain words) when anything is invalid: the gate fails closed."""
     if section in (None, {}):
         return {}
     if not isinstance(section, dict) or set(section) - {"areas"} or not isinstance(section.get("areas", {}), dict):
@@ -440,7 +448,7 @@ def weaker(old, new):
 
 def tighten(policy, local):
     """A computer's own guardrails setting may only raise an area's mode (warn to enforce); it adds or changes nothing else."""
-    out = json.loads(json.dumps(policy or {}))
+    out = copy.deepcopy(policy or {})
     la = (local or {}).get("areas") if isinstance(local, dict) else None
     if isinstance(la, dict) and isinstance(out.get("areas"), dict):
         rank = {"off": 0, "warn": 1, "enforce": 2}

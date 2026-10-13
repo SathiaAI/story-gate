@@ -9551,6 +9551,9 @@ class TestGuardrails(Base):
                        ("x" * 201, "1-200"), ("", "1-200"), ("(", "valid")):
             with self.subTest(p=p[:20]):
                 self.assertIn(why, A.pattern_problem(p))
+        with patch.object(A, "_parser", return_value=None):  # a Python without the private parser: compile only
+            self.assertEqual((A.pattern_problem("password"), A.pattern_problem("(a+)+")), ("", ""))
+            self.assertIn("valid", A.pattern_problem("("))
 
     # ---------------------------------------------------------------- triggers
     def test_which_areas_apply(self):
@@ -9617,10 +9620,10 @@ class TestGuardrails(Base):
         with patch.dict(os.environ, {"LANG": "de_DE.UTF-8", "LC_ALL": "de_DE.UTF-8"}):
             self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
         g("rm", "-q", "logo.bin"); g("commit", "-qm", "unbin")
-        (self.repo / "big.bin.txt").write_text("y" * gate.UNTRACKED_BYTES)  # an untracked file too big to read
+        (self.repo / "big.txt").write_text("y" * gate.UNTRACKED_BYTES)  # an untracked file too big to read
         why, notes, _ = gate.areas_that_apply(content_cfg, "main")
         self.assertIn("c", why); self.assertTrue(notes)
-        (self.repo / "big.bin.txt").unlink()
+        (self.repo / "big.txt").unlink()
         if os.name != "nt":
             os.symlink("/etc/hostname", self.repo / "link.txt")  # an untracked link isn't read: it can't rule a pattern out
             self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
@@ -9630,8 +9633,9 @@ class TestGuardrails(Base):
             self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
         (self.repo / "small.txt").unlink()
         with patch.object(gate, "must", side_effect=diff_fails):
-            why, _, files = gate.areas_that_apply(gate.cfg(), "main")
+            why, notes, files = gate.areas_that_apply(gate.cfg(), "main")
             self.assertIsNone(files); self.assertIn("quality", why)
+            self.assertIn("couldn't read the change (RuntimeError)", notes[0])  # the reason is shown, not swallowed
             seen = []
             with patch.object(gate, "ci_result", side_effect=lambda d, runs, key, b, fp, trust: seen.append(trust) or {"state": "not_run"}):
                 gate.ci_areas(None, "main", gate.cfg())
@@ -9740,6 +9744,9 @@ class TestGuardrails(Base):
             r = M.evaluate(b, rec, b"2026-09-01\n", "f", "ci", [])
             self.assertEqual((r["value"], r["as_of"], r["state"]), ("42", "2026-09-01", "checked"))
             self.assertFalse(M.met(b, M.Decimal(r["value"])))
+            with patch.object(M, "age_days", return_value=None):  # the clock moved back between parsing and ageing
+                r = M.evaluate(b, rec, b"2026-09-01\n", "f", "ci", [])
+            self.assertEqual((r["value"], r["state"]), (None, "not_run")); self.assertIn("future", r["why"])
 
     # ---------------------------------------------------------------- verdicts
     def test_warn_never_blocks_and_enforce_ignores_accept_concerns(self):

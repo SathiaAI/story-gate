@@ -571,7 +571,9 @@ def evaluate(b, rec, raw, fingerprint, source, trust):
         value = None
         if day is not None:
             base["as_of"] = day.isoformat()
-            value = Decimal(age_days(base["as_of"]))
+            age = age_days(base["as_of"])
+            value = Decimal(age) if age is not None else None
+            why = why if age is not None else "the date %s is in the future (UTC)" % base["as_of"]
     else:
         value, why = parse_number(raw.decode("utf-8", "replace"), b["unit"])
     if value is None:
