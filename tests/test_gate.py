@@ -8798,6 +8798,42 @@ class TestReviewLessons(unittest.TestCase):
             found += [f"{f.name}:{n.lineno}" for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
         self.assertEqual(found, [])
 
+    def test_lesson_12_trigger_logic_never_reads_a_failure_as_no_change(self):
+        """Lesson 12 (fail-safe inputs): working out which guardrail areas apply uses must(), never git(), because git()
+        turns a failed or timed-out command into empty output, which would read as "nothing changed" and switch checks off."""
+        import ast
+        tree = ast.parse((SRC / "gate.py").read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "areas_that_apply")
+        called = {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertIn("must", called)
+        self.assertNotIn("git", called)
+
+    def test_lesson_13_workflow_commands_escape_what_they_print(self):
+        """Lesson 13: every value printed into a GitHub workflow command (::warning ...::, ::error ...::) goes through
+        gh_msg() or gh_prop(), so text from a pull request, a tracker or an API can't end the line and start a command."""
+        import ast
+        found = []
+        for f in sorted(SRC.glob("*.py")):
+            for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+                if not (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "print" and n.args):
+                    continue
+                a = n.args[0]
+                if isinstance(a, ast.JoinedStr) and a.values and str(getattr(a.values[0], "value", "")).startswith("::"):
+                    found.append("%s:%d (f-string: use %% with gh_msg)" % (f.name, n.lineno))
+                if not (isinstance(a, ast.BinOp) and isinstance(a.op, ast.Mod) and isinstance(a.left, ast.Constant)
+                        and str(a.left.value).startswith("::")):
+                    continue
+                for v in (a.right.elts if isinstance(a.right, ast.Tuple) else [a.right]):
+                    fn = v.func if isinstance(v, ast.Call) else None
+                    name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                    if not (name in ("gh_msg", "gh_prop") or isinstance(v, ast.Constant)
+                            or (isinstance(v, ast.Name) and v.id == "level")):  # level: "error" or "warning", set by the gate
+                        found.append("%s:%d" % (f.name, n.lineno))
+                        break
+        self.assertEqual(found, [])
+        g = self.gate()
+        self.assertEqual(g.gh_msg("a%b\r\n::error::x"), "a%25b%0D%0A::error::x")
+
     def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
         """Values GitHub fills in from the event, inputs or earlier steps reach the shell through `env:`, never inline in `run:`."""
         import re
