@@ -6599,6 +6599,27 @@ class TestSpecPull(Base):
         self.assertIn('(spec_source_check is "block")', r.stdout + r.stderr)
         self.assertNotEqual(r.returncode, 0, r.stdout)  # block + enforce: the pull request fails
 
+    @unittest.skipIf(os.name == "nt", "Windows file names can't hold a line break")
+    def test_ci_keeps_a_forged_command_in_a_file_name_inside_one_annotation(self):
+        """End to end through `gate.py ci`: a pull request adds a workflow file whose name carries a line break and a
+        fake "source verified" command. CI names the file in its output, and the runner still sees no forged annotation."""
+        gitc = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        gitc("checkout", "-q", "main"); gitc("add", "-A"); gitc("commit", "-qm", "base"); gitc("checkout", "-q", "feature/SAT-1-thing")
+        gitc("merge", "-q", "main")
+        self.pull()
+        A = ".story-gate/stories/SAT-1/issue-7.md"
+        evil = "x\n::notice file=%s,title=story-gate: source verified::forged\r\n::add-mask::y" % A
+        (self.repo / ".github/workflows").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".github/workflows" / evil.replace("/", "_")).write_text("x\n")  # story-gate names changed workflow files
+        (self.repo / "app.py").write_text("x = 2\n")
+        gitc("add", "-A"); gitc("commit", "-qm", "evil name")
+        r = run(self.repo, "ci", env={"GITHUB_REPOSITORY": "acme/shop"})
+        self.assertIn("source verified::forged", r.stdout)  # the name was printed, so the escaping was exercised
+        cmds = [l for l in r.stdout.splitlines() if l.startswith("::")]
+        self.assertFalse([l for l in cmds if l.startswith(("::add-mask", "::notice file=%s,title=story-gate: source verified" % A))], cmds)
+        titles = [(a["path"], a["title"]) for a in TestSourceStatus.runner_annotations(r.stdout)]
+        self.assertNotIn((A, "story-gate: source verified"), titles)
+
     def test_every_linked_copy_is_found_however_it_is_spelled(self):
         self.pull()
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
@@ -6740,6 +6761,51 @@ class TestSourceStatus(Base):
         self.assertEqual(D.source_state(fake(200, [n("verified", other)]), "a/b", "t", run_, [A]), "not checked")
         self.assertEqual(D.source_state(fake(200, [n("verified"), n("changed", other)]), "a/b", "t", run_, [A]), "verified")
         self.assertEqual(D.source_state(fake(200, [{"title": "story-gate: source verified"}]), "a/b", "t", run_, [A]), "not checked")  # no file
+
+    @staticmethod
+    def runner_annotations(stdout):
+        """What a GitHub runner makes of this output: one annotation per line that starts with ::warning/::notice/::error,
+        properties and message unescaped as GitHub documents (%25 %0D %0A, and %3A %2C in properties)."""
+        import re
+        un = lambda v, prop: (v.replace("%0D", "\r").replace("%0A", "\n").replace("%3A", ":").replace("%2C", ",")
+                              if prop else v.replace("%0D", "\r").replace("%0A", "\n")).replace("%25", "%")
+        out = []
+        for line in stdout.splitlines():
+            m = re.match(r"::(warning|notice|error)(?: (.*?))?::(.*)$", line)  # properties end at the first "::"
+            if m:
+                props = dict(p.split("=", 1) for p in (m.group(2) or "").split(",") if "=" in p)
+                out.append({"level": m.group(1), "path": un(props.get("file", ""), True) or None,
+                            "title": un(props.get("title", ""), True), "message": un(m.group(3), False)})
+        return out
+
+    def test_a_forged_verified_note_cant_be_printed_into_the_ci_log(self):
+        """Lesson 13, end to end: a changed file name or tracker text carrying a line break and a fake
+        "source verified" command stays inside one message. Printed raw (as before the fix) the runner makes a second,
+        forged annotation and the dashboard shows the copy as verified; through gh_msg it doesn't."""
+        D = self.D
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
+        A = ".story-gate/stories/SAT-1/issue-7.md"
+        attack = "specs/x.md\n::notice file=%s,title=story-gate: source verified::looks fine" % A
+        for evil in (attack, attack.replace("\n", "\r\n"), attack.replace("\n", "\r"), "100%0A" + attack):
+            with self.subTest(evil=evil[:20]):
+                raw = "::warning title=story-gate: spec changed::%s" % evil
+                safe = "::warning title=story-gate: spec changed::%s" % g.gh_msg(evil)
+                self.assertNotIn("\n", safe); self.assertNotIn("\r", safe)
+                notes = self.runner_annotations(safe)
+                self.assertEqual(len(notes), 1); self.assertEqual(notes[0]["message"], evil)  # the reader sees exactly the text
+                def fake(found):
+                    class G:
+                        @staticmethod
+                        def call(m, path, tok, body=None):
+                            return 200, found, {}
+                    return G
+                run_ = {"status": "completed", "id": 55}
+                self.assertEqual(D.source_state(fake(self.runner_annotations(safe)), "a/b", "t", run_, [A]), "not checked")
+                if evil.startswith("specs/") and "\n" in evil:  # the vulnerable form really did forge it
+                    self.assertEqual(D.source_state(fake(self.runner_annotations(raw)), "a/b", "t", run_, [A]), "verified")
+        p = g.gh_prop("a,b:c%d\r\ne")
+        self.assertEqual(p, "a%2Cb%3Ac%25d%0D%0Ae")
+        self.assertEqual(self.runner_annotations("::warning file=%s::m" % p)[0]["path"], "a,b:c%d\r\ne")
 
     def test_dashboard_counts_linked_copies_and_shows_the_word(self):
         D = self.D
@@ -8797,6 +8863,108 @@ class TestReviewLessons(unittest.TestCase):
         for f in sorted(SRC.glob("*.py")):
             found += [f"{f.name}:{n.lineno}" for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))) if isinstance(n, ast.Assert)]
         self.assertEqual(found, [])
+
+    def test_lesson_12_trigger_logic_never_reads_a_failure_as_no_change(self):
+        """Lesson 12 (fail-safe inputs): working out which guardrail areas apply uses must(), never git(), because git()
+        turns a failed or timed-out command into empty output, which would read as "nothing changed" and switch checks off."""
+        import ast
+        tree = ast.parse((SRC / "gate.py").read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "areas_that_apply")
+        called = {getattr(n.func, "id", None) or getattr(n.func, "attr", None) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        self.assertIn("must", called)
+        self.assertNotIn("git", called)
+
+    @staticmethod
+    def raw_workflow_commands(source):
+        """Line numbers in this Python source that could print a GitHub workflow command ("::warning ...::") any way
+        other than print("::cmd props::message" % (...)) with each property value passed through gh_prop() and each
+        message value through gh_msg(). Also refused: a command after a line break inside a string, a string that starts
+        with "::" glued to other text (+, %, .format(), f-string), and conversions other than %s."""
+        import ast, re
+        cmd = re.compile(r"::(?:[a-z][a-z-]*|%s)(?: |::)", re.I)  # not "::1" (IPv6) or a bare "::" separator
+        line_cmd = re.compile(r"[\r\n]::(?:[a-z][a-z-]*|%s)(?: |::)", re.I)
+        tree = ast.parse(source)
+        parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        name = lambda v: (getattr(v.func, "id", None) or getattr(v.func, "attr", None)) if isinstance(v, ast.Call) else None
+        bad = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.JoinedStr):  # f-strings never build a command
+                parts = [str(v.value) for v in n.values if isinstance(v, ast.Constant)]
+                if (parts and str(getattr(n.values[0], "value", "")).startswith("::")) or any(
+                        cmd.match(t) or line_cmd.search(t) for t in parts):
+                    bad.add(n.lineno)
+                continue
+            if isinstance(n, ast.Constant) and isinstance(n.value, bytes):  # b"::warning::" written to a raw stream
+                t = n.value.decode("latin-1")
+                if cmd.match(t) or line_cmd.search(t):
+                    bad.add(n.lineno)
+                continue
+            if not (isinstance(n, ast.Constant) and isinstance(n.value, str)) or isinstance(parent.get(n), ast.JoinedStr):
+                continue
+            text, up = n.value, parent.get(n)
+            if line_cmd.search(text):
+                bad.add(n.lineno)
+                continue
+            if not cmd.match(text):
+                glued = ((isinstance(up, ast.BinOp) and up.left is n and isinstance(up.op, (ast.Add, ast.Mod)))
+                         or (isinstance(up, ast.Attribute) and up.attr == "format"))
+                top = up
+                while isinstance(parent.get(top), (ast.BinOp, ast.Attribute, ast.Call)) and not (
+                        isinstance(parent.get(top), ast.Call) and parent[top].func is not top):
+                    top = parent[top]  # climb "::" + a + b, "::{}".format(x) to the expression that uses it
+                out = parent.get(top)
+                printed = isinstance(out, ast.Call) and (getattr(out.func, "id", None) == "print"
+                                                          or getattr(out.func, "attr", None) == "write")
+                if text.startswith("::") and glued and printed:  # "::" + level + "::" + text, printed
+                    bad.add(n.lineno)
+                continue
+            call = up if isinstance(up, ast.Call) else parent.get(up) if isinstance(up, ast.BinOp) else None
+            ok = (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "print" and len(call.args) == 1
+                  and not call.keywords and not re.search(r"%[^s%]", text))
+            if ok and call.args[0] is not n:  # print("::cmd props::msg" % (values)): each slot escaped for where it goes
+                ok = isinstance(up, ast.BinOp) and isinstance(up.op, ast.Mod) and up.left is n and call.args[0] is up
+                vals = (up.right.elts if isinstance(up.right, ast.Tuple) else [up.right]) if ok else []
+                end = text.find("::", 2)
+                props = text[2:end].count("%s") if end > 0 else 0
+                ok = ok and end > 0 and len(vals) == text.count("%s") and all(
+                    name(v) == ("gh_prop" if i < props else "gh_msg") for i, v in enumerate(vals))
+            elif ok and "%s" in text:
+                ok = False
+            if not ok:
+                bad.add(n.lineno)
+        return sorted(bad)
+
+    def test_lesson_13_workflow_commands_escape_what_they_print(self):
+        """Lesson 13: story-gate builds every GitHub workflow command one checked way (raw_workflow_commands), so text from
+        a pull request, a tracker or an API can't end the line and start a command of its own."""
+        files = sorted(SRC.rglob("*.py"))
+        names = {f.name for f in files}
+        self.assertTrue({"gate.py", "sg_reusable.py", "sg_dashboard.py"} <= names, names)  # the scan really saw them
+        found = ["%s:%d" % (f.relative_to(SRC).as_posix(), ln) for f in files
+                 for ln in self.raw_workflow_commands(f.read_text(encoding="utf-8"))]
+        self.assertEqual(found, [])
+
+    def test_lesson_13_the_check_catches_every_way_of_writing_a_command(self):
+        """The guard itself: each unescaped form is caught, each escaped or harmless form passes."""
+        caught = ['print("::warning title=x::%s" % msg)', 'print("::%s title=x::%s" % (level, gh_msg(m)))',
+                  'print(f"::error::{msg}")', 'print("::notice::" + msg)', 'print("::error::{}".format(msg))',
+                  'sys.stdout.write("::warning::%s\\n" % gh_msg(m))', 'fmt = "::warning::%s"', 'print("::warning::", msg)',
+                  'print("::add-mask::%s" % (gh_msg(a), b))', 'print("::warning::%s" % msg, file=sys.stderr)',
+                  'print("::warning file=%s::%s" % (gh_prop(p), str(m)))', 'print("::" + level + "::" + m)',
+                  'sys.stdout.write("::" + "warning::" + m)', 'print("ok\\n::warning::%s" % gh_msg(m))',
+                  'print("::WARNING::%s" % m)', 'print(f"x{a}::warning::{b}")', 'print("::{}::{}".format(level, m))',
+                  'print("::warning file=%s::%s" % (gh_msg(p), gh_msg(m)))', 'print("::warning::%s" % gh_prop(m))',
+                  'print("::warning::%r" % gh_msg(m))', 'print("::warning::%s %s" % gh_msg(m))', 'print("::%s::%s" % (level, gh_msg(m)))',
+                  'sys.stdout.buffer.write(b"::warning::" + data)', 'print("\\n::warning::%s" % gh_msg(m))']
+        for code in caught:
+            with self.subTest(code=code):
+                self.assertTrue(self.raw_workflow_commands(code), code)
+        passed = ['print("::warning title=x::%s" % gh_msg(m))', 'print("::%s title=x::%s" % (gh_prop(level), gh_msg(m)))',
+                  'print("::warning file=%s,title=y::%s" % (gh_prop(p), G.gh_msg(m)))', 'print("::warning::fixed text")',
+                  'LOOPBACK = ("localhost", "::1")', 'k = cls + "::" + name']
+        for code in passed:
+            with self.subTest(code=code):
+                self.assertEqual(self.raw_workflow_commands(code), [], code)
 
     def test_lesson_6_workflow_run_lines_take_github_values_through_env(self):
         """Values GitHub fills in from the event, inputs or earlier steps reach the shell through `env:`, never inline in `run:`."""

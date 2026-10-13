@@ -43,11 +43,11 @@ def prepare(G, kv, rest):
         print("::error title=story-gate::.story-gate is a symlink in this checkout; refusing to run")
         return 1
     if want and not FINGERPRINT.fullmatch(want):
-        print("::error title=story-gate::release-key-fingerprint must look like SHA256:<43 characters> (got %r)" % want[:60])
+        print("::error title=story-gate::release-key-fingerprint must look like SHA256:<43 characters> (got %s)" % G.gh_msg(repr(want[:60])))
         return 1
     if want and T.key_fingerprint() != want:
         print("::error title=story-gate::this story-gate copy trusts release key %s, not the %s your workflow expects. "
-              "Check the commit you pinned." % (T.key_fingerprint(), want))
+              "Check the commit you pinned." % (G.gh_msg(T.key_fingerprint()), G.gh_msg(want)))
         return 1
     try:
         T.verify_release(src)
@@ -55,13 +55,13 @@ def prepare(G, kv, rest):
     except T.TrustError as e:
         if not unsigned:
             print("::error title=story-gate::the pinned story-gate commit isn't a signed release (%s). Pin the commit of a "
-                  "story-gate release tag, or set allow-unsigned: true to run a development copy on purpose." % e)
+                  "story-gate release tag, or set allow-unsigned: true to run a development copy on purpose." % G.gh_msg(e))
             return 1
         print("::warning title=story-gate::running an UNSIGNED development copy of story-gate (allow-unsigned: true)")
     policy = G.git("show", "%s:.story-gate/config.json" % base)
     if not policy.strip():
         print("::warning title=story-gate::story-gate is not on the base branch yet (no .story-gate/config.json on %s), so this "
-              "pull request is checked by human review only. It never runs code from the pull request itself." % base)
+              "pull request is checked by human review only. It never runs code from the pull request itself." % G.gh_msg(base))
         out_line("ready", "false")
         return 0
     dest = Path(out)

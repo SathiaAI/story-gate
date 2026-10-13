@@ -3547,7 +3547,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             if w:  # a warning, so GitHub shows it on the pull request, not only in the check's summary
                 weak = "This PR makes story-gate's rules weaker: %s. Reviewers: make sure that's intended." % "; ".join(w)
                 notes.insert(0, weak)
-                print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
+                print("::warning title=story-gate: rules made weaker::%s" % gh_msg(weak.replace("\n", " ")))
         import sg_measure as M
         has_budgets = git("cat-file", "-t", "%s:.story-gate/budgets.json" % base).strip() == "blob"
         base_budgets = git("show", "%s:.story-gate/budgets.json" % base) if has_budgets else None
@@ -3564,7 +3564,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             if wb:
                 weak = "This PR makes story-gate's budgets looser: %s. Reviewers: make sure that's intended." % "; ".join(wb)
                 notes.insert(0, weak)
-                print("::warning title=story-gate: rules made weaker::%s" % weak.replace("\n", " "))
+                print("::warning title=story-gate: rules made weaker::%s" % gh_msg(weak.replace("\n", " ")))
         try:  # pinned project hooks (sg_pin): flag scripts that seem to use repository files outside their pins
             import sg_pin as PIN
             head_sha = git("rev-parse", "HEAD").strip()
@@ -3584,7 +3584,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 msg = ("This PR also changes the spec its story is checked against (%s). Reviewers: check that no scenario was "
                        "removed or weakened to make the check pass." % ", ".join(changed))
                 notes.append(msg)
-                print("::warning title=story-gate: spec changed::%s" % msg)
+                print("::warning title=story-gate: spec changed::%s" % gh_msg(msg))
             import sg_specpull as SP  # issues copied in with spec-pull: compare each copy with the live issue
             story_text = rd(STORIES / sid / "story.md")
             snaps, odd = snapshot_links(story_text)
@@ -3594,7 +3594,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 msg = ("This PR removes the story's link to %s, so its requirements are no longer checked. Reviewers: make sure "
                        "that's intended." % ", ".join(dropped))
                 notes.append(msg)
-                print("::warning title=story-gate: spec link removed::%s" % msg)
+                print("::warning title=story-gate: spec link removed::%s" % gh_msg(msg))
             sources = CI_SOURCES.setdefault(sid, [])
 
             def report_source(rel, label, issue, state, detail):
@@ -3612,10 +3612,10 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 sources.append({"path": rel, "issue": issue, "state": word, "detail": detail, "checked_at": now(), "run": run_url,
                                 "copied_at": fields.get("fetched_at", ""), "issue_updated_at": fields.get("source_updated_at", "")})
                 if state == "unchanged":
-                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), msg))
+                    print("::notice file=%s,title=story-gate: source verified::%s" % (gh_prop(rel), gh_msg(msg)))
                     notes.append(msg)
                     return
-                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), word, msg))
+                print("::warning file=%s,title=story-gate: source %s::%s" % (gh_prop(rel), gh_prop(word), gh_msg(msg)))
                 if c.get("spec_source_check") == "block":
                     problems.append(msg + " (spec_source_check is \"block\")")
                 else:
@@ -3623,7 +3623,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             for path in odd:
                 msg = ("%s looks like a pulled issue but isn't where `spec-pull` saves one (.story-gate/stories/<ID>/issue-<N>.md), "
                        "so CI can't compare it with the live issue" % path)
-                print("::warning file=%s,title=story-gate: source not checked::%s" % (gh_prop(path), msg))
+                print("::warning file=%s,title=story-gate: source not checked::%s" % (gh_prop(path), gh_msg(msg)))
                 sources.append({"path": path, "issue": None, "state": "not checked", "detail": msg})
                 (problems if c.get("spec_source_check") == "block" else notes).append(msg)
             allowed = {r.lower() for r in c.get("spec_repos") or []}
@@ -3760,7 +3760,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         problems.append("story-gate could not run: %s" % e)
     level = "error" if enforce else "warning"
     for p in problems:
-        print("::%s title=story-gate::%s" % (level, gh_msg(p.replace("\n", " "))))
+        print("::%s title=story-gate::%s" % (gh_prop(level), gh_msg(p.replace("\n", " "))))
     for n in notes:
         if not n.startswith(("This PR makes story-gate's rules weaker", "This PR makes story-gate's budgets looser")):  # already printed as a warning
             print("::notice title=story-gate::%s" % gh_msg(n))
@@ -3769,7 +3769,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         lines += ["> **Checked without an AI judge.** story-gate ran your tests and every scenario itself and checked the story's "
                   "paperwork, but nobody independently checked: %s. Add a judge key to check those too (see the guide: "
                   "judge_mode)." % "; ".join(OBJECTIVE_LIMITS), ""]
-        print("::notice title=story-gate: objective mode::Checked without an AI judge. Not checked: %s." % "; ".join(OBJECTIVE_LIMITS))
+        print("::notice title=story-gate: objective mode::Checked without an AI judge. Not checked: %s." % gh_msg("; ".join(OBJECTIVE_LIMITS)))
     lines += ["> **%s**" % n for n in notes] + [""]
     if problems:
         lines += ["- [ ] %s" % p for p in problems]
@@ -3869,11 +3869,11 @@ def cmd_audit():
     print(json.dumps(row))
     if issues:
         for i in issues:
-            print("::warning title=story-gate audit::%s" % i)
+            print("::warning title=story-gate audit::%s" % gh_msg(i))
         st, r, _ = G.call("POST", "/repos/%s/issues" % ctx["repo"], token, {"title": "story-gate audit: PR #%s merged without human acceptance" % ctx["number"],
                "body": "\n".join("- " + i for i in issues) + "\n\nCommit %s. Review it, then revert or record why it was acceptable." % ctx["head_sha"]})
         if st not in (200, 201):
-            print("::error title=story-gate audit::could not open the audit issue (HTTP %s %s). The findings are in this log." % (st, (r or {}).get("message", "") if isinstance(r, dict) else ""))
+            print("::error title=story-gate audit::could not open the audit issue (HTTP %s %s). The findings are in this log." % (gh_msg(st), gh_msg((r or {}).get("message", "") if isinstance(r, dict) else "")))
             return 1
     return 0
 
