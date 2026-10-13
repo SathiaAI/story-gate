@@ -80,7 +80,9 @@ mkdir -p evil && (cd evil && git init -q && printf '#!/bin/sh\nid -u > "%s/fsmon
     tests.chmod(0o755)
     (repo / ".gitignore").write_text("reports/\n")
     cfg = json.loads((repo / ".story-gate/config.json").read_text())
-    cfg.update({"test_command": "./tests.sh", "junit_path": "reports/junit.xml"})
+    cfg.update({"test_command": "./tests.sh", "junit_path": "reports/junit.xml", "guardrails": {"areas": {"security": {
+        "mode": "enforce", "checks": [{"name": "scan", "measure": "sarif", "report": "reports/scan.sarif", "command": ["python3", "scan.py"],
+                                       "pins": ["scan.cfg"], "source": "e2e"}]}}}})
     (repo / ".story-gate/config.json").write_text(json.dumps(cfg))
     (repo / ".story-gate/budgets.json").write_text(json.dumps({"version": 1, "budgets": [
         {"name": "widgets", "unit": "count", "limit": 5, "status": "decided", "source": "e2e", "measure": "number",
@@ -88,6 +90,10 @@ mkdir -p evil && (cd evil && git init -q && printf '#!/bin/sh\nid -u > "%s/fsmon
         {"name": "fsize", "unit": "blocks", "limit": 10 ** 9, "status": "decided", "source": "e2e", "measure": "number",
          "command": ["python3", "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[1] // 512)"],
          "pins": ["count.py"]}]}))
+    (repo / "scan.py").write_text(  # a guardrail check runs like a budget: as the account, its report read after the stop
+        "import json, os, subprocess, sys\nsubprocess.Popen([sys.executable, 'attack.py'] + %r)\nos.makedirs('reports', exist_ok=True)\n"
+        "json.dump({'version': '2.1.0', 'runs': [{'tool': {'driver': {'name': 's'}}, 'results': [{'ruleId': 'uid-%%d' %% os.getuid(), "
+        "'level': 'error'}]}]}, open('reports/scan.sarif', 'w'))\n" % targets)
     (repo / "count.py").write_text("import subprocess, sys\nsubprocess.Popen([sys.executable, 'attack.py'] + %r)\nprint(3)\n" % targets)
     git(repo, "init", "-q", "-b", "main"); git(repo, "config", "user.email", "e@e"); git(repo, "config", "user.name", "e")
     git(repo, "add", "."); git(repo, "commit", "-qm", "base")
@@ -147,6 +153,9 @@ mkdir -p evil && (cd evil && git init -q && printf '#!/bin/sh\nid -u > "%s/fsmon
     meta = json.loads((mout / "measures.json").read_text())
     check(meta.get("isolated") is True and not meta.get("forged"), "budgets were measured isolated and measures.json not forged")
     check((mout / "measures" / "widgets.raw").read_bytes().strip() == b"3", "the measured value is the real one")
+    sar = mout / "measures" / "areas" / "security" / "scan.raw"
+    check(sar.is_file() and b"uid-%d" % os.getuid() not in sar.read_bytes() and b'"uid-' in sar.read_bytes(),
+          "a guardrail check ran as the account and its SARIF report was saved")
     import importlib.util
     spec = importlib.util.spec_from_file_location("sgv", str(rt / "sg_validation.py")); V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
     check((mout / "measures" / "fsize.raw").read_bytes().strip() == str(V.FILE_LIMIT // 512).encode(),

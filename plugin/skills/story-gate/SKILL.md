@@ -58,7 +58,8 @@ Not sure what to do next? Run `next`. It lists what's done and names the one nex
    - Set `test_refs` for every AC.
    - Self-review the diff (`/engineering:code-review` in Claude clients).
    - For every AC, run the feature for real and record it: `scenario <ID> --name ... --ac AC-1 --expect <text> -- <command>`. CI runs these again.
-   - If the repository has budgets (`.story-gate/budgets.json`), run `measure <ID>` after the last code change. A missed decided budget fails DONE; fix the work, not the measuring script.
+   - If the repository has budgets (`.story-gate/budgets.json`) or guardrails (`guardrails` in config.json), run `measure <ID>` after the last code change. DONE fails if the work doesn't meet a decided budget; fix the work, not the measuring script.
+   - `measure <ID>` also runs the guardrail checks that apply (`guardrails` in config.json). A problem in an enforce area fails DONE; a warn area shows it. Fix the work: never edit a check's command, its pinned files or a suppression comment to make it pass.
    - Fill in `validation.md` for the owner (result, ACs, scenarios, bugs, lessons, limits, demo steps or 'Not demo-able: reason'). Add screenshots with `evidence`.
    - Write `handoff.md` (all seven sections), then run `learn` (`--type error|pattern` also needs `--root-cause` and `--rule`), then run `score <ID> done`.
    - Show the owner: `report <ID> --open` builds the validation page. Show it for a change they can see; otherwise point to validation.md.
