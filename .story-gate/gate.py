@@ -3760,7 +3760,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         problems.append("story-gate could not run: %s" % e)
     level = "error" if enforce else "warning"
     for p in problems:
-        print("::%s title=story-gate::%s" % (level, gh_msg(p.replace("\n", " "))))
+        print("::%s title=story-gate::%s" % (gh_prop(level), gh_msg(p.replace("\n", " "))))
     for n in notes:
         if not n.startswith(("This PR makes story-gate's rules weaker", "This PR makes story-gate's budgets looser")):  # already printed as a warning
             print("::notice title=story-gate::%s" % gh_msg(n))
