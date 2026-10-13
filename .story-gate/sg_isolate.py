@@ -17,7 +17,7 @@ Where isolation can't be set up (not Linux, no root and no password-free sudo), 
 `ci_isolation: "strict"` (the default) CI then runs nothing and says so; with "relaxed" it runs as before and every
 result counts as reported, not checked. Stdlib only.
 """
-import hashlib, os, re, secrets, shutil, stat, subprocess, time
+import hashlib, os, posixpath, re, secrets, shutil, stat, subprocess, time
 
 NAME_PREFIX = "sgpr-"
 KILL_WAIT = 15            # seconds to wait for the account's processes to end before failing closed
@@ -72,10 +72,11 @@ def available():
 
 
 def env_for(home, env=None):
-    """The allowlisted environment for the account: toolchain paths and plain CI facts; HOME and TMPDIR are its own."""
+    """The allowlisted environment for the account: toolchain paths and plain CI facts; HOME and TMPDIR are its own
+    (Linux paths, so built with posixpath on every platform)."""
     env = os.environ if env is None else env
     out = {k: v for k, v in env.items() if ENV_ALLOW.match(k) and not SECRET_NAME.search(k)}
-    out.update({"HOME": home, "TMPDIR": os.path.join(home, "tmp"), "USER": os.path.basename(home), "LOGNAME": os.path.basename(home)})
+    out.update({"HOME": home, "TMPDIR": posixpath.join(home, "tmp"), "USER": posixpath.basename(home), "LOGNAME": posixpath.basename(home)})
     return out
 
 

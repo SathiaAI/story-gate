@@ -9489,6 +9489,7 @@ class TestCiIsolation(Base):
                   "RUNNER_NAME"):
             self.assertNotIn(k, out, k)  # GITHUB_ENV / RUNNER_TEMP point at the runner's own files: never handed over
 
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
     def test_the_wrapped_command_drops_privileges_for_good(self):
         """wrap(): a new uid and gid, no groups, no way to gain privileges back (no_new_privs), an empty environment
         refilled from the allowlist, and the file-size limit set inside when asked."""
