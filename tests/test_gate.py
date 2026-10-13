@@ -9522,7 +9522,8 @@ class TestGuardrails(Base):
                ({"checks": [self.check(limit=-1)]}, "0 or more"), ({"checks": [self.check(unit="seconds")]}, "unit"),
                ({"checks": [self.check(source="")]}, "source"), ({"checks": [self.check(command="ls")]}, "command"),
                ({"checks": [self.check(report="o.xml")]}, "report is only"), ({"checks": [self.check(name="a/b")]}, "name"),
-               ({"checks": [self.check(colour=1)]}, "unknown fields")]
+               ({"checks": [self.check(colour=1)]}, "unknown fields"),
+               ({"mode": "enforce", "checks": [self.check(measure="sarif", report="o.sarif", pins=[])]}, "needs pins")]
         for change, why in bad:
             with self.subTest(change=change):
                 area = dict({"checks": [self.check()]}, **change)
@@ -9572,13 +9573,16 @@ class TestGuardrails(Base):
         self.assertNotIn("secrets", A.applicable(areas, ["x"], story, rec)[0])
         untracked = "diff --git a/n.py b/n.py\nnew file (untracked)\n+++ b/n.py\n+password = 2\n"
         self.assertIn("secrets", A.applicable(areas, ["n.py"], untracked, rec)[0])
+        binary = "diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ\n"
+        why, notes = A.applicable(areas, ["logo.png"], binary, rec)
+        self.assertIn("secrets", why); self.assertIn("binary", notes[0])  # its content can't be matched, so it can't be ruled out
         everything, notes = A.applicable(areas, None, "", rec)
         self.assertEqual(set(everything), {"always", "web", "secrets"})
         with patch.object(A, "DIFF_CAP", 10):
             why, notes = A.applicable(areas, ["x"], "diff --git a/x b/x\n+++ b/x\n+" + "y" * 50 + "\n", rec)
         self.assertIn("secrets", why); self.assertIn("larger than", notes[0])
-        lines, _ = A.changed_lines("diff --git a/x b/x\n+++ b/x\n+" + "z" * 5000 + "\n", rec)
-        self.assertEqual(len(lines[0]), A.LINE_CAP)
+        far = "diff --git a/x b/x\n+++ b/x\n+" + "z" * 5000 + " password\n"  # a pattern far into a long line still counts
+        self.assertIn("secrets", A.applicable(areas, ["x"], far, rec)[0])
         self.assertTrue(A.applicable(areas, ["src/web\\x.js"], "", rec)[0].get("web") is None)  # globs are forward-slash paths
 
     def test_renames_and_an_unreadable_change_make_areas_apply(self):
@@ -9595,6 +9599,46 @@ class TestGuardrails(Base):
         with patch.object(gate, "resolve_base", return_value="0" * 40):
             why, _, files = gate.areas_that_apply(gate.cfg(), "main")
         self.assertIsNone(files); self.assertIn("couldn't read the change", why["quality"])
+        real = gate.must
+
+        def diff_fails(*a):
+            """git diff fails (or times out); everything else works."""
+            if "diff" in a:
+                raise RuntimeError("git diff failed")
+            return real(*a)
+        with patch.object(gate, "must", side_effect=diff_fails):
+            why, _, files = gate.areas_that_apply(gate.cfg(), "main")
+            self.assertIsNone(files); self.assertIn("quality", why)
+            seen = []
+            with patch.object(gate, "ci_result", side_effect=lambda d, runs, key, b, fp, trust: seen.append(trust) or {"state": "not_run"}):
+                gate.ci_areas(None, "main", gate.cfg())
+            self.assertEqual(seen, [[gate.UNREAD]])  # pinned files can't be ruled out, so the value can only be reported
+        with self.assertRaises(RuntimeError):
+            gate.must("rev-parse", "--verify", "--quiet", "no-such-ref")
+
+    def test_content_triggers_fire_on_real_added_untracked_renamed_and_deleted_files(self):
+        """In a real repository: a pattern in a committed new file, an uncommitted untracked file, a renamed file's new
+        lines and a deleted file's removed lines each make a content area apply; nothing matching applies nothing."""
+        g = lambda *x: subprocess.run(["git", *x], cwd=self.repo, capture_output=True, check=True)
+        (self.repo / "keep.py").write_text("token_secret = 1\n"); (self.repo / "move.py").write_text("x = 1\n")
+        g("add", "."); g("commit", "-qm", "base files"); g("checkout", "-q", "main"); g("merge", "-q", "feature/SAT-1-thing")
+        g("checkout", "-q", "feature/SAT-1-thing")
+        self.areas("warn", content=["MARKER_[0-9]+", "token_secret"], commit=True)  # the default branch's policy
+        gate = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.assertEqual(gate.areas_that_apply(gate.cfg(), "main")[0], {})  # no change yet: nothing applies
+        steps = [lambda: ((self.repo / "new.py").write_text("a = 'MARKER_1'\n"), g("add", "new.py"), g("commit", "-qm", "n")),
+                 lambda: (self.repo / "loose.py").write_text("b = 'MARKER_2'\n"),
+                 lambda: (g("mv", "move.py", "moved.py"), (self.repo / "moved.py").write_text("x = 'MARKER_3'\n")),
+                 lambda: g("rm", "-q", "keep.py")]
+        for i, step in enumerate(steps):
+            with self.subTest(step=i):
+                g("reset", "-q", "--hard", "HEAD"); subprocess.run(["git", "clean", "-qfd", "-e", ".story-gate"], cwd=self.repo)
+                step()
+                why, _, files = gate.areas_that_apply(gate.cfg(), "main")
+                self.assertIn("quality", why, files)
+                g("reset", "-q", "--hard", "HEAD") if i else None
+            if i == 0:
+                g("reset", "-q", "--hard", "HEAD~1")
 
     def test_unfinished_pattern_matching_never_switches_a_check_off(self):
         """When the separate matcher times out or fails, every area with patterns applies, and a note says why."""
@@ -9631,7 +9675,7 @@ class TestGuardrails(Base):
                          (self.sarif([{"ruleId": "R1", "level": "fatal"}]), "unknown level"), (self.sarif([{"ruleId": "R1", "kind": "maybe"}]), "kind"),
                          (self.sarif([{"ruleId": "R1", "suppressions": [{"kind": "inSource", "status": "sure"}]}]), "suppressions"),
                          (self.sarif([{"ruleId": "R1", "suppressions": {}}]), "suppressions"), (self.sarif(["x"]), "isn't an object"),
-                         (b"{not json", "readable"), (b"\xff\xfe", "readable"), (b"[]", "2.1.0"), (b" " * (M.OUTPUT_CAP + 1), "5 MB")):
+                         (b"{not json", "readable"), (b"[" * 200000 + b"]" * 200000, "readable"), (b"\xff\xfe", "readable"), (b"[]", "2.1.0"), (b" " * (M.OUTPUT_CAP + 1), "5 MB")):
             with self.subTest(why=why):
                 v, _, w = M.parse_sarif(bad)
                 self.assertIsNone(v); self.assertIn(why, w)
@@ -9713,11 +9757,27 @@ class TestGuardrails(Base):
             v = g.verdict(st, {"judge": "jev", "scores": {}, "not_judged": []}, [], {}, c)
             want = next((r for r in rank if r in combo), "PASS")
             self.assertEqual(v["overall"], want, combo)
-        src = (SRC / "gate.py").read_text(encoding="utf-8")
-        lists = [t for t in _re.findall(r"\([^()]*\"NOT_JUDGED\"[^()]*\)", src) if '"WAIVED"' in t]  # print_verdict lists WARN on purpose
-        self.assertGreaterEqual(len(lists), 4)
+        lists = []
+        for f in sorted(SRC.glob("*.py")):  # every module: tuples and lists naming the statuses that don't block
+            src = f.read_text(encoding="utf-8")
+            lists += [t for t in _re.findall(r"[\(\[][^()\[\]]*\"NOT_JUDGED\"[^()\[\]]*[\)\]]", src) if '"WAIVED"' in t]
+        self.assertGreaterEqual(len(lists), 4)  # print_verdict's ("PASS", "NOT_JUDGED") shows WARN on purpose
         for t in lists:
             self.assertIn('"WARN"', t, t)
+
+    def test_text_from_a_run_cant_inject_commands_or_markdown(self):
+        """A run's output reaches workflow commands and the step summary only escaped: no new line or ::command, no links,
+        images or mentions in the table."""
+        A, M = self.mods()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        evil = "x%0A::error::owned\r\n::add-mask::y [click](http://e) ![i](http://e/p.png) @team <b>|"
+        msg = g.gh_msg(evil)
+        self.assertNotIn("\n", msg); self.assertNotIn("\r", msg); self.assertIn("%250A", msg)
+        b = A.records(A.load({"areas": {"q": {"checks": [self.check()]}}}))[0]
+        line = A.summary_lines([(b, {"state": "not_run", "value": None, "why": evil})], True)[-1]
+        for bad in ("[click](", "![i](", " @team", "<b>", "\n"):
+            self.assertNotIn(bad, line)
+        self.assertEqual(line.count("|"), 8)  # the row still has its 7 cells
 
     def test_ci_order_runs_enforced_checks_before_warned_ones(self):
         """run_all(): decided budgets, then enforce-area checks, then warn-area checks, then proposed budgets; time that
@@ -9742,6 +9802,11 @@ class TestGuardrails(Base):
         """`measure` runs the checks of areas that apply and stores them as reported; a warn miss is a WARN that doesn't
         block DONE; the same miss in an enforce area fails DONE; an area that doesn't apply isn't shown."""
         self.ready()
+        g0 = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        h = g0.inputs_hash(self.sd, "done")
+        (self.sd / "guardrail_results.json").write_text(json.dumps({"results": {}}))
+        self.assertEqual(g0.inputs_hash(self.sd, "done"), h)  # without guardrail results, evidence hashes are as before
+        (self.sd / "guardrail_results.json").unlink()
         self.areas("warn", checks=[self.check(limit=1)])
         r = run(self.repo, "measure", "SAT-1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -9769,6 +9834,13 @@ class TestGuardrails(Base):
         rows, _, _ = g.area_rows(self.sd, g.cfg())
         self.assertEqual(rows[0][1]["state"], "reported")  # a stored "checked" never counts on this computer
         self.assertIn("edits files that decide", rows[0][1]["why"])  # worked out again: the stored "why" can't clear a pin
+        good = json.loads((self.sd / "guardrail_results.json").read_text())
+        for bad in ("abc", [1], "1e5", "NaN"):  # a forged value that isn't a plain number is not run, never a crash
+            (self.sd / "guardrail_results.json").write_text(json.dumps({"results": {"quality/count": dict(good["results"]["quality/count"], value=bad)}}))
+            rows, _, _ = g.area_rows(self.sd, g.cfg())
+            self.assertEqual(rows[0][1]["state"], "not_run", bad)
+            A, _ = self.mods()
+            self.assertEqual(A.verdict(rows, False)[0], "FAIL")
         shutil.rmtree(self.repo / "tools")
         r = run(self.repo, "measure", "SAT-1", "--check", "quality/count")  # one check runs even where its area doesn't apply
         self.assertIn("3 count", r.stdout)
@@ -9786,7 +9858,7 @@ class TestGuardrails(Base):
         g("add", "tools", ".gitignore"); g("commit", "-qm", "scanner"); g("checkout", "-q", "main"); g("merge", "-q", "feature/SAT-1-thing")
         g("checkout", "-q", "feature/SAT-1-thing")
         self.areas("enforce", commit=True, checks=[self.check(name="scan", measure="sarif", report="out/scan.sarif", limit=0,
-                                                              command=[PY, "tools/scan.py"], pins=[])])
+                                                              command=[PY, "tools/scan.py"], pins=["tools/scan.cfg"])])
         self.ready(); self.fill_validation()
         td, trust = TestBudgets.ci_dirs(self)
         env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_TRUSTED_DIR": str(trust)}
@@ -9808,6 +9880,9 @@ class TestGuardrails(Base):
         self.assertEqual(json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/scan"]["state"], "not_run")
         r = run(self.repo, "ci", env=env)
         self.assertIn("no measure job yet", r.stdout)
+        done = json.loads((self.sd / "done.json").read_text())
+        self.assertEqual(done["checks"]["guardrails_met"]["status"], "FAIL"); self.assertIn("not measured", done["checks"]["guardrails_met"]["why"])
+        self.assertNotEqual(done["overall"], "PASS")
 
     def test_a_pull_request_that_edits_pinned_files_gets_no_credit(self):
         """A check whose pinned files (a scanner config, the price data and its script) change in the same pull request is
@@ -9840,7 +9915,7 @@ class TestGuardrails(Base):
                  ({"sec": {"checks": [dict(sar, limit=2), self.check()]}}, "limit raised"),
                  ({"sec": {"checks": [dict(sar, levels=["error"]), self.check()]}}, "fewer levels"),
                  ({"sec": {"checks": [dict(sar, suppressed="exclude"), self.check()]}}, "suppressed in the code"),
-                 ({"sec": {"checks": [dict(sar, pins=[]), self.check()]}}, "no longer pins"),
+                 ({"sec": {"checks": [dict(sar, pins=["other.cfg"]), self.check()]}}, "no longer pins"),
                  ({"sec": {"checks": [dict(sar, command=["other"]), self.check()]}}, "measured differently"), (None, "perf removed")]
         raw = {"sec": {"mode": "enforce", "paths": ["src/**"], "content": ["exec"], "checks": [sar, self.check()]},
                "perf": {"mode": "warn", "checks": [self.check()]}}

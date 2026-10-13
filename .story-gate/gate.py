@@ -470,6 +470,22 @@ def git(*args):
         return ""
 
 
+def must(*args):
+    """git(), but a failure or a time-out raises RuntimeError instead of looking like empty output."""
+    try:
+        args = (GIT_LOCK_ARGS + args) if GIT_LOCKED else args
+        r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                           env=git_env())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError("git %s failed: %s" % (args[0] if args else "", e.__class__.__name__))
+    if r.returncode != 0:
+        raise RuntimeError("git %s failed (exit %d)" % (args[0] if args else "", r.returncode))
+    return r.stdout
+
+
+UNREAD = "story-gate couldn't read which files the change touches, so it can't tell whether pinned files changed"
+
+
 def front_matter(text):
     """Tiny 'key: value' / 'key: [a, b]' front matter reader between --- lines."""
     m = re.match(r"\s*---\s*\n(.*?)\n---", text, re.S)
@@ -635,9 +651,10 @@ def inputs_hash(sd, phase, c=None):
                  if isinstance(r, dict)}, sort_keys=True)
         except ConfigError:
             blob += "<budgets unreadable>"
-        gr = load_json(sd / "guardrail_results.json").get("results")  # the policy itself is in policy_fingerprint below
-        blob += json.dumps({n: [r.get(k) for k in ("spec", "value", "as_of", "fingerprint")] for n, r in
-                            (gr if isinstance(gr, dict) else {}).items() if isinstance(r, dict)}, sort_keys=True)
+        gr = load_json(sd / "guardrail_results.json").get("results")  # the policy itself is added below
+        if isinstance(gr, dict) and gr:  # only when there are guardrail results: other repositories keep their hashes
+            blob += json.dumps({n: [r.get(k) for k in ("spec", "value", "as_of", "fingerprint")] for n, r in gr.items()
+                                if isinstance(r, dict)}, sort_keys=True)
     try:
         c = c or cfg()
         blob += "".join(f + rd(ROOT / f) for f in spec_files(c))  # PRD/TRD pinned: a spec change makes READY out of date
@@ -1184,6 +1201,12 @@ def this_repo():
     return r if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r) else None
 
 
+def gh_msg(v):
+    """A workflow-command message (::warning::...) escaped as GitHub requires, so text that came from a pull request's
+    output can't end the line or start another command (%0A, ::)."""
+    return str(v).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def gh_prop(v):
     """A value for a GitHub Actions workflow-command property (file=...), escaped as GitHub requires."""
     return str(v).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace(":", "%3A").replace(",", "%2C")
@@ -1426,7 +1449,7 @@ def teardown_warnings(acc, I):
     except I.IsolationError as e:
         warn = ["%s; the runner may still have its processes" % e]
     for w in warn:
-        print("::warning title=story-gate: clean-up::%s" % w)
+        print("::warning title=story-gate: clean-up::%s" % gh_msg(w))
     return warn
 
 
@@ -1885,12 +1908,14 @@ def areas_that_apply(c, base):
     areas = areas_policy(c)
     if not any(a["mode"] != "off" for a in areas.values()):
         return {}, [], None
-    try:
+    try:  # git() reads a failure as empty output, so every call here must succeed or the change counts as unreadable
         mb = resolve_base(base)
-        if not git("rev-parse", "--verify", "--quiet", mb + "^{commit}").strip():
-            raise RuntimeError("no merge base")  # a failed git diff would look like "nothing changed"
-        files = changed_paths(base)  # both names of a renamed file, deletions and untracked files
-        diff = diff_against(base)[2]
+        must("rev-parse", "--verify", "--quiet", mb + "^{commit}")
+        z = lambda *a: [x for x in must("-c", "core.quotepath=false", *a, "-z").split("\0") if x]
+        untracked = [n for n in z("ls-files", "--others", "--exclude-standard") if not is_record(n)]
+        files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
+                       | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
+        diff = must("diff", mb, "--", ".", *[":(exclude)%s" % r for r in RECORD_PATHS]) + untracked_diff(untracked)
     except Exception:
         files, diff = None, ""
     why, notes = A.applicable(areas, files, diff, is_record)
@@ -1914,7 +1939,7 @@ def area_rows(sd, c, in_ci=False):
     for b in A.records(areas_policy(c), set(why)):
         r = M.current(b, stored.get(b["_key"]), fp)
         if r.get("value") is not None and r.get("state") != "not_run":
-            trust = M.trust_problems(b, str(ROOT), files or [])  # worked out again here: a stored "why" can't clear a pin
+            trust = M.trust_problems(b, str(ROOT), files) if files is not None else [UNREAD]  # a stored "why" can't clear a pin
             r = dict(r, state="reported", why="; ".join(trust + ["measured on the agent's computer"]))
         rows.append((b, A.refresh(b, r)))
     return rows, why, notes
@@ -2122,7 +2147,8 @@ def measure_areas(sd, sid, c, only=None):
     stored = stored if isinstance(stored, dict) else {}
     for b in recs:
         rec, raw = M.run(b, str(ROOT), work_state)
-        stored[b["_key"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local", M.trust_problems(b, str(ROOT), files or []))
+        stored[b["_key"]] = M.evaluate(b, rec, raw, rec.get("fingerprint"), "local",
+                                       M.trust_problems(b, str(ROOT), files) if files is not None else [UNREAD])
     wj(sd / "guardrail_results.json", {"v": M.SCHEMA, "story": sid, "results": stored})
     rows, why, _ = area_rows(sd, c)
     rows = [x for x in rows if x[0]["_key"] in {b["_key"] for b in recs}] or [
@@ -2354,12 +2380,18 @@ def diff_against(base):
     names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) | set(untracked)
     excl = [":(exclude)%s" % r for r in RECORD_PATHS]
     diff = git("diff", mb, "--", ".", *excl)  # story records never count as code evidence; the gate's own code does
-    for n in untracked[:200]:  # new files are evidence too, even before `git add`
+    return mb, sorted(names), diff + untracked_diff(untracked)
+
+
+def untracked_diff(untracked):
+    """New files as diff text (they are evidence too, even before `git add`)."""
+    out = ""
+    for n in untracked[:200]:
         f = ROOT / n
         if f.is_file() and f.stat().st_size < 500_000:
             body = rd(f)
-            diff += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
-    return mb, sorted(names), diff
+            out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
+    return out
 
 
 NOT_CODE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp", ".pdf", ".woff", ".woff2", ".ttf", ".otf",
@@ -3427,7 +3459,8 @@ def ci_areas(measures_dir, base, c):
     runs, loose = ci_runs(measures_dir)
     fp, out = work_fingerprint(), {}
     for b in A.records(areas_policy(c), set(why)):
-        r = ci_result(measures_dir, runs, b["_key"], b, fp, M.trust_problems(b, str(ROOT), files or []) + loose)
+        trust = M.trust_problems(b, str(ROOT), files) if files is not None else [UNREAD]
+        r = ci_result(measures_dir, runs, b["_key"], b, fp, trust + loose)
         out[b["_key"]] = A.refresh(b, r)
     return out, why, notes
 
@@ -3702,10 +3735,10 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         problems.append("story-gate could not run: %s" % e)
     level = "error" if enforce else "warning"
     for p in problems:
-        print("::%s title=story-gate::%s" % (level, p.replace("\n", " ")))
+        print("::%s title=story-gate::%s" % (level, gh_msg(p.replace("\n", " "))))
     for n in notes:
         if not n.startswith(("This PR makes story-gate's rules weaker", "This PR makes story-gate's budgets looser")):  # already printed as a warning
-            print("::notice title=story-gate::%s" % n)
+            print("::notice title=story-gate::%s" % gh_msg(n))
     lines = ["## story-gate %s%s" % ("- %s" % sid if sid else "", " (objective mode: no AI judge)" if objective(c) else ""), ""]
     if objective(c) and code:
         lines += ["> **Checked without an AI judge.** story-gate ran your tests and every scenario itself and checked the story's "
@@ -3749,7 +3782,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             lines += A.summary_lines(rows, True, why)
             st, w = A.verdict(rows, True)
             if st == "WARN":
-                print("::warning title=story-gate: guardrails::%s" % w.replace("\n", " ")[:900])
+                print("::warning title=story-gate: guardrails::%s" % gh_msg(w.replace("\n", " ")[:900]))
         except Exception as e:
             lines += ["", "Guardrails could not be shown: %s" % str(e)[:200]]
     lines += writing_summary(sid)

@@ -352,7 +352,7 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
         return None, {}, "the report is larger than 5 MB"
     try:
         doc = json.loads(raw.decode("utf-8-sig"))
-    except (UnicodeDecodeError, ValueError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:  # deeply nested JSON must not stop the gate
         return None, {}, "the report isn't readable SARIF JSON (%s)" % e.__class__.__name__
     if not isinstance(doc, dict) or doc.get("version") != "2.1.0" or not isinstance(doc.get("runs"), list) or not doc["runs"]:
         return None, {}, 'the report isn\'t SARIF 2.1.0 (it needs "version": "2.1.0" and a list of runs)'
@@ -645,6 +645,11 @@ def weaker(old, new):
 
 
 # ------------------------------------------------------------------ plain-English output
+def md(text):
+    """Text from a run (or a report) made inert for a Markdown table: no links, images, code, mentions or new cells."""
+    return re.sub(r"([\\`*_\[\]()<>!|#@~])", r"\\\1", str(text).replace("\r", " ").replace("\n", " "))
+
+
 def summary_lines(rows, in_ci):
     """Markdown table for the CI summary and the agent: budget, limit, value, state, result."""
     if not rows:
@@ -654,11 +659,11 @@ def summary_lines(rows, in_ci):
     for b, r in rows:
         v = r.get("value")
         res = ("within" if met(b, Decimal(v)) else "OVER" if b["direction"] == "max" else "UNDER") if v is not None and r.get("state") != "not_run" else "-"
-        how = word.get(r.get("state"), "not run") + (" (%s)" % r["why"][:120] if r.get("why") else "")
+        how = word.get(r.get("state"), "not run") + (" (%s)" % md(r["why"][:120]) if r.get("why") else "")
         out.append("| %s%s | %s %s %s | %s | %s | %s |" % (
             b["name"], "" if b["status"] == "decided" and b.get("_origin") != "story" else " (proposed)",
             "at most" if b["direction"] == "max" else "at least", b["limit"], b["unit"],
-            "%s %s" % (v, b["unit"]) if v is not None else "-", how.replace("|", "/"), res))
+            "%s %s" % (v, b["unit"]) if v is not None else "-", how, res))
     if not in_ci:
         out.append("")
         out.append("On your computer every value is 'reported'. CI measures the default branch's budgets again on the pull request.")

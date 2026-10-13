@@ -20,7 +20,7 @@ AREA = re.compile(r"[a-z][a-z0-9-]{0,31}")
 CHECK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 MEASURES = ("sarif", "junit", "number", "date")
 MAX_AREAS, MAX_CHECKS, MAX_TRIGGERS, MAX_PATTERN = 10, 10, 20, 200
-LINE_CAP, DIFF_CAP, MATCH_TIME = 2000, 5_000_000, 10
+DIFF_CAP, MATCH_TIME = 5_000_000, 10
 AREA_FIELDS = {"mode", "paths", "content", "checks"}
 CHECK_FIELDS = {"name", "measure", "command", "report", "pins", "timeout", "expect_exit", "limit", "unit", "levels",
                 "suppressed", "source"}
@@ -149,6 +149,11 @@ def area_problems(name, a):
     else:
         out += [w for w in map(pattern_problem, content) if w]
     checks = a.get("checks")
+    if a.get("mode") == "enforce" and isinstance(checks, list):
+        bare = [c.get("name") for c in checks if isinstance(c, dict) and c.get("measure") in ("sarif", "junit") and not c.get("pins")]
+        if bare:
+            out.append("an enforced scanner or test-report check needs pins (the tool's config, ignore and baseline files): "
+                       "%s. Without them the pull request could change what the tool looks at and still pass" % ", ".join(map(str, bare)))
     if not isinstance(checks, list) or not checks or len(checks) > MAX_CHECKS:
         out.append("checks must list 1 to %d checks (an area with no check can't show anything)" % MAX_CHECKS)
     else:
@@ -217,8 +222,8 @@ def records(areas, only=None):
 
 # ------------------------------------------------------------------ triggers
 def changed_lines(diff, is_record):
-    """(added and removed lines of a unified diff, outside story records, each cut to LINE_CAP; complete). complete is
-    False when the diff passed DIFF_CAP, so content triggers can't be ruled out."""
+    """(added and removed lines of a unified diff, outside story records, whole; complete). complete is False when the
+    diff passed DIFF_CAP or changes a binary file, so content triggers can't be ruled out. Lines are never cut: a pattern past a cut would be missed."""
     out, keep, header, size = [], True, False, 0
     for line in diff.splitlines():
         if line.startswith("diff --git "):
@@ -228,12 +233,14 @@ def changed_lines(diff, is_record):
         if header:
             if line.startswith("+++ "):
                 header = False
+            elif keep and line.startswith(("Binary files ", "GIT binary patch")):
+                return out, False  # a changed binary file: its content can't be matched, so patterns can't rule it out
             continue
         if keep and line[:1] in ("+", "-"):
             size += len(line)
             if size > DIFF_CAP:
                 return out, False
-            out.append(line[1:LINE_CAP + 1])
+            out.append(line[1:])
     return out, True
 
 
@@ -277,7 +284,8 @@ def applicable(areas, changed, diff, is_record):
     out, notes = {}, []
     lines, complete = changed_lines(diff or "", is_record)
     if not complete:
-        notes.append("the change is larger than story-gate reads for content patterns; every area with patterns applies")
+        notes.append("the change is larger than story-gate reads for content patterns, or changes a binary file; every area "
+                     "with patterns applies")
     pend = {}
     for n, a in sorted(live.items()):
         if not a["paths"] and not a["content"]:
@@ -363,11 +371,11 @@ def summary_lines(rows, in_ci, why=None):
         v = r.get("value")
         ok = v is not None and r.get("state") != "not_run"
         res = ("within" if M.met(b, Decimal(v)) else "OVER") if ok else "-"
-        how = word.get(r.get("state"), "not run") + (" (%s)" % r["why"][:120] if r.get("why") else "")
+        how = word.get(r.get("state"), "not run") + (" (%s)" % M.md(r["why"][:120]) if r.get("why") else "")
         meas = "-" if v is None else ("%s days (as of %s)" % (v, r.get("as_of")) if b["measure"] == "date" else "%s %s" % (v, b["unit"]))
-        meas += _suppressed_note(r)
+        meas += M.md(_suppressed_note(r))
         out.append("| %s (%s) | %s | at most %s %s | %s | %s | %s |" % (b["_area"], b["_mode"], b["name"], b["limit"], b["unit"],
-                                                                     meas, how.replace("|", "/"), res))
+                                                                     meas, how, res))
     if why:
         out.append("")
         out += ["- %s applies: %s" % (n, w) for n, w in sorted(why.items())]

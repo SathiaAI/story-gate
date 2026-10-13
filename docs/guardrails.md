@@ -79,11 +79,12 @@ story-gate settings area prices check age add --measure date --limit 30 \
 - `paths`: a changed file matches a glob (`fnmatch`, forward slashes). Added, changed, deleted, both names of a renamed
   file, and new untracked files all count.
 - `content`: an added or removed line matches a pattern. Patterns are at most 200 characters and kept simple: no
-  backreferences, no lookahead or lookbehind, no repeat inside a repeat (like `(a+)+`). Lines longer than 2,000
-  characters are cut.
+  backreferences, no lookahead or lookbehind, no repeat inside a repeat (like `(a+)+`). Every line is matched whole.
+- Paths and patterns are part of `config.json`, so anyone who can read the repository can read them. Don't put secrets in
+  them (`settings` refuses values that look like keys or tokens).
 - When story-gate can't be sure, the area applies: the change couldn't be read (for example no merge base in a shallow
-  clone; story-gate's own workflow fetches the full history), it is over 5 MB, or the patterns couldn't be matched
-  within 10 seconds.
+  clone; story-gate's own workflow fetches the full history), it is over 5 MB, it changes a binary file (its content
+  can't be matched), or the patterns couldn't be matched within 10 seconds.
 
 ## What CI does
 
@@ -108,8 +109,9 @@ An enforce-area check passes only when it is **checked by CI** and within its li
 
 Pin the files that decide what a check finds: the scanner's config and ignore files, a baseline file, the script, the
 price data. A pull request that changes a pinned file gets *reported* for that check, so an enforced area fails until
-that file changes in a pull request of its own. story-gate pins the script after an interpreter by itself
-(`python3 tools/x.py`); add the rest with `--pins`. A scanner that reads an ignore file you didn't pin can be told to
+that file changes in a pull request of its own. story-gate pins the program itself when it is a repository file
+(`./tools/scan.sh`) and the script after an interpreter (`python3 tools/x.py`); add the rest with `--pins`. An
+**enforced** SARIF or JUnit check must list pins: story-gate refuses to enforce one without them. A scanner that reads an ignore file you didn't pin can be told to
 skip findings by the pull request itself: pin it.
 
 ## Looser settings are flagged
