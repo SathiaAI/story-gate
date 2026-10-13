@@ -9581,6 +9581,21 @@ class TestGuardrails(Base):
         self.assertEqual(len(lines[0]), A.LINE_CAP)
         self.assertTrue(A.applicable(areas, ["src/web\\x.js"], "", rec)[0].get("web") is None)  # globs are forward-slash paths
 
+    def test_renames_and_an_unreadable_change_make_areas_apply(self):
+        """In a real repository: the old name of a renamed file triggers an area; a merge base story-gate can't read makes
+        every area that isn't off apply (a failed git diff never looks like "nothing changed")."""
+        g = lambda *x: subprocess.run(["git", *x], cwd=self.repo, capture_output=True, check=True)
+        (self.repo / "old").mkdir(); (self.repo / "old/x.py").write_text("x = 1\n")
+        g("add", "old"); g("commit", "-qm", "old"); g("checkout", "-q", "main"); g("merge", "-q", "feature/SAT-1-thing")
+        g("checkout", "-q", "feature/SAT-1-thing"); g("mv", "old", "new"); g("commit", "-qm", "rename")
+        self.areas("warn", paths=["old/**"])
+        gate = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        why, _, files = gate.areas_that_apply(gate.cfg(), "main")
+        self.assertIn("quality", why); self.assertIn("old/x.py", files); self.assertIn("new/x.py", files)
+        with patch.object(gate, "resolve_base", return_value="0" * 40):
+            why, _, files = gate.areas_that_apply(gate.cfg(), "main")
+        self.assertIsNone(files); self.assertIn("couldn't read the change", why["quality"])
+
     def test_unfinished_pattern_matching_never_switches_a_check_off(self):
         """When the separate matcher times out or fails, every area with patterns applies, and a note says why."""
         A, _ = self.mods()
@@ -9606,7 +9621,7 @@ class TestGuardrails(Base):
                         "extensions": [{"name": "e", "rules": [{"id": "X", "defaultConfiguration": {"level": "note"}}]}]}}
         raw = self.sarif(res, **ext)
         v, info, why = M.parse_sarif(raw)
-        self.assertEqual((v, info, why), (5, {"findings": 5, "suppressed": 1}, ""))
+        self.assertEqual((v, info, why), (5, {"findings": 5, "suppressed": 1, "suppressed_in": []}, ""))
         self.assertEqual(M.parse_sarif(raw, ("error",), "exclude")[0], 4)
         self.assertEqual(M.parse_sarif(raw, ("error", "warning", "note"))[0], 7)
         self.assertEqual(M.parse_sarif(b"\xef\xbb\xbf" + raw)[0], 5)
@@ -9621,6 +9636,17 @@ class TestGuardrails(Base):
                 v, _, w = M.parse_sarif(bad)
                 self.assertIsNone(v); self.assertIn(why, w)
         self.assertEqual(M.parse_sarif(self.sarif([]))[0], 0)
+        # other shapes: several runs summed; no invocations at all; rules only by index; extension rules; hostile locations
+        multi = json.dumps({"version": "2.1.0", "runs": [
+            {"tool": {"driver": {"name": "a"}}, "results": [{"ruleId": "x", "level": "error"}]},
+            {"tool": {"driver": {"name": "b", "rules": [{"id": "y", "defaultConfiguration": {"level": "error"}}]}},
+             "invocations": [{"executionSuccessful": True}, {"executionSuccessful": True}],
+             "results": [{"ruleIndex": 0}, {"ruleIndex": 0, "suppressions": [{"kind": "inSource"}],
+                                            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/[x](http://e)@me.py"}}}]}]}]}).encode()
+        v, info, _ = M.parse_sarif(multi)
+        self.assertEqual((v, info["suppressed"], info["suppressed_in"]), (3, 1, ["src/xhttp//eme.py"]))
+        self.assertIsNone(M.parse_sarif(json.dumps({"version": "2.1.0", "runs": [{"results": [], "invocations": [
+            {"executionSuccessful": True}, {"executionSuccessful": False}]}]}).encode())[0])  # one failed invocation spoils the run
 
     def test_the_date_parser_and_ages_use_one_utc_clock(self):
         """parse_date(): one ISO date or date-time; offsets convert to UTC; future, impossible and extra words are refused.
@@ -9674,6 +9700,24 @@ class TestGuardrails(Base):
         v = g.verdict({"guardrails_met": ("FAIL", "x")}, dict(judged, judge="jev"), [], {}, c)
         self.assertEqual(v["overall"], "FAIL")
         self.assertTrue(g._ok("WARN")); self.assertFalse(g._ok("FAIL"))
+
+    def test_warn_is_never_blocking_anywhere(self):
+        """Table: every mix of check statuses gives the overall verdict ignoring WARN; and every list in gate.py of statuses
+        that don't block (those naming WAIVED and NOT_JUDGED) names WARN too, so no other code path treats WARN as a failure."""
+        import itertools, re as _re
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        c = g.cfg()
+        rank = ["FAIL", "CONCERNS", "PASS"]
+        for combo in itertools.product(["PASS", "WARN", "CONCERNS", "FAIL"], repeat=3):
+            st = {"c%d" % i: (x, "why") for i, x in enumerate(combo)}
+            v = g.verdict(st, {"judge": "jev", "scores": {}, "not_judged": []}, [], {}, c)
+            want = next((r for r in rank if r in combo), "PASS")
+            self.assertEqual(v["overall"], want, combo)
+        src = (SRC / "gate.py").read_text(encoding="utf-8")
+        lists = [t for t in _re.findall(r"\([^()]*\"NOT_JUDGED\"[^()]*\)", src) if '"WAIVED"' in t]  # print_verdict lists WARN on purpose
+        self.assertGreaterEqual(len(lists), 4)
+        for t in lists:
+            self.assertIn('"WARN"', t, t)
 
     def test_ci_order_runs_enforced_checks_before_warned_ones(self):
         """run_all(): decided budgets, then enforce-area checks, then warn-area checks, then proposed budgets; time that
@@ -9861,6 +9905,9 @@ class TestGuardrails(Base):
                 "name": "scan", "command": ["./tools/scan.sh", "--all"], "measure": "sarif", "report": "out/s.sarif", "limit": 0,
                 "pins": ["tools/scan.cfg"], "source": "owner: no new errors"}]})
             self.assertEqual(list(sent[-1][0][2]), [".story-gate/config.json"]); self.assertIn("Not looser", sent[-1][1]["body"])
+            self.assertNotIn("Tip: pin", out)
+            code, out = cli("area", "perf", "check", "q", "add", "--measure", "number", "--source", "owner", "--", "./count.sh")
+            self.assertEqual(code, 0, out); self.assertIn("Tip: pin", out)
             self.assertEqual(cli("area", "security", "mode", "enforce")[0], 0)
             self.assertEqual(json.loads(main["text"])["guardrails"]["areas"]["security"]["mode"], "enforce")
             self.assertEqual(cli("area", "security", "content", '["exec\\\\(", "a,b"]')[0], 0)
@@ -9882,7 +9929,7 @@ class TestGuardrails(Base):
                     self.assertEqual(code, 1, out); self.assertIn(why, out)
             self.assertEqual(len(sent), n)  # nothing refused reached GitHub
             self.assertEqual(cli("area", "security", "remove")[0], 0)
-            self.assertNotIn("areas", json.loads(main["text"]).get("guardrails", {}))
+            self.assertNotIn("security", json.loads(main["text"])["guardrails"]["areas"])
             self.assertIn("guardrail area security removed", sent[-1][1]["body"])
         self.assertFalse((self.repo / ".story-gate/config.json").read_text().count("guardrails"))  # nothing local changed
 

@@ -357,6 +357,7 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
     if not isinstance(doc, dict) or doc.get("version") != "2.1.0" or not isinstance(doc.get("runs"), list) or not doc["runs"]:
         return None, {}, 'the report isn\'t SARIF 2.1.0 (it needs "version": "2.1.0" and a list of runs)'
     count = supp = total = 0
+    where = []
     for run in doc["runs"]:
         if not isinstance(run, dict):
             return None, {}, "a run in the report isn't an object"
@@ -387,10 +388,21 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
             total += 1
             if off:
                 supp += 1
+                if len(where) < 5:
+                    where.append(_location(res))
                 if suppressed == "exclude":
                     continue
             count += 1
-    return Decimal(count), {"findings": total, "suppressed": supp}, ""
+    return Decimal(count), {"findings": total, "suppressed": supp, "suppressed_in": [w for w in where if w]}, ""
+
+
+def _location(res):
+    """The file a result points at, as plain path characters only (it is shown on the pull request), or ""."""
+    try:
+        uri = res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return re.sub(r"[^A-Za-z0-9._/-]", "", uri if isinstance(uri, str) else "")[:100]
 
 
 KINDS = ("pass", "open", "informational", "notApplicable", "review", "fail")

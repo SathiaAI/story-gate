@@ -1886,8 +1886,11 @@ def areas_that_apply(c, base):
     if not any(a["mode"] != "off" for a in areas.values()):
         return {}, [], None
     try:
-        _, files, diff = diff_against(base)
-        files = [f for f in files if not is_record(f)]
+        mb = resolve_base(base)
+        if not git("rev-parse", "--verify", "--quiet", mb + "^{commit}").strip():
+            raise RuntimeError("no merge base")  # a failed git diff would look like "nothing changed"
+        files = changed_paths(base)  # both names of a renamed file, deletions and untracked files
+        diff = diff_against(base)[2]
     except Exception:
         files, diff = None, ""
     why, notes = A.applicable(areas, files, diff, is_record)

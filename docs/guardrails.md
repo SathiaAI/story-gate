@@ -48,7 +48,8 @@ usable; add `--expect-exit 0` when another exit code means the tool broke.
   rule's default, else `warning`.
 - Not counted: results marked `pass`, and results whose `baselineState` is `absent` (gone).
 - **Suppressed findings still count.** Your AI can add a "suppress this warning" comment to the code, so by default
-  story-gate counts those findings and says how many were suppressed. `--suppressed exclude` stops counting
+  story-gate counts those findings and says how many were suppressed, and in which files (up to five). Adding a
+  suppression therefore never lowers the count. `--suppressed exclude` stops counting
   suppressions that are in effect (status `accepted`, or none). Choosing it is a weaker rule.
 - Not usable (the check is *not run*): a run the tool says failed (`executionSuccessful: false`), a run with no
   `results` list, another SARIF version, unknown levels or kinds, malformed suppressions, a report over 5 MB.
@@ -80,8 +81,9 @@ story-gate settings area prices check age add --measure date --limit 30 \
 - `content`: an added or removed line matches a pattern. Patterns are at most 200 characters and kept simple: no
   backreferences, no lookahead or lookbehind, no repeat inside a repeat (like `(a+)+`). Lines longer than 2,000
   characters are cut.
-- When story-gate can't be sure, the area applies: the change couldn't be read, it is over 5 MB, or the patterns
-  couldn't be matched within 10 seconds.
+- When story-gate can't be sure, the area applies: the change couldn't be read (for example no merge base in a shallow
+  clone; story-gate's own workflow fetches the full history), it is over 5 MB, or the patterns couldn't be matched
+  within 10 seconds.
 
 ## What CI does
 

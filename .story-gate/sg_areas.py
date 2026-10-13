@@ -327,8 +327,7 @@ def verdict(rows, in_ci):
         if value is None:
             why = "%s: not measured - %s" % (label(b), r.get("why") or "no result")
         elif not M.met(b, value):
-            why = "%s: measured %s %s%s" % (label(b), r["value"], b["unit"], (", %s of them suppressed in the code" % r["suppressed"])
-                                            if r.get("suppressed") else "")
+            why = "%s: measured %s %s%s" % (label(b), r["value"], b["unit"], _suppressed_note(r))
         else:
             why = ""
             blockers = [w for w in (r.get("why") or "").split("; ") if w and w != "measured on the agent's computer"]
@@ -341,6 +340,14 @@ def verdict(rows, in_ci):
     if warn:
         return "WARN", "guardrails to look at (warn: shown, never blocks): " + " | ".join(warn)
     return "PASS", ""
+
+
+def _suppressed_note(r):
+    """', 2 suppressed in the code (src/a.py, src/b.py)' for a SARIF result with suppressions, else ''."""
+    if not r.get("suppressed"):
+        return ""
+    files = [f for f in (r.get("suppressed_in") or []) if isinstance(f, str)][:5]
+    return ", %s suppressed in the code%s" % (r["suppressed"], " (%s)" % ", ".join(files) if files else "")
 
 
 def summary_lines(rows, in_ci, why=None):
@@ -358,8 +365,7 @@ def summary_lines(rows, in_ci, why=None):
         res = ("within" if M.met(b, Decimal(v)) else "OVER") if ok else "-"
         how = word.get(r.get("state"), "not run") + (" (%s)" % r["why"][:120] if r.get("why") else "")
         meas = "-" if v is None else ("%s days (as of %s)" % (v, r.get("as_of")) if b["measure"] == "date" else "%s %s" % (v, b["unit"]))
-        if r.get("suppressed"):
-            meas += ", %s suppressed in the code" % r["suppressed"]
+        meas += _suppressed_note(r)
         out.append("| %s (%s) | %s | at most %s %s | %s | %s | %s |" % (b["_area"], b["_mode"], b["name"], b["limit"], b["unit"],
                                                                      meas, how.replace("|", "/"), res))
     if why:

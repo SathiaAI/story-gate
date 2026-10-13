@@ -732,8 +732,12 @@ def cmd_area(G, a, cmd):
                     raise SettingsError("area %s already has a check called %s; change it with settings area %s check %s FIELD VALUE" % (name, ck, name, ck))
                 ar.setdefault("checks", []).append(ch)
                 return xs
-            return area_pr(G, add, "area-%s-%s-add" % (name, ck), "story-gate settings: add guardrail check %s/%s" % (name, ck),
+            code = area_pr(G, add, "area-%s-%s-add" % (name, ck), "story-gate settings: add guardrail check %s/%s" % (name, ck),
                            "add guardrail check %s/%s" % (name, ck))
+            if code == 0 and not ch.get("pins"):
+                print("Tip: pin the files that decide what this check finds (its config, ignore or baseline files): "
+                      "settings area %s check %s pins FILE,FILE. Without pins, a pull request can change them and still get credit." % (name, ck))
+            return code
         if len(op) == 2:
             v = check_value(op[0], op[1])
 
