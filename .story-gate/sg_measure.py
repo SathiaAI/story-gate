@@ -356,7 +356,7 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
         return None, {}, "the report isn't readable SARIF JSON (%s)" % e.__class__.__name__
     if not isinstance(doc, dict) or doc.get("version") != "2.1.0" or not isinstance(doc.get("runs"), list) or not doc["runs"]:
         return None, {}, 'the report isn\'t SARIF 2.1.0 (it needs "version": "2.1.0" and a list of runs)'
-    count = supp = total = 0
+    count = supp = total = other = 0
     where = []
     for run in doc["runs"]:
         if not isinstance(run, dict):
@@ -384,6 +384,7 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
             if off is None:
                 return None, {}, "a result's suppressions are malformed"
             if level not in levels:
+                other += level != "none"  # shown, so a clean count never hides findings at other levels
                 continue
             total += 1
             if off:
@@ -393,7 +394,7 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
                 if suppressed == "exclude":
                     continue
             count += 1
-    return Decimal(count), {"findings": total, "suppressed": supp, "suppressed_in": [w for w in where if w]}, ""
+    return Decimal(count), {"findings": total, "suppressed": supp, "suppressed_in": [w for w in where if w], "other_levels": other}, ""
 
 
 def _location(res):

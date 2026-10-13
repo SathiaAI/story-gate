@@ -153,10 +153,10 @@ def area_problems(name, a):
         out += [w for w in map(pattern_problem, content) if w]
     checks = a.get("checks")
     if a.get("mode") == "enforce" and isinstance(checks, list):
-        bare = [c.get("name") for c in checks if isinstance(c, dict) and c.get("measure") in ("sarif", "junit") and not c.get("pins")]
+        bare = [c.get("name") for c in checks if isinstance(c, dict) and c.get("measure") != "date" and not c.get("pins")]
         if bare:
-            out.append("an enforced scanner or test-report check needs pins (the tool's config, ignore and baseline files): "
-                       "%s. Without them the pull request could change what the tool looks at and still pass" % ", ".join(map(str, bare)))
+            out.append("an enforced check needs pins (the tool's config, ignore and baseline files, or the modules a script "
+                       "imports): %s. Without them the pull request could change what is measured and still pass" % ", ".join(map(str, bare)))
     if not isinstance(checks, list) or not checks or len(checks) > MAX_CHECKS:
         out.append("checks must list 1 to %d checks (an area with no check can't show anything)" % MAX_CHECKS)
     else:
@@ -364,6 +364,12 @@ def _suppressed_note(r):
     return ", %s suppressed in the code%s" % (r["suppressed"], " (%s)" % ", ".join(files) if files else "")
 
 
+def _other_note(r):
+    """', 4 more at levels not counted' for a SARIF result whose report has findings at other levels, else ''."""
+    n = r.get("other_levels")
+    return ", %s more at levels not counted" % n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else ""
+
+
 def summary_lines(rows, in_ci, why=None):
     """Markdown table for the CI summary and the agent: area, check, limit, value, state, result. why: {area: reason}."""
     import sg_measure as M
@@ -379,7 +385,7 @@ def summary_lines(rows, in_ci, why=None):
         res = ("within" if M.met(b, Decimal(v)) else "OVER") if ok else "-"
         how = word.get(r.get("state"), "not run") + (" (%s)" % M.md(r["why"][:120]) if r.get("why") else "")
         meas = "-" if v is None else ("%s days (as of %s)" % (v, r.get("as_of")) if b["measure"] == "date" else "%s %s" % (v, b["unit"]))
-        meas += M.md(_suppressed_note(r))
+        meas += M.md(_suppressed_note(r) + _other_note(r))
         out.append("| %s (%s) | %s | at most %s %s | %s | %s | %s |" % (b["_area"], b["_mode"], b["name"], b["limit"], b["unit"],
                                                                      meas, how, res))
     if why:

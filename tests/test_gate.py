@@ -9524,7 +9524,8 @@ class TestGuardrails(Base):
                ({"checks": [self.check(source="")]}, "source"), ({"checks": [self.check(command="ls")]}, "command"),
                ({"checks": [self.check(report="o.xml")]}, "report is only"), ({"checks": [self.check(name="a/b")]}, "name"),
                ({"checks": [self.check(colour=1)]}, "unknown fields"),
-               ({"mode": "enforce", "checks": [self.check(measure="sarif", report="o.sarif", pins=[])]}, "needs pins")]
+               ({"mode": "enforce", "checks": [self.check(measure="sarif", report="o.sarif", pins=[])]}, "needs pins"),
+               ({"mode": "enforce", "checks": [self.check(pins=[])]}, "needs pins")]
         for change, why in bad:
             with self.subTest(change=change):
                 area = dict({"checks": [self.check()]}, **change)
@@ -9574,6 +9575,8 @@ class TestGuardrails(Base):
         self.assertNotIn("secrets", A.applicable(areas, ["x"], story, rec)[0])
         untracked = "diff --git a/n.py b/n.py\nnew file (untracked)\n+++ b/n.py\n+password = 2\n"
         self.assertIn("secrets", A.applicable(areas, ["n.py"], untracked, rec)[0])
+        self.assertIn(", 4 more at levels not counted", A.summary_lines([(A.records(A.load({"areas": {"q": {"checks": [self.check()]}}}))[0],
+                                                                         {"state": "checked", "value": "0", "other_levels": 4})], True)[-1])
         binary = "diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ\n"
         why, notes = A.applicable(areas, ["logo.png"], binary, rec)
         self.assertIn("secrets", why); self.assertIn("binary", notes[0])  # its content can't be matched, so it can't be ruled out
@@ -9607,10 +9610,25 @@ class TestGuardrails(Base):
             if "diff" in a:
                 raise RuntimeError("git diff failed")
             return real(*a)
+        content_cfg = dict(gate.cfg(), guardrails={"areas": {"c": {"content": ["zzz"], "checks": [self.check()]}}})
+        (self.repo / "logo.bin").write_bytes(b"\x00\x01zzz"); g("add", "logo.bin"); g("commit", "-qm", "bin")
+        why, _, _ = gate.areas_that_apply(content_cfg, "main")
+        self.assertIn("c", why)  # a committed binary file can't be matched, whatever language git speaks
+        with patch.dict(os.environ, {"LANG": "de_DE.UTF-8", "LC_ALL": "de_DE.UTF-8"}):
+            self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
+        g("rm", "-q", "logo.bin"); g("commit", "-qm", "unbin")
         (self.repo / "big.bin.txt").write_text("y" * gate.UNTRACKED_BYTES)  # an untracked file too big to read
-        why, notes, _ = gate.areas_that_apply(dict(gate.cfg(), guardrails={"areas": {"c": {"content": ["zzz"], "checks": [self.check()]}}}), "main")
+        why, notes, _ = gate.areas_that_apply(content_cfg, "main")
         self.assertIn("c", why); self.assertTrue(notes)
         (self.repo / "big.bin.txt").unlink()
+        if os.name != "nt":
+            os.symlink("/etc/hostname", self.repo / "link.txt")  # an untracked link isn't read: it can't rule a pattern out
+            self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
+            (self.repo / "link.txt").unlink()
+        with patch.object(Path, "read_text", side_effect=OSError("unreadable")):
+            (self.repo / "small.txt").write_text("hello")
+            self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
+        (self.repo / "small.txt").unlink()
         with patch.object(gate, "must", side_effect=diff_fails):
             why, _, files = gate.areas_that_apply(gate.cfg(), "main")
             self.assertIsNone(files); self.assertIn("quality", why)
@@ -9670,7 +9688,7 @@ class TestGuardrails(Base):
                         "extensions": [{"name": "e", "rules": [{"id": "X", "defaultConfiguration": {"level": "note"}}]}]}}
         raw = self.sarif(res, **ext)
         v, info, why = M.parse_sarif(raw)
-        self.assertEqual((v, info, why), (5, {"findings": 5, "suppressed": 1, "suppressed_in": []}, ""))
+        self.assertEqual((v, info, why), (5, {"findings": 5, "suppressed": 1, "suppressed_in": [], "other_levels": 2}, ""))
         self.assertEqual(M.parse_sarif(raw, ("error",), "exclude")[0], 4)
         self.assertEqual(M.parse_sarif(raw, ("error", "warning", "note"))[0], 7)
         self.assertEqual(M.parse_sarif(b"\xef\xbb\xbf" + raw)[0], 5)
@@ -9879,7 +9897,7 @@ class TestGuardrails(Base):
         self.assertEqual(done["status"], "FAIL"); self.assertIn("enforced guardrails not met", done["why"])
         res = json.loads((self.sd / "guardrail_results.json").read_text())["results"]["quality/scan"]
         self.assertEqual((res["value"], res["state"], res["source"]), ("1", "checked", "ci"))
-        self.assertIn("| quality (enforce) | scan | at most 0 findings | 1 findings | checked by CI | OVER |", summary.read_text())
+        self.assertIn("| quality (enforce) | scan | at most 0 findings | 1 findings, 1 more at levels not counted | checked by CI | OVER |", summary.read_text())
         meta = json.loads((td / "measures.json").read_text())
         (td / "measures.json").write_text(json.dumps(dict(meta, head="0" * 40)))
         run(self.repo, "ci", "--measures", str(td), env=env)

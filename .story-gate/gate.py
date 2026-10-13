@@ -474,8 +474,9 @@ def must(*args):
     """git(), but a failure or a time-out raises RuntimeError instead of looking like empty output."""
     try:
         args = (GIT_LOCK_ARGS + args) if GIT_LOCKED else args
+        env = dict(git_env() or os.environ, LC_ALL="C", LANGUAGE="C")  # git's messages in English, whatever the runner's locale
         r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                           env=git_env())
+                           env=env)
     except (OSError, subprocess.SubprocessError) as e:
         raise RuntimeError("git %s failed: %s" % (args[0] if args else "", e.__class__.__name__))
     if r.returncode != 0:
@@ -1915,9 +1916,11 @@ def areas_that_apply(c, base):
         untracked = [n for n in z("ls-files", "--others", "--exclude-standard") if not is_record(n)]
         files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
                        | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
-        diff = must("diff", mb, "--", ".", *[":(exclude)%s" % r for r in RECORD_PATHS]) + untracked_diff(untracked)
-        whole = len(untracked) <= UNTRACKED_MAX and all(
-            (ROOT / n).is_file() and (ROOT / n).stat().st_size < UNTRACKED_BYTES for n in untracked)  # else some content is unread
+        excl = [":(exclude)%s" % r for r in RECORD_PATHS]
+        new, read_all = untracked_text(untracked)
+        diff = must("diff", mb, "--", ".", *excl) + new
+        binary = any(l.startswith("-\t-\t") for l in must("diff", "--numstat", "--no-renames", mb, "--", ".", *excl).splitlines())
+        whole = read_all and not binary  # a binary file, or a new file story-gate didn't read: its content is unknown
     except Exception:
         files, diff, whole = None, "", False
     why, notes = A.applicable(areas, files, diff, is_record, whole)
@@ -2390,13 +2393,25 @@ UNTRACKED_MAX, UNTRACKED_BYTES = 200, 500_000  # new files read as evidence: how
 
 def untracked_diff(untracked):
     """New files as diff text (they are evidence too, even before `git add`)."""
-    out = ""
+    return untracked_text(untracked)[0]
+
+
+def untracked_text(untracked):
+    """(new files as diff text, True when every one of them was read). A file story-gate skips (too many, too large, a
+    link, unreadable) makes the second value False, so a content pattern can't be ruled out for it."""
+    out, whole = "", len(untracked) <= UNTRACKED_MAX
     for n in untracked[:UNTRACKED_MAX]:
         f = ROOT / n
-        if f.is_file() and f.stat().st_size < UNTRACKED_BYTES:
-            body = rd(f)
-            out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
-    return out
+        try:
+            ok = f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES
+            body = f.read_text(encoding="utf-8", errors="ignore") if ok else ""
+        except OSError:
+            ok = False
+        if not ok:
+            whole = False
+            continue
+        out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
+    return out, whole
 
 
 NOT_CODE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp", ".pdf", ".woff", ".woff2", ".ttf", ".otf",
