@@ -355,6 +355,10 @@ Your tests, scenarios and budgets run the pull request's own code. In CI, story-
 throwaway account on the runner, not as its own:
 
 - That account has no admin rights, no groups and no tokens. It gets its own home folder, so installs and caches work.
+- It gets only a short list of environment variables: `PATH`, locale and time zone, `CI`, a few plain GitHub facts
+  (repository, commit, run) and toolchain locations such as `JAVA_HOME`. Nothing else is passed, and nothing whose
+  name looks like a secret. A test that needs another variable sets it in the test command itself
+  (`MY_FLAG=1 npm test`).
 - It can't change story-gate's files or results. After each run, story-gate stops every process it started (a hidden
   background one too) and checks none is left before it reads anything.
 - **What "checked by CI" means:** CI ran your default branch's command on this code, and nothing changed the result
