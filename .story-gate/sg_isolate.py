@@ -183,20 +183,35 @@ class Account:
 
     def teardown(self):
         """Stop everything, give the checkout back to the runner's account and remove the throwaway account.
+        Every step is tried even when an earlier one fails (a kept runner must get its checkout and folders back).
         Returns warnings (plain words) for clean-up that didn't finish; results were already read after verified stops,
-        so these don't change them. IsolationError when the account's processes can't be stopped."""
-        self.stop()
+        so these don't change them. IsolationError, after the clean-up, when the account's processes can't be stopped."""
+        try:
+            self.stop()
+            stopped = None
+        except IsolationError as e:
+            stopped = e
         P = _priv()
         warn = []
-        _run(P + ["chown", "-hR", "%d:%d" % (os.getuid(), os.getgid()), self.root])
-        _run(P + ["chmod", "%o" % (self.root_mode if self.root_mode is not None else 0o755), self.root])
-        for d in reversed(self.opened):  # what this run opened, closed again (a self-hosted runner keeps its folders)
-            if _run(P + ["chmod", "o-x", d], check=False).returncode != 0:
-                warn.append("couldn't close %s again" % d)
-        r = _run(P + ["userdel", "--remove", self.name], check=False)
-        if r.returncode != 0:  # on a runner that is kept, its home could hold what the code cached: say so, loudly
-            warn.append("couldn't remove the throwaway account %s and its home folder; remove them by hand (%s)"
-                        % (self.name, (r.stderr or "").strip()[:120]))
+        steps = [(["chown", "-hR", "%d:%d" % (os.getuid(), os.getgid()), self.root], "couldn't give the checkout back to the runner's account"),
+                 (["chmod", "%o" % (self.root_mode if self.root_mode is not None else 0o755), self.root], "couldn't restore the checkout folder's permissions")]
+        steps += [(["chmod", "o-x", d], "couldn't close %s again" % d) for d in reversed(self.opened)]  # a kept runner keeps its folders
+        for argv, problem in steps:
+            try:
+                ok = _run(P + argv, check=False).returncode == 0
+            except IsolationError:
+                ok = False
+            if not ok:
+                warn.append(problem)
+        try:
+            r = _run(P + ["userdel", "--remove", self.name], check=False)
+            why = "" if r.returncode == 0 else (r.stderr or "").strip()[:120]
+        except IsolationError as e:
+            why = str(e)
+        if why:  # on a runner that is kept, its home could hold what the code cached: say so, loudly
+            warn.append("couldn't remove the throwaway account %s and its home folder; remove them by hand (%s)" % (self.name, why))
+        if stopped is not None:
+            raise IsolationError("; ".join([str(stopped)] + warn))
         return warn
 
 

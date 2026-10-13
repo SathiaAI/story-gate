@@ -9513,6 +9513,25 @@ class TestCiIsolation(Base):
             self.assertIsNone(I.read_regular(str(self.repo / "link.xml"), 4))
             self.assertIsNone(I.sha256_regular(str(self.repo / "link.xml")))
 
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_clean_up_runs_every_step_even_when_processes_cant_be_stopped(self):
+        """teardown(): when stop() fails, the checkout is still given back, the opened folders closed and the account
+        removal tried; then it raises with the stop problem and anything else that didn't finish."""
+        I = self.I()
+        a = I.Account(str(self.repo), [])
+        a.name, a.uid, a.root_mode, a.opened = "sgpr-test", 4242, 0o755, ["/srv/a"]
+        calls = []
+
+        def fake_run(argv, timeout=120, check=True):
+            """Record the command; userdel fails as it does while processes are left."""
+            calls.append(argv[len(I._priv()):])
+            return subprocess.CompletedProcess(argv, 1 if "userdel" in argv else 0, "", "user is logged in")
+        with patch.object(I, "_run", fake_run), patch.object(I.Account, "stop", side_effect=I.IsolationError("1 process(es) left")):
+            with self.assertRaises(I.IsolationError) as cm:
+                a.teardown()
+        self.assertEqual([c[0] for c in calls], ["chown", "chmod", "chmod", "userdel"])
+        self.assertIn("1 process(es) left", str(cm.exception)); self.assertIn("remove them by hand", str(cm.exception))
+
     def test_file_evidence_covers_the_whole_file(self):
         """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
         still changes the digest; a folder or a missing file has none."""
