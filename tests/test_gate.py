@@ -9897,6 +9897,11 @@ class TestGuardrails(Base):
         r = M.evaluate(b, rec, today.encode(), "f", "ci", M.trust_problems(b, str(self.repo), ["data/prices.json"]))
         self.assertEqual(r["state"], "reported"); self.assertEqual(A.verdict([(b, r)], True)[0], "FAIL")
         self.assertNotEqual(M.spec_hash(b), M.spec_hash(dict(b, levels=["note"])))  # how a report is read is part of the identity
+        (self.repo / "tools").mkdir(); (self.repo / "tools/scan.sh").write_text("#!/bin/sh\n")
+        scan = A.records(A.load({"areas": {"sec": {"mode": "enforce", "checks": [self.check(
+            name="scan", measure="sarif", report="o.sarif", command=["./tools/scan.sh"], pins=["tools/scan.cfg"])]}}}))[0]
+        self.assertTrue(M.trust_problems(scan, str(self.repo), ["tools/scan.sh"]))  # the program itself is pinned too
+        self.assertEqual(M.trust_problems(scan, str(self.repo), ["app.py"]), [])
 
     def test_looser_guardrails_are_named_and_a_computer_can_only_raise_an_area(self):
         """weaker(): removed or lowered areas, fewer triggers, removed checks, raised limits, fewer levels, excluded

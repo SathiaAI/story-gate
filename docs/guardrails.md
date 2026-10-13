@@ -111,7 +111,9 @@ Pin the files that decide what a check finds: the scanner's config and ignore fi
 price data. A pull request that changes a pinned file gets *reported* for that check, so an enforced area fails until
 that file changes in a pull request of its own. story-gate pins the program itself when it is a repository file
 (`./tools/scan.sh`) and the script after an interpreter (`python3 tools/x.py`); add the rest with `--pins`. An
-**enforced** SARIF or JUnit check must list pins: story-gate refuses to enforce one without them. A scanner that reads an ignore file you didn't pin can be told to
+**enforced** SARIF or JUnit check must list pins: story-gate refuses to enforce one without them. Pins protect repository
+files only: a command that loads code from elsewhere in the repository (modules it imports, a local virtual environment)
+needs those pinned too, or the whole folder. A scanner that reads an ignore file you didn't pin can be told to
 skip findings by the pull request itself: pin it.
 
 ## Looser settings are flagged
