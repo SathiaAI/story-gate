@@ -15,6 +15,8 @@ Mistakes that reviewers kept finding in story-gate's own pull requests, and how 
 | 9 | **Data from GitHub or a tracker can have any shape; an odd shape means "unknown, play safe", never a crash.** A non-numeric approval count would have stopped setup-repo; a non-object `parameters` would have crashed it. | Pre-PR checklist; `approval_required` treats an unreadable rule as "approval needed" (#76). |
 | 10 | **Checks raise errors, never `assert`; keys go only to https (or localhost) and never follow a redirect; XML is parsed with DTDs refused.** A security scan found `assert` used as a check (python -O removes it), urllib forwarding the Authorization header on redirect, and an XML parse that relied on a byte check. | Automatic: no `assert` in `.story-gate/` (`test_lesson_10_no_assert_for_checks`). Pre-PR checklist for the rest; `sg_judges.endpoint_error` / `open_url` and `sg_github._parse_xml_without_dtd` are the helpers to use. |
 
+| 11 | **Every file one CI job hands to another: who else can write it before it is read?** A test could leave a background process that rewrote story-gate's results before upload (#83 review, fixed in T1: pull request code runs as a separate account). | Automatic on Linux: `tests/isolation_e2e.py` runs hostile tests, scenarios and budgets on a real runner (tests.yml `isolation` job). Pre-PR checklist for any new artifact. |
+
 Also learned the hard way:
 
 - GitHub's GraphQL API can report a rate limit inside an HTTP 200 answer; check `errors`, not only the status.

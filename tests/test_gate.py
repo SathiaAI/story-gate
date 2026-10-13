@@ -8147,7 +8147,7 @@ class TestSettings(Base):
                   "judge.allow_self_judge_pass": (False, True), "approvers": ([], ["x"]), "reviewers": ([], ["bot"]),
                   "require_independent_review": (True, False), "checkpoint.every_edits": (10, 0),
                   "writing.enforce": (True, False), "writing.target": (0.8, 0.5), "writing.diagram_min_files": (5, 9),
-                  "validation.required": (True, False)}
+                  "validation.required": (True, False), "ci_isolation": ("strict", "relaxed")}
         self.assertEqual(set(SET.SETTINGS) - set(loosen), {"dashboard_issue"})  # the dashboard issue only says where a summary goes
         for k, (strict, loose) in loosen.items():
             base = {"writing": {"enforce": True}} if k.startswith("writing.") and k != "writing.enforce" else {}
@@ -9459,3 +9459,249 @@ class TestBudgets(Base):
         self.assertIn("Budgets</h3>", D.to_html(d))
         self.assertEqual(D.budget_history(b"{bad", rows)[0], [])
         self.assertIn("can't be read", D.budget_history(b"{bad", rows)[1])
+
+
+class TestCiIsolation(Base):
+    """T1: in CI the pull request's code runs as a separate throwaway account (sg_isolate), so it can't change the
+    results story-gate reads. The real boundary is exercised on Linux by tests/isolation_e2e.py (its own CI job);
+    these tests cover the rules around it."""
+
+    def I(self):
+        """sg_isolate from the source tree, freshly imported."""
+        sys.path.insert(0, str(SRC))
+        import importlib, sg_isolate
+        return importlib.reload(sg_isolate)
+
+    def test_the_account_gets_toolchains_but_no_secrets(self):
+        """env_for(): toolchain paths and plain CI facts pass; tokens, keys and anything not on the allowlist don't."""
+        I = self.I()
+        env = {"PATH": "/usr/bin", "JAVA_HOME_17_X64": "/j", "GITHUB_SHA": "abc", "GITHUB_TOKEN": "t", "ACTIONS_RUNTIME_TOKEN": "t",
+               "ACTIONS_ID_TOKEN_REQUEST_URL": "u", "OPENROUTER_API_KEY": "k", "AWS_SECRET_ACCESS_KEY": "k", "RUNNER_TEMP": "/r",
+               "HOME": "/home/runner", "GITHUB_ACTIONS": "true", "LC_ALL": "C", "SSH_AUTH_SOCK": "/s", "GITHUB_ENV": "/e",
+               "ANDROID_KEYSTORE_PASSWORD": "p", "DOTNET_NUGET_TOKEN": "t", "ANDROID_HOME": "/a", "JAVA_HOME_API": "k",
+               "RUNNER_NAME": "box-7", "GOROOT_1_22_X64": "/g"}
+        out = I.env_for("/home/sgpr-1", env)
+        self.assertEqual(out["PATH"], "/usr/bin"); self.assertEqual(out["JAVA_HOME_17_X64"], "/j"); self.assertEqual(out["GITHUB_SHA"], "abc")
+        self.assertEqual((out["ANDROID_HOME"], out["GOROOT_1_22_X64"]), ("/a", "/g"))  # exact toolchain names only
+        self.assertEqual((out["HOME"], out["TMPDIR"]), ("/home/sgpr-1", "/home/sgpr-1/tmp"))
+        for k in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "OPENROUTER_API_KEY", "AWS_SECRET_ACCESS_KEY",
+                  "RUNNER_TEMP", "SSH_AUTH_SOCK", "GITHUB_ENV", "ANDROID_KEYSTORE_PASSWORD", "DOTNET_NUGET_TOKEN", "JAVA_HOME_API",
+                  "RUNNER_NAME"):
+            self.assertNotIn(k, out, k)  # GITHUB_ENV / RUNNER_TEMP point at the runner's own files: never handed over
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_the_wrapped_command_drops_privileges_for_good(self):
+        """wrap(): a new uid and gid, no groups, no way to gain privileges back (no_new_privs), an empty environment
+        refilled from the allowlist, and the file-size limit set inside when asked."""
+        I = self.I()
+        a = I.Account(str(self.repo), [])
+        a.uid, a.gid, a.home = 4242, 4242, "/home/sgpr-x"
+        argv = a.wrap(["python3", "x.py"], max_file=100)
+        i = argv.index("setpriv")
+        self.assertEqual(argv[i:i + 6], ["setpriv", "--reuid=4242", "--regid=4242", "--clear-groups", "--no-new-privs", "--"])
+        self.assertEqual(argv[i + 6:i + 8], ["/usr/bin/env", "-i"])
+        self.assertIn('ulimit -f 100 && exec "$@"', argv); self.assertEqual(argv[-2:], ["python3", "x.py"])
+        self.assertNotIn("ulimit", " ".join(a.wrap(["true"])))
+
+    def test_reports_are_read_only_as_plain_files(self):
+        """read_regular(): a regular file is read (capped); a link, a folder or a missing file is refused."""
+        I = self.I()
+        f = self.repo / "r.xml"; f.write_bytes(b"x" * 10)
+        self.assertEqual(I.read_regular(str(f), 4), b"xxxxx"); self.assertIsNone(I.read_regular(str(self.repo), 4))
+        self.assertIsNone(I.read_regular(str(self.repo / "nope"), 4))
+        if os.name != "nt":
+            os.symlink(f, self.repo / "link.xml")
+            self.assertIsNone(I.read_regular(str(self.repo / "link.xml"), 4))
+            self.assertIsNone(I.sha256_regular(str(self.repo / "link.xml")))
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_clean_up_runs_every_step_even_when_processes_cant_be_stopped(self):
+        """teardown(): when stop() fails, the checkout is still given back, the opened folders closed and the account
+        removal tried; then it raises with the stop problem and anything else that didn't finish."""
+        I = self.I()
+        a = I.Account(str(self.repo), [])
+        a.name, a.uid, a.root_mode, a.opened = "sgpr-test", 4242, 0o755, ["/srv/a"]
+        calls = []
+
+        def fake_run(argv, timeout=120, check=True):
+            """Record the command; userdel fails as it does while processes are left."""
+            calls.append(argv[len(I._priv()):])
+            return subprocess.CompletedProcess(argv, 1 if "userdel" in argv else 0, "", "user is logged in")
+        with patch.object(I, "_run", fake_run), patch.object(I.Account, "stop", side_effect=I.IsolationError("1 process(es) left")):
+            with self.assertRaises(I.IsolationError) as cm:
+                a.teardown()
+        self.assertEqual([c[0] for c in calls], ["chown", "chmod", "chmod", "userdel"])
+        self.assertIn("1 process(es) left", str(cm.exception)); self.assertIn("remove them by hand", str(cm.exception))
+
+    def test_file_evidence_covers_the_whole_file(self):
+        """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
+        still changes the digest; a folder or a missing file has none."""
+        I = self.I()
+        f = self.repo / "big.bin"; f.write_bytes(b"a" * 100)
+        with patch.object(I, "CHUNK", 7):
+            a = I.sha256_regular(str(f))
+            self.assertEqual(a, hashlib.sha256(b"a" * 100).digest())
+            f.write_bytes(b"a" * 99 + b"b")
+            self.assertNotEqual(I.sha256_regular(str(f)), a)
+        self.assertIsNone(I.sha256_regular(str(self.repo))); self.assertIsNone(I.sha256_regular(str(self.repo / "nope")))
+
+    def test_the_isolation_module_loads_where_unix_account_modules_dont_exist(self):
+        """Windows has no grp or pwd: sg_isolate still imports (story-gate measure and ci-tests load it there), and
+        read_regular works; only creating an account needs them."""
+        import importlib, sg_isolate
+        self.addCleanup(importlib.reload, sg_isolate)
+        with patch.dict(sys.modules, {"grp": None, "pwd": None}):
+            I = importlib.reload(sg_isolate)
+            f = self.repo / "r.txt"; f.write_bytes(b"ok")
+            self.assertEqual(I.read_regular(str(f), 10), b"ok")
+            with self.assertRaises(ImportError):
+                I.Account(str(self.repo), [])
+
+    def test_strict_runs_nothing_when_isolation_is_unavailable(self):
+        """ci-tests with isolation required but impossible: strict runs no pull request code and says why; relaxed runs
+        it and marks every result not isolated."""
+        self.cfg(test_command="%s -c \"open('ran.txt','w').write('1')\"" % PY)
+        run(self.repo, "start", "SAT-1")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        import sg_isolate
+        out = self.repo.parent / (self.repo.name + "-out"); self.addCleanup(shutil.rmtree, out, True)
+        with patch.object(sg_isolate, "available", return_value="the runner's account can't use sudo without a password"), \
+                patch.dict(os.environ, {"STORY_GATE_ISOLATE": "1", "STORY_GATE_ID": "SAT-1"}):
+            g.cmd_ci_tests(str(out))
+            rec = json.loads((out / "results.json").read_text())
+            self.assertEqual((rec["exit_code"], rec["isolated"]), (None, False)); self.assertIn("sudo without a password", rec["error"])
+            self.assertFalse((self.repo / "ran.txt").exists())  # nothing of the pull request ran
+            self.cfg(ci_isolation="relaxed")
+            g.cmd_ci_tests(str(out))
+            rec = json.loads((out / "results.json").read_text())
+            self.assertEqual((rec["exit_code"], rec["isolated"]), (0, False)); self.assertTrue((self.repo / "ran.txt").exists())
+
+    def test_unisolated_ci_results_never_count_as_checked(self):
+        """struct_done(): CI tests or scenarios run without isolation fail under strict and are CONCERNS under relaxed;
+        budgets measured without isolation are reported, so a decided budget fails."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+        self.fill_validation()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        res = json.loads((sd / "scenario_results.json").read_text())["results"]
+        for mode, want in (("strict", "FAIL"), ("relaxed", "CONCERNS")):
+            self.cfg(ci_isolation=mode)
+            fp = g.work_fingerprint()  # config.json is part of the work in this test repository
+            (sd / "test_results.json").write_text(json.dumps({"exit_code": 0, "fingerprint": fp, "source": "ci", "isolated": False}))
+            for r in res.values():
+                r.update(source="ci", isolated=False, fingerprint=fp)
+            (sd / "scenario_results.json").write_text(json.dumps({"results": res}))
+            out = g.struct_done(sd, "SAT-1", ["app.py"], g.cfg(), in_ci=True)
+            self.assertEqual(out["tests_ran_green"][0], want, mode); self.assertIn("reported, not checked", out["tests_ran_green"][1])
+            self.assertEqual(out["scenarios_prove_acs"][0], want, mode)
+        (sd / "test_results.json").write_text(json.dumps({"exit_code": 0, "fingerprint": fp, "source": "ci", "isolated": True}))
+        self.assertIs(g.struct_done(sd, "SAT-1", ["app.py"], g.cfg(), in_ci=True)["tests_ran_green"][0], True)
+        (self.repo / ".story-gate/budgets.json").write_text(json.dumps({"version": 1, "budgets": [
+            {"name": "w", "unit": "count", "limit": 5, "status": "decided", "source": "t", "measure": "number",
+             "command": [PY, "-c", "print(3)"], "pins": ["scripts"]}]}))
+        md = self.repo.parent / (self.repo.name + "-m"); (md / "measures").mkdir(parents=True); self.addCleanup(shutil.rmtree, md, True)
+        import sg_measure as M
+        b = M.load((self.repo / ".story-gate/budgets.json").read_text())[0]
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+        (md / "measures/w.raw").write_bytes(b"3\n")
+        for mode, iso, want in (("strict", False, "not_run"), ("strict", None, "not_run"), ("relaxed", False, "reported"),
+                                ("relaxed", True, "checked"), ("strict", True, "checked")):
+            self.cfg(ci_isolation=mode)
+            meta = {"head": head, "runs": {"w": {"spec": M.spec_hash(b), "exit_code": 0}}}
+            if iso is not None:
+                meta["isolated"] = iso
+            (md / "measures.json").write_text(json.dumps(meta))
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                r = g.ci_budgets(str(md), "main", ["app.py"])["w"]
+            self.assertEqual(r["state"], want, (mode, iso))  # strict: a run not known to be isolated is no run
+
+    @unittest.skipIf(os.name == "nt", "the account path runs /bin/sh; isolation is never available on Windows")
+    def test_clean_up_problems_are_warnings_not_a_lost_result(self):
+        """When clean-up after the run doesn't finish (the account can't be removed), the verified result is kept, the
+        problem is a GitHub warning, and it's recorded with the result."""
+        self.cfg(test_command="%s -c \"print('ok')\"" % PY)
+        run(self.repo, "start", "SAT-1")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+
+        class Fake:
+            """Stands in for sg_isolate.Account: runs the command as is, and its clean-up reports a problem."""
+            def wrap(self, argv, max_file=None):
+                """The command unchanged."""
+                return list(argv)
+
+            def stop(self):
+                """Nothing to stop."""
+
+            def teardown(self):
+                """Clean-up that couldn't remove the account."""
+                return ["couldn't remove the throwaway account sgpr-x and its home folder; remove them by hand"]
+        out = self.repo.parent / (self.repo.name + "-out"); self.addCleanup(shutil.rmtree, out, True)
+        import io, contextlib
+        buf = io.StringIO()
+        with patch.object(g, "ci_account", return_value=(Fake(), "")), patch.dict(os.environ, {"STORY_GATE_ISOLATE": "1"}), \
+                contextlib.redirect_stdout(buf):
+            g.cmd_ci_tests(str(out))
+        rec = json.loads((out / "results.json").read_text())
+        self.assertEqual((rec["exit_code"], rec["isolated"]), (0, True))
+        self.assertIn("remove them by hand", rec["warnings"][0])
+        self.assertIn("::warning title=story-gate: clean-up::couldn't remove", buf.getvalue())
+
+    def test_the_gate_job_takes_isolation_only_from_the_tests_jobs_own_record(self):
+        """ci: test and scenario results count as isolated only when the tests job's own results.json / scenarios.json
+        say so; anything else (missing, false, or a story-folder claim) is stamped not isolated."""
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "start", "SAT-1"); self.fill_ready(); run(self.repo, "score", "SAT-1", "ready")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (self.repo / "app.py").write_text("x = 2\n")
+        self.fill_validation()
+        td = self.repo.parent / (self.repo.name + "-td"); td.mkdir(); self.addCleanup(shutil.rmtree, td, True)
+        name = next(iter(json.loads((sd / "scenario_results.json").read_text())["results"]))
+        env = {"SG_HEAD_REF": "feat/SAT-1-x", "STORY_GATE_ISOLATE": "1"}
+        for flag, want in ((True, True), (False, False), (None, False)):
+            rec, sc = {"exit_code": 0, "command": "x"}, {"results": {name: {"passed": True, "spec": "s"}}}
+            if flag is not None:
+                rec["isolated"] = sc["isolated"] = flag
+            (td / "results.json").write_text(json.dumps(rec)); (td / "scenarios.json").write_text(json.dumps(sc))
+            run(self.repo, "ci", "--tests", str(td), env=env)
+            self.assertIs(json.loads((sd / "test_results.json").read_text())["isolated"], want, flag)
+            self.assertIs(json.loads((sd / "scenario_results.json").read_text())["results"][name]["isolated"], want, flag)
+        res = json.loads((sd / "scenario_results.json").read_text())
+        res["results"][name]["isolated"] = True  # a claim in the story folder never counts
+        (sd / "scenario_results.json").write_text(json.dumps(res))
+        (td / "scenarios.json").write_text(json.dumps({"results": {name: {"passed": True, "spec": "s"}}}))
+        run(self.repo, "ci", "--tests", str(td), env=env)
+        self.assertIs(json.loads((sd / "scenario_results.json").read_text())["results"][name]["isolated"], False)
+
+    def test_after_pull_request_code_ran_story_gates_git_trusts_nothing_it_wrote(self):
+        """GIT_LOCKED: git reads no global or system config and runs no hook, fsmonitor, external diff or submodule
+        command; work_state reads links, pipes and nested repositories without following or running anything."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.addCleanup(setattr, g, "GIT_LOCKED", False)
+        g.GIT_LOCKED = True
+        env = g.git_env()
+        self.assertEqual((env["GIT_CONFIG_NOSYSTEM"], env["GIT_CONFIG_GLOBAL"]), ("1", os.devnull))
+        for opt in ("core.fsmonitor=false", "core.hooksPath=" + os.devnull, "diff.external=", "diff.ignoreSubmodules=all"):
+            self.assertIn(opt, g.GIT_LOCK_ARGS)
+        self.assertTrue(g.git("rev-parse", "HEAD").strip())  # still works on the checkout itself
+        other = self.repo.parent / (self.repo.name + "-other"); self.addCleanup(shutil.rmtree, other, True)
+        other.mkdir(); subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        inherited = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other), "GIT_INDEX_FILE": str(other / "idx"),
+                     "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "true"}
+        with patch.dict(os.environ, inherited):
+            self.assertFalse(set(inherited) & set(g.git_env()))  # git can't be pointed at another repository
+            self.assertEqual(Path(g.git("rev-parse", "--show-toplevel").strip()).resolve(), self.repo.resolve())
+        (self.repo / "data.txt").write_text("x")
+        self.assertEqual(g.locked_digest(self.repo / "data.txt")[1:], hashlib.sha256(b"x").digest())
+        if os.name != "nt":
+            os.symlink("/etc/passwd", self.repo / "link")
+            self.assertEqual(g.locked_digest(self.repo / "link"), b"-LINK:/etc/passwd")
+            os.mkfifo(self.repo / "pipe")
+            self.assertEqual(g.locked_digest(self.repo / "pipe"), b"-SPECIAL")  # never opened, so it can't hang the job
+            nested = self.repo / "evil"; nested.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+            (nested / "f").write_text("1")
+            a = g.locked_digest(nested); (nested / "f").write_text("2")
+            self.assertTrue(a.startswith(b"-DIR:")); self.assertNotEqual(a, g.locked_digest(nested))
+            self.assertIn("evil/", g.work_state())  # recorded without running git inside it

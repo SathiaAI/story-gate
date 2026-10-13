@@ -150,20 +150,24 @@ def _file_limit():
     resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
 
 
-def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
+def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None, account=None):
     """Run argv without a shell in root for at most `limit` seconds; the whole process tree ends with it.
     Returns (exit code or None, the last `keep` bytes of output as text, total output bytes, note). Output goes to a file,
     not a pipe, so a server the command leaves running can't hold the run open. With max_bytes, the output is checked
     every 50 ms and the command stopped once it passes that size; on Linux and macOS the system also refuses any file the
-    command writes past FILE_LIMIT, a hard bound on the disk it can fill. Shared by scenarios and measures."""
+    command writes past FILE_LIMIT, a hard bound on the disk it can fill. With account (sg_isolate.Account, in CI) the
+    command runs as that throwaway account, and afterwards every process of the account is stopped and the stop verified.
+    Shared by scenarios, measures and CI's test run."""
     argv = list(argv)
     exe = shutil.which(argv[0], path=os.environ.get("PATH")) if not os.path.dirname(argv[0]) else None
     if exe:
         argv[0] = exe  # Windows: finds npm.cmd, pytest.exe; elsewhere the same program the shell would run
+    if account is not None:  # CI: run it as the throwaway account (sg_isolate), with the file-size limit set inside
+        argv = account.wrap(argv, max_file=(FILE_LIMIT // 512) if max_bytes else None)
     out, code, note, size = "", None, "", 0
     try:
         kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-        if max_bytes and os.name != "nt":
+        if max_bytes and os.name != "nt" and account is None:
             kw["preexec_fn"] = _file_limit
         with tempfile.TemporaryFile() as buf:
             p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=buf, stderr=subprocess.STDOUT, **kw)
@@ -182,6 +186,8 @@ def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
                     if time.monotonic() >= end:
                         note = "stopped after %d seconds (timeout)" % limit
                         break
+            if account is not None:
+                account.stop()  # every process of the account, wherever it went (a detached one too); verified
             _kill(p)  # the command's whole process group ends with it (servers it started, stray children)
             try:
                 p.wait(timeout=10)
@@ -195,12 +201,12 @@ def execute(argv, root, limit, keep=MATCH_LIMIT, max_bytes=None):
     return code, out, size, note
 
 
-def run(s, root, work_state, source, timeout=None):
+def run(s, root, work_state, source, timeout=None, account=None):
     """Run one scenario without a shell. Returns the result record. work_state() -> {path: digest} of the work.
     A run that creates or changes files in the work is void: it would be testing code that isn't the code under review."""
     before = work_state()
     t0, limit = time.time(), int(timeout or s["timeout"])
-    code, out, _, note = execute(s["argv"], root, limit)
+    code, out, _, note = execute(s["argv"], root, limit, account=account)
     matched = bool(code is not None and re.search(s["expect_output"], out))
     after = work_state()
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
@@ -213,7 +219,7 @@ def run(s, root, work_state, source, timeout=None):
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "output_tail": redact(out)[-TAIL:]}
 
 
-def run_all(specs, root, work_state, source, ac_ids, budget=CI_BUDGET, skip_local_only=False):
+def run_all(specs, root, work_state, source, ac_ids, budget=CI_BUDGET, skip_local_only=False, account=None):
     """Run every usable scenario in order inside a total time budget. Returns {name: result}."""
     results, t0 = {}, time.time()
     for s in specs[:MAX_SCENARIOS]:
@@ -231,7 +237,7 @@ def run_all(specs, root, work_state, source, ac_ids, budget=CI_BUDGET, skip_loca
             results[name] = {"spec": spec_hash(s), "passed": False, "source": source,
                              "note": "not run: the %d-second budget for all scenarios ran out" % budget}
             continue
-        results[name] = run(s, root, work_state, source, timeout=min(s["timeout"], int(left)))
+        results[name] = run(s, root, work_state, source, timeout=min(s["timeout"], int(left)), account=account)
     return results
 
 

@@ -82,8 +82,9 @@ first.
   folder (`scripts`): a pinned folder covers every file in it.
 
 **What CI can't prove.** Running a command again proves it ran on this code. It doesn't prove the command measures the
-right thing. A measuring command that runs the pull request's own code (its tests, say) can be fooled by that code,
-which can even outlive the command on the measure job's runner; reviewers see such code in the diff. Pins stop a pull request from quietly changing the measuring script; they can't check that the script was
+right thing. A measuring command that runs the pull request's own code (its tests, say) can be fooled by what that
+code prints; reviewers see such code in the diff. In CI the command runs as a separate account, so nothing it starts
+can change story-gate's saved output (see the guide: "Pull request code runs as a separate account in CI"). Pins stop a pull request from quietly changing the measuring script; they can't check that the script was
 right in the first place. Read a budget's command before you decide it.
 
 ## Writing a measuring command

@@ -70,8 +70,9 @@ they block.
 1. `runtime-prepare` copies the default branch's `config.json` and `budgets.json` before any PR code runs.
 2. The measure job (no secrets, its own runner, no tests or scenarios) runs the budgets that apply and saves, per
    budget: exit code, the capped raw output or report (secret shapes removed), the time and the command hash. Nothing
-   else. Keeping it apart from the tests job means test and scenario code can't rewrite the saved output. Code the
-   measuring command itself runs still can: that is the limit stated in the threat model.
+   else. The commands run as a separate throwaway account (`sg_isolate.py`): it can't write the saved output, and all
+   its processes are stopped, and the stop verified, before story-gate reads anything. Where isolation can't be set up,
+   `ci_isolation` decides: strict measures nothing, relaxed measures and marks every value reported.
 3. The story-gate job (secrets, never runs PR code) recomputes which budgets apply, which pinned files changed (from its
    own checkout), parses the saved output with its own parser and compares it with the default branch's limit. A saved
    run for another command hash is ignored.

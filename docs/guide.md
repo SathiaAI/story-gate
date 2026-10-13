@@ -349,6 +349,29 @@ CI measures it with the default branch's command and compares the number with yo
 
 The full guide, including how to write a measuring command and what CI can and can't prove, is [budgets.md](budgets.md).
 
+### Pull request code runs as a separate account in CI
+
+Your tests, scenarios and budgets run the pull request's own code. In CI, story-gate runs that code as a new,
+throwaway account on the runner, not as its own:
+
+- That account has no admin rights, no groups and no tokens. It gets its own home folder, so installs and caches work.
+- It gets only a short list of environment variables: `PATH`, locale and time zone, `CI`, a few plain GitHub facts
+  (repository, commit, run) and toolchain locations such as `JAVA_HOME`. Nothing else is passed, and nothing whose
+  name looks like a secret. A test that needs another variable sets it in the test command itself
+  (`MY_FLAG=1 npm test`).
+- It can't change story-gate's files or results. After each run, story-gate stops every process it started (a hidden
+  background one too) and checks none is left before it reads anything.
+- **What "checked by CI" means:** CI ran your default branch's command on this code, and nothing changed the result
+  afterwards. It doesn't make a test that lies about itself honest; reviewers and the judge read the tests for that.
+
+This needs a Linux runner where story-gate can create an account (GitHub's own runners can). `ci_isolation` decides
+what happens elsewhere:
+
+| `ci_isolation` | Where isolation can't be set up |
+|---|---|
+| `strict` (default) | CI runs none of the pull request's code and says why, so the check fails. |
+| `relaxed` | CI runs it as before, but tests and scenarios are CONCERNS and budgets *reported*, not *checked*. Use it for suites that need Docker: Docker access would make the account an admin. Choosing it is a weaker rule. |
+
 ### ACCEPTANCE: in CI, on GitHub
 | Check | Question |
 |---|---|
@@ -411,6 +434,7 @@ Lists are comma-separated (`settings set enforce_points ci,stop`); `""` empties 
 | `spec_files` | empty | PRD/TRD files to fingerprint at READY (also taken from a `repo` source) |
 | `test_globs` | common patterns | Where tests live, so `test_refs` resolve only to real test files |
 | `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
+| `ci_isolation` | `"strict"` | In CI, pull request code runs as a separate account, or not at all. `"relaxed"`: where that can't be set up, it runs anyway and the results count as reported. A weaker rule |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |
@@ -687,7 +711,7 @@ Every number in the issue and the report says how it's calculated, and estimates
 - **Pilot status for some clients:**
   - Grok Build's and Muse's hook formats are partly unverified.
   - Cursor and Grok also read Claude's hook file, so a warning can show twice.
-- **Scenarios are not a sandbox:** a scenario runs with your rights on your computer, and with the CI job's rights in CI. story-gate limits time and output and removes known secret shapes, but redaction can miss things. Use test data. In CI, scenarios run in the same job as the PR's tests, so they're as trustworthy as that job, which has no secrets.
+- **Scenarios are not a sandbox:** a scenario runs with your rights on your computer, and with the CI job's rights in CI. story-gate limits time and output and removes known secret shapes, but redaction can miss things. Use test data. In CI, scenarios and tests run as a separate throwaway account with no secrets, and story-gate stops all of its processes before it reads the results.
 - **Shell writes:** detection is best-effort. Opaque scripts can still write files, and the CI check is what catches them.
 - **Judge output:** the judge returns scores, not reasons, and % complete is an estimate.
 - **Teams in CODEOWNERS:** team entries (`@org/team`) aren't resolved yet. List people, or use `approvers`.
