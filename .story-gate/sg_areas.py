@@ -22,7 +22,7 @@ MEASURES = ("sarif", "junit", "number", "date")
 MAX_AREAS, MAX_CHECKS, MAX_TRIGGERS, MAX_PATTERN = 10, 10, 20, 200
 DIFF_CAP, MATCH_TIME = 5_000_000, 10
 AREA_FIELDS = {"mode", "paths", "content", "checks"}
-CHECK_FIELDS = {"name", "measure", "command", "report", "pins", "timeout", "expect_exit", "limit", "unit", "levels",
+CHECK_FIELDS = {"name", "measure", "command", "report", "pins", "data", "timeout", "expect_exit", "limit", "unit", "levels",
                 "suppressed", "source"}
 UNIT_OF = {"sarif": "findings", "junit": "failed tests", "date": "days"}
 
@@ -113,9 +113,12 @@ def check_problems(ch):
     sp = ch.get("suppressed")
     if sp is not None and (m != "sarif" or sp not in ("count", "exclude")):
         out.append('suppressed is only for sarif checks: "count" (default: suppressed findings still count) or "exclude"')
-    if m == "date" and not ch.get("pins"):
-        out.append("a date check needs pins: the files that hold your prices and the script that reads their date, so a "
-                   "change to them can't be checked by the same pull request")
+    data = ch.get("data")
+    if m == "date" and (not isinstance(data, list) or not data or len(data) > M.MAX_LIST or not all(M._repo_path(x) for x in data)):
+        out.append("a date check needs data: the repository files that hold your prices (they are pinned, so new prices "
+                   "and their date need a pull request of their own)")
+    elif m != "date" and data is not None:
+        out.append("data is only for date checks")
     rec = {"name": "x", "unit": "count", "limit": 0, "status": "decided", "source": ch.get("source"),
            "measure": m if m in ("number", "junit") else "number", "command": ch.get("command"),
            "pins": ch.get("pins", []), "timeout": ch.get("timeout", M.DEFAULT_TIMEOUT)}
@@ -195,7 +198,8 @@ def _check(ch):
     """One valid check with every optional field filled in."""
     import sg_measure as M
     return {"name": ch["name"], "measure": ch["measure"], "command": list(ch["command"]), "report": ch.get("report"),
-            "pins": sorted(set(ch.get("pins") or [])), "timeout": ch.get("timeout", M.DEFAULT_TIMEOUT),
+            "pins": sorted(set(ch.get("pins") or []) | set(ch.get("data") or [])), "data": sorted(set(ch.get("data") or [])),
+            "timeout": ch.get("timeout", M.DEFAULT_TIMEOUT),
             "expect_exit": ch.get("expect_exit"), "limit": ch.get("limit", 0),
             "unit": ch.get("unit") or UNIT_OF.get(ch["measure"], "count"),
             "levels": list(ch.get("levels") or ["error"]) if ch["measure"] == "sarif" else None,
@@ -273,9 +277,10 @@ def content_hits(patterns, lines, timeout=MATCH_TIME):
     return hits, ""
 
 
-def applicable(areas, changed, diff, is_record):
+def applicable(areas, changed, diff, is_record, whole=True):
     """({area: why it applies} for areas that aren't off, notes). changed: changed paths from the merge base (None when
-    the diff couldn't be read: then every area applies). diff: the unified diff text from the merge base."""
+    the diff couldn't be read: then every area applies). diff: the unified diff text from the merge base. whole: False
+    when some changed content isn't in diff (an untracked file too big or too many to read)."""
     live = {n: a for n, a in areas.items() if a["mode"] != "off"}
     if changed is None:
         return {n: "story-gate couldn't read the change, so every area applies" for n in live}, []
@@ -283,6 +288,7 @@ def applicable(areas, changed, diff, is_record):
         return {}, []
     out, notes = {}, []
     lines, complete = changed_lines(diff or "", is_record)
+    complete = complete and whole
     if not complete:
         notes.append("the change is larger than story-gate reads for content patterns, or changes a binary file; every area "
                      "with patterns applies")

@@ -9517,7 +9517,8 @@ class TestGuardrails(Base):
                ({"checks": [self.check(measure="sarif")]}, "report"), ({"checks": [self.check(levels=["error"])]}, "levels is only"),
                ({"checks": [self.check(measure="sarif", report="o.sarif", levels=["fatal"])]}, "levels"),
                ({"checks": [self.check(suppressed="exclude")]}, "suppressed is only"),
-               ({"checks": [self.check(measure="date", pins=[])]}, "date check needs pins"),
+               ({"checks": [self.check(measure="date")]}, "needs data"), ({"checks": [self.check(measure="date", data=["../p"])]}, "needs data"),
+               ({"checks": [self.check(data=["p.json"])]}, "only for date"),
                ({"checks": [self.check(measure="sarif", report="o.sarif", limit=0.5)]}, "whole number"),
                ({"checks": [self.check(limit=-1)]}, "0 or more"), ({"checks": [self.check(unit="seconds")]}, "unit"),
                ({"checks": [self.check(source="")]}, "source"), ({"checks": [self.check(command="ls")]}, "command"),
@@ -9606,6 +9607,10 @@ class TestGuardrails(Base):
             if "diff" in a:
                 raise RuntimeError("git diff failed")
             return real(*a)
+        (self.repo / "big.bin.txt").write_text("y" * gate.UNTRACKED_BYTES)  # an untracked file too big to read
+        why, notes, _ = gate.areas_that_apply(dict(gate.cfg(), guardrails={"areas": {"c": {"content": ["zzz"], "checks": [self.check()]}}}), "main")
+        self.assertIn("c", why); self.assertTrue(notes)
+        (self.repo / "big.bin.txt").unlink()
         with patch.object(gate, "must", side_effect=diff_fails):
             why, _, files = gate.areas_that_apply(gate.cfg(), "main")
             self.assertIsNone(files); self.assertIn("quality", why)
@@ -9709,7 +9714,8 @@ class TestGuardrails(Base):
                     d, w = M.parse_date(text)
                     self.assertIsNone(d); self.assertIn(why, w)
             self.assertEqual((M.age_days("2026-10-13"), M.age_days("2026-09-13"), M.age_days("2026-10-20"), M.age_days("x")), (0, 30, None, None))
-            b = A.records(A.load({"areas": {"prices": {"checks": [self.check(measure="date", limit=30, pins=["data/prices.json"])]}}}))[0]
+            b = A.records(A.load({"areas": {"prices": {"checks": [self.check(measure="date", limit=30, data=["data/prices.json"])]}}}))[0]
+            self.assertIn("data/prices.json", b["pins"])  # price files are always pinned
             self.assertEqual(A.refresh(b, {"state": "checked", "value": "1", "as_of": "2026-09-01"})["value"], "42")
             self.assertEqual(A.refresh(b, {"state": "checked", "value": "1", "as_of": "bad"})["state"], "not_run")
             rec = {"spec": M.spec_hash(b), "fingerprint": "f", "note": ""}
@@ -9889,7 +9895,7 @@ class TestGuardrails(Base):
         'reported', so an enforce area fails in CI: change those in a pull request of their own."""
         A, M = self.mods()
         b = A.records(A.load({"areas": {"prices": {"mode": "enforce", "checks": [self.check(
-            measure="date", limit=30, pins=["data/prices.json", "tools/age.py"], command=[PY, "tools/age.py"])]}}}))[0]
+            measure="date", limit=30, pins=[], data=["data/prices.json"], command=[PY, "tools/age.py"])]}}}))[0]
         self.assertIn("data/prices.json", M.trust_problems(b, str(self.repo), ["data/prices.json", "app.py"])[0])
         self.assertEqual(M.trust_problems(b, str(self.repo), ["app.py"]), [])
         rec = {"spec": M.spec_hash(b), "fingerprint": "f", "note": ""}

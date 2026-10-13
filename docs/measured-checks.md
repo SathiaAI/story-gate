@@ -127,7 +127,8 @@ with direction `max` and tolerance 0, keyed `area/check`, plus its area and mode
   unless the check says `suppressed: exclude`; `executionSuccessful: false`, a missing `results` list, another version
   or any malformed field is `not_run`) and `date` (one ISO-8601 date or date-time, UTC when no zone; the value is the
   age in whole UTC calendar days, recomputed from the stored `as_of` date whenever it is read; a future date is
-  `not_run`). `levels` and `suppressed` are part of the record's `spec` hash. `junit` and `number` as above.
+  `not_run`; a date check names its price files in `data`, which are always pinned). `levels` and `suppressed` are part of
+  the record's `spec` hash. `junit` and `number` as above.
 - **Records.** `.story-gate/stories/<ID>/guardrail_results.json`: `{"v": 1, "story", "results": {"area/check": result}}`,
   the same result shape as budgets plus `findings`/`suppressed` (SARIF) or `as_of` (date). The measure job saves raw
   output under `measures/areas/<area>/<check>.raw`.

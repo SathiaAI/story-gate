@@ -82,7 +82,7 @@ mkdir -p evil && (cd evil && git init -q && printf '#!/bin/sh\nid -u > "%s/fsmon
     cfg = json.loads((repo / ".story-gate/config.json").read_text())
     cfg.update({"test_command": "./tests.sh", "junit_path": "reports/junit.xml", "guardrails": {"areas": {"security": {
         "mode": "enforce", "checks": [{"name": "scan", "measure": "sarif", "report": "reports/scan.sarif", "command": ["python3", "scan.py"],
-                                       "source": "e2e"}]}}}})
+                                       "pins": ["scan.cfg"], "source": "e2e"}]}}}})
     (repo / ".story-gate/config.json").write_text(json.dumps(cfg))
     (repo / ".story-gate/budgets.json").write_text(json.dumps({"version": 1, "budgets": [
         {"name": "widgets", "unit": "count", "limit": 5, "status": "decided", "source": "e2e", "measure": "number",

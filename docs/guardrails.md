@@ -61,12 +61,13 @@ price page. Your small script prints the date those prices were last checked (fo
 `data/prices.json`). story-gate counts the days from that date to today, in UTC, and compares them with your limit.
 
 ```
-story-gate settings area prices check age add --measure date --limit 30 \
-  --pins data/prices.json,tools/price_date.py --source "owner: re-check prices monthly" -- python3 tools/price_date.py
+story-gate settings area prices check age add --measure date --limit 30 --data data/prices.json \
+  --source "owner: re-check prices monthly" -- python3 tools/price_date.py
 ```
 
-- A date check needs `--pins`: the price file and the script. A pull request that changes them gets no credit, so new
-  prices and their date go in a pull request of their own, which a person checks.
+- A date check needs `--data`: the files that hold the prices. They are pinned, and so is the script after `python3`,
+  so a pull request that changes them gets no credit: new prices and their date go in a pull request of their own,
+  which a person checks.
 - Accepted: `2026-10-01`, `2026-10-01T09:30Z`, `2026-10-01T09:30:00+02:00`. No time zone means UTC. A date after today
   (UTC), an impossible date or more than one word is *not run*.
 - The age is worked out again every day: data that was fresh last week can be too old today.
@@ -84,7 +85,7 @@ story-gate settings area prices check age add --measure date --limit 30 \
   them (`settings` refuses values that look like keys or tokens).
 - When story-gate can't be sure, the area applies: the change couldn't be read (for example no merge base in a shallow
   clone; story-gate's own workflow fetches the full history), it is over 5 MB, it changes a binary file (its content
-  can't be matched), or the patterns couldn't be matched within 10 seconds.
+  can't be matched), it adds more than 200 untracked files or one of 500 KB or more (not read), or the patterns couldn't be matched within 10 seconds.
 
 ## What CI does
 

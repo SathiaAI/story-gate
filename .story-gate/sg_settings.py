@@ -580,7 +580,7 @@ def cmd_budget(G, a):
 
 
 # ------------------------------------------------------------------ guardrail areas (always through a pull request)
-CHECK_FIELDS = {"measure": "text", "report": "text", "pins": "list", "timeout": "int", "expect_exit": "int", "limit": "number",
+CHECK_FIELDS = {"measure": "text", "report": "text", "pins": "list", "data": "list", "timeout": "int", "expect_exit": "int", "limit": "number",
                 "unit": "text", "levels": "list", "suppressed": "text", "source": "text", "command": "words"}
 
 

@@ -1916,9 +1916,11 @@ def areas_that_apply(c, base):
         files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
                        | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
         diff = must("diff", mb, "--", ".", *[":(exclude)%s" % r for r in RECORD_PATHS]) + untracked_diff(untracked)
+        whole = len(untracked) <= UNTRACKED_MAX and all(
+            (ROOT / n).is_file() and (ROOT / n).stat().st_size < UNTRACKED_BYTES for n in untracked)  # else some content is unread
     except Exception:
-        files, diff = None, ""
-    why, notes = A.applicable(areas, files, diff, is_record)
+        files, diff, whole = None, "", False
+    why, notes = A.applicable(areas, files, diff, is_record, whole)
     return why, notes, files
 
 
@@ -2383,12 +2385,15 @@ def diff_against(base):
     return mb, sorted(names), diff + untracked_diff(untracked)
 
 
+UNTRACKED_MAX, UNTRACKED_BYTES = 200, 500_000  # new files read as evidence: how many, and how large each
+
+
 def untracked_diff(untracked):
     """New files as diff text (they are evidence too, even before `git add`)."""
     out = ""
-    for n in untracked[:200]:
+    for n in untracked[:UNTRACKED_MAX]:
         f = ROOT / n
-        if f.is_file() and f.stat().st_size < 500_000:
+        if f.is_file() and f.stat().st_size < UNTRACKED_BYTES:
             body = rd(f)
             out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
     return out
