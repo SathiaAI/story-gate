@@ -2316,6 +2316,62 @@ class TestRepoHookGuard(RuntimeFixture):
         r = self.git("add", ".claude/settings.json")
         self.assertEqual(self.git("diff", "--cached").stdout, ""); self.assertIn("git checkout --", r.stderr)
 
+    def test_checkout_puts_back_approved_hooks_a_branch_removed_or_reordered(self):
+        """A branch that deletes or reorders an approved project hook gets it back on disk, in the default branch's order,
+        and git status stays clean (the restored hook is never staged as the branch's change); policy commands and
+        display-only edits the branch kept stay."""
+        G = self.guard()
+        gate_ = {"type": "command", "command": "echo gate"}
+        audit = {"type": "command", "command": "echo audit"}
+        appr = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_]}, {"matcher": "Read", "hooks": [audit]}]}}
+        approved = json.dumps(appr).encode()
+        for name, branch in (("deleted", {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}]}}),
+                             ("reordered", {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}, {"matcher": "Bash", "hooks": [gate_]}]}}),
+                             ("all gone", {"theme": "dark"}),
+                             ("emptied", {"hooks": {}}),
+                             ("hooks a list", {"hooks": []}), ("hooks a string", {"hooks": "off"}), ("hooks null", {"hooks": None}),
+                             ("event an object", {"hooks": {"PreToolUse": {"matcher": "Bash"}}}),
+                             ("event a string", {"hooks": {"PreToolUse": "none"}})):
+            with self.subTest(branch=name):
+                out, removed, restored = G.smudge_form(json.dumps(branch).encode(), approved)
+                self.assertEqual(json.loads(out)["hooks"], appr["hooks"]); self.assertEqual(removed, [])
+        kept = {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [dict(audit, statusMessage="Auditing")]},
+                                         {"matcher": ".*", "hooks": [{"command": "./lint.sh"}]}]}}
+        out = json.loads(G.smudge_form(json.dumps(kept).encode(), approved, ["./lint.sh"])[0])["hooks"]["PreToolUse"]
+        self.assertEqual([g["matcher"] for g in out], ["Bash", "Read", ".*"])
+        self.assertEqual(out[1]["hooks"][0]["statusMessage"], "Auditing"); self.assertEqual(out[2]["hooks"], [{"command": "./lint.sh"}])
+        self.assertEqual(G.smudge_form(approved, approved)[0], approved)  # nothing to do: bytes unchanged
+        two = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_, gate_]}]}}  # approved twice in one group
+        split = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_]}, {"matcher": "Bash", "hooks": [gate_]}]}}
+        out = G.smudge_form(json.dumps(split).encode(), json.dumps(two).encode())[0].decode()
+        self.assertEqual(out.count("echo gate"), 2)  # split across groups: still exactly the approved count
+        for whole in (b"[]", b"null", b"0", b"not json", b'"x"'):  # a branch file that isn't an object: the approved file
+            with self.subTest(whole=whole):
+                self.assertEqual(json.loads(G.smudge_form(whole, approved)[0])["hooks"], appr["hooks"])
+        moved = {"hooks": {"Stop": [], "PreToolUse": appr["hooks"]["PreToolUse"]}}  # approved keys first, in approved order
+        self.assertEqual(list(json.loads(G.smudge_form(json.dumps(moved).encode(), approved)[0])["hooks"]), ["PreToolUse", "Stop"])
+        extra = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [dict(gate_, args=["x"], env={"X": "1"})]},
+                                          {"matcher": "Read", "hooks": [audit]}]}}  # anything beyond display keys: approved entry back
+        self.assertEqual(json.loads(G.smudge_form(json.dumps(extra).encode(), approved)[0])["hooks"], appr["hooks"])
+        srv = {"servers": {"fs": {"command": "fs-server"}}}  # an approved entry under a key: blanked or changed, it comes back
+        for branch in ({"servers": {"fs": {}}}, {"servers": {"fs": {"command": "fs-server", "disabled": True}}}):
+            with self.subTest(branch=branch):
+                self.assertEqual(json.loads(G.smudge_form(json.dumps(branch).encode(), json.dumps(srv).encode())[0]), srv)
+        # end to end through git's checkout filter
+        self.approve_on_main(appr)
+        self.git("checkout", "-qb", "drops-gate")
+        f = self.repo / ".claude/settings.json"
+        dropped = self.repo / "dropped.json"  # the branch's commit, as made on a computer without the filter
+        dropped.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}]}}, indent=2))
+        sha = self.git("hash-object", "-w", "--no-filters", "dropped.json").stdout.strip(); dropped.unlink()
+        self.git("update-index", "--cacheinfo", "100644,%s,.claude/settings.json" % sha); self.git("commit", "-qm", "drop the gate hook")
+        self.git("checkout", "-q", "main"); r = self.git("checkout", "-q", "drops-gate")
+        self.assertIn("echo gate", f.read_text())  # back on disk while this branch is checked out
+        self.assertIn("put back 1 hook entry", r.stderr)
+        self.assertEqual(self.git("status", "--porcelain").stdout.strip(), "")  # and never staged as the branch's change
+        (self.repo / "app.txt").write_text("x\n"); self.git("add", "-A"); self.git("commit", "-qm", "unrelated")
+        self.assertNotIn("echo gate", self.git("show", "HEAD:.claude/settings.json").stdout)  # the branch's stored file is unchanged
+
     def test_setting_a_guarded_value_to_the_new_approval_is_staged(self):
         """After the default branch moves from A to B, writing exactly the filter's B output by hand is your edit (the
         filter wrote A here), so git add stages it instead of matching it against what the filter would write now."""

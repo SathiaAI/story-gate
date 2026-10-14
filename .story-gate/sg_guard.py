@@ -186,6 +186,74 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed
 
 
+def _merge_approved(a, b):
+    """The approved value `a` with what the branch kept (`b`, already filtered) merged in: every approved hook entry
+    and group comes back in the approved order (a branch can't remove or reorder them); entries the branch kept that
+    match an approved one keep the branch's display-only keys; what else the branch kept (commands approved by
+    policy, groups holding them) follows. Scalars and other settings are the branch's."""
+    if b is None or (isinstance(a, (dict, list)) and type(a) is not type(b)):
+        return a  # missing, or replaced by another kind of value (a list for an object, a string for a list): approved wins
+    if isinstance(a, dict) and _is_actor(a):  # an approved entry: the branch's copy only if it is the same entry
+        return b if _is_actor(b) and _core(b) == _core(a) else a
+    if isinstance(a, dict) and isinstance(b, dict) and not _is_actor(a):
+        out = {k: _merge_approved(a[k], b.get(k)) for k in a}  # approved keys first, in the approved order
+        out.update((k, v) for k, v in b.items() if k not in a)
+        return out
+    if isinstance(a, list) and isinstance(b, list):
+        rest = list(b)
+        out = []
+        for x in a:
+            if isinstance(x, dict) and (_is_actor(x) or _is_group(x)):
+                same = next((i for i, y in enumerate(rest) if isinstance(y, dict) and (_is_actor(y) == _is_actor(x))
+                             and _core(y) == _core(x)), None)
+                out.append(_merge_approved(x, rest.pop(same)) if same is not None else x)
+            else:
+                out.append(x)
+        extra = [y for y in rest if isinstance(y, (dict, list)) or y not in a]  # plain values already in `a` are there once
+        return out + extra
+    return b
+
+
+def restore_approved(data, approved_bytes):
+    """What the checkout filter writes: the filtered branch file with every approved hook put back where and in the
+    order the default branch has it, so a branch can't switch a project's hook off by deleting or reordering it.
+    Only parts of the file that hold hooks or servers are touched. -> (new_data, restored count)."""
+    try:
+        appr = _load(approved_bytes) if approved_bytes else {}
+    except (ValueError, UnicodeDecodeError):
+        return data, 0
+    if not isinstance(appr, dict) or not isinstance(data, dict):
+        return data, 0
+    keys = {ctx[0] for ctx, _ in actor_places(appr) if ctx}
+    before = sum(actor_places(data).values())
+    out = dict(data)
+    for k in sorted(keys):
+        out[k] = _merge_approved(appr[k], data.get(k)) if k in data else appr[k]
+    return out, sum(actor_places(out).values()) - before
+
+
+def smudge_form(branch_bytes, approved_bytes, allowed=()):
+    """The bytes the checkout filter writes for a hook file: sanitize() (nothing unapproved), then restore_approved()
+    (nothing approved missing or out of order). -> (bytes, removed, restored count)."""
+    out, removed = sanitize(branch_bytes, approved_bytes, allowed)
+    try:
+        data = _load(out)
+    except (ValueError, UnicodeDecodeError):
+        return out, removed, 0
+    new, _ = restore_approved(data, approved_bytes)
+    try:
+        appr = _load(approved_bytes) if approved_bytes else {}
+    except (ValueError, UnicodeDecodeError):
+        appr = {}
+    appr = appr if isinstance(appr, dict) else {}
+    # the merged file passes the same check again: never more copies of an approved hook than the default branch has
+    new, _ = strip_unapproved(new, exec_strings(appr), actor_places(appr), set(allowed))
+    restored = max(0, sum(actor_places(new).values()) - sum(actor_places(data).values()))
+    if json.dumps(new) == json.dumps(data):  # same content in the same order: keep the bytes as they are
+        return out, removed, 0
+    return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed, restored
+
+
 def is_filtered_form(stored, on_disk, allowed=(), approved=None, smudged=None):
     """True when on_disk is `stored` with some entries taken out (and nothing else changed): our own filtered copy,
     possibly filtered under an older approval. `smudged` is the note of what the filter last wrote here (None when there
@@ -336,13 +404,17 @@ def filter_main(mode, path):
             if _conflicted(data):
                 out = data  # a merge conflict: the markers make it unparseable for every tool; resolving it is your call
             else:
-                out, removed = sanitize(data, approved, allowed)
+                out, removed, restored = smudge_form(data, approved, allowed)
                 out, blocked = PIN.smudge(out, top, path)  # repo scripts: run only the default branch's copy, or not at all
                 remember_smudge(top, path, out)
                 if blocked:
                     log(top, "filtered %s: %d hook(s) run repository code without pins" % (path, len(blocked)))
                     sys.stderr.write("story-gate: %d hook(s) in %s run repository code that isn't pinned, so they won't run "
                                      "(gate.py doctor shows how to pin them)\n" % (len(blocked), path))
+                if restored:
+                    log(top, "filtered %s: put back %d approved hook entr%s" % (path, restored, "y" if restored == 1 else "ies"))
+                    sys.stderr.write("story-gate: put back %d hook entr%s in %s that this branch removed or moved (the default "
+                                     "branch keeps them; change hooks there)\n" % (restored, "y" if restored == 1 else "ies", path))
                 if removed:
                     log(top, "filtered %s: removed %d unapproved entr%s" % (path, len(removed), "y" if len(removed) == 1 else "ies"))
                     sys.stderr.write("story-gate: removed %d unapproved hook entr%s or setting(s) from %s (they came from this branch, "
@@ -353,7 +425,7 @@ def filter_main(mode, path):
             plain = PIN.unwrap_bytes(data)  # never commit runner commands (they hold this computer's paths)
             out = plain
             note = last_smudge(top, path)
-            if idx is not None and ((note is None and PIN.smudge(sanitize(idx, approved, allowed)[0], top, path)[0] == data)
+            if idx is not None and ((note is None and PIN.smudge(smudge_form(idx, approved, allowed)[0], top, path)[0] == data)
                                     or is_filtered_form(idx, plain, allowed, approved, note)):
                 out = idx
                 if note is None and _guarded_differ(idx, plain):
