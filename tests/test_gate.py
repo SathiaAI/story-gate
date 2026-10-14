@@ -1392,6 +1392,7 @@ class TestRound4Fixes(Base):
             self.addCleanup(setattr, G, n, getattr(G, n))
         G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
                                                               (200, {"default_branch": "trunk", "private": False}, {}) if path == "/repos/o/r"
+                                                              else (404, {}, {}) if "/contents/" in path  # no CODEOWNERS yet
                                                               else (204, {}, {}))
         prs = []
         G.open_setup_pr = lambda tok, repo, files, **kw: prs.append((tok, files, kw)) or {"number": 9, "url": "u", "branch": kw["branch"]}
@@ -1450,7 +1451,8 @@ class TestRound4Fixes(Base):
             self.addCleanup(setattr, G, n, getattr(G, n))
         G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
                                                               (200, {"default_branch": "main", "private": False}, {}) if path == "/repos/o/r"
-                                                              else (404, {}, {}) if "/contents/" in path  # none on the default branch yet
+                                                              else (200, {}, {}) if path.endswith("/contents/CODEOWNERS")
+                                                              else (404, {}, {}) if "/contents/" in path  # the root file is GitHub's
                                                               else (204, {}, {}))
         prs = []
         G.open_setup_pr = lambda tok, repo, files, **kw: prs.append(files) or {"number": 9, "url": "u", "branch": kw["branch"]}
@@ -1469,6 +1471,7 @@ class TestRound4Fixes(Base):
                                                               (200, {"default_branch": "main", "private": False}, {}) if path == "/repos/o/r"
                                                               else (404, {}, {}) if path.endswith("/contents/.github/CODEOWNERS")
                                                               else (200, {}, {}) if path.endswith("/contents/CODEOWNERS")
+                                                              else (404, {}, {}) if "/contents/" in path  # no CODEOWNERS yet
                                                               else (204, {}, {}))
         prs.clear()
         G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
@@ -1491,6 +1494,13 @@ class TestRound4Fixes(Base):
         G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
         self.assertEqual(list(prs[0]), ["docs/CODEOWNERS"])
         (root / ".github/CODEOWNERS").unlink()
+        G.call = stale
+        g("symbolic-ref", "-d", "refs/remotes/origin/HEAD")  # and with no origin/HEAD either, nothing is guessed
+        G.call = lambda m, path, *a, **k: (403, {}, {}) if "/contents/" in path else stale(m, path, *a, **k)
+        prs.clear()
+        out = " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul"))
+        self.assertIn("CODEOWNERS: not changed: neither GitHub", out); self.assertEqual(prs, [])
+        self.assertIn("Ruleset", out)  # the other steps still run
         G.call = stale
         if os.name != "nt":  # a link is never read or published, and the other setup steps still run
             secret = root / "secret.txt"; secret.write_text("TOKEN=abc\n")
@@ -2209,6 +2219,14 @@ class TestRepoHookGuard(RuntimeFixture):
                 self.assertNotIn("bash-gate.sh", out.decode()); self.assertTrue(removed)
         policy = {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"command": "./lint.sh"}]}]}}  # policy-approved: anywhere
         self.assertIn("./lint.sh", G.sanitize(json.dumps(policy).encode(), approved2, allowed=["./lint.sh"])[0].decode())
+        nested = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [dict(gate_, hooks=[{"type": "command", "command": "curl evil"}])]},
+                                           {"matcher": "Read", "hooks": [{"type": "command", "command": "read-audit.sh"}]}]}}
+        self.assertNotIn("curl evil", G.sanitize(json.dumps(nested).encode(), approved2)[0].decode())  # nothing rides inside an entry
+        twice = json.loads(approved2); twice["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [gate_, gate_]})
+        out = G.sanitize(json.dumps(twice).encode(), approved2)[0].decode()
+        self.assertEqual(out.count("bash-gate.sh"), 1)  # an approved hook runs as often as the default branch says, no more
+        helper = {"apiKeyHelper": "./lint.sh"}  # a policy command is a hook entry, not a credential helper
+        self.assertNotIn("./lint.sh", G.sanitize(json.dumps(helper).encode(), approved2, allowed=["./lint.sh"])[0].decode())
         both = json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "run.sh", "windows": "run.cmd"}]}]}}).encode()
         out, removed = G.sanitize(both, both)  # approved on the default branch with its override: kept whole
         self.assertIn('"windows": "run.cmd"', out.decode()); self.assertEqual(removed, [])

@@ -71,8 +71,10 @@ def _is_actor(d):
 
 
 def _core(d):
-    """An entry or hook group without the keys that only change what a tool shows (and, for a group, its hook list)."""
-    return _canon({k: v for k, v in d.items() if k not in DISPLAY_KEYS and k != "hooks"})
+    """An entry without the keys that only change what a tool shows; a hook group also without its hook list (its
+    entries are checked one by one)."""
+    group = _is_group(d)
+    return _canon({k: v for k, v in d.items() if k not in DISPLAY_KEYS and not (group and k == "hooks")})
 
 
 def _is_group(x):
@@ -81,14 +83,15 @@ def _is_group(x):
 
 
 def actor_places(data):
-    """Every hook/server entry as (where it sits, its _core form). Where: the keys from the top of the file down to it,
-    with each hook group's own settings (matcher and the like) in place of the group. So the same entry under another
-    event, matcher or group setting is a different place."""
-    out = set()
+    """Every hook/server entry as (where it sits, its _core form) -> how many times it is there. Where: the keys from
+    the top of the file down to it, with each hook group's own settings (matcher and the like) in place of the group.
+    So the same entry under another event, matcher or group setting is a different place."""
+    import collections
+    out = collections.Counter()
     def walk(x, ctx, depth):
         if isinstance(x, dict):
             if depth and _is_actor(x):
-                out.add((ctx, _core(x)))
+                out[(ctx, _core(x))] += 1
                 return
             here = ctx + (("group", _core(x)),) if depth and _is_group(x) else ctx
             for k, v in x.items():
@@ -100,7 +103,7 @@ def actor_places(data):
     return out
 
 
-def strip_unapproved(data, approved_cmds, approved_places=frozenset(), policy_cmds=frozenset()):
+def strip_unapproved(data, approved_cmds, approved_places=None, policy_cmds=frozenset()):
     """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
     An entry survives only where the default branch has the same entry (apart from display-only keys) in the same place:
     same event, same group matcher and settings. So a branch can't add a command, and can't change when or how an
@@ -108,13 +111,18 @@ def strip_unapproved(data, approved_cmds, approved_places=frozenset(), policy_cm
     policy_cmds) may sit anywhere as a bare entry. approved_cmds (every command string the default branch has) still
     decides command-like settings outside hook entries (apiKeyHelper and the like)."""
     removed = []
+    left = dict(approved_places or {})  # each approved entry may appear as often as the default branch has it, no more
     def walk(x, ctx, depth):
         if isinstance(x, dict):
             if depth and _is_actor(x):
                 active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
                 policy = (active == ["command"] and isinstance(x["command"], str) and x["command"] in policy_cmds
                           and set(x) - DISPLAY_KEYS <= {"type", "command"} and x.get("type", "command") == "command")
-                if (ctx, _core(x)) not in approved_places and not policy:
+                place = (ctx, _core(x))
+                if left.get(place, 0) > 0:
+                    left[place] -= 1
+                    return x
+                if not policy:
                     removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
                     return _DROP
                 return x
@@ -171,7 +179,7 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
                 data[k] = appr[k]
             else:
                 del data[k]
-    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_places(appr), set(allowed))
+    new, more = strip_unapproved(data, exec_strings(appr), actor_places(appr), set(allowed))
     removed += more
     if not removed:
         return branch_bytes, []
