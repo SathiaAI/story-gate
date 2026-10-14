@@ -33,8 +33,8 @@ ACTOR_KEYS = ("command", "url", "prompt", "agent")
 ATTR_MARK = "# story-gate: AI-tool hook files are filtered so a branch can't add commands (gate.py enroll / unenroll)"
 # Per-OS command overrides (VS Code / Copilot hook formats): the tool runs these instead of "command" on that platform.
 OS_COMMAND_KEYS = {"windows", "linux", "osx", "bash", "powershell"}
-# The only sibling keys an approved command may keep when a branch edits the entry; anything else is not kept (fail closed).
-SAFE_ENTRY_KEYS = {"type", "command", "matcher", "timeout", "timeoutSec", "failClosed", "show_output", "statusMessage", "loop_limit"}
+# Keys that only change what a tool shows, never when or how a hook runs: a branch may change these on an approved entry.
+DISPLAY_KEYS = {"statusMessage", "show_output"}
 CANARY = "story-gate-canary-should-never-run"
 _DROP = object()
 
@@ -86,19 +86,50 @@ def actor_entries(data):
     return out
 
 
-def strip_unapproved(data, approved_cmds, approved_entries=frozenset()):
-    """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
-    An entry survives if it is identical to an approved one, or if its only active part is an approved command string."""
-    removed = []
+def _core(d):
+    """An entry or hook group without the keys that only change what a tool shows (and, for a group, its hook list)."""
+    return _canon({k: v for k, v in d.items() if k not in DISPLAY_KEYS and k != "hooks"})
+
+
+def group_settings(data):
+    """The settings of every hook group (a dict holding a "hooks" list: its matcher and the like), as _core forms."""
+    out = set()
     def walk(x, depth):
         if isinstance(x, dict):
-            if depth and _is_actor(x) and _canon(x) not in approved_entries:
+            if depth and isinstance(x.get("hooks"), list) and not _is_actor(x):
+                out.add(_core(x))
+            for v in x.values():
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, depth + 1)
+    walk(data, 0)
+    return out
+
+
+def strip_unapproved(data, approved_cmds, approved_entries=frozenset(), approved_groups=None):
+    """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
+    An entry survives if it is identical to an approved one apart from display-only keys, or if it is nothing but an
+    approved command string (a policy approval). Changing a matcher, a time limit or how an approved hook fails drops it.
+    approved_groups (group_settings of the approved file): a hook group holding a default-branch entry under a matcher
+    (or other group setting) the default branch never had is dropped too, so a branch can't narrow when an approved hook
+    runs. A command approved only by policy (project_hooks_allowed) may sit under any matcher."""
+    removed = []
+    cores = {_core(json.loads(e)) for e in approved_entries if isinstance(json.loads(e), dict)}
+    def walk(x, depth):
+        if isinstance(x, dict):
+            if depth and _is_actor(x) and _canon(x) not in approved_entries and _core(x) not in cores:
                 active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
                 plain_cmd = (active == ["command"] and isinstance(x["command"], str) and x["command"] in approved_cmds
-                             and set(x) <= SAFE_ENTRY_KEYS)
+                             and set(x) - DISPLAY_KEYS <= {"type", "command"} and x.get("type", "command") == "command")
                 if not plain_cmd:
                     removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
                     return _DROP
+            if (approved_groups is not None and depth and isinstance(x.get("hooks"), list) and not _is_actor(x)
+                    and set(x) - DISPLAY_KEYS != {"hooks"} and _core(x) not in approved_groups
+                    and any(isinstance(h, dict) and _core(h) in cores for h in x["hooks"])):  # a default-branch hook, retimed
+                removed.append("<hook group %s>" % _core(x)[:180])
+                return _DROP
             out = {}
             for k, v in x.items():
                 if is_exec_key(k) and not (isinstance(v, str) and v in approved_cmds):
@@ -149,7 +180,7 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
                 data[k] = appr[k]
             else:
                 del data[k]
-    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_entries(appr))
+    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_entries(appr), group_settings(appr))
     removed += more
     if not removed:
         return branch_bytes, []

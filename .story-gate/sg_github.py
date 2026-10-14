@@ -421,6 +421,18 @@ def owners_on_default_branch(repo, token):
     return []
 
 
+def codeowners_path_on_default_branch(repo, token):
+    """The CODEOWNERS path GitHub uses on the default branch (the first of CODEOWNERS_PATHS that exists there); "" when
+    none exists; None when GitHub's answer can't tell."""
+    for path in CODEOWNERS_PATHS:
+        st, _, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
+        if st == 200:
+            return path
+        if st != 404:
+            return None
+    return ""
+
+
 def codeowners_change(co, new, repo, token, login, added, rel=".github/CODEOWNERS"):
     """Put the new CODEOWNERS text where it can be approved: a pull request from the agent App, or the local file for you
     to commit. -> one line for setup-repo's report."""
@@ -475,11 +487,17 @@ def setup_repo(root, repo, owners, token, dry_run=False, login=None):
     A CODEOWNERS change goes in a pull request the agent App opens when it is installed; otherwise in the local file for
     you to commit, when that pull request can be approved (pr_author decides)."""
     out = []
-    rel = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file()), CODEOWNERS_PATHS[0])  # the file GitHub uses
+    # The file GitHub uses on the default branch decides; the local checkout only when GitHub can't tell (or has none).
+    remote = codeowners_path_on_default_branch(repo, token) if token and not dry_run else None
+    local = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file() or (Path(root) / r).is_symlink()), "")
+    rel = remote or local or CODEOWNERS_PATHS[0]
     co = Path(root) / rel
-    text = co.read_text(encoding="utf-8") if co.exists() else ""
-    new = add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
-    if new is not None:
+    link = co.is_symlink()  # never read (and publish) whatever a link points at
+    text = co.read_text(encoding="utf-8") if co.is_file() and not link else ""
+    new = None if link else add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
+    if link:
+        out.append("CODEOWNERS: not changed: %s is a link; replace it with the file itself and run setup-repo again" % rel)
+    elif new is not None:
         added = "CODEOWNERS: added %s to the '*' rule" % " ".join("@" + o.lstrip("@") for o in owners)
         if dry_run:
             out.append(added + " (dry run: nothing written)")

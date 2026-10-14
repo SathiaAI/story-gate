@@ -392,8 +392,9 @@ class Wizard:
         owners = [self.login] + self.approvers
         co_path, old = G.CODEOWNERS_PATHS[0], ""  # .github/CODEOWNERS only when the default branch has no CODEOWNERS file
         for cand in G.CODEOWNERS_PATHS:  # the file GitHub uses (first found), so the repository's existing rules stay in force
-            if subprocess.run(["git", "cat-file", "-e", "origin/%s:%s" % (base, cand)], cwd=str(self.top), capture_output=True).returncode == 0:
-                co_path, old = cand, git(self.top, "show", "origin/%s:%s" % (base, cand))
+            ref = "refs/remotes/origin/%s:%s" % (base, cand)  # the remote's copy: a local branch named origin/<base> can't stand in
+            if subprocess.run(["git", "cat-file", "-e", ref], cwd=str(self.top), capture_output=True).returncode == 0:
+                co_path, old = cand, git(self.top, "show", ref)
                 break
         new = G.add_owners(old, owners)  # the same merge setup_repo does
         if new is not None:
