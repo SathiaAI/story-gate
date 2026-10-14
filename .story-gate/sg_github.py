@@ -433,6 +433,18 @@ def codeowners_path_on_default_branch(repo, token):
     return ""
 
 
+def _codeowners_path_in_git(root):
+    """The CODEOWNERS path on refs/remotes/origin/HEAD's branch in this clone ("" when none); None when git can't tell."""
+    run = lambda *a: subprocess.run(["git", *a], cwd=str(root), capture_output=True, text=True)
+    head = run("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        return None
+    for path in CODEOWNERS_PATHS:
+        if run("cat-file", "-e", "%s:%s" % (head.stdout.strip(), path)).returncode == 0:
+            return path
+    return ""
+
+
 def codeowners_change(co, new, repo, token, login, added, rel=".github/CODEOWNERS"):
     """Put the new CODEOWNERS text where it can be approved: a pull request from the agent App, or the local file for you
     to commit. -> one line for setup-repo's report."""
@@ -453,6 +465,12 @@ def codeowners_change(co, new, repo, token, login, added, rel=".github/CODEOWNER
         except RuntimeError as e:  # report it and let setup-repo go on with the ruleset and Actions steps
             return "CODEOWNERS: not changed: couldn't open the pull request (%s)" % e
         if res.get("existing"):
+            ref = "?ref=" + urllib.parse.quote(res["branch"])
+            for other in CODEOWNERS_PATHS[:CODEOWNERS_PATHS.index(rel)] if rel in CODEOWNERS_PATHS else ():
+                st_o, _, _ = call("GET", "/repos/%s/contents/%s%s" % (repo, other, ref), tok)
+                if st_o != 404:  # an earlier run's file there would be the one GitHub reads, hiding this change
+                    return ("CODEOWNERS: not changed: pull request #%s still has %s, which GitHub would read instead of %s. "
+                            "Close it, then run setup-repo again." % (res.get("number"), other, rel))
             err = update_branch_file(tok, repo, res["branch"], rel, new, "story-gate: code owners")
             if err:
                 return ("CODEOWNERS: not changed: pull request #%s is already open with other code owners and couldn't be "
@@ -489,6 +507,8 @@ def setup_repo(root, repo, owners, token, dry_run=False, login=None):
     out = []
     # The file GitHub uses on the default branch decides; the local checkout only when GitHub can't tell (or has none).
     remote = codeowners_path_on_default_branch(repo, token) if token and not dry_run else None
+    if remote is None:  # GitHub can't tell: the remote's default branch as git last fetched it, never this checkout's files
+        remote = _codeowners_path_in_git(root)
     local = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file() or (Path(root) / r).is_symlink()), "")
     rel = remote or local or CODEOWNERS_PATHS[0]
     co = Path(root) / rel

@@ -1450,6 +1450,7 @@ class TestRound4Fixes(Base):
             self.addCleanup(setattr, G, n, getattr(G, n))
         G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
                                                               (200, {"default_branch": "main", "private": False}, {}) if path == "/repos/o/r"
+                                                              else (404, {}, {}) if "/contents/" in path  # none on the default branch yet
                                                               else (204, {}, {}))
         prs = []
         G.open_setup_pr = lambda tok, repo, files, **kw: prs.append(files) or {"number": 9, "url": "u", "branch": kw["branch"]}
@@ -1472,6 +1473,25 @@ class TestRound4Fixes(Base):
         prs.clear()
         G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
         self.assertEqual(list(prs[0]), ["CODEOWNERS"])
+        # an earlier run's open pull request still carries .github/CODEOWNERS: updating its root file would change nothing
+        stale = G.call
+        G.call = lambda m, path, *a, **k: (200, {}, {}) if "/contents/.github/CODEOWNERS?ref=" in path else stale(m, path, *a, **k)
+        G.open_setup_pr = lambda tok, repo, files, **kw: {"number": 9, "url": "u", "branch": kw["branch"], "existing": True}
+        out = " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul"))
+        self.assertIn("still has .github/CODEOWNERS", out)
+        G.call = stale
+        G.open_setup_pr = lambda tok, repo, files, **kw: prs.append(files) or {"number": 9, "url": "u", "branch": kw["branch"]}
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+        g("init", "-q", "-b", "main"); (root / "docs").mkdir(exist_ok=True); (root / "docs/CODEOWNERS").write_text("* @boss\n")
+        g("add", "docs/CODEOWNERS"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "owners")
+        g("update-ref", "refs/remotes/origin/main", "HEAD"); g("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        (root / ".github").mkdir(exist_ok=True); (root / ".github/CODEOWNERS").write_text("* @weak\n")  # this checkout's own file
+        G.call = lambda m, path, *a, **k: (403, {}, {}) if "/contents/" in path else stale(m, path, *a, **k)
+        prs.clear()  # GitHub won't say which file it uses: git's copy of the default branch decides, not this checkout
+        G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
+        self.assertEqual(list(prs[0]), ["docs/CODEOWNERS"])
+        (root / ".github/CODEOWNERS").unlink()
+        G.call = stale
         if os.name != "nt":  # a link is never read or published, and the other setup steps still run
             secret = root / "secret.txt"; secret.write_text("TOKEN=abc\n")
             os.symlink(secret, root / "CODEOWNERS")
@@ -2175,9 +2195,20 @@ class TestRepoHookGuard(RuntimeFixture):
         out, removed = G.sanitize(narrowed, approved)
         self.assertNotIn("NoSuchTool", out.decode()); self.assertTrue(removed)
         self.assertEqual(G.sanitize(approved, approved), (approved, []))
-        moved = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Write|Edit|Bash", "hooks": [entry]}],
-                                      "Stop": [{"hooks": [entry]}]}}).encode()  # the same approved entry under another event
-        self.assertIn("Stop", G.sanitize(moved, approved)[0].decode())
+        appr2 = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash-gate.sh"}]},
+                                          {"matcher": "Read", "hooks": [{"type": "command", "command": "read-audit.sh"}]}]}}
+        approved2 = json.dumps(appr2).encode()
+        gate_ = {"type": "command", "command": "bash-gate.sh"}
+        for name, branch in (  # each moves an approved hook to where it runs at another time: none is kept
+                ("event", {"hooks": {"Stop": [{"matcher": "Bash", "hooks": [gate_]}]}}),
+                ("no matcher", {"hooks": {"PreToolUse": [{"hooks": [gate_]}]}}),
+                ("other group", {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [gate_]}]}}),
+                ("bare copy", {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"command": "bash-gate.sh"}]}]}})):
+            with self.subTest(moved=name):
+                out, removed = G.sanitize(json.dumps(branch).encode(), approved2)
+                self.assertNotIn("bash-gate.sh", out.decode()); self.assertTrue(removed)
+        policy = {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"command": "./lint.sh"}]}]}}  # policy-approved: anywhere
+        self.assertIn("./lint.sh", G.sanitize(json.dumps(policy).encode(), approved2, allowed=["./lint.sh"])[0].decode())
         both = json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "run.sh", "windows": "run.cmd"}]}]}}).encode()
         out, removed = G.sanitize(both, both)  # approved on the default branch with its override: kept whole
         self.assertIn('"windows": "run.cmd"', out.decode()); self.assertEqual(removed, [])

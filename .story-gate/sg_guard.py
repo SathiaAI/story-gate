@@ -70,86 +70,77 @@ def _is_actor(d):
     return any(k in d for k in ACTOR_KEYS) or d.get("type") in ACTOR_TYPES
 
 
-def actor_entries(data):
-    """Canonical form of every hook/server entry (anything with a command, url, prompt or agent)."""
-    out = set()
-    def walk(x, depth):
-        if isinstance(x, dict):
-            if depth and _is_actor(x):
-                out.add(_canon(x))
-            for v in x.values():
-                walk(v, depth + 1)
-        elif isinstance(x, list):
-            for v in x:
-                walk(v, depth + 1)
-    walk(data, 0)
-    return out
-
-
 def _core(d):
     """An entry or hook group without the keys that only change what a tool shows (and, for a group, its hook list)."""
     return _canon({k: v for k, v in d.items() if k not in DISPLAY_KEYS and k != "hooks"})
 
 
-def group_settings(data):
-    """The settings of every hook group (a dict holding a "hooks" list: its matcher and the like), as _core forms."""
+def _is_group(x):
+    """A hook group: a dict holding a list of hooks with its own settings (Claude's {"matcher": ..., "hooks": [...]})."""
+    return isinstance(x, dict) and isinstance(x.get("hooks"), list) and not _is_actor(x)
+
+
+def actor_places(data):
+    """Every hook/server entry as (where it sits, its _core form). Where: the keys from the top of the file down to it,
+    with each hook group's own settings (matcher and the like) in place of the group. So the same entry under another
+    event, matcher or group setting is a different place."""
     out = set()
-    def walk(x, depth):
+    def walk(x, ctx, depth):
         if isinstance(x, dict):
-            if depth and isinstance(x.get("hooks"), list) and not _is_actor(x):
-                out.add(_core(x))
-            for v in x.values():
-                walk(v, depth + 1)
+            if depth and _is_actor(x):
+                out.add((ctx, _core(x)))
+                return
+            here = ctx + (("group", _core(x)),) if depth and _is_group(x) else ctx
+            for k, v in x.items():
+                walk(v, here + (k,), depth + 1)
         elif isinstance(x, list):
             for v in x:
-                walk(v, depth + 1)
-    walk(data, 0)
+                walk(v, ctx, depth + 1)
+    walk(data, (), 0)
     return out
 
 
-def strip_unapproved(data, approved_cmds, approved_entries=frozenset(), approved_groups=None):
+def strip_unapproved(data, approved_cmds, approved_places=frozenset(), policy_cmds=frozenset()):
     """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
-    An entry survives if it is identical to an approved one apart from display-only keys, or if it is nothing but an
-    approved command string (a policy approval). Changing a matcher, a time limit or how an approved hook fails drops it.
-    approved_groups (group_settings of the approved file): a hook group holding a default-branch entry under a matcher
-    (or other group setting) the default branch never had is dropped too, so a branch can't narrow when an approved hook
-    runs. A command approved only by policy (project_hooks_allowed) may sit under any matcher."""
+    An entry survives only where the default branch has the same entry (apart from display-only keys) in the same place:
+    same event, same group matcher and settings. So a branch can't add a command, and can't change when or how an
+    approved hook runs (matcher, event, time limit, fail mode). A command approved only by policy (project_hooks_allowed,
+    policy_cmds) may sit anywhere as a bare entry. approved_cmds (every command string the default branch has) still
+    decides command-like settings outside hook entries (apiKeyHelper and the like)."""
     removed = []
-    cores = {_core(json.loads(e)) for e in approved_entries if isinstance(json.loads(e), dict)}
-    def walk(x, depth):
+    def walk(x, ctx, depth):
         if isinstance(x, dict):
-            if depth and _is_actor(x) and _canon(x) not in approved_entries and _core(x) not in cores:
+            if depth and _is_actor(x):
                 active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
-                plain_cmd = (active == ["command"] and isinstance(x["command"], str) and x["command"] in approved_cmds
-                             and set(x) - DISPLAY_KEYS <= {"type", "command"} and x.get("type", "command") == "command")
-                if not plain_cmd:
+                policy = (active == ["command"] and isinstance(x["command"], str) and x["command"] in policy_cmds
+                          and set(x) - DISPLAY_KEYS <= {"type", "command"} and x.get("type", "command") == "command")
+                if (ctx, _core(x)) not in approved_places and not policy:
                     removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
                     return _DROP
-            if (approved_groups is not None and depth and isinstance(x.get("hooks"), list) and not _is_actor(x)
-                    and set(x) - DISPLAY_KEYS != {"hooks"} and _core(x) not in approved_groups
-                    and any(isinstance(h, dict) and _core(h) in cores for h in x["hooks"])):  # a default-branch hook, retimed
-                removed.append("<hook group %s>" % _core(x)[:180])
-                return _DROP
+                return x
+            here = ctx + (("group", _core(x)),) if depth and _is_group(x) else ctx
             out = {}
             for k, v in x.items():
                 if is_exec_key(k) and not (isinstance(v, str) and v in approved_cmds):
                     removed.append(str(v)[:200])
                     continue
-                nv = walk(v, depth + 1)
+                nv = walk(v, here + (k,), depth + 1)
                 if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
                     continue  # an entry that is now empty disappears
                 out[k] = nv
+            if depth and _is_group(x) and x["hooks"] and not out.get("hooks"):
+                return _DROP  # a group whose hooks were all taken out goes too (its matcher alone runs nothing)
             return out
         if isinstance(x, list):
             out = []
             for v in x:
-                nv = walk(v, depth + 1)
+                nv = walk(v, ctx, depth + 1)
                 if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
                     continue
                 out.append(nv)
             return out
         return x
-    return walk(data, 0), removed
+    return walk(data, (), 0), removed
 
 
 def _load(b):
@@ -180,7 +171,7 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
                 data[k] = appr[k]
             else:
                 del data[k]
-    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_entries(appr), group_settings(appr))
+    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_places(appr), set(allowed))
     removed += more
     if not removed:
         return branch_bytes, []
