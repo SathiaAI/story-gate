@@ -519,7 +519,7 @@ def make_handler(ss):
                 else:
                     return self._send(404, json.dumps({"error": "not found"}), "application/json")
             except SetupError as e:
-                if act == "confirm":  # the plan stays: fix the tick and confirm again
+                if act == "confirm" or ss.busy() or ss.step == "done":  # the plan, or the running step, stays; only the message changes
                     with ss.lock:
                         ss.msg = str(e)
                 else:

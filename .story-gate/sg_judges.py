@@ -71,6 +71,17 @@ def env_key(name):
     return None
 
 
+def _timeout(v, default=90):
+    """A judge.timeout as whole seconds; anything that isn't a positive whole number falls back to the default."""
+    if isinstance(v, bool):
+        return default
+    try:
+        t = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return t if t > 0 else default
+
+
 def settings(c):
     j = dict(c.get("judge") or {})
     if j.get("jev") is False or j.get("provider") == "none":  # an explicit opt-out always wins over the default provider
@@ -78,7 +89,7 @@ def settings(c):
     prov = j.get("provider") or "openrouter"
     d = DEFAULTS.get(prov, {})
     return {"provider": prov, "url": j.get("base_url") or d.get("url", ""), "key_env": j.get("api_key_env") or d.get("key_env", ""),
-            "model": j.get("model") or d.get("model", ""), "timeout": int(j.get("timeout", 90)),
+            "model": j.get("model") or d.get("model", ""), "timeout": _timeout(j.get("timeout")),
             "temperature": j.get("temperature")}
 
 

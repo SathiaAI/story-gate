@@ -31,6 +31,10 @@ GUARDED_KEYS = {"env", "permissions", "mcpServers", "enableAllProjectMcpServers"
 ACTOR_TYPES = {"command", "http", "prompt", "agent", "mcp_tool"}
 ACTOR_KEYS = ("command", "url", "prompt", "agent")
 ATTR_MARK = "# story-gate: AI-tool hook files are filtered so a branch can't add commands (gate.py enroll / unenroll)"
+# Per-OS command overrides (VS Code / Copilot hook formats): the tool runs these instead of "command" on that platform.
+OS_COMMAND_KEYS = {"windows", "linux", "osx", "bash", "powershell"}
+# The only sibling keys an approved command may keep when a branch edits the entry; anything else is not kept (fail closed).
+SAFE_ENTRY_KEYS = {"type", "command", "matcher", "timeout", "timeoutSec", "failClosed", "show_output", "statusMessage", "loop_limit"}
 CANARY = "story-gate-canary-should-never-run"
 _DROP = object()
 
@@ -39,7 +43,7 @@ _DROP = object()
 def is_exec_key(k):
     """Keys whose value an AI tool runs: command, apiKeyHelper, Gemini's discoveryCommand/callCommand, ..."""
     lk = k.lower() if isinstance(k, str) else ""
-    return lk.endswith("command") or lk.endswith("helper") or k in ("awsAuthRefresh", "awsCredentialExport")
+    return lk.endswith("command") or lk.endswith("helper") or lk in OS_COMMAND_KEYS or k in ("awsAuthRefresh", "awsCredentialExport")
 
 
 def exec_strings(data):
@@ -91,7 +95,7 @@ def strip_unapproved(data, approved_cmds, approved_entries=frozenset()):
             if depth and _is_actor(x) and _canon(x) not in approved_entries:
                 active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
                 plain_cmd = (active == ["command"] and isinstance(x["command"], str) and x["command"] in approved_cmds
-                             and not set(x) & {"args", "env", "headers", "url", "cwd"})
+                             and set(x) <= SAFE_ENTRY_KEYS)
                 if not plain_cmd:
                     removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
                     return _DROP
@@ -568,7 +572,8 @@ def prove(top):
     if not filter_active(top):
         return False, ["  checkout filter: OFF in this repository (gate.py filter on, or gate.py enroll)"]
     canary = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "echo %s" % CANARY}]}],
-                        "stop": [{"command": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY,
+                        "stop": [{"command": "echo %s" % CANARY},
+                                 {"type": "command", "linux": "echo %s" % CANARY, "osx": "echo %s" % CANARY, "windows": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY,
               "mcpServers": {"canary": {"command": "echo", "args": [CANARY]}}}
     blob = (json.dumps(canary, indent=2) + "\n").encode()
     toml = ('notify = ["sh", "-c", "echo %s"]\n' % CANARY).encode()

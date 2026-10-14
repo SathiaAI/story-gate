@@ -1,6 +1,6 @@
 # How each AI tool runs story-gate's hooks
 
-`gate.py install --user` puts story-gate's hooks in each tool's **user** settings and points them at the signed copy in your user folder. Until the first signed release is published, pilots install with `gate.py install --user --unsigned` (doctor then says the copy is unsigned). This table says what each tool's own documentation promises, so we only claim protection where the tool does. Checked October 2026. "Unverified" means the tool's docs don't say.
+`gate.py install --user` puts story-gate's hooks in each tool's **user** settings and points them at the signed copy in your user folder. Use `--unsigned` only for a development copy you trust (doctor then says the copy is unsigned). This table says what each tool's own documentation promises, so we only claim protection where the tool does. Checked October 2026. "Unverified" means the tool's docs don't say.
 
 | | Claude Code | Codex CLI | Cursor | Gemini CLI | Windsurf / Devin | Grok Build | Hermes |
 |---|---|---|---|---|---|---|---|
