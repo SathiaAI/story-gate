@@ -2341,6 +2341,10 @@ class TestRepoHookGuard(RuntimeFixture):
         self.assertEqual([g["matcher"] for g in out], ["Bash", "Read", ".*"])
         self.assertEqual(out[1]["hooks"][0]["statusMessage"], "Auditing"); self.assertEqual(out[2]["hooks"], [{"command": "./lint.sh"}])
         self.assertEqual(G.smudge_form(approved, approved)[0], approved)  # nothing to do: bytes unchanged
+        two = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_, gate_]}]}}  # approved twice in one group
+        split = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_]}, {"matcher": "Bash", "hooks": [gate_]}]}}
+        out = G.smudge_form(json.dumps(split).encode(), json.dumps(two).encode())[0].decode()
+        self.assertEqual(out.count("echo gate"), 2)  # split across groups: still exactly the approved count
         # end to end through git's checkout filter
         self.approve_on_main(appr)
         self.git("checkout", "-qb", "drops-gate")

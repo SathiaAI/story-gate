@@ -240,6 +240,11 @@ def smudge_form(branch_bytes, approved_bytes, allowed=()):
     except (ValueError, UnicodeDecodeError):
         return out, removed, 0
     new, restored = restore_approved(data, approved_bytes)
+    if restored or new != data:  # never more copies of an approved hook than the default branch has, wherever they came from
+        appr = _load(approved_bytes) if approved_bytes else {}
+        appr = appr if isinstance(appr, dict) else {}
+        new, _ = strip_unapproved(new, exec_strings(appr), actor_places(appr), set(allowed))
+        restored = sum(actor_places(new).values()) - sum(actor_places(data).values())
     if new == data:
         return out, removed, 0
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed, restored
