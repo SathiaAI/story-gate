@@ -2348,6 +2348,11 @@ class TestRepoHookGuard(RuntimeFixture):
         for whole in (b"[]", b"null", b"0", b"not json", b'"x"'):  # a branch file that isn't an object: the approved file
             with self.subTest(whole=whole):
                 self.assertEqual(json.loads(G.smudge_form(whole, approved)[0])["hooks"], appr["hooks"])
+        moved = {"hooks": {"Stop": [], "PreToolUse": appr["hooks"]["PreToolUse"]}}  # approved keys first, in approved order
+        self.assertEqual(list(json.loads(G.smudge_form(json.dumps(moved).encode(), approved)[0])["hooks"]), ["PreToolUse", "Stop"])
+        extra = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [dict(gate_, args=["x"], env={"X": "1"})]},
+                                          {"matcher": "Read", "hooks": [audit]}]}}  # anything beyond display keys: approved entry back
+        self.assertEqual(json.loads(G.smudge_form(json.dumps(extra).encode(), approved)[0])["hooks"], appr["hooks"])
         srv = {"servers": {"fs": {"command": "fs-server"}}}  # an approved entry under a key: blanked or changed, it comes back
         for branch in ({"servers": {"fs": {}}}, {"servers": {"fs": {"command": "fs-server", "disabled": True}}}):
             with self.subTest(branch=branch):

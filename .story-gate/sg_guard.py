@@ -196,10 +196,8 @@ def _merge_approved(a, b):
     if isinstance(a, dict) and _is_actor(a):  # an approved entry: the branch's copy only if it is the same entry
         return b if _is_actor(b) and _core(b) == _core(a) else a
     if isinstance(a, dict) and isinstance(b, dict) and not _is_actor(a):
-        out = {k: (_merge_approved(a[k], b[k]) if k in a else b[k]) for k in b}
-        for k in a:
-            if k not in out:
-                out[k] = a[k]
+        out = {k: _merge_approved(a[k], b.get(k)) for k in a}  # approved keys first, in the approved order
+        out.update((k, v) for k, v in b.items() if k not in a)
         return out
     if isinstance(a, list) and isinstance(b, list):
         rest = list(b)
@@ -251,7 +249,7 @@ def smudge_form(branch_bytes, approved_bytes, allowed=()):
     # the merged file passes the same check again: never more copies of an approved hook than the default branch has
     new, _ = strip_unapproved(new, exec_strings(appr), actor_places(appr), set(allowed))
     restored = max(0, sum(actor_places(new).values()) - sum(actor_places(data).values()))
-    if new == data:
+    if json.dumps(new) == json.dumps(data):  # same content in the same order: keep the bytes as they are
         return out, removed, 0
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed, restored
 
