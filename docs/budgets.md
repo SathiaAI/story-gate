@@ -5,7 +5,7 @@ accessibility test fails, or the build has at most 10 warnings. When a story cha
 budget that applies. DONE then shows whether the work stays within the limits.
 
 This is the **budget foundation** of Guardrails (G1, part 1). Guardrail areas (security, performance, data,
-accessibility), SARIF scanner results and price checks come in part 2. The design is in
+accessibility), SARIF scanner results and price checks are part 2: see [guardrails.md](guardrails.md). The design is in
 [measured-checks.md](measured-checks.md).
 
 ## What you decide
