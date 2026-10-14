@@ -2345,6 +2345,13 @@ class TestRepoHookGuard(RuntimeFixture):
         split = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [gate_]}, {"matcher": "Bash", "hooks": [gate_]}]}}
         out = G.smudge_form(json.dumps(split).encode(), json.dumps(two).encode())[0].decode()
         self.assertEqual(out.count("echo gate"), 2)  # split across groups: still exactly the approved count
+        for whole in (b"[]", b"null", b"0", b"not json", b'"x"'):  # a branch file that isn't an object: the approved file
+            with self.subTest(whole=whole):
+                self.assertEqual(json.loads(G.smudge_form(whole, approved)[0])["hooks"], appr["hooks"])
+        srv = {"servers": {"fs": {"command": "fs-server"}}}  # an approved entry under a key: blanked or changed, it comes back
+        for branch in ({"servers": {"fs": {}}}, {"servers": {"fs": {"command": "fs-server", "disabled": True}}}):
+            with self.subTest(branch=branch):
+                self.assertEqual(json.loads(G.smudge_form(json.dumps(branch).encode(), json.dumps(srv).encode())[0]), srv)
         # end to end through git's checkout filter
         self.approve_on_main(appr)
         self.git("checkout", "-qb", "drops-gate")

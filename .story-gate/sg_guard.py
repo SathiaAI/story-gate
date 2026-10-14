@@ -193,6 +193,8 @@ def _merge_approved(a, b):
     policy, groups holding them) follows. Scalars and other settings are the branch's."""
     if b is None or (isinstance(a, (dict, list)) and type(a) is not type(b)):
         return a  # missing, or replaced by another kind of value (a list for an object, a string for a list): approved wins
+    if isinstance(a, dict) and _is_actor(a):  # an approved entry: the branch's copy only if it is the same entry
+        return b if _is_actor(b) and _core(b) == _core(a) else a
     if isinstance(a, dict) and isinstance(b, dict) and not _is_actor(a):
         out = {k: (_merge_approved(a[k], b[k]) if k in a else b[k]) for k in b}
         for k in a:
@@ -209,7 +211,8 @@ def _merge_approved(a, b):
                 out.append(_merge_approved(x, rest.pop(same)) if same is not None else x)
             else:
                 out.append(x)
-        return out + [y for y in rest if not (not isinstance(y, (dict, list)) and y in a)]
+        extra = [y for y in rest if isinstance(y, (dict, list)) or y not in a]  # plain values already in `a` are there once
+        return out + extra
     return b
 
 
@@ -239,12 +242,15 @@ def smudge_form(branch_bytes, approved_bytes, allowed=()):
         data = _load(out)
     except (ValueError, UnicodeDecodeError):
         return out, removed, 0
-    new, restored = restore_approved(data, approved_bytes)
-    if restored or new != data:  # never more copies of an approved hook than the default branch has, wherever they came from
+    new, _ = restore_approved(data, approved_bytes)
+    try:
         appr = _load(approved_bytes) if approved_bytes else {}
-        appr = appr if isinstance(appr, dict) else {}
-        new, _ = strip_unapproved(new, exec_strings(appr), actor_places(appr), set(allowed))
-        restored = sum(actor_places(new).values()) - sum(actor_places(data).values())
+    except (ValueError, UnicodeDecodeError):
+        appr = {}
+    appr = appr if isinstance(appr, dict) else {}
+    # the merged file passes the same check again: never more copies of an approved hook than the default branch has
+    new, _ = strip_unapproved(new, exec_strings(appr), actor_places(appr), set(allowed))
+    restored = max(0, sum(actor_places(new).values()) - sum(actor_places(data).values()))
     if new == data:
         return out, removed, 0
     return (json.dumps(new, indent=2) + "\n").encode("utf-8"), removed, restored
