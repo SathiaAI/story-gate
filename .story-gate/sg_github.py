@@ -421,28 +421,50 @@ def owners_on_default_branch(repo, token):
     return []
 
 
-def codeowners_path_on_default_branch(repo, token):
-    """The CODEOWNERS path GitHub uses on the default branch (the first of CODEOWNERS_PATHS that exists there); "" when
-    none exists; None when GitHub's answer can't tell."""
+def codeowners_on_default_branch(repo, token):
+    """(path, text) of the CODEOWNERS file GitHub uses on the default branch (the first of CODEOWNERS_PATHS there);
+    ("", "") when there is none; None when GitHub's answer can't tell (an error, or a folder or link at that path)."""
     for path in CODEOWNERS_PATHS:
-        st, _, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
+        st, f, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
         if st == 200:
-            return path
+            if isinstance(f, dict) and f.get("type") == "file" and f.get("encoding") == "base64":
+                return path, base64.b64decode(f.get("content") or "").decode("utf-8", "replace")
+            return None
         if st != 404:
             return None
-    return ""
+    return "", ""
 
 
-def _codeowners_path_in_git(root):
-    """The CODEOWNERS path on refs/remotes/origin/HEAD's branch in this clone ("" when none); None when git can't tell."""
-    run = lambda *a: subprocess.run(["git", *a], cwd=str(root), capture_output=True, text=True)
-    head = run("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-    if head.returncode != 0 or not head.stdout.strip():
+def codeowners_in_git(root, ref):
+    """(path, text) of the CODEOWNERS file GitHub would use at git `ref` in the clone at root: the first of
+    CODEOWNERS_PATHS there; ("", "") when there is none; None when git can't read `ref` or that path is not a regular
+    file (a link or a folder), so nobody guesses."""
+    run = lambda *a: subprocess.run(["git", *a], cwd=str(root), capture_output=True)
+    if run("rev-parse", "--verify", "--quiet", ref + "^{commit}").returncode != 0:
         return None
     for path in CODEOWNERS_PATHS:
-        if run("cat-file", "-e", "%s:%s" % (head.stdout.strip(), path)).returncode == 0:
-            return path
-    return ""
+        r = run("ls-tree", "-z", ref, "--", path)
+        if r.returncode != 0:
+            return None
+        entry = r.stdout.split(b"\0")[0]
+        if not entry:
+            continue
+        mode, kind, sha = entry.split(b"\t")[0].split(b" ")
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            return None
+        blob = run("cat-file", "blob", sha.decode())
+        return (path, blob.stdout.decode("utf-8", "replace")) if blob.returncode == 0 else None
+    return "", ""
+
+
+def _link_on_path(root, rel):
+    """True when rel or any folder on the way to it is a link (writing there could land outside the checkout)."""
+    p = Path(root)
+    for part in Path(rel).parts:
+        p = p / part
+        if p.is_symlink():
+            return True
+    return False
 
 
 def codeowners_change(co, new, repo, token, login, added, rel=".github/CODEOWNERS"):
@@ -505,22 +527,25 @@ def setup_repo(root, repo, owners, token, dry_run=False, login=None):
     A CODEOWNERS change goes in a pull request the agent App opens when it is installed; otherwise in the local file for
     you to commit, when that pull request can be approved (pr_author decides)."""
     out = []
-    # The file GitHub uses on the default branch decides; the local checkout only when GitHub can't tell (or has none).
-    remote = codeowners_path_on_default_branch(repo, token) if token and not dry_run else None
-    if remote is None:  # GitHub can't tell: the remote's default branch as git last fetched it, never this checkout's files
-        remote = _codeowners_path_in_git(root)
-    local = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file() or (Path(root) / r).is_symlink()), "")
-    unknown = remote is None and not dry_run  # neither GitHub nor git can say which file the default branch uses
-    rel = (local if dry_run and remote is None else remote) or CODEOWNERS_PATHS[0]  # "": none yet, so .github/CODEOWNERS
+    # The file GitHub uses on the default branch, and its rules, decide; never this checkout's own files.
+    found = codeowners_on_default_branch(repo, token) if token and not dry_run else None
+    if found is None:  # GitHub can't tell: origin's default branch as git last fetched it
+        head = subprocess.run(["git", "symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cwd=str(root), capture_output=True, text=True)
+        found = codeowners_in_git(root, head.stdout.strip()) if head.returncode == 0 and head.stdout.strip() else None
+    if found is None and dry_run:  # a dry run writes nothing: the local file is enough to show what would change
+        local = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file() and not _link_on_path(root, r)), "")
+        found = (local, (Path(root) / local).read_text(encoding="utf-8") if local else "")
+    rel, text = found if found is not None else ("", "")
+    rel = rel or CODEOWNERS_PATHS[0]  # none on the default branch yet: GitHub reads .github/CODEOWNERS first
     co = Path(root) / rel
-    link = co.is_symlink()  # never read (and publish) whatever a link points at
-    text = co.read_text(encoding="utf-8") if co.is_file() and not link else ""
-    new = None if link or unknown else add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
-    if unknown:
+    link = _link_on_path(root, rel)  # never write through a link: it could point outside the checkout
+    new = None if found is None or link else add_owners(text, owners)  # on the effective (last) '*' rule
+    if found is None:
         out.append("CODEOWNERS: not changed: neither GitHub (it needs Contents: read) nor this clone's origin/HEAD says which "
                    "CODEOWNERS file the default branch uses. Run `git remote set-head origin --auto`, then setup-repo again")
     elif link:
-        out.append("CODEOWNERS: not changed: %s is a link; replace it with the file itself and run setup-repo again" % rel)
+        out.append("CODEOWNERS: not changed: %s is a link or is inside one; replace it with a real file and run setup-repo "
+                   "again" % rel)
     elif new is not None:
         added = "CODEOWNERS: added %s to the '*' rule" % " ".join("@" + o.lstrip("@") for o in owners)
         if dry_run:

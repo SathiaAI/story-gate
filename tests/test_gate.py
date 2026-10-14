@@ -1125,6 +1125,7 @@ class TestGitHubLogic(unittest.TestCase):
             G.call = lambda *a, order=order, **k: (200, list(order), {})
             seen[order[0] is zero] = " ".join(G.protection("o/r", "main", "t")[1])
         self.assertEqual(seen[True], seen[False])
+        self.assertNotIn("no approving review is required", seen[True])  # the rule asking for two approvals counts
 
     def test_setup_agent_server_refuses_a_foreign_host_header(self):
         """The agent-App setup page answers only its own 127.0.0.1:port Host (DNS-rebinding guard) and hides state from others."""
@@ -1141,10 +1142,10 @@ class TestGitHubLogic(unittest.TestCase):
         self.addCleanup(setattr, G.http.server, "HTTPServer", old)
         t = threading.Thread(target=G.setup_agent, kwargs={"open_browser": False}, daemon=True)
         t.start()
-        for _ in range(100):
+        for _ in range(600):  # HTTPServer looks up the host's name when it binds, which can take seconds on macOS
             if servers:
                 break
-            time.sleep(0.05)
+            time.sleep(0.1)
         self.assertTrue(servers)
         port = servers[0].server_address[1]
 
@@ -1443,75 +1444,96 @@ class TestRound4Fixes(Base):
         return G.setup_repo(Path(tempfile.mkdtemp()), "o/r", ["Paul"], "t", login="paul"), calls
 
     def test_setup_repo_changes_the_codeowners_file_github_uses(self):
-        """setup_repo adds the owners to a root CODEOWNERS (not a new .github/ one that would shadow it), in the local file
-        and in the pull request path."""
-        import importlib
+        """setup_repo adds the owners to the CODEOWNERS file GitHub uses on the default branch, keeping that file's rules,
+        whatever this checkout has: never a new .github/ file that would hide it, never a guess, never through a link."""
+        import importlib, base64 as b64
         sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
         for n in ("pr_author", "open_setup_pr"):
             self.addCleanup(setattr, G, n, getattr(G, n))
-        G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
-                                                              (200, {"default_branch": "main", "private": False}, {}) if path == "/repos/o/r"
-                                                              else (200, {}, {}) if path.endswith("/contents/CODEOWNERS")
-                                                              else (404, {}, {}) if "/contents/" in path  # the root file is GitHub's
-                                                              else (204, {}, {}))
+
+        def github(files, branch_files=None):
+            """Fake GitHub: the default branch holds `files` (path -> text); an open setup PR branch holds `branch_files`."""
+            def call(m, path, t=None, b=None, accept=None):
+                """Contents API for those files (404 for the rest), repository info and an empty ruleset list."""
+                if path.endswith("/rulesets"):
+                    return 200, [], {}
+                if path == "/repos/o/r":
+                    return 200, {"default_branch": "main", "private": False}, {}
+                if "/contents/" in path:
+                    name, _, ref = path.split("/contents/", 1)[1].partition("?ref=")
+                    have = (branch_files or {}) if ref else files
+                    if name in have:
+                        return 200, {"type": "file", "encoding": "base64", "sha": "s",
+                                     "content": b64.b64encode(have[name].encode()).decode()}, {}
+                    return 404, {}, {}
+                return 204, {}, {}
+            return call
         prs = []
         G.open_setup_pr = lambda tok, repo, files, **kw: prs.append(files) or {"number": 9, "url": "u", "branch": kw["branch"]}
         root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, root, True)
-        (root / "CODEOWNERS").write_text("* @boss\n/docs/ @writers\n")
+        rules = "* @boss\n/docs/ @writers\n"
+        G.call = github({"CODEOWNERS": rules})
+        (root / ".github").mkdir(); (root / ".github/CODEOWNERS").write_text("* @weak\n")  # this checkout's own file: ignored
         G.pr_author = lambda *a, **k: ("human", "t", "you open it")
         G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
-        self.assertEqual((root / "CODEOWNERS").read_text(), "* @boss @Paul\n/docs/ @writers\n")
-        self.assertFalse((root / ".github/CODEOWNERS").exists())
-        (root / "CODEOWNERS").write_text("* @boss\n")
+        self.assertEqual((root / "CODEOWNERS").read_text(), "* @boss @Paul\n/docs/ @writers\n")  # GitHub's rules, kept
+        self.assertEqual((root / ".github/CODEOWNERS").read_text(), "* @weak\n")
         G.pr_author = lambda *a, **k: ("app", "app-tok", "the agent App opens it")
-        G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
-        self.assertEqual(list(prs[0]), ["CODEOWNERS"])
-        (root / "CODEOWNERS").unlink()  # the default branch has a root CODEOWNERS this checkout lacks: GitHub's copy decides
-        G.call = lambda m, path, t=None, b=None, accept=None: ((200, [], {}) if path.endswith("/rulesets") else
-                                                              (200, {"default_branch": "main", "private": False}, {}) if path == "/repos/o/r"
-                                                              else (404, {}, {}) if path.endswith("/contents/.github/CODEOWNERS")
-                                                              else (200, {}, {}) if path.endswith("/contents/CODEOWNERS")
-                                                              else (404, {}, {}) if "/contents/" in path  # no CODEOWNERS yet
-                                                              else (204, {}, {}))
         prs.clear()
         G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
-        self.assertEqual(list(prs[0]), ["CODEOWNERS"])
+        self.assertEqual({k: v.decode() for k, v in prs[0].items()}, {"CODEOWNERS": "* @boss @Paul\n/docs/ @writers\n"})
         # an earlier run's open pull request still carries .github/CODEOWNERS: updating its root file would change nothing
-        stale = G.call
-        G.call = lambda m, path, *a, **k: (200, {}, {}) if "/contents/.github/CODEOWNERS?ref=" in path else stale(m, path, *a, **k)
+        G.call = github({"CODEOWNERS": rules}, {".github/CODEOWNERS": "* @old\n"})
         G.open_setup_pr = lambda tok, repo, files, **kw: {"number": 9, "url": "u", "branch": kw["branch"], "existing": True}
-        out = " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul"))
-        self.assertIn("still has .github/CODEOWNERS", out)
-        G.call = stale
+        self.assertIn("still has .github/CODEOWNERS", " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")))
         G.open_setup_pr = lambda tok, repo, files, **kw: prs.append(files) or {"number": 9, "url": "u", "branch": kw["branch"]}
-        g = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
-        g("init", "-q", "-b", "main"); (root / "docs").mkdir(exist_ok=True); (root / "docs/CODEOWNERS").write_text("* @boss\n")
-        g("add", "docs/CODEOWNERS"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "owners")
-        g("update-ref", "refs/remotes/origin/main", "HEAD"); g("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-        (root / ".github").mkdir(exist_ok=True); (root / ".github/CODEOWNERS").write_text("* @weak\n")  # this checkout's own file
-        G.call = lambda m, path, *a, **k: (403, {}, {}) if "/contents/" in path else stale(m, path, *a, **k)
-        prs.clear()  # GitHub won't say which file it uses: git's copy of the default branch decides, not this checkout
-        G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
-        self.assertEqual(list(prs[0]), ["docs/CODEOWNERS"])
-        (root / ".github/CODEOWNERS").unlink()
-        G.call = stale
-        g("symbolic-ref", "-d", "refs/remotes/origin/HEAD")  # and with no origin/HEAD either, nothing is guessed
-        G.call = lambda m, path, *a, **k: (403, {}, {}) if "/contents/" in path else stale(m, path, *a, **k)
+        # a folder (or a link) where GitHub looks first: it can't tell which file is used, so nothing is guessed
+        G.call = (lambda base: lambda m, path, *a, **k: (200, {"type": "dir"}, {}) if path.endswith("/contents/.github/CODEOWNERS")
+                  else base(m, path, *a, **k))(github({}))
         prs.clear()
         out = " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul"))
         self.assertIn("CODEOWNERS: not changed: neither GitHub", out); self.assertEqual(prs, [])
         self.assertIn("Ruleset", out)  # the other steps still run
-        G.call = stale
-        if os.name != "nt":  # a link is never read or published, and the other setup steps still run
-            secret = root / "secret.txt"; secret.write_text("TOKEN=abc\n")
-            os.symlink(secret, root / "CODEOWNERS")
-            calls = []
-            base_call = G.call
-            G.call = lambda m, path, *a, **k: calls.append((m, path)) or base_call(m, path, *a, **k)
-            prs.clear()
+        # GitHub can't say (no Contents: read): git's copy of origin's default branch decides, not this checkout
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+        g("init", "-q", "-b", "main"); (root / "docs").mkdir(exist_ok=True); (root / "docs/CODEOWNERS").write_text("* @boss\n")
+        g("add", "docs/CODEOWNERS"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "owners")
+        g("update-ref", "refs/remotes/origin/main", "HEAD"); g("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        G.call = (lambda base: lambda m, path, *a, **k: (403, {}, {}) if "/contents/" in path else base(m, path, *a, **k))(github({}))
+        prs.clear()
+        G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
+        self.assertEqual({k: v.decode() for k, v in prs[0].items()}, {"docs/CODEOWNERS": "* @boss @Paul\n"})
+        g("symbolic-ref", "-d", "refs/remotes/origin/HEAD")  # and with no origin/HEAD either, nothing is guessed
+        prs.clear()
+        self.assertIn("not changed: neither GitHub", " ".join(G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")))
+        self.assertEqual(prs, [])
+        if os.name != "nt":  # a link on the way to the file is never written through, and the other steps still run
+            shutil.rmtree(root / "docs"); outside = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, outside, True)
+            os.symlink(outside, root / "docs")
+            G.call = github({"docs/CODEOWNERS": "* @boss\n"})
+            G.pr_author = lambda *a, **k: ("human", "t", "you open it")
             out = G.setup_repo(root, "o/r", ["Paul"], "t", login="paul")
-            self.assertIn("is a link", out[0]); self.assertEqual(prs, [])
-            self.assertTrue([c for c in calls if c[1].endswith("/rulesets")])
+            self.assertIn("is a link or is inside one", out[0]); self.assertEqual(os.listdir(outside), [])
+            self.assertTrue([x for x in out if "Ruleset" in x])
+
+    def test_codeowners_in_git_reads_only_a_regular_file(self):
+        """The CODEOWNERS file at a git ref: the first regular file in GitHub's order with its text; a link or a folder in
+        that place, or a ref git can't read, means 'can't tell' (None), never the link's target or a later file."""
+        import importlib
+        sys.path.insert(0, str(SRC)); G = importlib.import_module("sg_github")
+        root = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, root, True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)
+        commit = lambda: g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
+        g("init", "-q", "-b", "main"); (root / "README").write_text("x"); g("add", "-A"); commit()
+        self.assertEqual(G.codeowners_in_git(root, "main"), ("", ""))
+        (root / "docs").mkdir(); (root / "docs/CODEOWNERS").write_text("* @boss\n"); g("add", "-A"); commit()
+        self.assertEqual(G.codeowners_in_git(root, "main"), ("docs/CODEOWNERS", "* @boss\n"))
+        self.assertIsNone(G.codeowners_in_git(root, "no-such-ref"))
+        (root / "CODEOWNERS").mkdir(); (root / "CODEOWNERS/x").write_text("x"); g("add", "-A"); commit()
+        self.assertIsNone(G.codeowners_in_git(root, "main"))  # a folder where GitHub looks: can't tell
+        if os.name != "nt":
+            g("rm", "-rq", "CODEOWNERS"); os.symlink("docs/CODEOWNERS", root / "CODEOWNERS"); g("add", "-A"); commit()
+            self.assertIsNone(G.codeowners_in_git(root, "main"))  # a link: can't tell, and its target is never read
 
     def test_setup_repo_goes_on_when_the_codeowners_pr_fails(self):
         """A refused CODEOWNERS pull request is reported; setup-repo then holds the ruleset back (CODEOWNERS isn't on the

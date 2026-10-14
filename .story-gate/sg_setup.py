@@ -390,15 +390,12 @@ class Wizard:
         final = json.loads(files[".story-gate/config.json"].decode("utf-8")) if ".story-gate/config.json" in files else {}
         junit = final.get("junit_path") if final.get("test_command") else ""
         owners = [self.login] + self.approvers
-        co_path, old = G.CODEOWNERS_PATHS[0], ""  # .github/CODEOWNERS only when the default branch has no CODEOWNERS file
-        for cand in G.CODEOWNERS_PATHS:  # the file GitHub uses (first found), so the repository's existing rules stay in force
-            ref = "refs/remotes/origin/%s:%s" % (base, cand)  # the remote's copy: a local branch named origin/<base> can't stand in
-            if subprocess.run(["git", "cat-file", "-e", ref], cwd=str(self.top), capture_output=True).returncode == 0:
-                co_path, old = cand, git(self.top, "show", ref)
-                break
-        new = G.add_owners(old, owners)  # the same merge setup_repo does
+        # The file GitHub uses (first found) on the remote's copy of the default branch, with its rules kept; a local branch
+        # named origin/<base> can't stand in. When git can't tell (or that path is a link), setup-repo adds the owners later.
+        found = G.codeowners_in_git(self.top, "refs/remotes/origin/%s" % base)
+        new = G.add_owners(found[1], owners) if found is not None else None  # the same merge setup_repo does
         if new is not None:
-            files.setdefault(co_path, new.encode())
+            files.setdefault(found[0] or G.CODEOWNERS_PATHS[0], new.encode())
         body = ("This adds story-gate: the settings, the agent instructions and three workflows (the PR check, the audit and the "
                 "dashboard). It was prepared by `story-gate init`. Merge it to finish setup; branch rules are applied right after.\n\n"
                 + ("**Merges are blocked until the story-gate check passes**, because GitHub can enforce branch rules on this "
