@@ -17,10 +17,10 @@ Follow **`.story-gate/PROTOCOL.md`** step by step. `gate.py` means **`story-gate
 
 This skill is guidance only. Nothing is protected until setup finishes and `story-gate doctor` says so.
 
-Set story-gate up in the human's own project: the folder they have open. https://github.com/SathiaAI/story-gate is only where story-gate comes from. Never clone it to set up, and never open issues or pull requests there.
+Set story-gate up in the human's own project: the folder they have open. https://github.com/Viaknox/story-gate is only where story-gate comes from. Never clone it to set up, and never open issues or pull requests there.
 
 1. Tell the human what you will run, and wait for a clear yes:
-   - `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.1` (if `uv --version` fails, install uv first with its official installer from astral.sh)
+   - `uv tool install --python 3.12 git+https://github.com/Viaknox/story-gate@v0.9.1` (if `uv --version` fails, install uv first with its official installer from astral.sh)
    - `story-gate init --test-command "<command>" --junit-path <file>`, in the project folder. The command runs the project's tests on a clean Linux machine (GitHub's CI), including installing what they need, e.g. `npm ci && npm test` or `pip install -r requirements.txt && python -m pytest`. Read the project to find it, and show it to the human. With it, a pull request that fails story-gate can't be merged. If the project has no tests yet, leave `--test-command` out: story-gate then only warns. Make the command also write a JUnit XML report (e.g. `python -m pytest --junitxml=reports/junit.xml`; for other tools, use their JUnit reporter) and add `--junit-path reports/junit.xml`, so story-gate sees each test's own result. Without an AI judge key this is required.
    - If `story-gate` isn't found after the install, run `uv tool update-shell` and use a new shell, or run it by its full path in the folder that `uv tool dir --bin` prints.
 2. Run `story-gate init` (with `--test-command` as agreed) in the background. It opens a setup page in the browser. Tell the human: "A setup page opened. Follow it; I'll wait."
@@ -46,7 +46,7 @@ If a step fails, read the error to the human and stop. Never copy story-gate fil
 | never | Frontier models are not used for gate work | |
 
 - **If your client can't choose a model for sub-agents** (or has no sub-agents), do the steps yourself, in order.
-- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/SathiaAI/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
+- **Judging never uses your model:** `gate.py` sends the evidence to the configured judge. That's Jev by default; see https://github.com/Viaknox/story-gate/blob/main/docs/guide.md#fallbacks for the other options.
 
 ## The moments
 Not sure what to do next? Run `next`. It lists what's done and names the one next step, with the exact command. It costs nothing and changes nothing.

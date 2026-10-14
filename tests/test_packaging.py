@@ -52,11 +52,11 @@ class Version(unittest.TestCase):
         self.assertIn("set -eu", sh)
         self.assertIn('$ErrorActionPreference = "Stop"', ps)
         for text in (sh, ps):
-            self.assertIn("git+https://github.com/SathiaAI/story-gate@", text)
+            self.assertIn("git+https://github.com/Viaknox/story-gate@", text)
             self.assertNotIn("sudo", text); self.assertNotIn("RunAs", text)
             for url in re.findall(r"https://[^\s\"')|]+", text):
-                self.assertTrue(url == "https://astral.sh/uv" or url.startswith(("https://astral.sh/uv/", "https://github.com/SathiaAI/story-gate",
-                                                "https://raw.githubusercontent.com/SathiaAI/story-gate/", "https://git-scm.com/")), url)
+                self.assertTrue(url == "https://astral.sh/uv" or url.startswith(("https://astral.sh/uv/", "https://github.com/Viaknox/story-gate",
+                                                "https://raw.githubusercontent.com/Viaknox/story-gate/", "https://git-scm.com/")), url)
 
 
 @unittest.skipUnless(UV, "uv not on PATH")

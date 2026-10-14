@@ -658,7 +658,7 @@ def key_is_private(path):
 
 
 def manifest(name, redirect):
-    return {"name": name, "url": "https://github.com/SathiaAI/story-gate", "public": False,
+    return {"name": name, "url": "https://github.com/Viaknox/story-gate", "public": False,
             "hook_attributes": {"url": "https://example.invalid/story-gate", "active": False},
             "redirect_url": redirect, "description": "AI coding agent identity created by story-gate. It can push branches and open PRs; it cannot approve, merge protected branches, or change CI.",
             "default_permissions": {"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read", "checks": "read"},

@@ -2,7 +2,7 @@
 
 The adopting repository's workflows call story-gate's own workflows at a pinned commit:
 
-    uses: SathiaAI/story-gate/.github/workflows/gate.yml@<full commit SHA>  # vX.Y.Z
+    uses: Viaknox/story-gate/.github/workflows/gate.yml@<full commit SHA>  # vX.Y.Z
 
 Inside those workflows, `gate.py runtime-prepare` (this module) checks the pinned story-gate copy (its release signature,
 and the release key the caller expects), then copies it and the BASE branch's settings into a folder outside the
@@ -12,7 +12,7 @@ change the settings or the code that judges it: the same split as the copied wor
 import json, os, re, shutil, sys, urllib.parse
 from pathlib import Path
 
-UPSTREAM = "SathiaAI/story-gate"
+UPSTREAM = "Viaknox/story-gate"
 SHA = re.compile(r"[0-9a-f]{40}")
 FINGERPRINT = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
 SECRETS = ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JUDGE_API_KEY", "STORY_GATE_SPECS_TOKEN",

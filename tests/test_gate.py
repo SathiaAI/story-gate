@@ -3773,7 +3773,7 @@ class TestLiveDashboard(Base):
         sys.modules.pop("sg_reusable", None)
         import re, sg_reusable as R
         ci_name = re.search(r"^name: (.+)$", g.CI_YML, re.M).group(1)
-        caller = R.caller_files("SathiaAI/story-gate", "a" * 40, "0", "SHA256:x", "main", "# managed by story-gate\n")[".github/workflows/story-gate-dashboard.yml"]
+        caller = R.caller_files("Viaknox/story-gate", "a" * 40, "0", "SHA256:x", "main", "# managed by story-gate\n")[".github/workflows/story-gate-dashboard.yml"]
         for y in (g.dash_yml(), caller):
             self.assertIn("workflow_run:\n    workflows: [%s]\n    types: [completed]" % ci_name, y)
             self.assertIn("push:\n    branches: [\"main\"]", y); self.assertIn('cron: "11,41 * * * *"', y); self.assertIn("workflow_dispatch:", y)
@@ -4395,7 +4395,7 @@ class TestGuidedSetup(unittest.TestCase):
     def test_rules_step_sees_the_merged_reusable_workflow_for_the_check_name(self):
         G, S = self.G, self.S
         self.push_main(".github/workflows/story-gate.yml",
-                       "name: story-gate\njobs:\n  story-gate:\n    uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + "a" * 40 + "\n")
+                       "name: story-gate\njobs:\n  story-gate:\n    uses: Viaknox/story-gate/.github/workflows/gate.yml@" + "a" * 40 + "\n")
         seen = []
         G.pr_merged = lambda tok, repo, n: True
         G.setup_repo = lambda root, repo, owners, tok, dry_run=False: seen.append(G.ci_check_name(root)) or ["Ruleset: created"]
@@ -5972,7 +5972,7 @@ class TestMarketplacePackaging(unittest.TestCase):
         self.assertIn("\nname: story-gate\n", text.split("---", 2)[1] + "\n")
 
     def test_setup_steps_pin_the_current_release(self):
-        pin = "git+https://github.com/SathiaAI/story-gate@v%s" % self.version()
+        pin = "git+https://github.com/Viaknox/story-gate@v%s" % self.version()
         skill = (self.ROOT / "skills" / "story-gate" / "SKILL.md").read_text(encoding="utf-8")
         for text, where in ((skill, "skill"), ((self.ROOT / "README.md").read_text(encoding="utf-8"), "README")):
             self.assertIn(pin, text, where)
@@ -5986,7 +5986,7 @@ class TestMarketplacePackaging(unittest.TestCase):
         for rel in ("README.md", "skills/story-gate/SKILL.md"):
             with self.subTest(path=rel):
                 text = (self.ROOT / rel).read_text(encoding="utf-8")
-                pins = re.findall(r"git\+https://github\.com/SathiaAI/story-gate@([^\s`]+)", text)
+                pins = re.findall(r"git\+https://github\.com/Viaknox/story-gate@([^\s`]+)", text)
                 self.assertTrue(pins, "no pinned installation command")
                 self.assertEqual(set(pins), {"v" + self.version()})
 
@@ -8260,7 +8260,7 @@ class TestReusableWorkflow(Base):
         import sg_reusable as R, sg_github as GH
         for name, called in (("story-gate.yml", "gate.yml"), ("story-gate-audit.yml", "audit.yml"), ("story-gate-dashboard.yml", "dashboard.yml")):
             t = (self.repo / ".github/workflows" / name).read_text()
-            self.assertIn("uses: SathiaAI/story-gate/.github/workflows/%s@%s # v%s" % (called, self.SHA, g.VERSION), t)
+            self.assertIn("uses: Viaknox/story-gate/.github/workflows/%s@%s # v%s" % (called, self.SHA, g.VERSION), t)
             self.assertIn('release-key-fingerprint: "%s"' % g.T.key_fingerprint(), t)
             self.assertNotIn("inherit", t); self.assertNotIn("gate.py", t); self.assertLess(len(t.splitlines()), 45, name)
         t = (self.repo / ".github/workflows/story-gate.yml").read_text()
@@ -8282,8 +8282,8 @@ class TestReusableWorkflow(Base):
         self.assertEqual(GH.ci_check_name(self.repo), "story-gate")
         p = self.repo / ".github/workflows/story-gate.yml"
         orig = p.read_text()  # a comment or a step that mentions the reusable workflow doesn't switch the mode
-        p.write_text(orig.replace("      # <<< your steps", "      # see SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA
-                                  + "\n      - uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n      # <<< your steps", 1))
+        p.write_text(orig.replace("      # <<< your steps", "      # see Viaknox/story-gate/.github/workflows/gate.yml@" + self.SHA
+                                  + "\n      - uses: Viaknox/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n      # <<< your steps", 1))
         self.assertEqual(GH.ci_check_name(self.repo), "story-gate")
         p.write_text(orig)
         p.write_text(p.read_text().replace("      # <<< your steps", "      - run: echo mine\n      # <<< your steps", 1))
@@ -8315,13 +8315,13 @@ class TestReusableWorkflow(Base):
         doctor refuses a caller job with another id or its own `name:`, and protection() checks that exact name."""
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
-        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        self.assertIn("ok (Viaknox/story-gate at v", run(self.repo, "doctor").stdout)
         for bad in (t.replace("\n  story-gate:\n", "\n  gate:\n", 1),
                     t.replace("\n  story-gate:\n", "\n  story-gate:\n    name: Gate\n", 1)):
             g.write_text(bad)
             self.assertIn("its job must be called `story-gate`", run(self.repo, "doctor").stdout)
         g.write_text(t)
-        self.assertIn("ok (SathiaAI/story-gate at v", run(self.repo, "doctor").stdout)
+        self.assertIn("ok (Viaknox/story-gate at v", run(self.repo, "doctor").stdout)
         load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
         import sg_github as GH
         name = GH.ci_check_name(self.repo)
@@ -8335,7 +8335,7 @@ class TestReusableWorkflow(Base):
     def test_doctor_checks_the_short_workflows_and_a_plain_install_keeps_the_mode(self):
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         r = run(self.repo, "doctor")
-        self.assertIn("ok (SathiaAI/story-gate at v", r.stdout); self.assertNotIn("OUTDATED", r.stdout)
+        self.assertIn("ok (Viaknox/story-gate at v", r.stdout); self.assertNotIn("OUTDATED", r.stdout)
         p = self.repo / ".github/workflows/story-gate-audit.yml"
         p.write_text(p.read_text().replace(self.SHA, "b" * 40))
         self.assertIn("pinned to different commits", run(self.repo, "doctor").stdout)
@@ -8348,7 +8348,7 @@ class TestReusableWorkflow(Base):
         good = '      release-key-fingerprint: "%s"' % load_gate(self.repo).T.key_fingerprint(); os.environ.pop("STORY_GATE_ROOT")
         g.write_text(t.replace("    with:\n", "    with:\n      #" + good.strip() + "\n", 1))
         self.assertIn("expects release key SHA256:ZZZ", run(self.repo, "doctor").stdout)
-        g.write_text(t.replace("jobs:\n", "jobs:\n  # uses: SathiaAI/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n", 1)
+        g.write_text(t.replace("jobs:\n", "jobs:\n  # uses: Viaknox/story-gate/.github/workflows/gate.yml@" + self.SHA + "\n", 1)
                      .replace("/.github/workflows/gate.yml@" + self.SHA + " #", "/.github/workflows/audit.yml@" + self.SHA + " #"))
         out = run(self.repo, "doctor").stdout  # with no active call to gate.yml it's no longer a reusable install: it fails either way
         self.assertTrue("doesn't call story-gate's gate.yml" in out or "story-gate.yml           OUTDATED" in out, out)
@@ -8390,13 +8390,13 @@ class TestReusableWorkflow(Base):
         sys.modules.pop("sg_reusable", None)
         import sg_reusable as R, sg_github as GH
         from unittest import mock
-        replies = {"/repos/SathiaAI/story-gate/git/ref/tags/v1.2.3": (200, {"object": {"type": "tag", "sha": "f" * 40}}, {}),
-                   "/repos/SathiaAI/story-gate/git/tags/" + "f" * 40: (200, {"object": {"type": "commit", "sha": "c" * 40}}, {})}
+        replies = {"/repos/Viaknox/story-gate/git/ref/tags/v1.2.3": (200, {"object": {"type": "tag", "sha": "f" * 40}}, {}),
+                   "/repos/Viaknox/story-gate/git/tags/" + "f" * 40: (200, {"object": {"type": "commit", "sha": "c" * 40}}, {})}
         with mock.patch.object(GH, "human_token", return_value=None), \
                 mock.patch.object(GH, "call", side_effect=lambda m, p, t=None, b=None: replies.get(p, (404, {}, {}))):
-            self.assertEqual(R.resolve_tag(g, "SathiaAI/story-gate", "1.2.3"), "c" * 40)
+            self.assertEqual(R.resolve_tag(g, "Viaknox/story-gate", "1.2.3"), "c" * 40)
             with self.assertRaises(RuntimeError):
-                R.resolve_tag(g, "SathiaAI/story-gate", "9.9.9")
+                R.resolve_tag(g, "Viaknox/story-gate", "9.9.9")
 
     def test_the_published_workflows_are_pinned_and_keep_secrets_away_from_pr_code(self):
         sys.modules.pop("sg_reusable", None)

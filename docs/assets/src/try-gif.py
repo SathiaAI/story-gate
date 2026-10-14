@@ -44,7 +44,7 @@ frames.append((term(base, False), 900))
 frames.append((term(base+A1, False), 900))
 frames.append((term(base+A1+'\n'+A2, False), 1500))
 frames.append((term(base+A1+'\n'+A2+'\n'+END, False), 2600))
-card='<div class="card"><h1>Your AI said <span class="y">done</span>.<br>story-gate checked.</h1><p>Every goal runs for real before a pull request can merge.<br>github.com/SathiaAI/story-gate</p></div>'
+card='<div class="card"><h1>Your AI said <span class="y">done</span>.<br>story-gate checked.</h1><p>Every goal runs for real before a pull request can merge.<br>github.com/Viaknox/story-gate</p></div>'
 frames.append((card, 2800))
 async def main():
     async with async_playwright() as p:

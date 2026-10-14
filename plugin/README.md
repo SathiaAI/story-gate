@@ -6,7 +6,7 @@
 
 story-gate makes your AI coding tool plan before it builds, check its course while it builds, and show you the feature working when it's done. Then it waits for a person to approve the work on GitHub. An independent AI judge scores each check, so your coding AI never grades its own work.
 
-Free and open source (MIT), by Viaknox. Pilot release (pre-1.0). Full documentation: https://github.com/SathiaAI/story-gate
+Free and open source (MIT), by Viaknox. Pilot release (pre-1.0). Full documentation: https://github.com/Viaknox/story-gate
 
 ## Example use cases
 

@@ -56,7 +56,7 @@ Every client has different hooks and models, so until now there has been no sing
 
 You do this once per repository. The steps are the same as in the README:
 
-1. **Ask your AI:** `Set up story-gate in my project (the folder I have open). Install it from https://github.com/SathiaAI/story-gate, but don't change that repository.`. It asks before installing, then installs the pinned release (`uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.1`) and runs `story-gate init`, which opens the setup page.
+1. **Ask your AI:** `Set up story-gate in my project (the folder I have open). Install it from https://github.com/Viaknox/story-gate, but don't change that repository.`. It asks before installing, then installs the pinned release (`uv tool install --python 3.12 git+https://github.com/Viaknox/story-gate@v0.9.1`) and runs `story-gate init`, which opens the setup page.
 2. **Sign in to GitHub** on that page (click Authorize).
 3. **Give your AI its own login:** click Create, then Install. Your AI never uses your account.
 4. **Add the judge key:** paste an OpenRouter key once. It goes into a GitHub secret and your user folder, never the repository.
@@ -133,7 +133,7 @@ By default `install` copies three workflows (about 100 lines each) into your rep
 ```yaml
 jobs:
   story-gate:
-    uses: SathiaAI/story-gate/.github/workflows/gate.yml@<40-character commit SHA> # vX.Y.Z
+    uses: Viaknox/story-gate/.github/workflows/gate.yml@<40-character commit SHA> # vX.Y.Z
     with:
       release-key-fingerprint: "SHA256:..."
     secrets:
@@ -532,7 +532,7 @@ The token belongs to the person who made it. If they leave or it expires, the co
           permission-issues: read
 ```
 
-The step's token lasts about an hour, is masked in logs, and goes straight into `STORY_GATE_SPECS_TOKEN`. It's never written to a file or printed. Rotate the private key in the App's settings. We haven't yet run this recipe end to end on a real second repository, so treat it as unvalidated until we have ([#51](https://github.com/SathiaAI/story-gate/issues/51)).
+The step's token lasts about an hour, is masked in logs, and goes straight into `STORY_GATE_SPECS_TOKEN`. It's never written to a file or printed. Rotate the private key in the App's settings. We haven't yet run this recipe end to end on a real second repository, so treat it as unvalidated until we have ([#51](https://github.com/Viaknox/story-gate/issues/51)).
 
 
 - **Ticket files** (`# 03: Title` with `**What to build:**`): every `- [ ]` line is a requirement. So is every `- [ ]` under a `## Acceptance criteria` heading in any linked file.

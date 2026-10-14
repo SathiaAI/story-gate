@@ -4,7 +4,7 @@ story-gate decides whether AI-written code may merge, so a way around it is a se
 
 ## Report a vulnerability
 
-Use GitHub's private report form: **[Report a vulnerability](https://github.com/SathiaAI/story-gate/security/advisories/new)**.
+Use GitHub's private report form: **[Report a vulnerability](https://github.com/Viaknox/story-gate/security/advisories/new)**.
 
 Please don't open a public issue, pull request or discussion for a security problem. The report stays private between you and the maintainers until a fix is released.
 

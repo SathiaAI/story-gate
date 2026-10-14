@@ -3,7 +3,7 @@
   "description": "story-gate: a quality gate for AI coding work, by Viaknox.",
   "owner": {
     "name": "Viaknox",
-    "url": "https://github.com/SathiaAI/story-gate"
+    "url": "https://github.com/Viaknox/story-gate"
   },
   "plugins": [
     {
