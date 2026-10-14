@@ -74,6 +74,7 @@ def graphql(query, variables, token):
 
 
 # ------------------------------------------------------------------ CODEOWNERS
+CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub uses the first that exists
 CODEOWNERS_HEADER = "# Code owners: the humans who accept work. Bots and apps cannot be code owners."
 WILDCARDS = ("*", "/*", "/**", "**")
 
@@ -218,7 +219,11 @@ def protection(repo, branch, token, check=None):
     if not pr:
         missing.append("pull request reviews are not required")
     else:
-        p = pr[0]
+        p = {  # GitHub applies every active ruleset together, the strictest value of each setting wins
+            "require_code_owner_review": any(x.get("require_code_owner_review") for x in pr),
+            "dismiss_stale_reviews_on_push": any(x.get("dismiss_stale_reviews_on_push") for x in pr),
+            "require_last_push_approval": any(x.get("require_last_push_approval") for x in pr),
+            "required_approving_review_count": max(int(x.get("required_approving_review_count") or 0) for x in pr)}
         if not p.get("require_code_owner_review"):
             missing.append("code owner review is not required")
         if not p.get("dismiss_stale_reviews_on_push"):
@@ -407,7 +412,7 @@ def allow_ai_prs(repo, ruleset_id, token):
 def owners_on_default_branch(repo, token):
     """Users on the '*' rule of the CODEOWNERS file GitHub uses on the default branch (.github/, then the root, then docs/);
     [] when there is none; None when GitHub's answer can't tell (then the caller carries on as before)."""
-    for path in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+    for path in CODEOWNERS_PATHS:
         st, f, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
         if st == 200 and isinstance(f, dict) and f.get("encoding") == "base64":
             return codeowners(base64.b64decode(f.get("content") or "").decode("utf-8", "replace"))[0]
@@ -416,7 +421,53 @@ def owners_on_default_branch(repo, token):
     return []
 
 
-def codeowners_change(co, new, repo, token, login, added):
+def codeowners_on_default_branch(repo, token):
+    """(path, text) of the CODEOWNERS file GitHub uses on the default branch (the first of CODEOWNERS_PATHS there);
+    ("", "") when there is none; None when GitHub's answer can't tell (an error, or a folder or link at that path)."""
+    for path in CODEOWNERS_PATHS:
+        st, f, _ = call("GET", "/repos/%s/contents/%s" % (repo, path), token)
+        if st == 200:
+            if isinstance(f, dict) and f.get("type") == "file" and f.get("encoding") == "base64":
+                return path, base64.b64decode(f.get("content") or "").decode("utf-8", "replace")
+            return None
+        if st != 404:
+            return None
+    return "", ""
+
+
+def codeowners_in_git(root, ref):
+    """(path, text) of the CODEOWNERS file GitHub would use at git `ref` in the clone at root: the first of
+    CODEOWNERS_PATHS there; ("", "") when there is none; None when git can't read `ref` or that path is not a regular
+    file (a link or a folder), so nobody guesses."""
+    run = lambda *a: subprocess.run(["git", *a], cwd=str(root), capture_output=True)
+    if run("rev-parse", "--verify", "--quiet", ref + "^{commit}").returncode != 0:
+        return None
+    for path in CODEOWNERS_PATHS:
+        r = run("ls-tree", "-z", ref, "--", path)
+        if r.returncode != 0:
+            return None
+        entry = r.stdout.split(b"\0")[0]
+        if not entry:
+            continue
+        mode, kind, sha = entry.split(b"\t")[0].split(b" ")
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            return None
+        blob = run("cat-file", "blob", sha.decode())
+        return (path, blob.stdout.decode("utf-8", "replace")) if blob.returncode == 0 else None
+    return "", ""
+
+
+def _link_on_path(root, rel):
+    """True when rel or any folder on the way to it is a link (writing there could land outside the checkout)."""
+    p = Path(root)
+    for part in Path(rel).parts:
+        p = p / part
+        if p.is_symlink():
+            return True
+    return False
+
+
+def codeowners_change(co, new, repo, token, login, added, rel=".github/CODEOWNERS"):
     """Put the new CODEOWNERS text where it can be approved: a pull request from the agent App, or the local file for you
     to commit. -> one line for setup-repo's report."""
     st, info, _ = call("GET", "/repos/%s" % repo, token)
@@ -429,14 +480,20 @@ def codeowners_change(co, new, repo, token, login, added):
         return "CODEOWNERS: not changed: couldn't tell who should open the pull request (%s)" % e
     if who == "app":
         try:  # one fixed branch: running setup-repo again before that pull request is merged finds it instead of opening another
-            res = open_setup_pr(tok, repo, {".github/CODEOWNERS": new.encode("utf-8")},
+            res = open_setup_pr(tok, repo, {rel: new.encode("utf-8")},
                                 branch="story-gate-codeowners", title="story-gate: code owners",
-                                body="Names the people who accept story-gate's work (`.github/CODEOWNERS`).\n\nOpened by: %s." % why,
+                                body="Names the people who accept story-gate's work (`%s`).\n\nOpened by: %s." % (rel, why),
                                 base=base)
         except RuntimeError as e:  # report it and let setup-repo go on with the ruleset and Actions steps
             return "CODEOWNERS: not changed: couldn't open the pull request (%s)" % e
         if res.get("existing"):
-            err = update_branch_file(tok, repo, res["branch"], ".github/CODEOWNERS", new, "story-gate: code owners")
+            ref = "?ref=" + urllib.parse.quote(res["branch"])
+            for other in CODEOWNERS_PATHS[:CODEOWNERS_PATHS.index(rel)] if rel in CODEOWNERS_PATHS else ():
+                st_o, _, _ = call("GET", "/repos/%s/contents/%s%s" % (repo, other, ref), tok)
+                if st_o != 404:  # an earlier run's file there would be the one GitHub reads, hiding this change
+                    return ("CODEOWNERS: not changed: pull request #%s still has %s, which GitHub would read instead of %s. "
+                            "Close it, then run setup-repo again." % (res.get("number"), other, rel))
+            err = update_branch_file(tok, repo, res["branch"], rel, new, "story-gate: code owners")
             if err:
                 return ("CODEOWNERS: not changed: pull request #%s is already open with other code owners and couldn't be "
                         "updated (%s). Close it, then run setup-repo again." % (res.get("number"), err))
@@ -470,15 +527,31 @@ def setup_repo(root, repo, owners, token, dry_run=False, login=None):
     A CODEOWNERS change goes in a pull request the agent App opens when it is installed; otherwise in the local file for
     you to commit, when that pull request can be approved (pr_author decides)."""
     out = []
-    co = Path(root) / ".github" / "CODEOWNERS"
-    text = co.read_text(encoding="utf-8") if co.exists() else ""
-    new = add_owners(text, owners)  # on the effective (last) '*' rule, keeping later path rules in force
-    if new is not None:
+    # The file GitHub uses on the default branch, and its rules, decide; never this checkout's own files.
+    found = codeowners_on_default_branch(repo, token) if token and not dry_run else None
+    if found is None:  # GitHub can't tell: origin's default branch as git last fetched it
+        head = subprocess.run(["git", "symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cwd=str(root), capture_output=True, text=True)
+        found = codeowners_in_git(root, head.stdout.strip()) if head.returncode == 0 and head.stdout.strip() else None
+    if found is None and dry_run:  # a dry run writes nothing: the local file is enough to show what would change
+        local = next((r for r in CODEOWNERS_PATHS if (Path(root) / r).is_file() and not _link_on_path(root, r)), "")
+        found = (local, (Path(root) / local).read_text(encoding="utf-8") if local else "")
+    rel, text = found if found is not None else ("", "")
+    rel = rel or CODEOWNERS_PATHS[0]  # none on the default branch yet: GitHub reads .github/CODEOWNERS first
+    co = Path(root) / rel
+    link = _link_on_path(root, rel)  # never write through a link: it could point outside the checkout
+    new = None if found is None or link else add_owners(text, owners)  # on the effective (last) '*' rule
+    if found is None:
+        out.append("CODEOWNERS: not changed: neither GitHub (it needs Contents: read) nor this clone's origin/HEAD says which "
+                   "CODEOWNERS file the default branch uses. Run `git remote set-head origin --auto`, then setup-repo again")
+    elif link:
+        out.append("CODEOWNERS: not changed: %s is a link or is inside one; replace it with a real file and run setup-repo "
+                   "again" % rel)
+    elif new is not None:
         added = "CODEOWNERS: added %s to the '*' rule" % " ".join("@" + o.lstrip("@") for o in owners)
         if dry_run:
             out.append(added + " (dry run: nothing written)")
         else:
-            out.append(codeowners_change(co, new, repo, token, login or (owners[0] if owners else None), added))
+            out.append(codeowners_change(co, new, repo, token, login or (owners[0] if owners else None), added, rel))
     else:
         out.append("CODEOWNERS: already lists %s" % ", ".join(owners))
     if dry_run:
@@ -603,6 +676,9 @@ def setup_agent(owner=None, org=False, code=None, open_browser=True):
                 pass
 
             def do_GET(self):
+                if self.headers.get("Host", "") != "127.0.0.1:%d" % self.server.server_address[1]:  # DNS-rebinding guard, as in sg_setup
+                    self.send_response(403); self.end_headers()
+                    return
                 u = urllib.parse.urlparse(self.path)
                 qs = urllib.parse.parse_qs(u.query)
                 if u.path == "/start":

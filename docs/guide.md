@@ -208,7 +208,7 @@ Use the copied workflows (`install --ci copy`, the default) if your organization
 
 Codex adds its own hard-on-change layer: it asks you to trust any changed project hook. Cursor, Gemini, Windsurf and Grok have no switch like lockdown, so the checkout filter is their protection. Details per tool: [docs/client-security.md](client-security.md).
 
-**What the filter checks:** every hook entry, MCP server and command-like setting (`apiKeyHelper`, `statusLine`, Gemini's `discoveryCommand`, ...) must match the default branch's version; `env`, `permissions`, `mcpServers` and plugin settings must be identical to it. Files covered, in any folder: `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `.devin/hooks.json`, `.windsurf/hooks.json`, `.grok/hooks/*.json`, `.github/hooks/*.json` (VS Code), `.agents/hooks.json` (Antigravity).
+**What the filter checks:** every hook entry, MCP server and command-like setting (`apiKeyHelper`, `statusLine`, Gemini's `discoveryCommand`, ...) must match the default branch's version. A branch may change only what a tool shows (`statusMessage`, `show_output`); a changed `matcher`, time limit, fail mode or hook type takes the hook off disk, because a hook that runs less often or stops sooner is switched off in effect. A branch can still remove an approved hook or change the order of approved hooks; both show in the pull request's diff, and neither runs anything new. Per-OS overrides (`linux`, `osx`, `windows`, `bash`, `powershell`) count as commands; `env`, `permissions`, `mcpServers` and plugin settings must be identical to it. Files covered, in any folder: `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.cursor/hooks.json`, `.cursor/mcp.json`, `.gemini/settings.json`, `.devin/hooks.json`, `.windsurf/hooks.json`, `.grok/hooks/*.json`, `.github/hooks/*.json` (VS Code), `.agents/hooks.json` (Antigravity).
 
 **Adding a project hook on purpose:** put it on the default branch (or list its exact command in `project_hooks_allowed` there). On other branches it stays off disk. If you edit a filtered hook file on a branch, git warns you before the commit would drop that branch's commands. To commit the *removal* of a hook the default branch never approved, turn the filter off for that commit (`gate.py filter off`, then `filter on`).
 
@@ -742,14 +742,14 @@ Every number in the issue and the report says how it's calculated, and estimates
 - **Grok:** user and project hook merging isn't documented, so story-gate doesn't register Grok hooks (status checks by hand, CI as the backstop). Windsurf/Devin timeout and trust behaviour is undocumented.
 - **Fail-open tools:** in Claude Code, Gemini and Grok a hook that crashes or times out lets the edit through. story-gate's pre-edit hook only reads local files, so it stays fast; CI still checks every PR.
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
-- **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
+- **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py tests/test_packaging.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
 - **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets. To remove it from this computer, delete that file; `uninstall --user` keeps it and prints where it is.
 - **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
 
 ## Tests
 
 ```bash
-python -m unittest tests/test_gate.py
+python -m unittest tests/test_gate.py tests/test_packaging.py
 ```
 CI runs the suite on Linux, Windows and macOS, with Python 3.9 and 3.12.
 

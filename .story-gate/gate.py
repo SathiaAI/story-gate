@@ -2559,7 +2559,7 @@ def cmd_checkpoint(sid, quiet=False):
         left = deadline - time.time()
         if left < 5:
             err = "checkpoint ran out of time (%ds budget); run `gate.py checkpoint %s` by hand" % (CHECKPOINT_BUDGET, sid); break
-        cc = json.loads(json.dumps(c)); cc["judge"]["timeout"] = int(min(left, int(c["judge"].get("timeout", 90))))
+        cc = json.loads(json.dumps(c)); cc["judge"]["timeout"] = int(min(left, J.settings(c).get("timeout", 90)))
         q = {"ac_%02d" % j: {"type": "noul", "instructions": "The code so far fully implements %s: %s" % (aid, text)}
              for j, (aid, text, _) in enumerate(chunk)}
         if n == 0:

@@ -27,7 +27,7 @@ Anything story-gate can't read with certainty is **blocked**, never plain:
 - **Wrappers:** `env`, `time`, `xargs`.
 - **Environment settings:** `VAR=...`.
 - **Code given inline:** `-c`, `-e`, `-m`.
-- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`, `docker compose` / `docker build`.
+- **Tools that load code from repository config:** `pytest`, `eslint`, `jest`, `pylint`, `mypy`, `flake8`, `docker compose` / `docker build`.
 - **Shell features:** pipes, `&&`, `$VARS`.
 - **Repository paths hidden inside options.**
 

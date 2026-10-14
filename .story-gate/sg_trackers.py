@@ -684,17 +684,18 @@ def untrusted_server(gate, settings):
     named = named[len("https://"):] if named.startswith("https://") else named  # the same forms jira-setup takes
     if named == site:
         return None
-    base = gate.cfg().get("base_branch", "main")
-    for ref in ("origin/" + base, base):
-        raw = gate.git("show", "%s:.story-gate/config.json" % ref)
-        if raw:
-            try:
-                theirs = ((json.loads(raw).get("trackers") or {}).get("jira") or {})
-            except (ValueError, AttributeError):
-                theirs = {}
-            if isinstance(theirs, dict) and theirs.get("server") and theirs.get("site") == site:
-                return None
-            break
+    # The default branch comes from the remote's own HEAD, never from this branch's config (base_branch), and only the
+    # remote-tracking ref counts: a local branch of the same name is something the branch under test can create.
+    head = (gate.git("symbolic-ref", "-q", "refs/remotes/origin/HEAD") or "").strip()
+    base = head[len("refs/remotes/origin/"):] if head.startswith("refs/remotes/origin/") else "main"
+    raw = gate.git("show", "refs/remotes/origin/%s:.story-gate/config.json" % base)
+    if raw:
+        try:
+            theirs = ((json.loads(raw).get("trackers") or {}).get("jira") or {})
+        except (ValueError, AttributeError):
+            theirs = {}
+        if isinstance(theirs, dict) and theirs.get("server") and theirs.get("site") == site:
+            return None
     return ("this branch's config sends your Jira token to %s, which isn't the address on %s's config. If that's your "
             "Jira, set STORY_GATE_JIRA_SITE=%s and run it again." % (site, base, site))
 

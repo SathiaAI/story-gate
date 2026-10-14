@@ -28,7 +28,8 @@ RUNNERS = {"npm", "npx", "yarn", "pnpm", "bun", "bunx", "make", "just", "task", 
            "lefthook", "husky", "turbo", "nx"}  # run code chosen by repository files (package.json, Makefile, ...)
 CONFIG_LOADERS = {"docker-compose", "podman-compose", "pytest", "py.test", "eslint", "prettier", "jest", "vitest", "mocha", "tsc", "webpack", "vite", "rollup",
                   "babel", "gulp", "grunt", "rspec", "phpunit", "playwright", "cypress", "stylelint", "commitlint", "lint-staged",
-                  "tsx", "ts-node", "nodemon", "rails", "django-admin"}  # load code from repository config (conftest.py, *.config.js)
+                  "tsx", "ts-node", "nodemon", "rails", "django-admin",
+                  "pylint", "mypy", "dmypy", "flake8"}  # load code from repository config (conftest.py, *.config.js, init-hook, plugins)
 PROGRAM_FILE_TOOLS = {"awk", "gawk", "mawk", "nawk", "busybox", "sed", "gsed", "jq", "gojq", "yq", "dc", "bc", "m4"}
 PROGRAM_FILE_FLAGS = {"-f", "--file", "--from-file", "--script-file"}  # glued forms (-fprog, --file=prog) are options analyse() refuses
 CONTAINER_TOOLS = {"docker", "podman", "nerdctl"}

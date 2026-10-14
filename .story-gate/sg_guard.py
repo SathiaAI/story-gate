@@ -31,6 +31,10 @@ GUARDED_KEYS = {"env", "permissions", "mcpServers", "enableAllProjectMcpServers"
 ACTOR_TYPES = {"command", "http", "prompt", "agent", "mcp_tool"}
 ACTOR_KEYS = ("command", "url", "prompt", "agent")
 ATTR_MARK = "# story-gate: AI-tool hook files are filtered so a branch can't add commands (gate.py enroll / unenroll)"
+# Per-OS command overrides (VS Code / Copilot hook formats): the tool runs these instead of "command" on that platform.
+OS_COMMAND_KEYS = {"windows", "linux", "osx", "bash", "powershell"}
+# Keys that only change what a tool shows, never when or how a hook runs: a branch may change these on an approved entry.
+DISPLAY_KEYS = {"statusMessage", "show_output"}
 CANARY = "story-gate-canary-should-never-run"
 _DROP = object()
 
@@ -39,7 +43,7 @@ _DROP = object()
 def is_exec_key(k):
     """Keys whose value an AI tool runs: command, apiKeyHelper, Gemini's discoveryCommand/callCommand, ..."""
     lk = k.lower() if isinstance(k, str) else ""
-    return lk.endswith("command") or lk.endswith("helper") or k in ("awsAuthRefresh", "awsCredentialExport")
+    return lk.endswith("command") or lk.endswith("helper") or lk in OS_COMMAND_KEYS or k in ("awsAuthRefresh", "awsCredentialExport")
 
 
 def exec_strings(data):
@@ -66,55 +70,85 @@ def _is_actor(d):
     return any(k in d for k in ACTOR_KEYS) or d.get("type") in ACTOR_TYPES
 
 
-def actor_entries(data):
-    """Canonical form of every hook/server entry (anything with a command, url, prompt or agent)."""
-    out = set()
-    def walk(x, depth):
+def _core(d):
+    """An entry without the keys that only change what a tool shows; a hook group also without its hook list (its
+    entries are checked one by one)."""
+    group = _is_group(d)
+    return _canon({k: v for k, v in d.items() if k not in DISPLAY_KEYS and not (group and k == "hooks")})
+
+
+def _is_group(x):
+    """A hook group: a dict holding a list of hooks with its own settings (Claude's {"matcher": ..., "hooks": [...]})."""
+    return isinstance(x, dict) and isinstance(x.get("hooks"), list) and not _is_actor(x)
+
+
+def actor_places(data):
+    """Every hook/server entry as (where it sits, its _core form) -> how many times it is there. Where: the keys from
+    the top of the file down to it, with each hook group's own settings (matcher and the like) in place of the group.
+    So the same entry under another event, matcher or group setting is a different place."""
+    import collections
+    out = collections.Counter()
+    def walk(x, ctx, depth):
         if isinstance(x, dict):
             if depth and _is_actor(x):
-                out.add(_canon(x))
-            for v in x.values():
-                walk(v, depth + 1)
+                out[(ctx, _core(x))] += 1
+                return
+            here = ctx + (("group", _core(x)),) if depth and _is_group(x) else ctx
+            for k, v in x.items():
+                walk(v, here + (k,), depth + 1)
         elif isinstance(x, list):
             for v in x:
-                walk(v, depth + 1)
-    walk(data, 0)
+                walk(v, ctx, depth + 1)
+    walk(data, (), 0)
     return out
 
 
-def strip_unapproved(data, approved_cmds, approved_entries=frozenset()):
+def strip_unapproved(data, approved_cmds, approved_places=None, policy_cmds=frozenset()):
     """Remove every hook/server entry and command the default branch didn't approve. Returns (new_data, removed).
-    An entry survives if it is identical to an approved one, or if its only active part is an approved command string."""
+    An entry survives only where the default branch has the same entry (apart from display-only keys) in the same place:
+    same event, same group matcher and settings. So a branch can't add a command, and can't change when or how an
+    approved hook runs (matcher, event, time limit, fail mode). A command approved only by policy (project_hooks_allowed,
+    policy_cmds) may sit anywhere as a bare entry. approved_cmds (every command string the default branch has) still
+    decides command-like settings outside hook entries (apiKeyHelper and the like)."""
     removed = []
-    def walk(x, depth):
+    left = dict(approved_places or {})  # each approved entry may appear as often as the default branch has it, no more
+    def walk(x, ctx, depth):
         if isinstance(x, dict):
-            if depth and _is_actor(x) and _canon(x) not in approved_entries:
+            if depth and _is_actor(x):
                 active = [k for k in x if k in ACTOR_KEYS or is_exec_key(k)]
-                plain_cmd = (active == ["command"] and isinstance(x["command"], str) and x["command"] in approved_cmds
-                             and not set(x) & {"args", "env", "headers", "url", "cwd"})
-                if not plain_cmd:
+                policy = (active == ["command"] and isinstance(x["command"], str) and x["command"] in policy_cmds
+                          and set(x) - DISPLAY_KEYS <= {"type", "command"} and x.get("type", "command") == "command")
+                place = (ctx, _core(x))
+                if left.get(place, 0) > 0:
+                    left[place] -= 1
+                    return x
+                if not policy:
                     removed.append(str(x.get("command") or x.get("url") or x.get("prompt") or x.get("agent") or x.get("type"))[:200])
                     return _DROP
+                return x
+            here = ctx + (("group", _core(x)),) if depth and _is_group(x) else ctx
             out = {}
             for k, v in x.items():
                 if is_exec_key(k) and not (isinstance(v, str) and v in approved_cmds):
                     removed.append(str(v)[:200])
                     continue
-                nv = walk(v, depth + 1)
+                nv = walk(v, here + (k,), depth + 1)
                 if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
                     continue  # an entry that is now empty disappears
                 out[k] = nv
+            if depth and _is_group(x) and x["hooks"] and not out.get("hooks"):
+                return _DROP  # a group whose hooks were all taken out goes too (its matcher alone runs nothing)
             return out
         if isinstance(x, list):
             out = []
             for v in x:
-                nv = walk(v, depth + 1)
+                nv = walk(v, ctx, depth + 1)
                 if nv is _DROP or (isinstance(v, (dict, list)) and v and not nv):
                     continue
                 out.append(nv)
             return out
         return x
-    return walk(data, 0), removed
+    return walk(data, (), 0), removed
 
 
 def _load(b):
@@ -145,7 +179,7 @@ def sanitize(branch_bytes, approved_bytes, allowed=()):
                 data[k] = appr[k]
             else:
                 del data[k]
-    new, more = strip_unapproved(data, exec_strings(appr) | set(allowed), actor_entries(appr))
+    new, more = strip_unapproved(data, exec_strings(appr), actor_places(appr), set(allowed))
     removed += more
     if not removed:
         return branch_bytes, []
@@ -568,7 +602,8 @@ def prove(top):
     if not filter_active(top):
         return False, ["  checkout filter: OFF in this repository (gate.py filter on, or gate.py enroll)"]
     canary = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "echo %s" % CANARY}]}],
-                        "stop": [{"command": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY,
+                        "stop": [{"command": "echo %s" % CANARY},
+                                 {"type": "command", "linux": "echo %s" % CANARY, "osx": "echo %s" % CANARY, "windows": "echo %s" % CANARY}]}, "apiKeyHelper": "echo %s" % CANARY,
               "mcpServers": {"canary": {"command": "echo", "args": [CANARY]}}}
     blob = (json.dumps(canary, indent=2) + "\n").encode()
     toml = ('notify = ["sh", "-c", "echo %s"]\n' % CANARY).encode()

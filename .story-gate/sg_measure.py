@@ -320,15 +320,19 @@ def _sarif_rules(run):
 
 
 def _sarif_level(res, rules):
-    """A result's level: its own, else its rule's default configuration, else "warning" (SARIF 2.1.0, 3.27.10)."""
+    """A result's level: its own, else its rule's default configuration, else "warning" (SARIF 2.1.0, 3.27.10).
+    None when the result's rule reference is malformed."""
     if "level" in res:
         return res["level"]
     ref = res.get("rule") if isinstance(res.get("rule"), dict) else {}
     comp = ref.get("toolComponent", {}).get("index", -1) if isinstance(ref.get("toolComponent"), dict) else -1
     idx = ref.get("index", res.get("ruleIndex"))
+    rid = ref.get("id") or res.get("ruleId")
+    if not isinstance(comp, int) or isinstance(comp, bool) or not (rid is None or isinstance(rid, str)):
+        return None  # a malformed identifier (an unhashable or wrong-typed value) makes the report unusable, never an exception
     rule = rules.get((comp, idx)) if isinstance(idx, int) and not isinstance(idx, bool) else None
     if rule is None:
-        rule = rules.get(ref.get("id") or res.get("ruleId"))
+        rule = rules.get(rid)
     cfg = (rule or {}).get("defaultConfiguration")
     return cfg.get("level", "warning") if isinstance(cfg, dict) else "warning"
 
@@ -378,6 +382,8 @@ def parse_sarif(raw, levels=("error",), suppressed="count"):
             if res.get("kind", "fail") != "fail" or res.get("baselineState") == "absent":
                 continue
             level = _sarif_level(res, rules)
+            if level is None:
+                return None, {}, "a result has a malformed rule reference (ruleId, rule.id or toolComponent.index)"
             if level not in SARIF_LEVELS + ("none",):
                 return None, {}, "a result has an unknown level %r" % str(level)[:20]
             off = _suppressed(res)
