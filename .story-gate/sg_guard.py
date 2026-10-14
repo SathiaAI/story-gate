@@ -191,8 +191,8 @@ def _merge_approved(a, b):
     and group comes back in the approved order (a branch can't remove or reorder them); entries the branch kept that
     match an approved one keep the branch's display-only keys; what else the branch kept (commands approved by
     policy, groups holding them) follows. Scalars and other settings are the branch's."""
-    if b is None:
-        return a
+    if b is None or (isinstance(a, (dict, list)) and type(a) is not type(b)):
+        return a  # missing, or replaced by another kind of value (a list for an object, a string for a list): approved wins
     if isinstance(a, dict) and isinstance(b, dict) and not _is_actor(a):
         out = {k: (_merge_approved(a[k], b[k]) if k in a else b[k]) for k in b}
         for k in a:

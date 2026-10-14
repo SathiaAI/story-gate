@@ -2328,7 +2328,10 @@ class TestRepoHookGuard(RuntimeFixture):
         for name, branch in (("deleted", {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}]}}),
                              ("reordered", {"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [audit]}, {"matcher": "Bash", "hooks": [gate_]}]}}),
                              ("all gone", {"theme": "dark"}),
-                             ("emptied", {"hooks": {}})):
+                             ("emptied", {"hooks": {}}),
+                             ("hooks a list", {"hooks": []}), ("hooks a string", {"hooks": "off"}), ("hooks null", {"hooks": None}),
+                             ("event an object", {"hooks": {"PreToolUse": {"matcher": "Bash"}}}),
+                             ("event a string", {"hooks": {"PreToolUse": "none"}})):
             with self.subTest(branch=name):
                 out, removed, restored = G.smudge_form(json.dumps(branch).encode(), approved)
                 self.assertEqual(json.loads(out)["hooks"], appr["hooks"]); self.assertEqual(removed, [])
