@@ -20,7 +20,7 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **A one-page validation report** | Each goal next to the run that shows it working, with screenshots and steps to try it yourself |
 | **Nothing merges without you** | A failing story blocks the pull request, and only you (or people you name) can approve |
 | **A live dashboard** | A pinned GitHub issue: what's in progress, what's blocked, and what needs you |
-| **Works with your plans** | Reads Spec Kit, OpenSpec, Matt Pocock's skills, GitHub issues, and Linear or Jira tickets |
+| **Works with your plans** | Reads Spec Kit, OpenSpec, Matt Pocock's skills, GitHub issues, and Linear or Jira tickets (Jira Server and Data Center are still experimental) |
 | **Settings without editing files** | `story-gate settings` explains every setting and changes it safely (new) |
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
