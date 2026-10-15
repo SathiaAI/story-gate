@@ -14,7 +14,7 @@ fails until every critical one shown is acknowledged; in warn mode the same find
 Feed text is data from outside this repository: it is cut short, stripped of control characters and shown as advice to
 check, never as instructions. Stdlib only.
 """
-import json, os, re, urllib.request
+import json, os, re, urllib.error, urllib.request
 from pathlib import Path
 
 SCHEMA = "learner-patterns/v1"
@@ -61,12 +61,24 @@ def clean(s, n):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
+class _HttpsOnly(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https:// address, so the feed is never fetched without TLS."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """The redirected request, or a refusal when it would leave https."""
+        if not newurl.lower().startswith("https://"):
+            raise urllib.error.HTTPError(newurl, code, "redirect away from https refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def read_feed(source, root):
     """(text, "") or (None, why). An https:// URL is fetched; anything else is a file path (relative to the repository)."""
     try:
         if source.lower().startswith("https://"):
             req = urllib.request.Request(source, headers={"User-Agent": "story-gate", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=FETCH_TIME) as r:  # https only: checked above
+            with urllib.request.build_opener(_HttpsOnly).open(req, timeout=FETCH_TIME) as r:  # https on every hop
+                if not r.geturl().lower().startswith("https://"):
+                    raise ValueError("not https")
                 data = r.read(MAX_FEED + 1)
         else:
             p = Path(os.path.expanduser(source))
@@ -90,7 +102,7 @@ def _int(v):
     """A count from the feed, or 0."""
     try:
         return max(0, int(v))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: JSON reads 1e999 as infinity
         return 0
 
 
@@ -150,7 +162,7 @@ def acknowledged(context_text, ids):
             inside = line.strip() == SECTION
             continue
         m = ACK.match(line) if inside else None
-        if m and m.group(1) in ids and len(m.group(2).strip()) >= 10 and "TODO" not in m.group(2):
+        if m and m.group(1) in ids and len(m.group(2).strip()) >= 10 and "todo" not in m.group(2).lower():
             out.add(m.group(1))
     return out
 
@@ -204,13 +216,20 @@ def shown_in(rec):
 
 
 # ------------------------------------------------------------------ sast-check rules for the pitfalls shown
-def sast_home(environ=None, home=None):
-    """The sast-check folder on this computer (SAST_CHECK_HOME, else ~/.claude/skills/sast-check), or None. Never a
-    folder inside the repository's own settings: the pull request can't pick the scanner that checks it."""
+def sast_home(root, environ=None, home=None):
+    """The sast-check folder on this computer (SAST_CHECK_HOME, else ~/.claude/skills/sast-check), or None. A folder or
+    file that is, or links to, anything inside the repository is refused: a branch must never pick the scanner code
+    that --scan runs."""
     environ = os.environ if environ is None else environ
+    top = os.path.realpath(root)
+    inside = lambda p: os.path.realpath(p) == top or os.path.realpath(p).startswith(top + os.sep)
     for d in (environ.get("SAST_CHECK_HOME"), os.path.join(home or os.path.expanduser("~"), ".claude", "skills", "sast-check")):
-        if d and (Path(d) / "scripts" / "sast.py").is_file() and (Path(d) / "dist" / "rules.yaml").is_file():
-            return Path(d)
+        if not d or not os.path.isabs(os.path.expanduser(d)):
+            continue  # a relative folder would be read from wherever the command runs, the repository included
+        d = Path(os.path.expanduser(d))
+        files = (d, d / "scripts", d / "scripts" / "sast.py", d / "dist", d / "dist" / "rules.yaml")
+        if files[2].is_file() and files[4].is_file() and not any(inside(f) for f in files):
+            return Path(os.path.realpath(d))
     return None
 
 

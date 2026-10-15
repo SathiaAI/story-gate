@@ -596,6 +596,9 @@ def tighten(policy, local):
     if isinstance(local.get("spec_repos"), list):  # this computer may allow fewer repositories, never more
         mine = {str(r).lower() for r in local["spec_repos"]}
         out["spec_repos"] = [r for r in out.get("spec_repos") or [] if str(r).lower() in mine]
+    lp, op_ = local.get("pitfalls"), out.get("pitfalls")
+    if isinstance(lp, dict) and lp.get("mode") == "enforce" and isinstance(op_, dict) and op_.get("mode") == "warn":
+        out["pitfalls"] = dict(op_, mode="enforce")  # stricter on this computer, with the policy's own feed
     if isinstance(local.get("trackers"), dict):  # this computer may drop a tracker or the public-repo allowance, never add
         lt, mine = local["trackers"], {}
         for k, v in (out.get("trackers") or {}).items():

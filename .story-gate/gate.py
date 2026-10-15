@@ -2596,15 +2596,15 @@ def cmd_pitfalls(sid, scan=False, base=None):
     hp.write_text(PF.put_block(text, PF.handoff_block(rec)), encoding="utf-8")
     print("\n".join(["story-gate: " + x for x in PF.scan_lines(rec["scan"])]))
     print("story-gate: the result is in %s (section %s)." % (hp.relative_to(ROOT), PF.SECTION))
-    return 0 if rec["scan"]["state"] in ("ran", "no_rules", "not_installed") else 1
+    return 0 if rec["scan"]["state"] in ("ran", "no_rules", "not_installed") and st[0] is not False else 1
 
 
 def pitfalls_scan(shown, base):
     """Run sast-check, if it is installed on this computer, for the rules whose metadata.learner_pattern_id is one of the
     pitfalls shown. -> {state: ran | no_rules | not_installed | error, rules, hits, detail, at}."""
     import sg_pitfalls as PF, tempfile
-    out = {"at": now(), "state": "not_installed", "rules": [], "hits": []}
-    home = PF.sast_home()
+    out = {"at": now(), "state": "not_installed", "rules": [], "hits": [], "fingerprint": work_fingerprint()}  # the code scanned
+    home = PF.sast_home(ROOT)
     if home is None:
         return out
     try:
@@ -2628,7 +2628,9 @@ def pitfalls_scan(shown, base):
             doc = json.loads(Path(td, "findings.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, subprocess.TimeoutExpired) as e:
             return dict(out, state="error", detail="sast-check didn't run (%s)" % e.__class__.__name__)
-    runs = {r.get("name"): r for r in doc.get("runs") or [] if isinstance(r, dict)}
+    if not isinstance(doc, dict) or not isinstance(doc.get("runs"), list):
+        return dict(out, state="error", detail="sast-check's findings.json isn't in the expected shape")
+    runs = {r.get("name"): r for r in doc["runs"] if isinstance(r, dict)}
     og = runs.get("opengrep") or {}
     if og.get("status") != "ran" or doc.get("verdict") == "error" or p.returncode == 2:
         bad = [r for r in runs.values() if r.get("status") != "ran"]

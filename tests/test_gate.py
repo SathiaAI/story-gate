@@ -11082,3 +11082,49 @@ class TestPitfalls(Base):
         for phrase in ("at most %d, each with its checklist" % PF.MAX_SHOWN, "(%d are shown at most)" % PF.MAX_LINES,
                        "to %d characters" % PF.LINE_CAP, "at least 10 characters"):
             self.assertIn(phrase, doc)
+
+    def test_review_round_2_edge_cases(self):
+        """Huge feed numbers read as 0, a lower-case todo isn't an acknowledgement, a redirect away from https is
+        refused, and a sast-check folder inside the repository (or linked into it) is never used."""
+        sys.path.insert(0, str(SRC)); import importlib, urllib.error; PF = importlib.import_module("sg_pitfalls")
+        doc = {"schema": PF.SCHEMA, "patterns": [{"id": "lp-x", "stack": "python", "domain": "auth", "hits": 1e999,
+                                                  "repos": "9" * 400, "checklist": ["c"]}]}
+        p = PF.parse_feed(json.dumps(doc).replace("Infinity", "1e999"))[0][0]
+        self.assertEqual((p["hits"], p["repos"]), (0, int("9" * 400)))
+        self.assertEqual(PF.acknowledged("## Known pitfalls\n- lp-x: todo, later on\n", {"lp-x"}), set())
+        h = PF._HttpsOnly()
+        with self.assertRaises(urllib.error.HTTPError):
+            h.redirect_request(None, None, 302, "Found", {}, "http://example.com/feed.json")
+        inside = self.repo / "tools/sast-check"; (inside / "scripts").mkdir(parents=True); (inside / "dist").mkdir()
+        (inside / "scripts/sast.py").write_text("x"); (inside / "dist/rules.yaml").write_text("rules: []\n")
+        nohome = str(self.repo.parent / "nohome")
+        self.assertIsNone(PF.sast_home(self.repo, {"SAST_CHECK_HOME": str(inside)}, nohome))
+        self.assertIsNone(PF.sast_home(self.repo, {"SAST_CHECK_HOME": "tools/sast-check"}, nohome))
+        home = self.fake_sast()
+        self.assertEqual(PF.sast_home(self.repo, {"SAST_CHECK_HOME": str(home)}, nohome), home.resolve())
+        if os.name != "nt":
+            (home / "scripts/sast.py").unlink(); os.symlink(inside / "scripts/sast.py", home / "scripts/sast.py")
+            self.assertIsNone(PF.sast_home(self.repo, {"SAST_CHECK_HOME": str(home)}, nohome))
+
+    def test_scan_keeps_a_failed_acknowledgement_and_a_bad_report_is_an_error(self):
+        """--scan exits 1 while a critical pitfall isn't acknowledged in enforce mode, and a findings.json of the wrong
+        shape is recorded as a scanner error, never as no hits."""
+        self.on(mode="enforce"); sd = self.story()
+        home = self.fake_sast()
+        r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "ran")
+        self.assertIn("fingerprint", json.loads((sd / "pitfalls.json").read_text())["scan"])
+        s = (home / "scripts/sast.py").read_text()
+        (home / "scripts/sast.py").write_text(s[:s.index("(out / 'findings.json')")] + "(out / 'findings.json').write_text('[]')\n")
+        run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "error")
+
+    def test_an_enrolled_computer_may_raise_pitfalls_to_enforce_never_lower(self):
+        """tighten(): a local enforce raises the policy's warn (keeping the policy's feed); a local off or warn changes nothing."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        pol = g.full_config(json.dumps({"pitfalls": {"mode": "warn", "source": "a.json"}}))
+        self.assertEqual(g.T.tighten(pol, {"pitfalls": {"mode": "enforce", "source": "evil.json"}})["pitfalls"],
+                         {"mode": "enforce", "source": "a.json"})
+        strict = dict(pol, pitfalls={"mode": "enforce", "source": "a.json"})
+        self.assertEqual(g.T.tighten(strict, {"pitfalls": {"mode": "off"}})["pitfalls"]["mode"], "enforce")
