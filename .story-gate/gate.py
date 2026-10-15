@@ -623,7 +623,7 @@ def policy_fingerprint(c):
     """Hash of the policy settings that affect scoring, so a stricter config re-scores stored verdicts."""
     j = c.get("judge") or {}
     import sg_pitfalls as PF
-    pf = {"pf": PF.mode(c)} if PF.mode(c) != "off" else {}  # known pitfalls off: every stored verdict keeps its hash
+    pf = {"pf": [PF.mode(c), c["pitfalls"].get("source")]} if PF.mode(c) != "off" else {}  # off: every stored verdict keeps its hash
     return json.dumps({**pf, "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
                        "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
@@ -2519,43 +2519,57 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
 
 
 def pitfalls_ready(sd, sid, c, in_ci=False, show=True):
-    """The known-pitfalls READY check (status, why), or None when the feature is off. On this computer it reads the feed,
-    shows the pitfalls that match the story and records them in pitfalls.json. CI doesn't read the feed: it checks the
-    acknowledgements against that record, and a missing record is never a pass."""
+    """The known-pitfalls READY check (status, why), or None when the feature is off. It reads the feed, matches it to the
+    story's tags and checks context.md's acknowledgements. On this computer it also shows the pitfalls and records them in
+    pitfalls.json. CI never trusts that record (the pull request can edit it): it reads the feed itself, an https URL or
+    the file on the base branch, and a feed it can't read is never a pass."""
     import sg_pitfalls as PF
     m = PF.mode(c)
     if m == "off":
         return None
-    fm = front_matter(rd(sd / "story.md"))
-    stack, domain = PF.story_tags(fm)
-    context = rd(sd / "context.md")
-    if in_ci:
-        rec = load_json(sd / "pitfalls.json")
-        if "shown" not in rec:
-            return PF.check(m, [], set(), "no record of the known pitfalls shown at READY (pitfalls.json): run `%s` on "
-                            "your computer and commit the story folder" % gate_cmd("score %s ready" % sid))
-        shown = PF.shown_in(rec)
-        return PF.check(m, shown, PF.acknowledged(context, {p["id"] for p in shown}))
+    stack, domain = PF.story_tags(front_matter(rd(sd / "story.md")))
     if not stack or not domain:
         why = ("story.md's front matter needs stack: and domain: (for example stack: [python] and domain: [auth], or none) "
                "so known pitfalls can be matched")
         if show:
             print("story-gate: " + why)
         return PF.check(m, [], set(), why)
-    text, why = PF.read_feed(c["pitfalls"]["source"], ROOT)
+    text, why = (pitfalls_feed_ci(c) if in_ci else PF.read_feed(c["pitfalls"]["source"], ROOT))
     patterns, notes = PF.parse_feed(text) if text is not None else ([], [why])
     if text is not None and not patterns and notes:
         why = notes[0]
     shown = PF.matching(patterns, stack, domain)
-    acked = PF.acknowledged(context, {p["id"] for p in shown})
+    acked = PF.acknowledged(rd(sd / "context.md"), {p["id"] for p in shown})
     if show:
         print("\n".join(["story-gate: " + n for n in notes] + PF.show_lines(shown, acked, stack, domain)))
     if text is None or why:
         return PF.check(m, [], set(), why)
-    old = load_json(sd / "pitfalls.json")
-    wj(sd / "pitfalls.json", PF.record(sid, now(), m, stack, domain, shown, acked, old))
-    emit("pitfalls_shown", sid, {"shown": [p["id"] for p in shown], "acknowledged": sorted(acked)})
+    if not in_ci:
+        wj(sd / "pitfalls.json", PF.record(sid, now(), m, stack, domain, shown, acked, load_json(sd / "pitfalls.json")))
+        emit("pitfalls_shown", sid, {"shown": [p["id"] for p in shown], "acknowledged": sorted(acked)})
     return PF.check(m, shown, acked)
+
+
+def pitfalls_feed_ci(c):
+    """(text, "") or (None, why): the feed as CI reads it. An https URL is fetched; a file is read from the base branch
+    (never the pull request's copy); a path on one computer can't be read in CI."""
+    import sg_pitfalls as PF
+    src = c["pitfalls"]["source"]
+    if src.lower().startswith("https://"):
+        return PF.read_feed(src, ROOT)
+    rel = src.replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if not rel or rel.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", rel) or ".." in rel.split("/"):
+        return None, ("CI can't read a pitfalls feed that is on one computer (%s): use an https:// URL or a file in the "
+                      "repository" % PF.clean(src, 80))
+    try:
+        text = must("show", "%s:%s" % (c["base_branch"], rel))
+    except RuntimeError as e:  # a missing file or a failed git read: never a pass
+        return None, "CI couldn't read the pitfalls feed %s from the base branch (%s)" % (PF.clean(rel, 80), e.__class__.__name__)
+    if len(text.encode("utf-8", "ignore")) > PF.MAX_FEED:
+        return None, "the pitfalls feed is larger than %d MB" % (PF.MAX_FEED // 1_000_000)
+    return text, ""
 
 
 def cmd_pitfalls(sid, scan=False, base=None):

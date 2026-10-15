@@ -187,12 +187,12 @@ def show_lines(shown, acked, stack, domain):
 
 def record(sid, at, m, stack, domain, shown, acked, old=None):
     """What the story keeps in pitfalls.json: which pitfalls were shown and acknowledged (only ids and bands, never
-    feed text), so a later step can measure whether the same mistakes come back. A scan result is kept."""
+    feed text), so a later step can measure whether the same mistakes come back. A scan of the same pitfalls is kept."""
     rec = {"schema": 1, "story": sid, "at": at, "mode": m, "feed": SCHEMA, "stack": sorted(stack), "domain": sorted(domain),
            "shown": [{"id": p["id"], "impact_band": p["impact_band"]} for p in shown],
            "acknowledged": sorted(acked & {p["id"] for p in shown})}
-    if isinstance(old, dict) and isinstance(old.get("scan"), dict):
-        rec["scan"] = old["scan"]
+    if isinstance(old, dict) and isinstance(old.get("scan"), dict) and old.get("shown") == rec["shown"]:
+        rec["scan"] = old["scan"]  # a scan made for other pitfalls is dropped
     return rec
 
 

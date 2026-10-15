@@ -41,7 +41,8 @@ Add this to `.story-gate/config.json` in a pull request of its own:
 | `mode` | `off` (default), `warn`, `enforce` | `warn`: shown, and a missing acknowledgement is a WARN that never blocks. `enforce`: READY fails until every critical pitfall shown is acknowledged |
 | `source` | a file path or an `https://` URL | Where the feed is. A relative path starts at the repository's top folder |
 
-Start with `warn`. Turning `enforce` off, or changing the feed in enforce mode, is reported as a weaker rule.
+Start with `warn`. Turning `enforce` off, or changing the feed in enforce mode, is reported as a weaker rule. Changing
+the mode or the source makes stored READY verdicts out of date, so they are scored again.
 
 ## Tag each story
 
@@ -95,9 +96,10 @@ pitfalls shown. sast-check's own settings, suppressions and fail-closed rules ap
 
 ## In CI
 
-CI does not read the feed. It checks the acknowledgements in the pull request's `context.md` against the story's
-`pitfalls.json`. A story with no `pitfalls.json` fails in enforce mode. Run `story-gate score <ID> ready` on your
-computer and commit the story folder.
+CI reads the feed itself and never trusts `pitfalls.json`, which the pull request can edit. An `https://` feed is
+fetched. A file in the repository is read from the base branch, never from the pull request. A feed on one computer
+(for example `~/feeds/patterns-public.json`) can't be read in CI: in enforce mode READY then fails, so use a URL or a
+file in the repository. CI then checks the acknowledgements in the pull request's `context.md`.
 
 ## Known limits
 

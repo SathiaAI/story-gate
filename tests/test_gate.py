@@ -10950,17 +10950,41 @@ class TestPitfalls(Base):
             self.assertEqual(self.ready()[0]["checks"]["pitfalls_acknowledged"]["status"], "WARN", source)
         self.assertNotIn("Traceback", out)
 
-    def test_ci_checks_the_record_not_the_feed(self):
-        """In CI the feed isn't read: the acknowledgements are checked against pitfalls.json, and no record fails."""
-        self.on(mode="enforce"); sd = self.story()
+    def test_ci_reads_the_feed_from_the_base_branch_and_never_trusts_the_record(self):
+        """In CI the feed is read from the base branch: an edited pitfalls.json or feed in the pull request changes nothing,
+        a path on one computer can't be read (never a pass), and an acknowledgement in context.md still clears it."""
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / "feeds").mkdir(); shutil.copy(FEED, self.repo / "feeds/p.json")
+        g_("add", "feeds/p.json"); g_("commit", "-qm", "feed"); g_("checkout", "-q", "feature/SAT-1-thing"); g_("merge", "-q", "main")
+        self.on(mode="enforce", source="./feeds/p.json"); sd = self.story()
+        (self.repo / "feeds/p.json").write_text(json.dumps({"schema": "learner-patterns/v1", "patterns": []}))  # the PR's copy
+        (sd / "pitfalls.json").write_text(json.dumps({"shown": []}))  # a record that claims nothing was shown
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
-        c = dict(g.cfg(), pitfalls={"mode": "enforce", "source": str(self.repo / "nowhere.json")})  # CI can't read it
+        c = dict(g.cfg(), base_branch="main")
         st, why = g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)
-        self.assertIs(st, False); self.assertIn("no record", why)
-        (sd / "pitfalls.json").write_text(json.dumps({"shown": [{"id": "lp-synthetic-001", "impact_band": "critical"}]}))
-        self.assertIs(g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)[0], False)
+        self.assertIs(st, False); self.assertIn("lp-synthetic-001", why)
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text()), {"shown": []})  # CI writes no record
         (sd / "context.md").write_text((sd / "context.md").read_text() + "## Known pitfalls\n- lp-synthetic-001: compared with compare_digest\n")
         self.assertIs(g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)[0], True)
+        for src in (str(FEED), "~/feed.json", "../feed.json", "feeds/missing.json"):
+            st, why = g.pitfalls_ready(sd, "SAT-1", dict(c, pitfalls={"mode": "enforce", "source": src}), in_ci=True, show=False)
+            self.assertIs(st, False, src)
+
+    def test_a_scan_for_other_pitfalls_is_dropped(self):
+        """A stored scan is kept only while the same pitfalls are shown; a scan made for another set is dropped."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        a = [{"id": "lp-a", "impact_band": "high"}]
+        old = PF.record("S", "t", "warn", {"x"}, {"y"}, a, set())
+        old["scan"] = {"state": "ran"}
+        self.assertIn("scan", PF.record("S", "t", "warn", {"x"}, {"y"}, a, set(), old))
+        self.assertNotIn("scan", PF.record("S", "t", "warn", {"x"}, {"y"}, a + [{"id": "lp-b", "impact_band": "low"}], set(), old))
+
+    def test_changing_the_feed_source_rescores_ready(self):
+        """With pitfalls on, a new feed source makes a stored READY verdict out of date; with them off, nothing changes."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        fp = lambda **p: g.policy_fingerprint(dict(g.cfg(), pitfalls=p))
+        self.assertNotEqual(fp(mode="warn", source="a.json"), fp(mode="warn", source="b.json"))
+        self.assertEqual(fp(mode="off", source="a.json"), fp(mode="off", source="b.json"))
 
     def test_bad_settings_are_refused(self):
         """A pitfalls section with a wrong mode, no source, a plain-http source or an unknown field fails closed."""
