@@ -696,7 +696,9 @@ class TestJudges(Base):
             self.assertEqual(len(J.routes({"judge": {"base_url": "https://example.test/decisions"}})), 1)  # a pinned endpoint is never swapped
             self.assertEqual(got({"judge": {"provider": "decisions-proxy", "model": "typesafe/jev-1.13"}}), [("decisions-proxy", "typesafe/jev-1.13")])
             del os.environ["TYPESAFE_API_KEY"]
+            os.environ["STORY_GATE_ENV_FILE"] = str(self.repo / "no-such-judge.env")  # a developer's real key file can't leak in
             self.assertEqual(got({"judge": {}}), [("openrouter", "typesafe/jev-1.13")])  # no direct key: OpenRouter as before
+            self.assertTrue(J.JEV_ALIAS.match("jev-latest") and not J.JEV_ALIAS.match("jev-evil"))
             good, bad = MockJudge(model="typesafe/jev-1.13-20260917"), MockJudge(broken=True)
             saved = {k: dict(v) for k, v in J.DEFAULTS.items()}
             try:
@@ -709,7 +711,7 @@ class TestJudges(Base):
             finally:
                 J.DEFAULTS.clear(); J.DEFAULTS.update(saved); good.close(); bad.close()
         finally:
-            for k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
+            for k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE"):
                 os.environ.pop(k, None)
 
     def test_jev_model_id_is_matched_strictly(self):

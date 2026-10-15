@@ -127,6 +127,7 @@ def routes(c):
 
 
 def available(c):
+    """True when the judge is enabled and at least one of its routes has a key and an address."""
     s = settings(c)
     return s["provider"] != "none" and any(bool(env_key(r["key_env"])) and bool(r["url"]) for r in routes(c))
 
@@ -183,6 +184,7 @@ def _post(url, key, body, timeout):
 
 
 JEV_MODEL = re.compile(r"^(typesafe/)?jev(-[\d.]+)?(-\d{8})?$", re.I)
+JEV_ALIAS = re.compile(r"^jev-(latest|preview)$", re.I)  # TypeSafe's own aliases; trusted only from its direct API
 
 
 def _prob(x):
@@ -233,6 +235,7 @@ def ask(c, state, questions):
 
 
 def _ask_one(s, state, questions):
+    """Ask one route (settings `s`). Same result shape as ask(); never raises."""
     if s["provider"] == "none":
         return {"tier": "none", "error": "judge disabled in config"}
     key = env_key(s["key_env"])
@@ -257,7 +260,7 @@ def _ask_one(s, state, questions):
     # Only the model id the server reports counts; a proxy cannot pass a non-Jev model off as Jev.
     # TypeSafe's own API is Jev by definition, so it counts as Jev even if it omits the model id.
     direct = s["provider"] == "jev-direct" and urllib.parse.urlparse(s["url"]).hostname in ("api.typesafe.ai",)
-    tier = "jev" if JEV_MODEL.match(model) or (direct and not model) else "emulated"
+    tier = "jev" if JEV_MODEL.match(model) or (direct and (not model or JEV_ALIAS.match(model))) else "emulated"
     usage = r.get("usage") if isinstance(r.get("usage"), dict) else {}
     return {"tier": tier, "provider": s["provider"], "model": model or s["model"], "answers": ans, "cost": usage.get("cost")}
 
