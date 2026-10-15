@@ -11137,3 +11137,29 @@ class TestPitfalls(Base):
         self.assertIn("none given", "\n".join(PF.tag_lines(set(), set())))
         g = (SRC / "gate.py").read_text(encoding="utf-8")
         self.assertIn("PF.tag_lines(*PF.story_tags(", g)
+
+    def test_review_round_3_edge_cases(self):
+        """A feed nested too deep is invalid (not a crash), `none` beats wildcard pitfalls, a repository feed that links
+        outside the checkout is refused, a report with a non-list findings is a scanner error, and an enrolled
+        computer may raise an off policy that names a feed."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        self.assertEqual(PF.parse_feed("[" * 100000 + "]" * 100000)[0], [])
+        wild = {"id": "lp-w", "stack": {"any"}, "domain": {"any"}, "impact_band": "critical", "hits": 1, "repos": 1}
+        self.assertEqual(PF.matching([wild], {"python"}, {"none"}), [])
+        self.assertEqual(len(PF.matching([wild], {"python"}, {"auth"})), 1)
+        if os.name != "nt":
+            os.symlink(FEED, self.repo / "feed.json")
+            self.assertIsNone(PF.read_feed("feed.json", self.repo)[0])
+        shutil.copy(FEED, self.repo / "feed2.json")
+        self.assertIsNotNone(PF.read_feed("feed2.json", self.repo)[0])
+        self.on(); sd = self.story()
+        home = self.fake_sast()
+        s = (home / "scripts/sast.py").read_text()
+        doc = {"verdict": "pass", "runs": [{"name": "opengrep", "status": "ran"}], "findings": None}
+        (home / "scripts/sast.py").write_text(s[:s.index("(out / 'findings.json')")] + "(out / 'findings.json').write_text(%r)\n" % json.dumps(doc))
+        run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "error")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        off = g.full_config(json.dumps({"pitfalls": {"mode": "off", "source": "a.json"}}))
+        self.assertEqual(g.T.tighten(off, {"pitfalls": {"mode": "enforce"}})["pitfalls"], {"mode": "enforce", "source": "a.json"})
+        self.assertEqual(g.T.tighten(g.full_config("{}"), {"pitfalls": {"mode": "enforce", "source": "x"}})["pitfalls"]["mode"], "off")

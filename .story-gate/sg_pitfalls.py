@@ -82,7 +82,11 @@ def read_feed(source, root):
                 data = r.read(MAX_FEED + 1)
         else:
             p = Path(os.path.expanduser(source))
-            p = p if p.is_absolute() else Path(root) / p
+            if not p.is_absolute():  # a file in the repository: a branch must not point it elsewhere with a link
+                top, real = os.path.realpath(root), os.path.realpath(Path(root) / p)
+                if not real.startswith(top + os.sep) or not os.path.isfile(real):
+                    raise ValueError("not a regular file inside the repository")
+                p = Path(real)
             with p.open("rb") as f:
                 data = f.read(MAX_FEED + 1)
     except (OSError, ValueError) as e:  # URLError and HTTPError are OSErrors; ValueError: a malformed URL
@@ -111,7 +115,7 @@ def parse_feed(text):
     with no valid id or no checklist is skipped and counted. Each pattern comes back cleaned."""
     try:
         doc = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: JSON nested too deep
         return [], ["the pitfalls feed isn't valid JSON"]
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA or not isinstance(doc.get("patterns"), list):
         return [], ['the pitfalls feed isn\'t in the "%s" format' % SCHEMA]
@@ -139,7 +143,10 @@ def story_tags(fm):
 
 
 def _fits(want, have):
-    """True when a pattern's tags (empty or a wildcard: any) meet the story's tags."""
+    """True when a pattern's tags (empty or a wildcard: any) meet the story's tags. A story tagged only `none` matches
+    nothing, wildcards included."""
+    if have == {"none"}:
+        return False
     return not want or bool(want & set(WILDCARD)) or bool(want & have)
 
 

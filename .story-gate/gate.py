@@ -2620,6 +2620,7 @@ def pitfalls_scan(shown, base):
         mb = resolve_base(base)
     except RuntimeError as e:
         return dict(out, state="error", detail=str(e)[:200])
+    out["base"] = mb  # the merge base this scan compared with (the fingerprint above uses config's base branch)
     with tempfile.TemporaryDirectory() as td:
         try:  # diff mode: only what this change brings in; its own settings, suppressions and fail-closed rules apply
             p = subprocess.run([sys.executable, "-I", str(home / "scripts" / "sast.py"), "--repo", str(ROOT), "--mode", "diff",
@@ -2628,7 +2629,7 @@ def pitfalls_scan(shown, base):
             doc = json.loads(Path(td, "findings.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, subprocess.TimeoutExpired) as e:
             return dict(out, state="error", detail="sast-check didn't run (%s)" % e.__class__.__name__)
-    if not isinstance(doc, dict) or not isinstance(doc.get("runs"), list):
+    if not isinstance(doc, dict) or not isinstance(doc.get("runs"), list) or not isinstance(doc.get("findings"), list):
         return dict(out, state="error", detail="sast-check's findings.json isn't in the expected shape")
     runs = {r.get("name"): r for r in doc["runs"] if isinstance(r, dict)}
     og = runs.get("opengrep") or {}
