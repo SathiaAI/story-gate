@@ -68,3 +68,11 @@ Because DONE is checked against the latest default branch, turn on GitHub's sett
 ## `gate.py deps <ID>`
 
 Prints, in plain English: what the story depends on (when, why, and whether each is done), which stories on this branch or the default branch depend on it (worked out, not stored), its open blockers and its risks. It exits 1 only for a bad ID or a story it can't find.
+
+## On the dashboard
+
+- **Waiting** is a stage between Draft and Queued: a story whose `before-start` dependency isn't finished on the default branch, or that has an open blocker. Precedence: Done > Blocked > In review > Waiting > In progress > Queued > Draft, so a story with no dependencies and no blockers keeps exactly the stage it had before.
+- **Waiting on others** lists those stories, what each waits for, and what it blocks.
+- The **All stories** table has a *Depends on / Blocks* column, e.g. `SAT-9, SAT-10… / SAT-15`: `…` = not finished yet, `(waived)` = done with a waiver, `(missing)` = no story with that ID was found on any scanned branch. "Blocks" is worked out from the other stories, never stored.
+- **Dependency loops** are shown at the top (e.g. `SAT-3 → SAT-5 → SAT-3`).
+- **Suggested order** (folded) lists unfinished stories so each comes after what it depends on; ties go to the lowest ID (SAT-2 before SAT-10), and stories in a loop come last, marked "(in a loop)".
