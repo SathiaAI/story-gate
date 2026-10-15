@@ -596,6 +596,10 @@ def tighten(policy, local):
     if isinstance(local.get("spec_repos"), list):  # this computer may allow fewer repositories, never more
         mine = {str(r).lower() for r in local["spec_repos"]}
         out["spec_repos"] = [r for r in out.get("spec_repos") or [] if str(r).lower() in mine]
+    lp, op_ = local.get("pitfalls"), out.get("pitfalls")
+    if (isinstance(lp, dict) and lp.get("mode") == "enforce" and isinstance(op_, dict) and op_.get("mode") in ("off", "warn")
+            and isinstance(op_.get("source"), str) and op_["source"].strip()):
+        out["pitfalls"] = dict(op_, mode="enforce")  # stricter on this computer, with the policy's own feed
     if isinstance(local.get("trackers"), dict):  # this computer may drop a tracker or the public-repo allowance, never add
         lt, mine = local["trackers"], {}
         for k, v in (out.get("trackers") or {}).items():
@@ -692,6 +696,11 @@ def weaker(old, new):
         out.append("the AI judge no longer checks the work (judge_mode: objective)")
     if (o.get("ci_isolation") or "strict") == "strict" and n.get("ci_isolation") == "relaxed":
         out.append("CI may run pull request code as story-gate's own account (ci_isolation: relaxed); those results count as reported")
+    op, np_ = o.get("pitfalls") if isinstance(o.get("pitfalls"), dict) else {}, n.get("pitfalls") if isinstance(n.get("pitfalls"), dict) else {}
+    if op.get("mode") == "enforce" and np_.get("mode") != "enforce":
+        out.append("critical known pitfalls no longer have to be acknowledged (pitfalls mode: %s)" % np_.get("mode", "off"))
+    elif op.get("mode") == "enforce" and op.get("source") != np_.get("source"):
+        out.append("known pitfalls now come from another feed (pitfalls source)")
     if (o.get("validation") or {}).get("required", True) and not (n.get("validation") or {}).get("required", True):
         out.append("validation (validation.md and scenario runs for every acceptance criterion) no longer required")
     more = sorted(set(n.get("exempt_globs") or []) - set(o.get("exempt_globs") or []))
