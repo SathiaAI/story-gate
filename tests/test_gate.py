@@ -11636,7 +11636,7 @@ class TestDependencies(Base):
 
     def test_no_deps_no_remote_adds_no_checks(self):
         """No deps no remote adds no checks."""
-        shutil.rmtree(self.remote.parent); self.g("remote", "remove", "origin")
+        self.g("remote", "remove", "origin")  # no remote any more; setUp's cleanup deletes the bare repo (git marks its objects read-only on Windows)
         self.story("")
         v, checks, _ = self.ready()
         for k in ("dependencies", "blockers_resolved", "risks_handled", "consumers_match"):
@@ -11802,7 +11802,7 @@ class TestDependencies(Base):
 
     def test_default_branch_missing_fails_with_fetch_hint(self):
         """Default branch missing fails with fetch hint."""
-        shutil.rmtree(self.remote.parent); self.g("remote", "remove", "origin"); self.g("branch", "-m", "work")
+        self.g("remote", "remove", "origin"); self.g("branch", "-m", "work")  # setUp's cleanup deletes the bare repo (read-only objects on Windows)
         self.g("update-ref", "-d", "refs/heads/main")
         self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
         _, checks, _ = self.ready()
