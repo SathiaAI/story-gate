@@ -240,13 +240,27 @@ def blocks_of(edges, sid):
 
 def topo_order(edges, ids):
     """`ids` in build order: a story comes after everything it waits on (only links among `ids` count). Ties go to the
-    lowest ID (SAT-2 before SAT-10). Stories stuck in a cycle come last, sorted."""
+    lowest ID (SAT-2 before SAT-10). A cycle is placed as one group (its members sorted) as soon as nothing outside it is
+    still waiting, so a story that waits on a cycle still comes after it."""
     left = set(ids)
     out = []
-    while True:
+    while left:
         ready = sorted((s for s in left if not (set(edges.get(s) or ()) & left)), key=natural_key)
-        if not ready:
-            break
-        out.append(ready[0])
-        left.discard(ready[0])
-    return out + sorted(left, key=natural_key)
+        if ready:
+            out.append(ready[0])
+            left.discard(ready[0])
+            continue
+        reach = {}
+        for n in left:  # what each stuck story waits on, directly or not, among the stories still left
+            seen, todo = set(), [d for d in (edges.get(n) or ()) if d in left]
+            while todo:
+                x = todo.pop()
+                if x not in seen:
+                    seen.add(x)
+                    todo.extend(d for d in (edges.get(x) or ()) if d in left)
+            reach[n] = seen
+        groups = [g for g in ({n} | {m for m in reach[n] if n in reach[m]} for n in left) if reach[next(iter(g))] <= g]
+        first = min(groups, key=lambda g: min(natural_key(x) for x in g))  # a cycle that waits on nothing else still left
+        out += sorted(first, key=natural_key)
+        left -= first
+    return out

@@ -875,6 +875,8 @@ class DepWorld:
         if overall in ("PASS", "WAIVED"):
             if tree and self.changed_here(sid, tree, base):
                 st["note"] = "this branch changes %s, so its finished verdict on %s is for the old version" % (sid, self.ref)
+            elif not tree and self.deleted_here(sid):
+                st["note"] = "this branch deletes %s, so its finished verdict on %s won't survive the merge" % (sid, self.ref)
             else:
                 st.update(done=True, waived=overall == "WAIVED", where=self.ref)
         self._seen[sid] = st
@@ -889,6 +891,11 @@ class DepWorld:
         mb = git("merge-base", "HEAD", self.sha).strip()
         return not mb or n(tree) != n(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
 
+    def deleted_here(self, sid):
+        """True when THIS branch removed the story: it existed where the branch was cut and is gone from this checkout."""
+        mb = git("merge-base", "HEAD", self.sha).strip()
+        return bool(mb) and bool(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
+
     def stories(self):
         """{id: story.md text} for every story on this branch and on the default branch's tip (this branch wins)."""
         ids = {p.name for p in (STORIES.iterdir() if STORIES.is_dir() else []) if p.is_dir()}
@@ -898,13 +905,14 @@ class DepWorld:
         return {i: t for i, t in texts.items() if t}
 
     def edges_from(self, sid, own_text):
-        """{id: set of ids it waits on} for a story and everything below it, read from this branch and the default branch."""
+        """{id: set of ids it waits on} for a story and everything below it, read from wherever each story was found
+        (this branch, the default branch, or another remote branch), so a loop through an unmerged story is still caught."""
         edges, todo = {}, [(sid, own_text)]
         while todo:
             x, text = todo.pop()
             if x not in edges:
                 edges[x] = {d for d in SS.depends_on_ids(SS.front_matter(text)) if self.pat.fullmatch(d) and d != x}
-                todo += [(d, self.tree(d) or self.base(d)) for d in edges[x] if d not in edges]
+                todo += [(d, self.state(d)["text"]) for d in edges[x] if d not in edges]
         return edges
 
 

@@ -183,26 +183,28 @@ def trace_acs(text):
     return out
 
 
-MAX_LINKS = 50  # dependencies / open blockers read per story
+MAX_LINKS = 50  # open blockers shown per story (dependencies are all kept: status and links are worked out from them)
 
 
 def story_links(st, fm, id_pattern):
-    """(deps, blockers_open, risk count, is_d1, any_error) of one story.md, via sg_stories, every string cleaned and capped. A legacy story (no
-    '## Dependencies') gets each depends_on id as before-start with no reason. An id that isn't a story id is dropped."""
+    """(deps, blockers_open, risk count, is_d1, any_error) of one story.md, via sg_stories, display strings cleaned and capped. Dependency IDs
+    are kept whole (they matched the story ID pattern) and every one is kept, so status and links never miss one; they are
+    shortened only when rendered. A legacy story (no '## Dependencies') gets each depends_on id as before-start with no
+    reason. An id that isn't a story id is dropped."""
     pat = re.compile(r"(?:%s)" % (id_pattern or r"[A-Za-z0-9][A-Za-z0-9._-]*"))
     recs, errs, d1 = sg_stories.parse_dependencies(st, pat.pattern)
     listed = [x for x in sg_stories.depends_on_ids(fm) if isinstance(x, str)]
-    ids = listed + [x for x in recs if x not in listed]
+    ids = listed  # edges come only from depends_on, as in gate.py; a stray ### block is a READY error, not a link
     deps, seen = [], set()
     for x in ids:
         if x in seen or not pat.fullmatch(x):
             continue
         seen.add(x)
         r = recs.get(x) or {}
-        deps.append({"id": clean(x, 40), "when": r.get("when", "before-start"), "why": clean(r.get("why"), 120)})
+        deps.append({"id": x, "when": r.get("when", "before-start"), "why": clean(r.get("why"), 120)})
     blockers, berr = sg_stories.parse_blockers(st)
     risks, rerr = sg_stories.parse_risks(st)
-    return (deps[:MAX_LINKS], [{"title": clean(b["title"], 80), "owner": clean(b["owner"], 40)} for b in blockers if b["status"] == "open"][:MAX_LINKS],
+    return (deps, [{"title": clean(b["title"], 80), "owner": clean(b["owner"], 40)} for b in blockers if b["status"] == "open"][:MAX_LINKS],
             len(risks), d1, bool(errs or berr or rerr))
 
 
@@ -453,7 +455,7 @@ def metrics(rows, calib, learn, conflicts, now):
     by = {k: [s for s in rows if s["status"] == k] for k, _, _ in STATUSES}
     total = len(rows)
     dor = [s for s in rows if ready_ok(s)]
-    active = by["in_progress"] + by["blocked"]
+    active = by["in_progress"] + by["blocked"] + [s for s in by["waiting"] if s.get("coder")]  # claimed, now waiting: still assigned
     finished = by["done"] + by["in_review"]
     ac_tot = ac_ok = ac_unknown = 0
     for s in finished:

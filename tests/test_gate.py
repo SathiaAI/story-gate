@@ -3735,6 +3735,41 @@ class TestDashboardDependencies(Base):
         self.assertEqual(self.st("SAT-2")["status"], "waiting"); self.assertEqual(self.st("SAT-2")["waiting_for"], ["SAT-1"])
         self.assertEqual(self.st("SAT-2")["deps"][0]["state"], "open")
 
+    def test_every_dependency_counts_beyond_fifty(self):
+        """Status uses all dependencies, not only the first 50 (Codex review)."""
+        ids = ["SAT-%d" % i for i in range(100, 155)]
+        for i in ids[:-1]:
+            self.put(i, done="PASS")
+        self.put(ids[-1]); self.put("SAT-1", legacy=ids)
+        self.push(); self.build()
+        self.assertEqual(self.st("SAT-1")["status"], "waiting"); self.assertEqual(self.st("SAT-1")["waiting_for"], ["SAT-154"])
+        self.assertEqual(self.st("SAT-154")["blocks"], ["SAT-1"])
+
+    def test_long_story_ids_stay_whole_in_the_graph(self):
+        """An ID longer than 40 characters still links to its story (Codex review)."""
+        long_id = "SAT-" + "9" * 50
+        self.put(long_id, done="PASS"); self.put("SAT-1", deps=[(long_id, "before-start", "needs it")])
+        self.push(); self.build()
+        self.assertEqual(self.st("SAT-1")["status"], "queued"); self.assertEqual(self.st("SAT-1")["deps"][0]["state"], "done")
+        self.assertEqual(self.st(long_id)["blocks"], ["SAT-1"])
+
+    def test_a_stray_dependency_block_is_not_a_link(self):
+        """Links come only from depends_on; a ### block without it is a READY error, not a dashboard edge (Codex review)."""
+        self.put("SAT-9")
+        sd = self.repo / ".story-gate/stories/SAT-1"; sd.mkdir(parents=True, exist_ok=True)
+        (sd / "story.md").write_text("---\nid: SAT-1\ntitle: T\nsource: x\ndepends_on: []\n---\n## Dependencies\n### SAT-9\nwhen: before-start\nwhy: stray\n")
+        (sd / "ready.json").write_text(json.dumps({"overall": "PASS", "drift": "none", "checks": {}}))
+        self.push(); self.build()
+        self.assertEqual(self.st("SAT-1")["deps"], []); self.assertEqual(self.st("SAT-1")["status"], "queued")
+        self.assertEqual(self.st("SAT-9")["blocks"], [])
+
+    def test_a_claimed_story_that_waits_still_counts_as_an_agent_working(self):
+        """A claimed story that becomes waiting stays in the active metrics (Codex review)."""
+        self.put("SAT-9"); self.put("SAT-1", deps=[("SAT-9", "before-start", "needs it")], coder={"client": "claude", "model": "m", "branch": "b"})
+        self.push(); self.build()
+        self.assertEqual(self.st("SAT-1")["status"], "waiting")
+        self.assertEqual({m["key"]: m["value"] for m in self.data["metrics"]}["agents"], 1)
+
     def test_before_merge_only_does_not_make_a_story_wait(self):
         """Before merge only does not make a story wait."""
         self.put("SAT-1"); self.put("SAT-2", deps=[("SAT-1", "before-merge", "shares a schema")])
@@ -11740,6 +11775,30 @@ class TestDependencies(Base):
         self.story("SAT-2", self.dep_section(("SAT-2", "before-merge")))
         _, checks, _ = self.ready()
         self.assertEqual(checks["dependencies"]["status"], "FAIL"); self.assertIn("circular dependency: SAT-1 -> SAT-2 -> SAT-1", checks["dependencies"]["why"])
+
+    def test_loop_through_a_story_on_another_branch_fails(self):
+        """A loop is caught even when the other story exists only on another remote branch (Codex review)."""
+        self.publish("feature/SAT-2-x", "SAT-2", deps="SAT-1")
+        self.story("SAT-2", self.dep_section(("SAT-2", "before-merge")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("circular dependency: SAT-1 -> SAT-2 -> SAT-1", checks["dependencies"]["why"])
+
+    def test_branch_that_deletes_the_dependency_voids_its_done_verdict(self):
+        """Deleting a finished dependency's story on this branch means it won't be finished after the merge (Codex review)."""
+        self.publish("main", "SAT-9", done="PASS")
+        self.g("merge", "-q", "--no-edit", "main")
+        shutil.rmtree(self.repo / ".story-gate/stories/SAT-9")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("this branch deletes SAT-9", checks["dependencies"]["why"])
+
+    def test_suggested_order_puts_a_cycle_before_what_waits_on_it(self):
+        """A story that waits on a cycle comes after the whole cycle in the build order (Codex review)."""
+        self.assertEqual(self.S.topo_order({"A-0": {"A-1"}, "A-1": {"A-2"}, "A-2": {"A-1"}}, ["A-0", "A-1", "A-2"]), ["A-1", "A-2", "A-0"])
+        chained = {"B-1": {"C-1"}, "C-1": {"C-2"}, "C-2": {"C-1"}, "A-1": {"A-2"}, "A-2": {"A-1", "C-1"}}
+        self.assertEqual(self.S.topo_order(chained, list(chained)), ["C-1", "C-2", "B-1", "A-1", "A-2"])
 
     def test_default_branch_missing_fails_with_fetch_hint(self):
         """Default branch missing fails with fetch hint."""
