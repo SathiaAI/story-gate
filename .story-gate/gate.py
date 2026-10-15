@@ -2574,7 +2574,8 @@ def pitfalls_feed_ci(c):
     text, err = None, None
     for ref in (b,) if b.startswith("origin/") else (b, "origin/" + b):  # a CI checkout may have only the remote branch
         try:
-            text = must("show", "%s:%s" % (ref, rel)).lstrip("\ufeff")  # a BOM, as utf-8-sig drops on this computer
+            text = must("show", "%s:%s" % (ref, rel))
+            text = text[1:] if text.startswith("\ufeff") else text  # one BOM, exactly as utf-8-sig drops on this computer
             break
         except RuntimeError as e:  # a missing file or a failed git read: never a pass
             err = e

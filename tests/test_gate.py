@@ -11229,3 +11229,16 @@ class TestPitfalls(Base):
         self.on(); p = sd / "story.md"; p.write_text(p.read_text().replace("domain: auth\n", ""))
         r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("couldn't be matched", r.stdout + r.stderr)
+
+    def test_ci_and_local_read_a_doubled_bom_the_same_way(self):
+        """CI drops exactly one BOM, as utf-8-sig does locally, so a feed with two BOMs is invalid in both places."""
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / "feeds").mkdir()
+        (self.repo / "feeds/p.json").write_bytes(b"\xef\xbb\xbf\xef\xbb\xbf" + FEED.read_bytes())
+        g_("add", "feeds/p.json"); g_("commit", "-qm", "feed"); g_("checkout", "-q", "feature/SAT-1-thing"); g_("merge", "-q", "main")
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        ci_text, _ = g.pitfalls_feed_ci(dict(g.cfg(), base_branch="main", pitfalls={"mode": "warn", "source": "feeds/p.json"}))
+        local_text, _ = PF.read_feed("feeds/p.json", self.repo)
+        self.assertEqual(ci_text, local_text)
+        self.assertEqual(PF.parse_feed(ci_text)[0], [])
