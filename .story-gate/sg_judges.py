@@ -17,7 +17,7 @@ import hashlib, json, math, os, re, urllib.error, urllib.parse, urllib.request
 
 DEFAULTS = {
     "openrouter": {"url": "https://openrouter.ai/api/alpha/decisions", "key_env": "OPENROUTER_API_KEY", "model": "typesafe/jev-1.13"},
-    "jev-direct": {"url": "https://api.typesafe.ai/v1/systemone", "key_env": "TYPESAFE_API_KEY", "model": "jev"},
+    "jev-direct": {"url": "https://api.typesafe.ai/v1/systemone", "key_env": "TYPESAFE_API_KEY", "model": "jev-1.13.0"},
     "decisions-proxy": {"url": "", "key_env": "JUDGE_API_KEY", "model": "typesafe/jev-1.13"},
     "openai-compatible": {"url": "", "key_env": "JUDGE_API_KEY", "model": ""},
     # Your own API account as the judge (a ChatGPT, SuperGrok or Claude subscription does not include API access).
@@ -93,9 +93,43 @@ def settings(c):
             "temperature": j.get("temperature")}
 
 
-def available(c):
+# TypeSafe direct and OpenRouter serve the same Jev model. Unless judge.base_url pins one endpoint or judge.jev_fallback is
+# false, a Jev judge asks TypeSafe direct first (when TYPESAFE_API_KEY is set) and OpenRouter if that fails.
+JEV_ROUTES = ("jev-direct", "openrouter")
+
+
+def _route_model(model, route):
+    """The same Jev version under the other route's model id ('typesafe/jev-1.14' <-> 'jev-1.14.0'); None if unknown."""
+    m = re.match(r"^~?(?:typesafe/)?jev-(latest|preview|\d+\.\d+)(?:\.0)?$", (model or "").strip(), re.I)
+    if not m:
+        return None
+    v = m.group(1).lower()
+    if route == "jev-direct":
+        return "jev-%s" % v if v in ("latest", "preview") else "jev-%s.0" % v
+    return "~typesafe/jev-latest" if v == "latest" else None if v == "preview" else "typesafe/jev-%s" % v
+
+
+def routes(c):
+    """The judge settings to try, in order. One entry unless the judge is Jev and its endpoint isn't pinned."""
     s = settings(c)
-    return s["provider"] != "none" and bool(env_key(s["key_env"])) and bool(s["url"])
+    j = c.get("judge") or {}
+    if s["provider"] not in JEV_ROUTES or j.get("base_url") or j.get("jev_fallback") is False:
+        return [s]
+    out = []
+    for r in JEV_ROUTES:
+        if r == s["provider"]:
+            out.append(s)
+        else:
+            model = _route_model(s["model"], r)
+            if model and env_key(DEFAULTS[r]["key_env"]):
+                out.append(dict(s, provider=r, url=DEFAULTS[r]["url"], key_env=DEFAULTS[r]["key_env"], model=model))
+    return [r for r in out if env_key(r["key_env"])] or [s]
+
+
+def available(c):
+    """True when the judge is enabled and at least one of its routes has a key and an address."""
+    s = settings(c)
+    return s["provider"] != "none" and any(bool(env_key(r["key_env"])) and bool(r["url"]) for r in routes(c))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -150,6 +184,7 @@ def _post(url, key, body, timeout):
 
 
 JEV_MODEL = re.compile(r"^(typesafe/)?jev(-[\d.]+)?(-\d{8})?$", re.I)
+JEV_ALIAS = re.compile(r"^jev-(latest|preview)$", re.I)  # TypeSafe's own aliases; trusted only from its direct API
 
 
 def _prob(x):
@@ -184,8 +219,23 @@ def validate(answers, questions):
 
 
 def ask(c, state, questions):
-    """-> {"tier", "provider", "model", "answers"} or {"tier": "none", "error"}. Never raises."""
-    s = settings(c)
+    """-> {"tier", "provider", "model", "answers"} or {"tier": "none", "error"}. Never raises.
+    Tries each route in order (TypeSafe direct, then OpenRouter, for a Jev judge); the first that answers wins."""
+    if settings(c)["provider"] == "none":
+        return {"tier": "none", "error": "judge disabled in config"}
+    errors = []
+    for s in routes(c):
+        r = _ask_one(s, state, questions)
+        if r.get("tier") != "none":
+            if errors:
+                r["fallback_from"] = "; ".join(errors)[:300]
+            return r
+        errors.append("%s: %s" % (s["provider"], r.get("error")))
+    return {"tier": "none", "error": "; ".join(errors)[:600]}
+
+
+def _ask_one(s, state, questions):
+    """Ask one route (settings `s`). Same result shape as ask(); never raises."""
     if s["provider"] == "none":
         return {"tier": "none", "error": "judge disabled in config"}
     key = env_key(s["key_env"])
@@ -210,7 +260,7 @@ def ask(c, state, questions):
     # Only the model id the server reports counts; a proxy cannot pass a non-Jev model off as Jev.
     # TypeSafe's own API is Jev by definition, so it counts as Jev even if it omits the model id.
     direct = s["provider"] == "jev-direct" and urllib.parse.urlparse(s["url"]).hostname in ("api.typesafe.ai",)
-    tier = "jev" if JEV_MODEL.match(model) or (direct and not model) else "emulated"
+    tier = "jev" if JEV_MODEL.match(model) or (direct and (not model or JEV_ALIAS.match(model))) else "emulated"
     usage = r.get("usage") if isinstance(r.get("usage"), dict) else {}
     return {"tier": tier, "provider": s["provider"], "model": model or s["model"], "answers": ans, "cost": usage.get("cost")}
 

@@ -682,6 +682,38 @@ class TestJudges(Base):
         self.assertIsNone(J.validate({"c": {"choice": ["none"], "confidence": 0.9}}, cq)[0])  # unhashable choice
         self.assertIsNotNone(J.validate({"c": {"choice": "none", "confidence": 0.9}}, cq)[0])
 
+    def test_jev_asks_typesafe_direct_first_then_openrouter(self):
+        """With both keys, a Jev judge asks TypeSafe direct first, under the same Jev version, and OpenRouter only if direct fails."""
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        os.environ.update(TYPESAFE_API_KEY="t", OPENROUTER_API_KEY="o")
+        try:
+            got = lambda c: [(r["provider"], r["model"]) for r in J.routes(c)]
+            self.assertEqual(got({"judge": {}}), [("jev-direct", "jev-1.13.0"), ("openrouter", "typesafe/jev-1.13")])
+            self.assertEqual(got({"judge": {"model": "typesafe/jev-1.14"}}), [("jev-direct", "jev-1.14.0"), ("openrouter", "typesafe/jev-1.14")])
+            self.assertEqual(got({"judge": {"provider": "jev-direct", "model": "jev-latest"}}), [("jev-direct", "jev-latest"), ("openrouter", "~typesafe/jev-latest")])
+            self.assertEqual(got({"judge": {"jev_fallback": False}}), [("openrouter", "typesafe/jev-1.13")])
+            self.assertEqual(len(J.routes({"judge": {"base_url": "https://example.test/decisions"}})), 1)  # a pinned endpoint is never swapped
+            self.assertEqual(got({"judge": {"provider": "decisions-proxy", "model": "typesafe/jev-1.13"}}), [("decisions-proxy", "typesafe/jev-1.13")])
+            del os.environ["TYPESAFE_API_KEY"]
+            os.environ["STORY_GATE_ENV_FILE"] = str(self.repo / "no-such-judge.env")  # a developer's real key file can't leak in
+            self.assertEqual(got({"judge": {}}), [("openrouter", "typesafe/jev-1.13")])  # no direct key: OpenRouter as before
+            self.assertTrue(J.JEV_ALIAS.match("jev-latest") and not J.JEV_ALIAS.match("jev-evil"))
+            good, bad = MockJudge(model="typesafe/jev-1.13-20260917"), MockJudge(broken=True)
+            saved = {k: dict(v) for k, v in J.DEFAULTS.items()}
+            try:
+                os.environ["TYPESAFE_API_KEY"] = "t"
+                J.DEFAULTS["jev-direct"]["url"], J.DEFAULTS["openrouter"]["url"] = bad.url + "/v1/systemone", good.url + "/decisions"
+                r = J.ask({"judge": {}}, {"x": 1}, {"q": {"type": "noul", "instructions": "x"}})
+                self.assertEqual((r["tier"], r["provider"]), ("jev", "openrouter"))
+                self.assertIn("jev-direct", r["fallback_from"])
+                self.assertEqual(bad.last["model"], "jev-1.13.0")  # direct was asked first, with its own model id
+            finally:
+                J.DEFAULTS.clear(); J.DEFAULTS.update(saved); good.close(); bad.close()
+        finally:
+            for k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "STORY_GATE_ENV_FILE"):
+                os.environ.pop(k, None)
+
     def test_jev_model_id_is_matched_strictly(self):
         import importlib
         sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
