@@ -11214,3 +11214,18 @@ class TestPitfalls(Base):
         s = summary.read_text()
         self.assertIn("**Warning (warn mode, doesn't block):** critical known pitfalls not acknowledged", s)
         self.assertNotIn("pitfalls_acknowledged (", s)  # never listed among the blocking problems
+
+    def test_scan_stops_when_matching_could_not_run(self):
+        """--scan never uses a pitfall list recorded earlier: when the story lost its tags or the feed can't be read now,
+        it stops with exit 1 and leaves the stored scan alone, in warn mode too."""
+        self.on(); sd = self.story()
+        home = self.fake_sast()
+        run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        before = json.loads((sd / "pitfalls.json").read_text())
+        self.on(source="missing.json")
+        r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("couldn't be matched", r.stdout + r.stderr)
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text()), before)
+        self.on(); p = sd / "story.md"; p.write_text(p.read_text().replace("domain: auth\n", ""))
+        r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr); self.assertIn("couldn't be matched", r.stdout + r.stderr)

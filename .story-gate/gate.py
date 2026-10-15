@@ -2518,11 +2518,12 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     return 0 if passed(v, c, sd) else 1
 
 
-def pitfalls_ready(sd, sid, c, in_ci=False, show=True):
+def pitfalls_ready(sd, sid, c, in_ci=False, show=True, out=None):
     """The known-pitfalls READY check (status, why), or None when the feature is off. It reads the feed, matches it to the
     story's tags and checks context.md's acknowledgements. On this computer it also shows the pitfalls and records them in
     pitfalls.json. CI never trusts that record (the pull request can edit it): it reads the feed itself, an https URL or
-    the file on the base branch, and a feed it can't read is never a pass."""
+    the file on the base branch, and a feed it can't read is never a pass. `out` (a dict) gets the record this run wrote,
+    under "rec", only when the matching ran."""
     import sg_pitfalls as PF
     m = PF.mode(c)
     if m == "off":
@@ -2547,6 +2548,8 @@ def pitfalls_ready(sd, sid, c, in_ci=False, show=True):
     if not in_ci:
         rec = PF.record(sid, now(), m, stack, domain, shown, acked, load_json(sd / "pitfalls.json"), work_fingerprint())
         wj(sd / "pitfalls.json", rec)
+        if out is not None:
+            out["rec"] = rec
         hp = sd / "handoff.md"
         if (rec.get("scan") or {}).get("state") == "stale" and PF.BLOCK_START in rd(hp):  # the handoff must not show old hits
             hp.write_text(PF.put_block(rd(hp), PF.handoff_block(rec)), encoding="utf-8")
@@ -2593,12 +2596,13 @@ def cmd_pitfalls(sid, scan=False, base=None):
         print('story-gate: known pitfalls are off. Turn them on in .story-gate/config.json: "pitfalls": {"mode": "warn", '
               '"source": "<path or https URL of patterns-public.json>"} (docs/pitfalls.md).')
         return 0
-    st = pitfalls_ready(sd, sid, c)
+    got = {}
+    st = pitfalls_ready(sd, sid, c, out=got)
     if not scan:
         return 0 if st[0] is not False else 1
-    rec = load_json(sd / "pitfalls.json")
-    if "shown" not in rec:
-        sys.exit("story-gate: no pitfalls recorded for %s yet (see above), so there is nothing to scan for" % sid)
+    rec = got.get("rec")
+    if rec is None:  # the matching didn't run now: never scan a list recorded for older tags or another feed
+        sys.exit("story-gate: the known pitfalls for %s couldn't be matched (see above), so there is nothing to scan for" % sid)
     rec["scan"] = pitfalls_scan(PF.shown_in(rec), base or c["base_branch"])
     wj(sd / "pitfalls.json", rec)
     hp = sd / "handoff.md"
