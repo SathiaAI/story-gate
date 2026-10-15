@@ -11794,6 +11794,17 @@ class TestDependencies(Base):
         self.assertEqual(checks["dependencies"]["status"], "FAIL")
         self.assertIn("this branch deletes SAT-9", checks["dependencies"]["why"])
 
+    def test_unknown_branch_point_fails_closed_for_a_missing_dependency(self):
+        """When git can't find where this branch was cut (no merge-base), a finished dependency missing here doesn't count (Bugbot review)."""
+        self.publish("main", "SAT-9", done="PASS")
+        g = load_gate(self.repo)
+        real = g.git
+        g.git = lambda *a: "" if a and a[0] == "merge-base" else real(*a)
+        st = g.DepWorld(g.cfg()).state("SAT-9")
+        self.assertFalse(st["done"]); self.assertIn("can't tell whether it deletes SAT-9", st["note"])
+        g.git = real
+        self.assertTrue(g.DepWorld(g.cfg()).state("SAT-9")["done"])  # with a branch point it is simply done on main
+
     def test_suggested_order_puts_a_cycle_before_what_waits_on_it(self):
         """A story that waits on a cycle comes after the whole cycle in the build order (Codex review)."""
         self.assertEqual(self.S.topo_order({"A-0": {"A-1"}, "A-1": {"A-2"}, "A-2": {"A-1"}}, ["A-0", "A-1", "A-2"]), ["A-1", "A-2", "A-0"])

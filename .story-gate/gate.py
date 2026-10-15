@@ -875,8 +875,10 @@ class DepWorld:
         if overall in ("PASS", "WAIVED"):
             if tree and self.changed_here(sid, tree, base):
                 st["note"] = "this branch changes %s, so its finished verdict on %s is for the old version" % (sid, self.ref)
-            elif not tree and self.deleted_here(sid):
-                st["note"] = "this branch deletes %s, so its finished verdict on %s won't survive the merge" % (sid, self.ref)
+            elif not tree and (gone := self.deleted_here(sid)) is not False:  # None (can't tell) fails closed, like changed_here
+                st["note"] = ("this branch deletes %s, so its finished verdict on %s won't survive the merge" % (sid, self.ref)
+                              if gone else "can't find where this branch was cut from %s, so story-gate can't tell "
+                              "whether it deletes %s; fetch more history (git fetch --unshallow origin)" % (self.ref, sid))
             else:
                 st.update(done=True, waived=overall == "WAIVED", where=self.ref)
         self._seen[sid] = st
@@ -892,9 +894,12 @@ class DepWorld:
         return not mb or n(tree) != n(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
 
     def deleted_here(self, sid):
-        """True when THIS branch removed the story: it existed where the branch was cut and is gone from this checkout."""
+        """True when THIS branch removed the story (it existed where the branch was cut and is gone from this checkout),
+        False when it didn't, None when that can't be told (no common commit with the default branch, e.g. a shallow clone)."""
         mb = git("merge-base", "HEAD", self.sha).strip()
-        return bool(mb) and bool(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
+        if not mb:
+            return None
+        return bool(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
 
     def stories(self):
         """{id: story.md text} for every story on this branch and on the default branch's tip (this branch wins)."""
