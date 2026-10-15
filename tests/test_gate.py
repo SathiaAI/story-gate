@@ -11128,3 +11128,12 @@ class TestPitfalls(Base):
                          {"mode": "enforce", "source": "a.json"})
         strict = dict(pol, pitfalls={"mode": "enforce", "source": "a.json"})
         self.assertEqual(g.T.tighten(strict, {"pitfalls": {"mode": "off"}})["pitfalls"]["mode"], "enforce")
+
+    def test_ci_summary_shows_the_tags_the_story_chose(self):
+        """The story picks its own tags, so CI's summary shows them to the approver, safe for markdown."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        out = "\n".join(PF.tag_lines({"python"}, {"none", "a`b"}))
+        self.assertIn("- stack: `python`", out); self.assertIn("- domain: `a'b`, `none`", out)
+        self.assertIn("none given", "\n".join(PF.tag_lines(set(), set())))
+        g = (SRC / "gate.py").read_text(encoding="utf-8")
+        self.assertIn("PF.tag_lines(*PF.story_tags(", g)

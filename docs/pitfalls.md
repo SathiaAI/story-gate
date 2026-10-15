@@ -103,5 +103,9 @@ file in the repository. CI then checks the acknowledgements in the pull request'
 
 ## Known limits
 
+- The story chooses its own `stack:` and `domain:`. A story tagged with something unrelated, or `none`, matches no
+  pitfall, and READY passes. CI shows the tags in its summary, so the person who approves the pull request can check
+  that they fit the change.
+
 - The scan runs on your computer, not in CI. Its result is reported, not checked.
 - sast-check runs every Opengrep rule and story-gate keeps the matching ones, so a scan takes as long as a normal one.

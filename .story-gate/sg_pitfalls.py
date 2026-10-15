@@ -197,6 +197,15 @@ def show_lines(shown, acked, stack, domain):
     return out
 
 
+def tag_lines(stack, domain):
+    """The CI summary section that shows the tags a story chose. The story picks them, and they decide which pitfalls
+    apply, so the person who approves the pull request checks that they fit."""
+    code = lambda tags: ", ".join("`%s`" % t.replace("`", "'") for t in sorted(tags)) or "none given"
+    return ["", "### Known pitfalls: the story's own tags",
+            "These tags pick which known pitfalls apply. The story chose them, so check that they fit the change.",
+            "- stack: %s" % code(stack), "- domain: %s" % code(domain)]
+
+
 def record(sid, at, m, stack, domain, shown, acked, old=None):
     """What the story keeps in pitfalls.json: which pitfalls were shown and acknowledged (only ids and bands, never
     feed text), so a later step can measure whether the same mistakes come back. A scan of the same pitfalls is kept."""

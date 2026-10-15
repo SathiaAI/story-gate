@@ -3947,6 +3947,10 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         except Exception as e:
             lines += ["", "Guardrails could not be shown: %s" % str(e)[:200]]
     lines += writing_summary(sid)
+    if sid and (STORIES / sid).exists():
+        import sg_pitfalls as PF
+        if PF.mode(c) != "off":  # the story picks its own tags, so the approver sees them
+            lines += PF.tag_lines(*PF.story_tags(front_matter(rd(STORIES / sid / "story.md"))))
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
         if recs:
