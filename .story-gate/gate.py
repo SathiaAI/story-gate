@@ -2571,7 +2571,7 @@ def pitfalls_feed_ci(c):
     text, err = None, None
     for ref in (b,) if b.startswith("origin/") else (b, "origin/" + b):  # a CI checkout may have only the remote branch
         try:
-            text = must("show", "%s:%s" % (ref, rel))
+            text = must("show", "%s:%s" % (ref, rel)).lstrip("\ufeff")  # a BOM, as utf-8-sig drops on this computer
             break
         except RuntimeError as e:  # a missing file or a failed git read: never a pass
             err = e
@@ -3642,7 +3642,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
     verify human acceptance through GitHub, report clearly whether merges are actually blocked."""
     import sg_github as G
     problems, notes, code, enforce, c = [], [], [], True, {}
-    sid = None
+    sid, pitfall_warn = None, ""
     try:
         c = cfg()
         enforce = c["mode"] == "enforce" or "ci" in c.get("enforce_points", [])
@@ -3883,6 +3883,10 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 for ph in ("ready", "done"):
                     cmd_score(sid, ph, base, ci_trust=accepted["accepted"], results=results if ph == "done" else None, quiet=True)
                     v = load_v(sid, ph)
+                    pa = ((v or {}).get("checks") or {}).get("pitfalls_acknowledged") or {}
+                    if pa.get("status") == "WARN":  # warn mode never blocks, but the approver must still see it
+                        pitfall_warn = pa.get("why") or "known pitfalls could not be checked"
+                        print("::warning title=story-gate: known pitfalls::%s" % gh_msg(pitfall_warn.replace("\n", " ")[:900]))
                     if not passed(v, c):
                         bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
                         problems.append("%s %s gate is %s: %s" % (sid, ph.upper(), (v or {}).get("overall", "missing"), "; ".join(bad)[:900]))
@@ -3962,6 +3966,8 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         import sg_pitfalls as PF
         if PF.mode(c) != "off":  # the story picks its own tags, so the approver sees them
             lines += PF.tag_lines(*PF.story_tags(front_matter(rd(STORIES / sid / "story.md"))))
+            if pitfall_warn:
+                lines += ["", "**Warning (warn mode, doesn't block):** " + PF.clean(pitfall_warn, 900)]
     if sid:
         recs = jsonl(STORIES / sid / "decisions.jsonl")
         if recs:

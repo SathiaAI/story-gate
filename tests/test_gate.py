@@ -11186,3 +11186,31 @@ class TestPitfalls(Base):
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         text, why = g.pitfalls_feed_ci(dict(g.cfg(), base_branch="trunk", pitfalls={"mode": "warn", "source": "feeds/p.json"}))
         self.assertIsNotNone(text, why)
+
+    def test_a_one_line_checklist_string_is_shown(self):
+        """The learner's feed gives `checklist` as one string; it is shown as a one-line checklist."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        doc = {"schema": PF.SCHEMA, "patterns": [{"id": "lp-0123456789ab", "pattern": "p", "stack": "python", "domain": "auth",
+                                                  "cwe": "CWE-208", "hits": 3, "repos": 2, "impact_band": "critical",
+                                                  "summary": "s", "checklist": "Compare secrets in constant time."}]}
+        p = PF.parse_feed(json.dumps(doc))[0][0]
+        self.assertEqual(p["checklist"], ["Compare secrets in constant time."])
+        self.assertIn("      - Compare secrets in constant time.", PF.show_lines([p], set(), {"python"}, {"auth"}))
+
+    def test_ci_warns_on_pitfalls_in_warn_mode_and_reads_a_feed_with_a_bom(self):
+        """`gate.py ci`: a warn-mode pitfalls problem (an unacknowledged critical one) is a GitHub warning and a summary
+        line and never a blocking problem; the repository feed on the base branch is read even with a UTF-8 BOM."""
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / "feeds").mkdir()
+        (self.repo / "feeds/p.json").write_bytes(b"\xef\xbb\xbf" + FEED.read_bytes())
+        self.on(mode="warn", source="feeds/p.json"); self.cfg(judge_mode="objective")  # the policy, on the base branch
+        g_("add", "-A"); g_("commit", "-qm", "feed"); g_("checkout", "-q", "feature/SAT-1-thing"); g_("merge", "-q", "main")
+        self.story()
+        (self.repo / "app.py").write_text("x = 3\n")
+        summary = self.repo.parent / (self.repo.name + "-summary.md"); self.addCleanup(lambda: summary.unlink() if summary.exists() else None)
+        r = run(self.repo, "ci", env={"GITHUB_STEP_SUMMARY": str(summary)})
+        self.assertIn("::warning title=story-gate: known pitfalls::critical known pitfalls not acknowledged", r.stdout, r.stdout[-2000:])
+        self.assertIn("lp-synthetic-001", r.stdout)
+        s = summary.read_text()
+        self.assertIn("**Warning (warn mode, doesn't block):** critical known pitfalls not acknowledged", s)
+        self.assertNotIn("pitfalls_acknowledged (", s)  # never listed among the blocking problems

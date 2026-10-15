@@ -64,11 +64,11 @@ The feed is the learner's `patterns-public.json`, in this format:
 ```json
 {"schema": "learner-patterns/v1",
  "patterns": [{"id": "lp-0042", "pattern": "...", "stack": "python", "domain": "auth", "cwe": "CWE-208",
-               "hits": 14, "repos": 5, "impact_band": "critical", "summary": "...", "checklist": ["...", "..."]}]}
+               "hits": 14, "repos": 5, "impact_band": "critical", "summary": "...", "checklist": "one 'before you build' line"}]}
 ```
 
 - `impact_band` sets the order: `critical`, `high`, `medium`, `low`. Then more `hits` and more `repos` come first.
-- `stack` and `domain` are a word or a list of words. `checklist` is a list of lines (5 are shown at most).
+- `stack` and `domain` are a word or a list of words. `checklist` is one line or a list of lines (5 are shown at most).
 - `repos` is a count of projects. The feed never names them.
 - A feed in another format, or one story-gate can't read, is never a pass: READY shows a WARN, or fails in enforce
   mode. A pattern with no valid `lp-` id or no checklist is skipped, and READY says how many.
