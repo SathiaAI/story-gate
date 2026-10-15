@@ -10971,13 +10971,14 @@ class TestPitfalls(Base):
             self.assertIs(st, False, src)
 
     def test_a_scan_for_other_pitfalls_is_dropped(self):
-        """A stored scan is kept only while the same pitfalls are shown; a scan made for another set is dropped."""
+        """A stored scan is kept only while the same pitfalls are shown; a scan made for another set is marked stale."""
         sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
         a = [{"id": "lp-a", "impact_band": "high"}]
         old = PF.record("S", "t", "warn", {"x"}, {"y"}, a, set())
         old["scan"] = {"state": "ran"}
         self.assertIn("scan", PF.record("S", "t", "warn", {"x"}, {"y"}, a, set(), old))
-        self.assertNotIn("scan", PF.record("S", "t", "warn", {"x"}, {"y"}, a + [{"id": "lp-b", "impact_band": "low"}], set(), old))
+        self.assertEqual(PF.record("S", "t", "warn", {"x"}, {"y"}, a + [{"id": "lp-b", "impact_band": "low"}], set(), old)["scan"],
+                         {"state": "stale"})
 
     def test_changing_the_feed_source_rescores_ready(self):
         """With pitfalls on, a new feed source makes a stored READY verdict out of date; with them off, nothing changes."""
@@ -11163,3 +11164,25 @@ class TestPitfalls(Base):
         off = g.full_config(json.dumps({"pitfalls": {"mode": "off", "source": "a.json"}}))
         self.assertEqual(g.T.tighten(off, {"pitfalls": {"mode": "enforce"}})["pitfalls"], {"mode": "enforce", "source": "a.json"})
         self.assertEqual(g.T.tighten(g.full_config("{}"), {"pitfalls": {"mode": "enforce", "source": "x"}})["pitfalls"]["mode"], "off")
+
+    def test_a_scan_of_older_code_is_marked_stale_and_ci_finds_the_remote_base(self):
+        """Re-scoring READY after a code change marks the stored scan stale (in pitfalls.json and handoff.md), and CI
+        reads a repository feed from origin/<base> when only the remote branch exists."""
+        self.on(); sd = self.story()
+        home = self.fake_sast()
+        run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "ran")
+        run(self.repo, "score", "SAT-1", "ready")
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "ran")  # same code: kept
+        (self.repo / "app.py").write_text("x = 2\n")
+        run(self.repo, "score", "SAT-1", "ready")
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"], {"state": "stale"})
+        h = (sd / "handoff.md").read_text()
+        self.assertIn("no longer counts", h); self.assertNotIn("sast.python.shown", h)
+        g_ = lambda *a: subprocess.run(["git", *a], cwd=self.repo, capture_output=True, check=True)
+        g_("checkout", "-q", "main"); (self.repo / "feeds").mkdir(); shutil.copy(FEED, self.repo / "feeds/p.json")
+        g_("add", "feeds/p.json"); g_("commit", "-qm", "feed"); g_("update-ref", "refs/remotes/origin/trunk", "HEAD")
+        g_("checkout", "-q", "feature/SAT-1-thing")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        text, why = g.pitfalls_feed_ci(dict(g.cfg(), base_branch="trunk", pitfalls={"mode": "warn", "source": "feeds/p.json"}))
+        self.assertIsNotNone(text, why)

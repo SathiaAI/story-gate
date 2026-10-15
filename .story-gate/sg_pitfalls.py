@@ -213,14 +213,17 @@ def tag_lines(stack, domain):
             "- stack: %s" % code(stack), "- domain: %s" % code(domain)]
 
 
-def record(sid, at, m, stack, domain, shown, acked, old=None):
+def record(sid, at, m, stack, domain, shown, acked, old=None, fingerprint=None):
     """What the story keeps in pitfalls.json: which pitfalls were shown and acknowledged (only ids and bands, never
-    feed text), so a later step can measure whether the same mistakes come back. A scan of the same pitfalls is kept."""
+    feed text), so a later step can measure whether the same mistakes come back. A scan of the same pitfalls and the
+    same code (`fingerprint`) is kept; any other scan is marked stale."""
     rec = {"schema": 1, "story": sid, "at": at, "mode": m, "feed": SCHEMA, "stack": sorted(stack), "domain": sorted(domain),
            "shown": [{"id": p["id"], "impact_band": p["impact_band"]} for p in shown],
            "acknowledged": sorted(acked & {p["id"] for p in shown})}
-    if isinstance(old, dict) and isinstance(old.get("scan"), dict) and old.get("shown") == rec["shown"]:
-        rec["scan"] = old["scan"]  # a scan made for other pitfalls is dropped
+    scan = old.get("scan") if isinstance(old, dict) else None
+    if isinstance(scan, dict) and scan.get("state") != "stale":
+        same = old.get("shown") == rec["shown"] and (fingerprint is None or scan.get("fingerprint") == fingerprint)
+        rec["scan"] = scan if same else {"state": "stale"}  # a scan of other pitfalls, or of older code, no longer counts
     return rec
 
 
@@ -294,6 +297,8 @@ def scan_lines(scan):
     if st == "not_installed":
         return ["sast-check is not installed on this computer, so no rule checked these pitfalls (set SAST_CHECK_HOME "
                 "to its folder)."]
+    if st == "stale":
+        return ["The last scan ran on other code or other pitfalls, so it no longer counts. Run --scan again."]
     if st == "no_rules":
         return ["sast-check has no rule for these pitfalls yet, so nothing was scanned for them."]
     if st != "ran":

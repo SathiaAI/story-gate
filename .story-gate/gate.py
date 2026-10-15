@@ -2545,7 +2545,11 @@ def pitfalls_ready(sd, sid, c, in_ci=False, show=True):
     if text is None or why:
         return PF.check(m, [], set(), why)
     if not in_ci:
-        wj(sd / "pitfalls.json", PF.record(sid, now(), m, stack, domain, shown, acked, load_json(sd / "pitfalls.json")))
+        rec = PF.record(sid, now(), m, stack, domain, shown, acked, load_json(sd / "pitfalls.json"), work_fingerprint())
+        wj(sd / "pitfalls.json", rec)
+        hp = sd / "handoff.md"
+        if (rec.get("scan") or {}).get("state") == "stale" and PF.BLOCK_START in rd(hp):  # the handoff must not show old hits
+            hp.write_text(PF.put_block(rd(hp), PF.handoff_block(rec)), encoding="utf-8")
         emit("pitfalls_shown", sid, {"shown": [p["id"] for p in shown], "acknowledged": sorted(acked)})
     return PF.check(m, shown, acked)
 
@@ -2563,10 +2567,16 @@ def pitfalls_feed_ci(c):
     if not rel or rel.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", rel) or ".." in rel.split("/"):
         return None, ("CI can't read a pitfalls feed that is on one computer (%s): use an https:// URL or a file in the "
                       "repository" % PF.clean(src, 80))
-    try:
-        text = must("show", "%s:%s" % (c["base_branch"], rel))
-    except RuntimeError as e:  # a missing file or a failed git read: never a pass
-        return None, "CI couldn't read the pitfalls feed %s from the base branch (%s)" % (PF.clean(rel, 80), e.__class__.__name__)
+    b = c["base_branch"]
+    text, err = None, None
+    for ref in (b,) if b.startswith("origin/") else (b, "origin/" + b):  # a CI checkout may have only the remote branch
+        try:
+            text = must("show", "%s:%s" % (ref, rel))
+            break
+        except RuntimeError as e:  # a missing file or a failed git read: never a pass
+            err = e
+    if text is None:
+        return None, "CI couldn't read the pitfalls feed %s from the base branch (%s)" % (PF.clean(rel, 80), err.__class__.__name__)
     if len(text.encode("utf-8", "ignore")) > PF.MAX_FEED:
         return None, "the pitfalls feed is larger than %d MB" % (PF.MAX_FEED // 1_000_000)
     return text, ""
