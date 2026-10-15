@@ -10840,3 +10840,221 @@ class TestCiIsolation(Base):
             a = g.locked_digest(nested); (nested / "f").write_text("2")
             self.assertTrue(a.startswith(b"-DIR:")); self.assertNotEqual(a, g.locked_digest(nested))
             self.assertIn("evil/", g.work_state())  # recorded without running git inside it
+
+
+FEED = Path(__file__).resolve().parent / "fixtures/pitfalls/patterns-public.json"
+PYTHON_AUTH = ["lp-synthetic-001", "lp-synthetic-008", "lp-synthetic-002", "lp-synthetic-003", "lp-synthetic-007"]
+
+
+class TestPitfalls(Base):
+    """Known pitfalls (learner P4): a feed shown at READY, acknowledged by the story, scanned for before the PR, recorded."""
+
+    def on(self, mode="warn", source=None):
+        """Turn the pitfalls feed on, reading the synthetic fixture unless another source is given."""
+        self.cfg(pitfalls={"mode": mode, "source": str(FEED) if source is None else source})
+
+    def story(self, stack="[python]", domain="auth", ack=""):
+        """A filled-in story with these front-matter tags, and context.md with an optional Known pitfalls section."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        tags = "".join("%s: %s\n" % (k, v) for k, v in (("stack", stack), ("domain", domain)) if v is not None)
+        (sd / "story.md").write_text((sd / "story.md").read_text().replace("depends_on: []\n", "depends_on: []\n" + tags))
+        if ack:
+            (sd / "context.md").write_text((sd / "context.md").read_text() + "## Known pitfalls\n" + ack + "\n")
+        return sd
+
+    def ready(self):
+        """Score READY and return (verdict, output)."""
+        r = run(self.repo, "score", "SAT-1", "ready")
+        return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r.stdout + r.stderr
+
+    def shown(self, out):
+        """The pitfall ids printed, in order."""
+        import re
+        return re.findall(r"^  \[\w+\] (lp-[\w.-]+)", out, re.M)
+
+    def test_off_by_default_and_nothing_changes(self):
+        """Off by default: READY has no pitfalls check, writes no record, prints nothing new, and verdict hashes stay as before."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.assertEqual(g.DEFAULT_CONFIG["pitfalls"], {"mode": "off", "source": ""})
+        self.assertNotIn('"pf"', g.policy_fingerprint(g.cfg()))
+        sd = self.story()
+        v, out = self.ready()
+        self.assertNotIn("pitfalls_acknowledged", v["checks"])
+        self.assertFalse((sd / "pitfalls.json").exists())
+        self.assertNotIn("pitfall", out.lower())
+        r = run(self.repo, "pitfalls", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("known pitfalls are off", r.stdout)
+
+    def test_python_auth_story_shows_the_right_pitfalls_most_serious_first(self):
+        """A python+auth story sees the matching pitfalls (wildcard stack included), ranked by band then hits, at most 5,
+        each with its checklist; other stacks and domains, and a pattern with no checklist, are left out."""
+        self.on(); sd = self.story()
+        r = run(self.repo, "pitfalls", "SAT-1")
+        self.assertEqual(self.shown(r.stdout), PYTHON_AUTH, r.stdout)
+        self.assertIn("Compare secrets with hmac.compare_digest, never ==.", r.stdout)
+        self.assertIn("1 pattern(s) in the feed were skipped", r.stdout)
+        rec = json.loads((sd / "pitfalls.json").read_text())
+        self.assertEqual([p["id"] for p in rec["shown"]], PYTHON_AUTH)
+        self.assertEqual((rec["stack"], rec["domain"], rec["acknowledged"]), (["python"], ["auth"], []))
+        self.assertNotIn("hmac", json.dumps(rec))  # ids and bands only, never feed text
+        _, out = self.ready()
+        self.assertEqual(self.shown(out), PYTHON_AUTH)
+        self.assertIn("pitfalls_shown", (self.repo / ".story-gate/outbox.jsonl").read_text())
+
+    def test_unrelated_story_shows_none(self):
+        """A story whose stack and domain match no pattern sees no pitfalls, and the check passes."""
+        self.on(mode="enforce"); sd = self.story(stack="rust", domain="[billing, reports]")
+        v, out = self.ready()
+        self.assertEqual(self.shown(out), []); self.assertIn("no known pitfalls match this story", out)
+        self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "PASS")
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["shown"], [])
+
+    def test_enforce_needs_every_critical_pitfall_acknowledged(self):
+        """Enforce mode: READY fails until context.md acknowledges each critical pitfall shown with a real explanation."""
+        self.on(mode="enforce"); sd = self.story()
+        v, out = self.ready()
+        self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "FAIL")
+        self.assertIn("lp-synthetic-001", v["checks"]["pitfalls_acknowledged"]["why"])
+        ctx = (sd / "context.md").read_text()
+        for weak in ("- lp-synthetic-001: TODO later on", "- lp-synthetic-001: ok", "lp-synthetic-001 is noted somewhere"):
+            (sd / "context.md").write_text(ctx + "## Known pitfalls\n" + weak + "\n")
+            self.assertEqual(self.ready()[0]["checks"]["pitfalls_acknowledged"]["status"], "FAIL", weak)
+        (sd / "context.md").write_text(ctx + "## Known pitfalls\n- lp-synthetic-001: tokens are compared with hmac.compare_digest\n")
+        v, out = self.ready()
+        self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "PASS", out)
+        self.assertIn("acknowledged in context.md", out)
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["acknowledged"], ["lp-synthetic-001"])
+
+    def test_warn_mode_warns_and_never_blocks(self):
+        """Warn mode shows an unacknowledged critical pitfall as WARN, and the overall verdict is unchanged."""
+        self.on(mode="warn"); self.story()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        v, out = self.ready()
+        self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "WARN")
+        self.assertEqual(v["overall"], "PASS", out)
+
+    def test_missing_tags_or_an_unreadable_feed_is_never_a_pass(self):
+        """No stack/domain, a missing feed, or a feed in another format fails in enforce mode (and warns in warn mode)."""
+        self.on(mode="enforce"); sd = self.story(stack=None, domain=None)
+        v, out = self.ready()
+        self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "FAIL"); self.assertIn("needs stack: and domain:", out)
+        self.story()
+        for source, text in (("missing.json", None), ("feed.json", '{"schema": "other/v9", "patterns": []}'), ("feed.json", "not json")):
+            if text is not None:
+                (self.repo / source).write_text(text)
+            self.on(mode="enforce", source=source)
+            v, out = self.ready()
+            self.assertEqual(v["checks"]["pitfalls_acknowledged"]["status"], "FAIL", (source, out))
+            self.on(mode="warn", source=source)
+            self.assertEqual(self.ready()[0]["checks"]["pitfalls_acknowledged"]["status"], "WARN", source)
+        self.assertNotIn("Traceback", out)
+
+    def test_ci_checks_the_record_not_the_feed(self):
+        """In CI the feed isn't read: the acknowledgements are checked against pitfalls.json, and no record fails."""
+        self.on(mode="enforce"); sd = self.story()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        c = dict(g.cfg(), pitfalls={"mode": "enforce", "source": str(self.repo / "nowhere.json")})  # CI can't read it
+        st, why = g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)
+        self.assertIs(st, False); self.assertIn("no record", why)
+        (sd / "pitfalls.json").write_text(json.dumps({"shown": [{"id": "lp-synthetic-001", "impact_band": "critical"}]}))
+        self.assertIs(g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)[0], False)
+        (sd / "context.md").write_text((sd / "context.md").read_text() + "## Known pitfalls\n- lp-synthetic-001: compared with compare_digest\n")
+        self.assertIs(g.pitfalls_ready(sd, "SAT-1", c, in_ci=True, show=False)[0], True)
+
+    def test_bad_settings_are_refused(self):
+        """A pitfalls section with a wrong mode, no source, a plain-http source or an unknown field fails closed."""
+        for bad in ({"mode": "loud", "source": "f.json"}, {"mode": "warn", "source": ""}, {"mode": "warn", "source": "http://x/f.json"},
+                    {"mode": "warn", "source": "f.json", "extra": 1}, "warn"):
+            self.cfg(pitfalls=bad)
+            r = run(self.repo, "pitfalls", "SAT-1")
+            self.assertNotEqual(r.returncode, 0, bad); self.assertIn('"pitfalls"', r.stdout + r.stderr, bad)
+
+    def test_turning_enforce_off_is_a_weaker_rule(self):
+        """Lowering pitfalls from enforce, or swapping its feed, is reported as a weaker rule; turning it on isn't."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        full = lambda **p: g.full_config(json.dumps({"pitfalls": dict({"mode": "enforce", "source": "a.json"}, **p)}))
+        self.assertTrue(g.T.weaker(full(), full(mode="warn")))
+        self.assertTrue(g.T.weaker(full(), full(source="b.json")))
+        self.assertEqual(g.T.weaker(full(mode="warn"), full()), [])
+
+    def test_feed_text_is_cleaned(self):
+        """Feed text can't add control characters or terminal codes, and long lines are cut."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        doc = {"schema": PF.SCHEMA, "patterns": [{"id": "lp-x", "stack": "python", "domain": "auth", "impact_band": "critical",
+                                                  "summary": "a\x1b[31mred\nline", "checklist": ["::error::x" + "y" * 900]}]}
+        p = PF.parse_feed(json.dumps(doc))[0][0]
+        self.assertNotIn("\x1b", p["summary"]); self.assertNotIn("\n", p["summary"])
+        self.assertLessEqual(len(p["checklist"][0]), PF.LINE_CAP)
+        self.assertTrue(all(line.startswith("story-gate:") or line.startswith("  ")
+                            for line in PF.show_lines([p], set(), {"python"}, {"auth"})))
+
+    def fake_sast(self, verdict="pass", opengrep="ran"):
+        """A sast-check folder with three rules (one per shown, not-shown and no pitfall) and a sast.py that reports a
+        finding for each, recording how it was called."""
+        home = self.repo.parent / (self.repo.name + "-sast"); self.addCleanup(shutil.rmtree, home, True)
+        (home / "scripts").mkdir(parents=True); (home / "dist").mkdir()
+        (home / "dist/rules.yaml").write_text(
+            "# GENERATED\nrules:\n- id: sast.python.shown\n  languages:\n  - python\n  metadata:\n    cwe: CWE-208\n"
+            "    learner_pattern_id: lp-synthetic-001\n  message: x\n"
+            "- languages:\n  - python\n  id: sast.python.other\n  metadata:\n    learner_pattern_id: lp-synthetic-005\n"
+            "- id: sast.python.none\n  learner_pattern_id: lp-synthetic-001\n  metadata:\n    cwe: CWE-1\n")
+        findings = [{"rule": r, "path": "app.py", "line": 1, "severity": "high", "in_diff": True, "suppressed": ""}
+                    for r in ("sast.python.shown", "sast.python.other", "sast.python.none")]
+        doc = {"verdict": verdict, "runs": [{"name": "opengrep", "status": opengrep, "detail": "", "count": 3}], "findings": findings}
+        (home / "scripts/sast.py").write_text(
+            "import json, sys\nfrom pathlib import Path\na = sys.argv[1:]\nout = Path(a[a.index('--out') + 1])\n"
+            "Path(%r).write_text(json.dumps(a))\n(out / 'findings.json').write_text(%r)\nsys.exit(0)\n"
+            % (str(home / "argv.json"), json.dumps(doc)))
+        return home
+
+    def test_scan_runs_only_the_rules_for_shown_pitfalls_and_reports_them_in_the_handoff(self):
+        """--scan keeps only findings of rules whose metadata.learner_pattern_id is a shown pitfall, runs sast-check in diff
+        mode with Opengrep, writes the result to pitfalls.json and one block in handoff.md (replaced, never repeated)."""
+        self.on(); sd = self.story()
+        home = self.fake_sast()
+        (sd / "handoff.md").write_text("# Handoff: SAT-1\n\n## What changed\nreal\n")
+        for _ in range(2):
+            r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        argv = json.loads((home / "argv.json").read_text())
+        self.assertEqual(argv[argv.index("--only") + 1], "opengrep"); self.assertEqual(argv[argv.index("--mode") + 1], "diff")
+        rec = json.loads((sd / "pitfalls.json").read_text())
+        self.assertEqual((rec["scan"]["state"], rec["scan"]["rules"]), ("ran", ["sast.python.shown"]))
+        self.assertEqual([h["rule"] for h in rec["scan"]["hits"]], ["sast.python.shown"])
+        h = (sd / "handoff.md").read_text()
+        self.assertEqual(h.count("<!-- story-gate:pitfalls -->"), 1); self.assertIn("## What changed\nreal\n\n## Known pitfalls\n", h)
+        self.assertIn("lp-synthetic-001 (sast.python.shown): `app.py` line 1", h)
+        self.assertNotIn("sast.python.other", h); self.assertNotIn("sast.python.none", h)
+        run(self.repo, "score", "SAT-1", "ready")  # re-scoring READY keeps the scan
+        self.assertIn("scan", json.loads((sd / "pitfalls.json").read_text()))
+
+    def test_scan_without_sast_check_or_with_a_scanner_error_says_so(self):
+        """No sast-check: the handoff says nothing was checked. A scanner that didn't run is an error, never 'no hits'."""
+        self.on(); sd = self.story()
+        r = run(self.repo, "pitfalls", "SAT-1", "--scan")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("sast-check is not installed", (sd / "handoff.md").read_text())
+        home = self.fake_sast(verdict="error", opengrep="skipped")
+        r = run(self.repo, "pitfalls", "SAT-1", "--scan", env={"SAST_CHECK_HOME": str(home)})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(json.loads((sd / "pitfalls.json").read_text())["scan"]["state"], "error")
+        self.assertIn("This is not a pass", (sd / "handoff.md").read_text())
+
+    def test_the_fixture_is_synthetic(self):
+        """The test feed is made up: synthetic ids, project counts (never names), and only the feed's own fields."""
+        doc = json.loads(FEED.read_text(encoding="utf-8"))
+        fields = {"id", "pattern", "stack", "domain", "cwe", "hits", "repos", "impact_band", "summary", "checklist"}
+        self.assertEqual(doc["schema"], "learner-patterns/v1")
+        for p in doc["patterns"]:
+            self.assertEqual(set(p), fields); self.assertTrue(p["id"].startswith("lp-synthetic-"))
+            self.assertIsInstance(p["repos"], int)
+            self.assertNotRegex(json.dumps(p), r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+|https?:|@")
+
+    def test_docs_quote_the_limits_the_code_uses(self):
+        """docs/pitfalls.md quotes the limits sg_pitfalls.py enforces."""
+        sys.path.insert(0, str(SRC)); import importlib; PF = importlib.import_module("sg_pitfalls")
+        doc = (SRC.parent / "docs/pitfalls.md").read_text(encoding="utf-8")
+        for phrase in ("at most %d, each with its checklist" % PF.MAX_SHOWN, "(%d are shown at most)" % PF.MAX_LINES,
+                       "to %d characters" % PF.LINE_CAP, "at least 10 characters"):
+            self.assertIn(phrase, doc)

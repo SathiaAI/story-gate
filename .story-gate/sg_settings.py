@@ -72,6 +72,8 @@ ELSEWHERE = {
     "writing.standard": "the plain-writing standard; edit config.json in a pull request of its own",
     "guardrails": "guardrail areas (security, performance, ...) and their checks: `story-gate settings area` "
                   "(always opens a pull request)",
+    "pitfalls": "known pitfalls from a learner's feed, shown at READY (mode off, warn or enforce, and the feed's source); "
+                "edit config.json in a pull request of its own (docs/pitfalls.md)",
 }
 EXTRA_KNOWN = ("min_runtime_version",)  # top-level keys the gate reads that aren't in DEFAULT_CONFIG
 GH_USER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
@@ -86,7 +88,7 @@ SECRET = re.compile("|".join([
     r"-----BEGIN [A-Z ]*PRIVATE KEY", r"(?i:\b(?:bearer|basic)\s+[A-Za-z0-9+/=._~-]{16,})",
     r"://[^/\s:@]+:[^/\s@]+@",  # a password inside a link
 ]))
-DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers", "guardrails")
+DICTS = ("thresholds", "judge", "writing", "validation", "checkpoint", "models", "model_tiers", "trackers", "guardrails", "pitfalls")
 CONFIG = ".story-gate/config.json"
 BUDGETS = ".story-gate/budgets.json"
 REPO = re.compile(r"$^")  # owner/repo names: gate.REPO_NAME, set in cli()

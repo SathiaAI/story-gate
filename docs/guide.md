@@ -270,6 +270,7 @@ There are two kinds of check:
 | `context_present` | Structural | PRD, TRD, upstream handoffs and prior learnings are filled ("None — searched: …" is allowed) |
 | `test_matrix` | Structural | Every AC has positive, negative, edge **and** regression cases, or a reason one doesn't apply |
 | `upstream_handoffs` | Structural | Every `depends_on` story has a handoff |
+| `pitfalls_acknowledged` | Structural | Shown only when [known pitfalls](pitfalls.md) are on. The story has `stack:` and `domain:`, the feed was read, and `context.md` acknowledges every critical pitfall shown. In `warn` mode a problem is a WARN that never blocks |
 | `spec_covered` | Structural | When `story.md` links a spec or ticket (`spec:`: Spec Kit, OpenSpec, or a Matt Pocock ticket or spec), every scenario, checkbox criterion and user story in it is named in some AC's `covers` (checked again at DONE). See [Spec Kit, OpenSpec and BMAD](#spec-kit-openspec-and-bmad) |
 | `dor_value`, `dor_scope`, `dor_interfaces`, `dor_dependencies`, `dor_nfr`, `dor_small`, `dor_no_blockers` | Judge | Definition of Ready: value, scope, interfaces, dependencies, NFRs, small enough, no blockers |
 | `ac_testable`, `ac_covers_scope`, `tests_plan_adequate` | Judge | ACs are pass/fail, cover the scope, and the test plan is meaningful |
@@ -454,6 +455,7 @@ Lists are comma-separated (`settings set enforce_points ci,stop`); `""` empties 
 | `validation.required` | `true` | DONE needs `validation.md` and a passing scenario for every AC. Turning it off is reported as a weaker rule in the PR check |
 | `ci_isolation` | `"strict"` | In CI, pull request code runs as a separate account, or not at all. `"relaxed"`: where that can't be set up, it runs anyway and the results count as reported. A weaker rule |
 | `guardrails` | `{}` | Guardrail areas and their checks ([guardrails.md](guardrails.md)). Change them with `story-gate settings area ...` (opens a pull request). Lowering an area, narrowing its triggers or loosening a check is a weaker rule |
+| `pitfalls` | `{"mode": "off"}` | [Known pitfalls](pitfalls.md) from a learner's feed, shown at READY when a story's stack and domain match. `"warn"` shows them; `"enforce"` fails READY until each critical one is acknowledged. `"source"`: a file path or an `https://` URL. Turning enforce off is a weaker rule |
 | `checkpoint.every_edits` | `10` | How often automatic checkpoints run. `0` turns them off |
 | `thresholds.pass` / `.concerns` | `0.7` / `0.4` | Stricter or looser. Tune with `gate.py label` data |
 | `require_spec_link` | `false` | `true`: every story must link the spec it builds (`spec:` in story.md), so no story can skip the scenario check. Turning it off is reported as a weaker rule |

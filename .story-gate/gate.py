@@ -58,6 +58,8 @@ Commands (run from the repo root):
   learn <ID> --type error|learning|pattern|none --summary .. [--root-cause ..] [--rule ..] [--tags a,b]
   checkpoint <ID>                    mid-story Jev check: % complete (estimate), on course?, drift, TODOs, tests keeping pace
   learnings [words...]               search past learnings (read these before planning)
+  pitfalls <ID> [--scan] [--base REF]   known pitfalls (if turned on) that match the story's stack and domain; --scan
+                                     runs sast-check's rules for them on the change and adds the result to handoff.md
   status [<ID>]                      one plain-English line
   next [<ID>]                        what's done and the single next step for the story (no judge call, no cost)
   hook --client C --event pre|post|stop|session   called by AI-client hooks (reads JSON on stdin)
@@ -244,6 +246,10 @@ DEFAULT_CONFIG = {
     # "content": [...], "checks": [...]}}}. Each area is off, warn (shown, never blocks) or enforce. Lowering an area,
     # narrowing its triggers or loosening a check is a weaker rule.
     "guardrails": {},
+    # Known pitfalls (sg_pitfalls.py, docs/pitfalls.md): a learner's feed of mistakes other projects kept making, shown at
+    # READY when a story's stack and domain match. "off" (default), "warn" (shown, never blocks) or "enforce" (READY fails
+    # until each critical one shown is acknowledged). "source": a file path or an https:// URL of patterns-public.json.
+    "pitfalls": {"mode": "off", "source": ""},
 }
 
 # ------------------------------------------------------------------ checks
@@ -407,6 +413,10 @@ def check_config(c):
         A.load(c.get("guardrails"))
     except ValueError as e:
         raise ConfigError('.story-gate/config.json: "guardrails" %s - the gate fails closed until fixed' % e)
+    import sg_pitfalls as PF
+    why = PF.settings_problem(c.get("pitfalls"))
+    if why:
+        raise ConfigError('.story-gate/config.json: "pitfalls" %s - the gate fails closed until fixed' % why)
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:
         raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)
@@ -612,7 +622,9 @@ def spec_files(c):
 def policy_fingerprint(c):
     """Hash of the policy settings that affect scoring, so a stricter config re-scores stored verdicts."""
     j = c.get("judge") or {}
-    return json.dumps({"v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+    import sg_pitfalls as PF
+    pf = {"pf": PF.mode(c)} if PF.mode(c) != "off" else {}  # known pitfalls off: every stored verdict keeps its hash
+    return json.dumps({**pf, "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
                        "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
@@ -2461,6 +2473,9 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     mx = int(c["judge"].get("max_chars", 90000))
     if phase == "ready":
         structural, fm = struct_ready(sd)
+        pf = pitfalls_ready(sd, sid, c, in_ci=ci_trust is not None, show=not quiet)
+        if pf is not None:
+            structural["pitfalls_acknowledged"] = pf
         wr = writing_report(sd, sid, "ready", c)
         pl = sections(rd(sd / "context.md")).get("## Prior learnings", "").strip().lower()
         skip = {"learnings_applied"} if pl.startswith("none") and "searched" in pl else set()  # skip only with search evidence
@@ -2501,6 +2516,111 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     if not quiet:
         print_verdict(v)
     return 0 if passed(v, c, sd) else 1
+
+
+def pitfalls_ready(sd, sid, c, in_ci=False, show=True):
+    """The known-pitfalls READY check (status, why), or None when the feature is off. On this computer it reads the feed,
+    shows the pitfalls that match the story and records them in pitfalls.json. CI doesn't read the feed: it checks the
+    acknowledgements against that record, and a missing record is never a pass."""
+    import sg_pitfalls as PF
+    m = PF.mode(c)
+    if m == "off":
+        return None
+    fm = front_matter(rd(sd / "story.md"))
+    stack, domain = PF.story_tags(fm)
+    context = rd(sd / "context.md")
+    if in_ci:
+        rec = load_json(sd / "pitfalls.json")
+        if "shown" not in rec:
+            return PF.check(m, [], set(), "no record of the known pitfalls shown at READY (pitfalls.json): run `%s` on "
+                            "your computer and commit the story folder" % gate_cmd("score %s ready" % sid))
+        shown = PF.shown_in(rec)
+        return PF.check(m, shown, PF.acknowledged(context, {p["id"] for p in shown}))
+    if not stack or not domain:
+        why = ("story.md's front matter needs stack: and domain: (for example stack: [python] and domain: [auth], or none) "
+               "so known pitfalls can be matched")
+        if show:
+            print("story-gate: " + why)
+        return PF.check(m, [], set(), why)
+    text, why = PF.read_feed(c["pitfalls"]["source"], ROOT)
+    patterns, notes = PF.parse_feed(text) if text is not None else ([], [why])
+    if text is not None and not patterns and notes:
+        why = notes[0]
+    shown = PF.matching(patterns, stack, domain)
+    acked = PF.acknowledged(context, {p["id"] for p in shown})
+    if show:
+        print("\n".join(["story-gate: " + n for n in notes] + PF.show_lines(shown, acked, stack, domain)))
+    if text is None or why:
+        return PF.check(m, [], set(), why)
+    old = load_json(sd / "pitfalls.json")
+    wj(sd / "pitfalls.json", PF.record(sid, now(), m, stack, domain, shown, acked, old))
+    emit("pitfalls_shown", sid, {"shown": [p["id"] for p in shown], "acknowledged": sorted(acked)})
+    return PF.check(m, shown, acked)
+
+
+def cmd_pitfalls(sid, scan=False, base=None):
+    """Show the known pitfalls for a story and record them (no judge). With scan: run the sast-check rules written for
+    the pitfalls shown on this change, and put the result in pitfalls.json and handoff.md."""
+    import sg_pitfalls as PF
+    c, sd = cfg(), sdir(sid)
+    if not sd.exists():
+        sys.exit("no story folder; run: start %s" % sid)
+    if PF.mode(c) == "off":
+        print('story-gate: known pitfalls are off. Turn them on in .story-gate/config.json: "pitfalls": {"mode": "warn", '
+              '"source": "<path or https URL of patterns-public.json>"} (docs/pitfalls.md).')
+        return 0
+    st = pitfalls_ready(sd, sid, c)
+    if not scan:
+        return 0 if st[0] is not False else 1
+    rec = load_json(sd / "pitfalls.json")
+    if "shown" not in rec:
+        sys.exit("story-gate: no pitfalls recorded for %s yet (see above), so there is nothing to scan for" % sid)
+    rec["scan"] = pitfalls_scan(PF.shown_in(rec), base or c["base_branch"])
+    wj(sd / "pitfalls.json", rec)
+    hp = sd / "handoff.md"
+    text = rd(hp) or SKELETONS["handoff.md"].replace("{id}", sid)
+    hp.write_text(PF.put_block(text, PF.handoff_block(rec)), encoding="utf-8")
+    print("\n".join(["story-gate: " + x for x in PF.scan_lines(rec["scan"])]))
+    print("story-gate: the result is in %s (section %s)." % (hp.relative_to(ROOT), PF.SECTION))
+    return 0 if rec["scan"]["state"] in ("ran", "no_rules", "not_installed") else 1
+
+
+def pitfalls_scan(shown, base):
+    """Run sast-check, if it is installed on this computer, for the rules whose metadata.learner_pattern_id is one of the
+    pitfalls shown. -> {state: ran | no_rules | not_installed | error, rules, hits, detail, at}."""
+    import sg_pitfalls as PF, tempfile
+    out = {"at": now(), "state": "not_installed", "rules": [], "hits": []}
+    home = PF.sast_home()
+    if home is None:
+        return out
+    try:
+        rules = PF.rule_patterns((home / "dist" / "rules.yaml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        return dict(out, state="error", detail="couldn't read sast-check's rules (%s)" % e.__class__.__name__)
+    ids = {p["id"] for p in shown}
+    want = {r: lp for r, lp in rules.items() if lp in ids}
+    out["rules"] = sorted(want)
+    if not want:
+        return dict(out, state="no_rules")
+    try:
+        mb = resolve_base(base)
+    except RuntimeError as e:
+        return dict(out, state="error", detail=str(e)[:200])
+    with tempfile.TemporaryDirectory() as td:
+        try:  # diff mode: only what this change brings in; its own settings, suppressions and fail-closed rules apply
+            p = subprocess.run([sys.executable, "-I", str(home / "scripts" / "sast.py"), "--repo", str(ROOT), "--mode", "diff",
+                                "--base", mb, "--only", "opengrep", "--out", td], cwd=ROOT, capture_output=True, text=True,
+                               timeout=900)
+            doc = json.loads(Path(td, "findings.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return dict(out, state="error", detail="sast-check didn't run (%s)" % e.__class__.__name__)
+    runs = {r.get("name"): r for r in doc.get("runs") or [] if isinstance(r, dict)}
+    og = runs.get("opengrep") or {}
+    if og.get("status") != "ran" or doc.get("verdict") == "error" or p.returncode == 2:
+        bad = [r for r in runs.values() if r.get("status") != "ran"]
+        why = "; ".join("%s %s: %s" % (r.get("name"), r.get("status"), PF.clean(r.get("detail", ""), 120)) for r in bad[:2])
+        return dict(out, state="error", detail=why or "exit %d" % p.returncode)
+    return dict(out, state="ran", hits=PF.scan_hits(doc.get("findings"), want))
 
 
 def calib_log(sid, phase, v, judged):
@@ -3299,7 +3419,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/sg_pitfalls.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -4976,7 +5096,7 @@ def cmd_setup(cmd, kv, rest):
 # Flags that take no value. Every flag a command looks for in `rest` must be listed here (a test checks), or flags()
 # would read the next argument as its value.
 BOOL_FLAGS = ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--serve", "--publish",
-              "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force", "--revoke")
+              "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force", "--revoke", "--scan")
 
 
 def flags(argv):
@@ -5147,6 +5267,10 @@ def main(argv):
         return 0 if r.get("status") == "ON_TRACK" else 1
     if cmd == "learn":
         return cmd_learn(rest[0], kv) or 0
+    if cmd == "pitfalls":
+        if not rest:
+            sys.exit("usage: pitfalls <ID> [--scan] [--base REF]")
+        return cmd_pitfalls(rest[0], "--scan" in rest, kv.get("base"))
     if cmd == "learnings":
         return cmd_learnings(rest) or 0
     if cmd == "status":

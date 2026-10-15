@@ -1,0 +1,31 @@
+{
+ "schema": "learner-patterns/v1",
+ "patterns": [
+  {"id": "lp-synthetic-001", "pattern": "secret-compare-not-constant-time", "stack": "python", "domain": "auth", "cwe": "CWE-208",
+   "hits": 14, "repos": 5, "impact_band": "critical", "summary": "Passwords or tokens compared with == leak timing.",
+   "checklist": ["Compare secrets with hmac.compare_digest, never ==.", "Add a test that a wrong token of the same length is refused."]},
+  {"id": "lp-synthetic-002", "pattern": "session-not-rotated", "stack": "python", "domain": "auth", "cwe": "CWE-384",
+   "hits": 5, "repos": 3, "impact_band": "high", "summary": "The session id is kept after login.",
+   "checklist": ["Issue a new session id after a successful login."]},
+  {"id": "lp-synthetic-003", "pattern": "token-without-expiry", "stack": "any", "domain": "auth", "cwe": "CWE-613",
+   "hits": 4, "repos": 2, "impact_band": "medium", "summary": "Access tokens are issued with no expiry.",
+   "checklist": ["Give every access token an expiry and test that an expired one is refused."]},
+  {"id": "lp-synthetic-004", "pattern": "unescaped-html", "stack": "javascript", "domain": "ui", "cwe": "CWE-79",
+   "hits": 20, "repos": 7, "impact_band": "high", "summary": "User text is put into the page as HTML.",
+   "checklist": ["Set textContent, never innerHTML, for user text."]},
+  {"id": "lp-synthetic-005", "pattern": "sql-string-building", "stack": "python", "domain": "data", "cwe": "CWE-89",
+   "hits": 11, "repos": 4, "impact_band": "critical", "summary": "SQL built by joining strings.",
+   "checklist": ["Use query parameters for every value."]},
+  {"id": "lp-synthetic-006", "pattern": "verbose-login-errors", "stack": "python", "domain": "auth", "cwe": "CWE-204",
+   "hits": 3, "repos": 2, "impact_band": "low", "summary": "Login errors say whether the user exists.",
+   "checklist": ["Give the same message for a wrong user and a wrong password."]},
+  {"id": "lp-synthetic-007", "pattern": "no-login-rate-limit", "stack": ["python", "go"], "domain": ["auth"], "cwe": "CWE-307",
+   "hits": 2, "repos": 1, "impact_band": "medium", "summary": "Login has no limit on attempts.",
+   "checklist": ["Limit failed logins per account and per address."]},
+  {"id": "lp-synthetic-008", "pattern": "reset-token-reusable", "stack": "python", "domain": "auth", "cwe": "CWE-640",
+   "hits": 9, "repos": 4, "impact_band": "high", "summary": "A password reset link works more than once.",
+   "checklist": ["Make a reset token single-use and short-lived."]},
+  {"id": "lp-synthetic-009", "pattern": "no-checklist", "stack": "python", "domain": "auth", "cwe": "CWE-0",
+   "hits": 99, "repos": 9, "impact_band": "critical", "summary": "Skipped: it has no checklist.", "checklist": []}
+ ]
+}

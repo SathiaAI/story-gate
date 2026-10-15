@@ -48,6 +48,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
    - `## TRD`: the architecture and technical rules it must follow.
    - `## Upstream handoffs`: one `### <dep-id>` block per `depends_on`. Use that story's `handoff.md`, or the equivalent from Linear or control-hub.
    - `## Prior learnings`: run `gate.py learnings <3-6 keywords>`, then paste the relevant hits with their ids. If nothing fits, write `None — searched: …`.
+   - `## Known pitfalls` (only when `config.json` → `pitfalls` is on): put `stack:` and `domain:` in story.md's front matter, then run `gate.py pitfalls <ID>`. For each critical pitfall shown, add a line `- <id>: <how this story avoids it>`. In enforce mode READY fails until each one is there (docs/pitfalls.md).
    - **Spec pinning:** PRD/TRD files listed in `config.json` (`spec_files`, or a `repo` source's `prd`/`trd`) are fingerprinted at READY. If they change mid-story, READY goes out of date: re-run READY and reconcile.
 
 4. ∥ **Test plan** (model: `tests`). Fill `tests.json`:
@@ -114,6 +115,8 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
    - In `tests.json`, set each acceptance criterion's `test_refs` to the exact names of the automated tests that cover its cases (e.g. `test_ac1_expired_token_401`).
    - DONE fails any criterion whose tests are not in the current test files (`test_globs`), or, when JUnit is available, did not run and pass.
    - `trace.md` is written for reviewers: AC → planned cases → tests → result.
+
+   **Known pitfalls** (only when they are on): run `gate.py pitfalls <ID> --scan`. If sast-check is on this computer, it runs the rules for the pitfalls shown at READY and writes the hits into handoff.md. Fix each hit, or say in handoff.md why it doesn't apply.
 
    **Self-review before the PR:** run your client's code reviewer on the diff and fix what it finds.
    - In Claude clients, that's `/engineering:code-review`.
