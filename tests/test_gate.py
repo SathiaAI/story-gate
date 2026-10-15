@@ -3725,6 +3725,16 @@ class TestDashboardDependencies(Base):
         self.put("SAT-2", deps=[("SAT-1", "before-start", "needs it")], ready=None); self.push(); self.build()
         self.assertEqual(self.st("SAT-2")["status"], "draft")
 
+    def test_a_dependency_done_only_on_its_branch_still_makes_a_story_wait(self):
+        """A DONE that passed on the dependency's own branch is not finished: only the default branch's copy counts."""
+        self.put("SAT-1"); self.put("SAT-2", deps=[("SAT-1", "before-start", "needs it")])
+        self.push()
+        self.put("SAT-1", done="PASS"); self.push("feature/SAT-1-x")  # later report, branch only
+        self.build()
+        self.assertEqual(self.st("SAT-1")["ref"], "origin/feature/SAT-1-x"); self.assertEqual(self.st("SAT-1")["status"], "in_review")
+        self.assertEqual(self.st("SAT-2")["status"], "waiting"); self.assertEqual(self.st("SAT-2")["waiting_for"], ["SAT-1"])
+        self.assertEqual(self.st("SAT-2")["deps"][0]["state"], "open")
+
     def test_before_merge_only_does_not_make_a_story_wait(self):
         """Before merge only does not make a story wait."""
         self.put("SAT-1"); self.put("SAT-2", deps=[("SAT-1", "before-merge", "shares a schema")])
