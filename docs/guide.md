@@ -264,12 +264,18 @@ There are two kinds of check:
 - **Judge** checks are a probability: 0.7 or above passes, 0.4 or above is a concern, anything lower fails.
 
 ### READY: is the story fit to build?
+Links between stories are explained in [dependencies.md](dependencies.md). READY reads other stories, so its verdict can change when another story finishes; the stored `inputs_hash` is not affected.
+
 | Check | Type | Question |
 |---|---|---|
 | `story_present`, `story_source` | Structural | The story is copied verbatim and says where it came from |
 | `context_present` | Structural | PRD, TRD, upstream handoffs and prior learnings are filled ("None — searched: …" is allowed) |
 | `test_matrix` | Structural | Every AC has positive, negative, edge **and** regression cases, or a reason one doesn't apply |
 | `upstream_handoffs` | Structural | Every `depends_on` story has a handoff |
+| `dependencies` | Structural | Shown only when the story has `depends_on` or a `## Dependencies` section. Every dependency exists, there is no cycle, and each `before-start` dependency is finished on the default branch. A `before-merge` dependency that isn't finished, a waived one, or a legacy story with no `## Dependencies` section is a WARN. An open blocker or a missing dependency can't be waived. See [dependencies.md](dependencies.md) |
+| `blockers_resolved` | Structural | Shown only when story.md has a `## Blockers` section. Fails while any blocker is `open`, or the section is malformed |
+| `risks_handled` | Structural | Shown only when story.md has a `## Risks` section. Fails when it is malformed; CONCERNS when a `high` impact risk has no `mitigation` |
+| `consumers_match` | Structural | Shown only when the legacy `consumers:` line is used. A WARN when it disagrees with what other stories' `depends_on` say |
 | `pitfalls_acknowledged` | Structural | Shown only when [known pitfalls](pitfalls.md) are on. The story has `stack:` and `domain:`, the feed was read, and `context.md` acknowledges every critical pitfall shown. In `warn` mode a problem is a WARN that never blocks |
 | `spec_covered` | Structural | When `story.md` links a spec or ticket (`spec:`: Spec Kit, OpenSpec, or a Matt Pocock ticket or spec), every scenario, checkbox criterion and user story in it is named in some AC's `covers` (checked again at DONE). See [Spec Kit, OpenSpec and BMAD](#spec-kit-openspec-and-bmad) |
 | `dor_value`, `dor_scope`, `dor_interfaces`, `dor_dependencies`, `dor_nfr`, `dor_small`, `dor_no_blockers` | Judge | Definition of Ready: value, scope, interfaces, dependencies, NFRs, small enough, no blockers |
@@ -291,6 +297,7 @@ The result is one of three: **ON_TRACK**; **AT_RISK** (fix the named cause); or 
 | Check | Type | Question |
 |---|---|---|
 | `ready_gate_passed` | Structural | READY passed, and neither the story nor the PRD/TRD has changed since |
+| `dependencies_done` | Structural | Every dependency, `before-start` and `before-merge`, is finished on the default branch's latest commit, and no blocker is open. This is what stops a story merging before what it depends on. Turn on GitHub's "Require branches to be up to date before merging" so this runs against the latest main. See [dependencies.md](dependencies.md) |
 | `tests_ran_green` | Structural | The pinned test command passed on **this exact code**. CI uses its own run |
 | `traceability` | Structural | Every AC's `test_refs` exist in the current test files and ran and passed (writes `trace.md`) |
 | `scenarios_prove_acs` | Structural | Every AC has a scenario (the feature run end to end) that passed on **this exact code**. In CI only CI's own runs count; a `--local-only` scenario gives CONCERNS |

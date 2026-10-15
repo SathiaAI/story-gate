@@ -15,8 +15,9 @@ Rules this module keeps:
 import base64, hashlib, html, http.server, json, os, re, secrets, signal, statistics, subprocess, tempfile, threading, time, urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sg_stories
 
-SCHEMA = 1
+SCHEMA = 2  # 2: stories carry dependency fields (deps, blocks, waiting_for ...), a 'waiting' stage, dep_cycles and order
 MAX_BLOB = 1_000_000          # bytes per record file
 MAX_STORIES = 2000            # stories per snapshot
 ISSUE_LIMIT = 60_000          # characters (GitHub's issue body limit is 65,536; the rest is headroom)
@@ -32,6 +33,7 @@ STORY_FILES = ("story.md", "context.md", "tests.json", "ready.json", "done.json"
 BUDGET_HISTORY = 50  # measurements kept per budget on the dashboard (the records themselves stay in each story folder)
 STATUSES = [  # order matters: this is the pipeline, left to right
     ("draft", "Draft", "READY not passed yet"),
+    ("waiting", "Waiting", "a before-start dependency isn't finished, or a blocker is open"),
     ("queued", "Queued", "READY passed, nobody has started it"),
     ("in_progress", "In progress", "claimed by an agent, DONE not passed"),
     ("blocked", "Blocked", "drift escalated, or the last checkpoint said OFF_COURSE"),
@@ -147,16 +149,7 @@ def jsonl_rows(raw, limit=500):
 
 
 def front(text):
-    m = re.match(r"\s*---\s*\n(.*?)\n---", text, re.S)
-    out = {}
-    for line in (m.group(1).splitlines() if m else []):
-        if ":" in line:
-            k, v = line.split(":", 1)
-            v = v.strip()
-            if v.startswith("[") and v.endswith("]"):
-                v = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()]
-            out[k.strip()] = v
-    return out
+    return sg_stories.front_matter(text)
 
 
 def verdict(v):
@@ -190,10 +183,36 @@ def trace_acs(text):
     return out
 
 
-def parse_story(sid, files):
+MAX_LINKS = 50  # open blockers shown per story (dependencies are all kept: status and links are worked out from them)
+
+
+def story_links(st, fm, id_pattern):
+    """(deps, blockers_open, risk count, is_d1, any_error) of one story.md, via sg_stories, display strings cleaned and capped. Dependency IDs
+    are kept whole (they matched the story ID pattern) and every one is kept, so status and links never miss one; they are
+    shortened only when rendered. A legacy story (no '## Dependencies') gets each depends_on id as before-start with no
+    reason. An id that isn't a story id is dropped."""
+    pat = re.compile(r"(?:%s)" % (id_pattern or r"[A-Za-z0-9][A-Za-z0-9._-]*"))
+    recs, errs, d1 = sg_stories.parse_dependencies(st, pat.pattern)
+    listed = [x for x in sg_stories.depends_on_ids(fm) if isinstance(x, str)]
+    ids = listed  # edges come only from depends_on, as in gate.py; a stray ### block is a READY error, not a link
+    deps, seen = [], set()
+    for x in ids:
+        if x in seen or not pat.fullmatch(x):
+            continue
+        seen.add(x)
+        r = recs.get(x) or {}
+        deps.append({"id": x, "when": r.get("when", "before-start"), "why": clean(r.get("why"), 120)})
+    blockers, berr = sg_stories.parse_blockers(st)
+    risks, rerr = sg_stories.parse_risks(st)
+    return (deps, [{"title": clean(b["title"], 80), "owner": clean(b["owner"], 40)} for b in blockers if b["status"] == "open"][:MAX_LINKS],
+            len(risks), d1, bool(errs or berr or rerr))
+
+
+def parse_story(sid, files, id_pattern=None):
     """files: {name: bytes or None}. Returns a validated, display-safe dict."""
     st = (files.get("story.md") or b"").decode("utf-8", "replace")
     fm = front(st)
+    deps, blockers_open, risks, d1, dep_errors = story_links(st, fm, id_pattern)
     tests = as_json(files.get("tests.json"))
     acs = []
     if isinstance(tests, dict) and isinstance(tests.get("acceptance_criteria"), list):
@@ -226,6 +245,7 @@ def parse_story(sid, files):
         # issues copied in with spec-pull: CI's check on the pull request says whether each still matches the live issue
         "snapshots": snapshot_paths(fm.get("spec")),
         "budgets": budget_results(as_json(files.get("budget_results.json"))),
+        "deps": deps, "d1": d1, "blockers_open": blockers_open, "risks": risks, "dep_errors": dep_errors,
     }
 
 
@@ -283,6 +303,8 @@ def ready_ok(s):
 
 
 def status_of(s, merged):
+    # Precedence: done > blocked > in_review > waiting > in_progress > queued > draft. "waiting" needs the other stories, so
+    # link_stories() applies it once every story is chosen; nothing here changes for a story with no dependencies or blockers.
     r, d, cp = s.get("ready") or {}, s.get("done") or {}, s.get("checkpoint") or {}
     if merged and d.get("overall") in ("PASS", "WAIVED"):
         return "done"  # finished; WAIVED ones are flagged and never count as proven
@@ -303,6 +325,27 @@ def iso_days(a, b):
         return (fb - fa).total_seconds() / 86400
     except Exception:
         return None
+
+
+def link_stories(rows):
+    """Work out, on the chosen copy of every story: what each dependency's state is, what it waits for, what it blocks (derived
+    from the other stories' deps, never stored), and which deps are missing. A not-yet-started or in-progress story that waits
+    on an unfinished before-start dependency or an open blocker becomes 'waiting'. -> edges {id: set of ids it depends on}."""
+    ids = {s["id"] for s in rows}
+    done = {s["id"] for s in rows if s["status"] == "done"}
+    waived = {s["id"] for s in rows if s["id"] in done and (s.get("done") or {}).get("overall") == "WAIVED"}
+    edges = {s["id"]: {d["id"] for d in s["deps"]} for s in rows}
+    for s in rows:
+        for d in s["deps"]:
+            d["state"] = "waived" if d["id"] in waived else "done" if d["id"] in done else "open" if d["id"] in ids else "missing"
+        s["missing"] = [d["id"] for d in s["deps"] if d["id"] not in ids]
+        s["merge_waits"] = [d["id"] for d in s["deps"] if d["when"] == "before-merge" and d["id"] not in done]
+        s["waiting_for"] = [d["id"] for d in s["deps"] if d["when"] == "before-start" and d["id"] not in done] + \
+                           ["blocker: %s (%s)" % (b["title"], b["owner"]) for b in s["blockers_open"]]
+        s["blocks"] = sg_stories.blocks_of(edges, s["id"])
+        if s["waiting_for"] and s["status"] in ("in_progress", "queued", "draft"):
+            s["status"] = "waiting"
+    return edges
 
 
 def build(root, default_ref, id_pattern, include_local=False, now=None, gate=None):
@@ -354,7 +397,7 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
             if len(stories) >= MAX_STORIES:
                 omissions.append("more than %d stories: the rest are not shown" % MAX_STORIES); break
             files = {f: blobs.get("%s:.story-gate/stories/%s/%s" % (sha, sid, f)) for f in listing.get(sid, [])}
-            s = parse_story(sid, files)
+            s = parse_story(sid, files, id_pattern)
             # a story linking a spec: its full hash also covers that spec, which isn't read here, so compare the part that
             # doesn't (story, context, test plan, PRD/TRD, policy). A spec-only change is caught when CI scores READY again.
             key = "inputs_hash_base" if s.get("spec_linked") else "inputs_hash"
@@ -386,6 +429,7 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
                 stories[sid] = s
         if too_big:
             omissions.append("%s: %d record file(s) over %d bytes were skipped" % (ref, len(too_big), MAX_BLOB))
+    edges = link_stories(list(stories.values()))
     rows = sorted(stories.values(), key=lambda s: ([k for k, _, _ in STATUSES].index(s["status"]), s["id"]))
     for s in rows:
         if s["feature"]:
@@ -394,7 +438,8 @@ def build(root, default_ref, id_pattern, include_local=False, now=None, gate=Non
         s["stale"] = bool(s["status"] in ("in_progress", "blocked") and lr and (iso_days(lr, now) or 0) > STALE_DAYS)
     data = {"schema": SCHEMA, "generated_at": now, "default_ref": refs[0][0], "default_sha": refs[0][1],
             "refs_scanned": [{"ref": r, "sha": s[:12]} for r, s in refs], "omissions": omissions, "conflicts": conflicts,
-            "features": [{"id": k, "title": v} for k, v in sorted(features.items())], "stories": rows}
+            "features": [{"id": k, "title": v} for k, v in sorted(features.items())], "stories": rows,
+            "dep_cycles": sg_stories.graph_cycles(edges), "order": sg_stories.topo_order(edges, [s["id"] for s in rows if s["status"] != "done"])}
     data["metrics"] = metrics(rows, list(calib.values()), list(learn.values()), conflicts, now)
     data["budgets"], why = budget_history(policy_blob, rows)
     if why:
@@ -410,7 +455,7 @@ def metrics(rows, calib, learn, conflicts, now):
     by = {k: [s for s in rows if s["status"] == k] for k, _, _ in STATUSES}
     total = len(rows)
     dor = [s for s in rows if ready_ok(s)]
-    active = by["in_progress"] + by["blocked"]
+    active = by["in_progress"] + by["blocked"] + [s for s in by["waiting"] if s.get("coder")]  # claimed, now waiting: still assigned
     finished = by["done"] + by["in_review"]
     ac_tot = ac_ok = ac_unknown = 0
     for s in finished:
@@ -449,6 +494,7 @@ def metrics(rows, calib, learn, conflicts, now):
     add("dor_pct", "Ready rate", pct(len(dor), total), "Meet Definition of Ready / Stories", "%")
     add("queued", "Queued to start", len(by["queued"]), "READY passed and nobody has claimed it")
     add("in_progress", "In progress", len(by["in_progress"]), "claimed by an agent, DONE not passed")
+    add("waiting", "Waiting", len(by["waiting"]), "a before-start dependency isn't finished on the default branch, or a blocker is open", good="low")
     add("blocked", "Blocked", len(by["blocked"]), "drift escalated, or the last checkpoint was OFF_COURSE", good="low")
     add("agents", "Agents working", len({(s["coder"].get("client"), s["coder"].get("model")) for s in active if s.get("coder")}), "distinct client + model on claimed, unfinished stories")
     add("drifting", "Stories drifting", len(drifting), "unfinished stories whose READY or last checkpoint reports drift", good="low")
@@ -517,6 +563,22 @@ def budget_word(e):
     return "reported" if e.get("state") == "reported" else "not run"
 
 
+def dep_cell(s, esc):
+    """'SAT-9, SAT-10… / SAT-15': what a story depends on (… not finished, (waived), (missing)) / what depends on it. '—' when none."""
+    mark = {"waived": " (waived)", "missing": " (missing)", "open": "…"}
+    more = lambda xs: " +%d" % (len(xs) - 8) if len(xs) > 8 else ""
+    a = [x for x in s.get("deps") or []]
+    b = s.get("blocks") or []
+    if not a and not b:
+        return "—"
+    return "%s%s / %s%s" % (", ".join(esc(x["id"], 40) + mark.get(x.get("state"), "") for x in a[:8]) or "—", more(a),
+                            ", ".join(esc(x, 40) for x in b[:8]) or "—", more(b))
+
+
+def loop_text(cycles, esc):
+    return "; ".join(" → ".join(esc(x, 40) for x in cy + cy[:1]) for cy in cycles[:10])
+
+
 def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     """The pinned issue's Markdown: summary, charts and tables, trimmed to `limit` characters with a link to the full report."""
     M = {m["key"]: m for m in d.get("metrics", [])}
@@ -565,7 +627,7 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
         notes += ["", "**Ownership conflicts:** " + "; ".join("%s on %s" % (md(c["story"], 40), ", ".join(md(b, 60) for b in c["branches"])) for c in d["conflicts"][:20])]
     if d.get("omissions"):
         notes += ["", "**Not shown:** " + "; ".join(md(o, 160) for o in d["omissions"][:10])]
-    srows = ["| %s %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), stage[s["status"]],
+    srows = ["| %s %s | %s | %s | %s | %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), md(s["feature"] or "—", 30), stage[s["status"]], dep_cell(s, md),
                                                    (s.get("ready") or {}).get("overall", "—") + no_judge(s.get("ready")) + (" (out of date)" if s.get("ready_fresh") is False else ""),
                                                    (s.get("done") or {}).get("overall", "—") + no_judge(s.get("done")), md(s["ref"], 60) + (" · " + ci_cell(s) if s.get("ci") else ""))
              for s in d["stories"]]
@@ -582,17 +644,26 @@ def to_markdown(d, artifact_url=None, limit=ISSUE_LIMIT):
     # summary > chart (small; falls back to a table) > features > who is working > queued > notes > definitions > all stories.
     # Each part is (lines before the rows, rows, lines after); a long list keeps as many rows as fit (at most half of what is left,
     # so the lists after it still get room) and says how many it left out.
-    order = ["head", "chart", "agents", "queued", "feats", "budgets", "notes", "defs", "stories"]
+    cyc = d.get("dep_cycles") or []
+    wrows = ["| %s %s | %s | %s |" % (md(s["id"], 40), md(s["title"], 50), ", ".join(md(x, 90) for x in s.get("waiting_for") or []) or "—",
+                                    ", ".join(md(x, 40) for x in (s.get("blocks") or [])[:8]) or "—") for s in d["stories"] if s["status"] == "waiting"]
+    byid = {s["id"]: s for s in d["stories"]}
+    inloop = {x for cy in cyc for x in cy}
+    orows = ["%d. %s %s%s" % (i, md(x, 40), md((byid.get(x) or {}).get("title"), 60), " (in a loop)" if x in inloop else "") for i, x in enumerate(d.get("order") or [], 1)]
+    order = ["head", "cycles", "chart", "agents", "waiting", "queued", "feats", "budgets", "notes", "defs", "stories", "suggested"]
     parts = {"head": (head, [], []), "chart": (chart, [], []),
+             "cycles": (["", "**⚠ Dependency loops:** " + loop_text(cyc, md)], [], []) if cyc else ([], [], []),
+             "waiting": (["", "## Waiting on others", "", "| Story | Waiting for | Blocks |", "|---|---|---|"], wrows, []) if wrows else ([], [], []),
+             "suggested": (fold("Suggested order", "%d stories, a story after what it depends on" % len(orows)), orows, ["", "</details>"]) if orows else ([], [], []),
              "agents": (["", "## Who is working on what", "", "| Story | Agent | Model | Status | Done | Drift | CI check | Last report |", "|---|---|---|---|---|---|---|---|"], arows, []),
              "queued": (fold("Queued to start", "%d queued" % len([s for s in d["stories"] if s["status"] == "queued"])), qrows, ["", "</details>"]),
              "feats": (fold("Features", "%d features" % len(frows)) + ["| Feature | Stories | Done | Ready | Acceptance criteria proven |", "|---|---|---|---|---|"], frows, ["", "</details>"]),
              "budgets": (["", "## Budgets", "", "Values the merged stories recorded; %s." % BUDGET_LEGEND, "",
                           "| Budget | Limit | Latest | Last 5 | Over the limit |", "|---|---|---|---|---|"], brows, []) if brows else ([], [], []),
              "notes": (notes, [], []), "defs": (defs, [], []),
-             "stories": (fold("All stories", "%d stories" % len(srows)) + ["| Story | Feature | Stage | READY | DONE | Branch |", "|---|---|---|---|---|---|"], srows, ["", "</details>"])}
-    priority = ["head", "chart", "feats", "agents", "budgets", "queued", "notes", "defs", "stories"]
-    lists = ("stories", "agents", "feats", "queued", "budgets")
+             "stories": (fold("All stories", "%d stories" % len(srows)) + ["| Story | Feature | Stage | Depends on / Blocks | READY | DONE | Branch |", "|---|---|---|---|---|---|---|"], srows, ["", "</details>"])}
+    priority = ["head", "cycles", "chart", "feats", "agents", "waiting", "budgets", "queued", "notes", "defs", "stories", "suggested"]
+    lists = ("stories", "agents", "feats", "queued", "budgets", "waiting", "suggested")
     full = "[see the full report](%s)" % artifact_url if artifact_url else "see the full report"
     more = lambda n: "… %d more: %s" % (n, full)
     size = lambda ls: sum(len(x) + 1 for x in ls)
@@ -715,11 +786,25 @@ def to_html(d, artifact_note="", live=False, issue=None):
         len([s for s in d["stories"] if s["feature"] == f["id"] and (s.get("ready") or {}).get("overall") == "PASS"]),
         len([s for s in d["stories"] if s["feature"] == f["id"] and s["status"] == "done"])) for f in d.get("features", [])) \
         or '<tr><td colspan="4" class="text-secondary">No features yet. Add one with gate.py feature &lt;ID&gt; --title "…"</td></tr>'
-    rows = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (
-        h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], pill((s.get("ready") or {}).get("overall"), s.get("ready")),
+    rows = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="text-secondary">%s</td></tr>' % (
+        h(s["id"], 40), h(s["title"], 100), h(s["feature"] or "—", 40), label[s["status"]], dep_cell(s, h), pill((s.get("ready") or {}).get("overall"), s.get("ready")),
         pill((s.get("done") or {}).get("overall"), s.get("done")), ("%d/%d" % (sum(1 for _, ok in s["trace"] if ok), len(s["trace"]))) if s["trace"] else "—", h(s["ref"], 80) + (h(f" · #{s['ci'].get('pr')} {s['ci'].get('result')}" + (" · source " + s["ci"]["source"] if s["ci"].get("source") else ""), 80) if s.get("ci") else "")) for s in d["stories"]) \
         or '<tr><td colspan="8" class="text-secondary">No stories yet. Plan one with gate.py plan &lt;ID&gt; --title "…"</td></tr>'
-    notes = ""
+    cyc = d.get("dep_cycles") or []
+    notes = ('<div class="alert mb-3"><span class="sg-pill fail">Dependency loops</span> %s</div>' % loop_text(cyc, h)) if cyc else ""
+    waits = "".join('<tr><td><strong>%s</strong><div class="text-secondary">%s</div></td><td>%s</td><td>%s</td></tr>' % (
+        h(s["id"], 40), h(s["title"], 80), h(", ".join(clean(x, 90) for x in s.get("waiting_for") or []) or "—", 600),
+        h(", ".join((s.get("blocks") or [])[:8]) or "—", 400)) for s in d["stories"] if s["status"] == "waiting")
+    byid = {s["id"]: s for s in d["stories"]}
+    inloop = {x for cy in cyc for x in cy}
+    steps = "".join("<li>%s %s%s</li>" % (h(x, 40), h((byid.get(x) or {}).get("title"), 80), " (in a loop)" if x in inloop else "") for x in d.get("order") or [])
+    extra = ""
+    if waits:
+        extra += ('<div class="col-12"><div class="card"><div class="card-header"><h3 class="card-title">Waiting on others</h3></div><div class="table-responsive">'
+                  '<table class="table card-table"><thead><tr><th>Story</th><th>Waiting for</th><th>Blocks</th></tr></thead><tbody>%s</tbody></table></div></div></div>' % waits)
+    if steps:
+        extra += ('<div class="col-12"><div class="card"><div class="card-body"><details><summary><strong>Suggested order</strong> '
+                  '<span class="text-secondary">a story comes after what it depends on</span></summary><ol class="mt-2 mb-0">%s</ol></details></div></div></div>' % steps)
     if d.get("budgets"):
         notes += ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">Budgets</h3></div><div class="table-responsive">'
                   '<table class="table card-table"><thead><tr><th>Budget</th><th>Limit</th><th>Latest</th><th>Last 5</th><th class="text-end">Over the limit</th></tr></thead><tbody>%s'
@@ -765,15 +850,16 @@ def to_html(d, artifact_note="", live=False, issue=None):
 <table class="table card-table"><thead><tr><th>Feature</th><th class="text-end">Stories</th><th class="text-end">Ready</th><th class="text-end">Done</th></tr></thead><tbody>%s</tbody></table></div></div></div>
 <div class="col-lg-7"><div class="card"><div class="card-header"><h3 class="card-title">Quality and flow</h3></div><div class="table-responsive">
 <table class="table card-table"><thead><tr><th>Measure</th><th class="text-end">Value</th><th>How it's calculated</th></tr></thead><tbody>%s</tbody></table></div></div></div>
+%s
 <div class="col-12"><div class="card"><div class="card-header"><h3 class="card-title">All stories</h3></div><div class="table-responsive">
-<table class="table table-vcenter card-table"><thead><tr><th>Story</th><th>Feature</th><th>Stage</th><th>READY</th><th>DONE</th><th>Criteria proven</th><th>Branch</th></tr></thead><tbody>%s</tbody></table></div></div></div>
+<table class="table table-vcenter card-table"><thead><tr><th>Story</th><th>Feature</th><th>Stage</th><th>Depends on / Blocks</th><th>READY</th><th>DONE</th><th>Criteria proven</th><th>Branch</th></tr></thead><tbody>%s</tbody></table></div></div></div>
 </div>
 <p class="text-secondary small my-3">Verdicts are recorded by the coding agents; the story-gate check in CI re-checks them on every pull request. Estimates are marked. %s</p>
 </main>
 <footer class="container-xl py-3"><span class="sg-brand text-secondary">story-gate · by <span aria-label="Viaknox">%s</span></span></footer>
 </body></html>""" % (script_src, css, BRAND_CSS, stale, h(d.get("generated_at"), 30), h(d.get("default_ref"), 60), h((d.get("default_sha") or "")[:12], 12),
                       len(d.get("refs_scanned", [])), (" · " + h(artifact_note, 200)) if artifact_note else "", notes, kpi, bar_chart(counts), agents, feats,
-                      quality, rows, h("Snapshot of: " + ", ".join(r["ref"] for r in d.get("refs_scanned", [])[:30]), 2000), mark)
+                      quality, extra, rows, h("Snapshot of: " + ", ".join(r["ref"] for r in d.get("refs_scanned", [])[:30]), 2000), mark)
 
 
 # ------------------------------------------------------------------ publishing (CI)

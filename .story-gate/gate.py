@@ -60,6 +60,7 @@ Commands (run from the repo root):
   learnings [words...]               search past learnings (read these before planning)
   pitfalls <ID> [--scan] [--base REF]   known pitfalls (if turned on) that match the story's stack and domain; --scan
                                      runs sast-check's rules for them on the change and adds the result to handoff.md
+  deps <ID>                          what the story depends on, what depends on it, open blockers and risks (docs/dependencies.md)
   status [<ID>]                      one plain-English line
   next [<ID>]                        what's done and the single next step for the story (no judge call, no cost)
   hook --client C --event pre|post|stop|session   called by AI-client hooks (reads JSON on stdin)
@@ -160,6 +161,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE))]  # never import modules from the working tree
 import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
+import sg_stories as SS  # noqa: E402
 
 VERSION = "0.9.2"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
@@ -499,28 +501,13 @@ UNREAD = "story-gate couldn't read which files the change touches, so it can't t
 
 
 def front_matter(text):
-    """Tiny 'key: value' / 'key: [a, b]' front matter reader between --- lines."""
-    m = re.match(r"\s*---\s*\n(.*?)\n---", text, re.S)
-    out = {}
-    for line in (m.group(1).splitlines() if m else []):
-        if ":" in line:
-            k, v = line.split(":", 1)
-            v = v.strip()
-            if v.startswith("[") and v.endswith("]"):
-                v = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()]
-            out[k.strip()] = v
-    return out
+    """Tiny 'key: value' / 'key: [a, b]' front matter reader between --- lines (see sg_stories)."""
+    return SS.front_matter(text)
 
 
 def sections(text):
-    out, cur = {}, None
-    for line in text.splitlines():
-        if line.startswith("## "):
-            cur = line.strip()
-            out[cur] = ""
-        elif cur:
-            out[cur] += line + "\n"
-    return out
+    """{'## Heading': body} for a markdown file (see sg_stories)."""
+    return SS.sections(text)
 
 
 def junit_file(c):
@@ -815,8 +802,7 @@ def struct_ready(sd):
         out["test_matrix"] = (ok, "no acceptance criteria" if not acs else "ACs missing a positive/negative/edge/regression case (or N/A reason): " + ", ".join(bad))
     except Exception as e:
         out["test_matrix"] = (False, "tests.json invalid: %s" % e)
-    deps = fm.get("depends_on") or []
-    deps = [deps] if isinstance(deps, str) and deps and deps.lower() != "none" else (deps if isinstance(deps, list) else [])
+    deps = SS.depends_on_ids(fm)
     up = secs.get("## Upstream handoffs", "")
     pat = re.compile(r"(?:%s)" % cfg()["story_id_pattern"])
     bad_ids = [d for d in deps if not (isinstance(d, str) and pat.fullmatch(d))]  # story ids only: no paths, no traversal
@@ -826,7 +812,216 @@ def struct_ready(sd):
     cov = spec_coverage(sd, fm, cfg())
     if cov is not None:
         out["spec_covered"] = cov
+    out.update(story_link_checks(sd, fm, story))
     return out, fm
+
+
+# ------------------------------------------------------------------ story dependencies, risks, blockers (docs/dependencies.md)
+STORY_FILE = ".story-gate/stories/%s/%s"
+DEP_BASE = {}  # {"commit": sha} once a check looked at the default branch: cmd_score stores it in the verdict
+
+
+class DepWorld:
+    """Where other stories live: this branch, the default branch's tip, other remote branches. Built only for a story that
+    has dependencies (a repository with none never touches git here). 'Done' is read from the TIP of the default branch,
+    not the merge-base, so a story finished after this branch was cut still counts."""
+
+    def __init__(self, c):
+        want = os.environ.get("SG_BASE_REF") or os.environ.get("GITHUB_BASE_REF") or c["base_branch"]  # as cmd_ci finds it
+        self.name = re.sub(r"^origin/", "", want)
+        self.pat = re.compile(r"(?:%s)" % c["story_id_pattern"])
+        self.sha = self.ref = None
+        for r in ("origin/" + self.name, self.name):
+            self.sha = git("rev-parse", "--verify", "--quiet", r + "^{commit}").strip()
+            if self.sha:
+                self.ref = r
+                break
+        if self.sha:
+            DEP_BASE["commit"] = self.sha
+        self.err = "" if self.sha else "can't find the default branch '%s' to check dependencies; run `git fetch origin`" % self.name
+        self._remote, self._seen = None, {}
+
+    def tree(self, sid):
+        return rd(STORIES / sid / "story.md")
+
+    def base(self, sid, name="story.md"):
+        return git("show", "%s:%s" % (self.sha, STORY_FILE % (sid, name))) if self.sha else ""
+
+    def remote_branches(self):
+        if self._remote is None:
+            skip = {"refs/remotes/origin/HEAD", "refs/remotes/origin/" + self.name}
+            self._remote = sorted(r[len("refs/remotes/"):] for r in git("for-each-ref", "--format=%(refname)", "refs/remotes/origin").split()
+                                  if r not in skip)
+        return self._remote
+
+    def state(self, sid):
+        """{found, where, unverified, done, waived, note, text} for a story ID that already matches story_id_pattern."""
+        if sid in self._seen:
+            return self._seen[sid]
+        tree, base = self.tree(sid), self.base(sid)
+        st = {"found": bool(tree or base), "where": "this branch" if tree else self.ref, "unverified": False, "done": False,
+              "waived": False, "note": "", "text": tree or base}
+        if not st["found"]:
+            for r in self.remote_branches():
+                text = git("show", "%s:%s" % (r, STORY_FILE % (sid, "story.md")))
+                if text:
+                    st.update(found=True, where=r, unverified=True, text=text)
+                    break
+        try:
+            d = json.loads(self.base(sid, "done.json") or "{}")
+        except ValueError:
+            d = {}
+        overall = d.get("overall") if isinstance(d, dict) else None
+        if overall in ("PASS", "WAIVED"):
+            if tree and self.changed_here(sid, tree, base):
+                st["note"] = "this branch changes %s, so its finished verdict on %s is for the old version" % (sid, self.ref)
+            elif not tree and (gone := self.deleted_here(sid)) is not False:  # None (can't tell) fails closed, like changed_here
+                st["note"] = ("this branch deletes %s, so its finished verdict on %s won't survive the merge" % (sid, self.ref)
+                              if gone else "can't find where this branch was cut from %s, so story-gate can't tell "
+                              "whether it deletes %s; fetch more history (git fetch --unshallow origin)" % (self.ref, sid))
+            else:
+                st.update(done=True, waived=overall == "WAIVED", where=self.ref)
+        self._seen[sid] = st
+        return st
+
+    def changed_here(self, sid, tree, base):
+        """True when THIS branch edited the story: its copy differs from both the default branch's tip and the commit the
+        branch was cut from. A branch that is merely behind the default branch has not changed it."""
+        n = lambda s: s.replace("\r\n", "\n")
+        if n(tree) == n(base):
+            return False
+        mb = git("merge-base", "HEAD", self.sha).strip()
+        return not mb or n(tree) != n(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
+
+    def deleted_here(self, sid):
+        """True when THIS branch removed the story (it existed where the branch was cut and is gone from this checkout),
+        False when it didn't, None when that can't be told (no common commit with the default branch, e.g. a shallow clone)."""
+        mb = git("merge-base", "HEAD", self.sha).strip()
+        if not mb:
+            return None
+        return bool(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
+
+    def stories(self):
+        """{id: story.md text} for every story on this branch and on the default branch's tip (this branch wins)."""
+        ids = {p.name for p in (STORIES.iterdir() if STORIES.is_dir() else []) if p.is_dir()}
+        if self.sha:
+            ids |= {ln.rsplit("/", 1)[-1] for ln in git("ls-tree", "--name-only", self.sha, ".story-gate/stories/").splitlines()}
+        texts = {i: self.tree(i) or self.base(i) for i in sorted(ids) if self.pat.fullmatch(i)}
+        return {i: t for i, t in texts.items() if t}
+
+    def edges_from(self, sid, own_text):
+        """{id: set of ids it waits on} for a story and everything below it, read from wherever each story was found
+        (this branch, the default branch, or another remote branch), so a loop through an unmerged story is still caught."""
+        edges, todo = {}, [(sid, own_text)]
+        while todo:
+            x, text = todo.pop()
+            if x not in edges:
+                edges[x] = {d for d in SS.depends_on_ids(SS.front_matter(text)) if self.pat.fullmatch(d) and d != x}
+                todo += [(d, self.state(d)["text"]) for d in edges[x] if d not in edges]
+        return edges
+
+
+def where_text(st):
+    """'origin/feature/x, unverified' / 'this branch' for a message."""
+    return st["where"] + (", unverified" if st["unverified"] else "")
+
+
+def dependency_check(sid, fm, story, c):
+    """The READY `dependencies` check (status, why), or None when the story has no dependencies and no section."""
+    pat = re.compile(r"(?:%s)" % c["story_id_pattern"])
+    ids = SS.depends_on_ids(fm)
+    recs, errs, d1 = SS.parse_dependencies(story, c["story_id_pattern"])
+    if not ids and not d1:
+        return None
+    fail, warn = [], []
+    bad = [d for d in ids if not pat.fullmatch(d)]
+    fail += ["depends_on has '%s', which is not a story ID (like SAT-9)" % d[:40] for d in bad]
+    if sid in ids:
+        fail.append("%s depends on itself: remove it from depends_on" % sid)
+    good = sorted({d for d in ids if d not in bad and d != sid}, key=SS.natural_key)
+    fail += errs
+    if d1 and not errs:
+        fail += ["%s is in depends_on but has no '### %s' block in ## Dependencies (add when: and why:)" % (d, d) for d in good if d not in recs]
+        fail += ["'### %s' is in ## Dependencies but not in depends_on" % d for d in sorted(recs, key=SS.natural_key) if d not in ids]
+    if good and not d1:
+        warn.append("add a ## Dependencies section with when/why for: %s (until then each counts as before-start)" % ", ".join(good))
+    if good and not errs:
+        w = DepWorld(c)
+        if w.err:
+            fail.append(w.err)
+        else:
+            for d in good:
+                st, when = w.state(d), (recs.get(d) or {}).get("when", "before-start")
+                if not st["found"]:
+                    fail.append("%s isn't on this branch, on %s, or on any other branch: check the ID or create the story first" % (d, w.name))
+                elif st["done"]:
+                    if st["waived"]:
+                        warn.append("%s is done (waived)" % d)
+                elif when == "before-start":
+                    fail.append("%s must be finished and merged first (when: before-start)%s. If the work can run in parallel, change it to "
+                                "before-merge and agree the contract in context.md" % (d, " - " + st["note"] if st["note"] else ""))
+                else:
+                    warn.append("%s isn't finished yet (found on %s)%s. This story can't merge until it is" % (
+                        d, where_text(st), " - " + st["note"] if st["note"] else ""))
+            for cy in SS.graph_cycles(w.edges_from(sid, story), through=sid):
+                fail.append("circular dependency: " + " -> ".join(cy + [cy[0]]))
+    return (False, "; ".join(fail + warn)) if fail else ("WARN", "; ".join(warn)) if warn else (True, "")
+
+
+def story_link_checks(sd, fm, story):
+    """READY checks about links between stories: dependencies, blockers_resolved, risks_handled, consumers_match."""
+    c, sid, out = cfg(), sd.name, {}
+    dep = dependency_check(sid, fm, story, c)
+    if dep:
+        out["dependencies"] = dep
+    if SS.has_section(story, "Blockers"):
+        bl, errs = SS.parse_blockers(story)
+        bad = errs + ["%s '%s' is still open (owner: %s). Resolve it, or if work can safely start, move it to ## Risks with a mitigation"
+                      % (b["id"], b["title"][:60], b["owner"] or "nobody") for b in bl if b["status"] == "open"]
+        out["blockers_resolved"] = (False, "; ".join(bad)) if bad else (True, "")
+    if SS.has_section(story, "Risks"):
+        rk, errs = SS.parse_risks(story)
+        weak = ["%s '%s' has high impact and no mitigation: add 'mitigation:'" % (r["id"], r["title"][:60]) for r in rk if r["impact"] == "high" and not r["mitigation"]]
+        out["risks_handled"] = (False, "; ".join(errs)) if errs else ("CONCERNS", "; ".join(weak)) if weak else (True, "")
+    declared = set(SS.depends_on_ids({"depends_on": fm.get("consumers")}))
+    if declared and load_json(sd / "done.json").get("overall") not in ("PASS", "WAIVED"):
+        w = DepWorld(c)
+        if not w.err:
+            texts = w.stories()
+            texts[sid] = story
+            derived = set(SS.blocks_of({i: set(SS.depends_on_ids(SS.front_matter(t))) for i, t in texts.items()}, sid))
+            gone, new = sorted(declared - derived, key=SS.natural_key), sorted(derived - declared, key=SS.natural_key)
+            if gone or new:
+                out["consumers_match"] = ("WARN", "consumers is legacy; story-gate now works this out from depends_on.%s%s" % (
+                    " Declared but nothing depends on this story: " + ", ".join(gone) + "." if gone else "",
+                    " Depends on this story but not declared: " + ", ".join(new) + "." if new else ""))
+            else:
+                out["consumers_match"] = (True, "")
+    return out
+
+
+def dependencies_done(sd, sid, c):
+    """The DONE `dependencies_done` check (status, why), or None when there is nothing to check: every dependency (before-start
+    and before-merge) is finished on the default branch's tip, and no blocker is open. This is what keeps a before-merge
+    dependency from merging first (CI scores DONE against the default branch)."""
+    story, fail = rd(sd / "story.md"), []
+    pat = re.compile(r"(?:%s)" % c["story_id_pattern"])
+    ids = SS.depends_on_ids(SS.front_matter(story))
+    bl, errs = SS.parse_blockers(story)
+    fail += ["depends_on has '%s', which is not a story ID" % d[:40] for d in ids if not pat.fullmatch(d)] + errs
+    fail += ["%s '%s' is still open (owner: %s)" % (b["id"], b["title"][:60], b["owner"] or "nobody") for b in bl if b["status"] == "open"]
+    good = sorted({d for d in ids if pat.fullmatch(d) and d != sid}, key=SS.natural_key)
+    if good:
+        w = DepWorld(c)
+        if w.err:
+            fail.append(w.err)
+        for d in good if not w.err else []:
+            st = w.state(d)
+            if not st["found"]:
+                fail.append("%s isn't on this branch, on %s, or on any other branch" % (d, w.name))
+            elif not st["done"]:
+                fail.append("%s isn't finished on %s yet (found on %s)%s" % (d, w.name, where_text(st), " - " + st["note"] if st["note"] else ""))
+    return (False, "; ".join(fail)) if fail else (True, "") if good or bl else None
 
 
 SPECKIT_STORY = re.compile(r"^ {0,3}#{2,4}[ \t]+User Story[ \t]+(\d+)\b", re.I)
@@ -1481,6 +1676,9 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
     cov = spec_coverage(sd, front_matter(rd(sd / "story.md")), c)  # again at DONE: the spec may have changed since READY
     if cov is not None:
         out["spec_covered"] = cov
+    dd = dependencies_done(sd, sid, c)
+    if dd is not None:
+        out["dependencies_done"] = dd
     tr = load_json(sd / "test_results.json")
     fresh = tr.get("fingerprint") == work_fingerprint()
     pinned = c.get("test_command")
@@ -1630,6 +1828,15 @@ TODO: 3 to 6 short sentences a non-coder can read (PROTOCOL.md > Writing): who t
 
 ## Story (word for word from the source)
 TODO: paste the full story text: who/why, scope, out of scope, interfaces, NFRs, acceptance criteria (AC-1, AC-2, ...).
+
+## Dependencies
+None
+
+## Risks
+None
+
+## Blockers
+None
 """,
     "context.md": """# Context for {id}
 Each section: quote only the relevant excerpts and cite the source (file#heading, Linear URL, control-hub id).
@@ -2290,6 +2497,15 @@ Shoppers who buy 10 or more items get 10% off. The order total shows the discoun
 As a shopper, I get 10% off when I buy 10 or more items.
 AC-1: The total is the quantity times the unit price.
 AC-2: Orders of 10 or more items get 10% off.
+
+## Dependencies
+None
+
+## Risks
+None
+
+## Blockers
+None
 '''
 
 
@@ -2470,6 +2686,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     sd = sdir(sid)
     if not sd.exists():
         sys.exit("no story folder; run: start %s" % sid)
+    DEP_BASE.clear()  # CI scores several stories in one run: never carry one story's base_commit into another's verdict
     mx = int(c["judge"].get("max_chars", 90000))
     if phase == "ready":
         structural, fm = struct_ready(sd)
@@ -2507,6 +2724,8 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
               "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
                                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
               "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
+    if DEP_BASE.get("commit"):
+        v["base_commit"] = DEP_BASE["commit"]  # the default branch's latest commit that dependencies were checked against
     wj(sd / ("%s.json" % phase), v)
     failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
@@ -2584,6 +2803,52 @@ def pitfalls_feed_ci(c):
     if len(text.encode("utf-8", "ignore")) > PF.MAX_FEED:
         return None, "the pitfalls feed is larger than %d MB" % (PF.MAX_FEED // 1_000_000)
     return text, ""
+
+
+def cmd_deps(sid):
+    """Print what a story waits on, what waits on it (worked out from the other stories, never stored), its open blockers and
+    its risks. Exit 1 only for a bad story ID or a story that can't be found."""
+    c = cfg()
+    if not re.fullmatch(c["story_id_pattern"], sid or ""):
+        print("story-gate: '%s' is not a story ID (like SAT-9)" % (sid or "")[:40])
+        return 1
+    w = DepWorld(c)
+    me = w.state(sid)
+    if not me["found"]:
+        print("story-gate: %s isn't on this branch, on %s, or on any other branch" % (sid, w.name))
+        return 1
+    story = me["text"]
+    print("%s (found on %s)" % (sid, where_text(me)))
+    if w.err:
+        print("note: " + w.err)
+    ids = sorted({d for d in SS.depends_on_ids(SS.front_matter(story)) if w.pat.fullmatch(d)}, key=SS.natural_key)
+    recs, errs, d1 = SS.parse_dependencies(story, c["story_id_pattern"])
+    print("Depends on:" + ("" if ids else " nothing"))
+    for d in ids:
+        st = w.state(d)
+        state = ("done (waived)" if st["waived"] else "done") if st["done"] else \
+            "not done (found on %s)%s" % (where_text(st), " - " + st["note"] if st["note"] else "") if st["found"] else "not found anywhere"
+        r = recs.get(d) or {}
+        print("  %s  %s  %s%s" % (d, r.get("when", "before-start"), state, "  - " + r["why"] if r.get("why") else ""))
+    texts = w.stories()
+    texts[sid] = story
+    edges = {i: set(SS.depends_on_ids(SS.front_matter(t))) for i, t in texts.items()}
+    waiting = SS.blocks_of(edges, sid)
+    print("Blocks (stories on this branch or %s that depend on it):%s" % (w.name, "" if waiting else " nothing"))
+    for b in waiting:
+        r = SS.parse_dependencies(texts[b], c["story_id_pattern"])[0].get(sid) or {}
+        print("  %s  %s%s" % (b, r.get("when", "before-start"), "  - " + r["why"] if r.get("why") else ""))
+    bl, e2 = SS.parse_blockers(story)
+    rk, e3 = SS.parse_risks(story)
+    print("Blockers:" + ("" if bl else " none"))
+    for b in bl:
+        print("  %s  %s  (owner: %s, %s)" % (b["id"], b["title"], b["owner"], b["status"]))
+    print("Risks:" + ("" if rk else " none"))
+    for r in rk:
+        print("  %s  %s  (likelihood: %s, impact: %s, mitigation: %s)" % (r["id"], r["title"], r["likelihood"], r["impact"], r["mitigation"] or "none"))
+    for e in errs + e2 + e3:
+        print("problem: " + e)
+    return 0
 
 
 def cmd_pitfalls(sid, scan=False, base=None):
@@ -2909,6 +3174,10 @@ NEXT_READY = (("story_present", "story.md", "Paste the full story into story.md,
               ("context_present", "context.md", "Fill every section of context.md"),
               ("test_matrix", "tests.json", "Plan a positive, negative, edge and regression case for every AC in tests.json (or give an N/A reason)"),
               ("upstream_handoffs", "context.md", "Add a handoff for each story this one depends on"),
+              ("dependencies", "dependencies", "Fix the story's dependencies: finish what it must wait for, or fix the ## Dependencies section (docs/dependencies.md)"),
+              ("blockers_resolved", "blockers", "Resolve every open blocker in story.md's ## Blockers (or move it to ## Risks with a mitigation)"),
+              ("risks_handled", "risks", "Fix the ## Risks section of story.md (docs/dependencies.md)"),
+              ("consumers_match", "consumers", "Drop the legacy `consumers:` line from story.md: story-gate works it out from depends_on"),
               ("spec_covered", "spec links", "Name every scenario of the linked spec in an AC's `covers` list in tests.json "
                "(list them with `story-gate spec-scenarios <spec path>`)"))
 NEXT_DONE = (("spec_covered", "spec links", "Name every scenario of the linked spec in an AC's `covers` list in tests.json"),
@@ -3451,7 +3720,7 @@ def gate_check(event, payload, c):
 
 # ------------------------------------------------------------------ CI
 GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
-              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/sg_pitfalls.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
+              ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/sg_pitfalls.py", ".story-gate/sg_stories.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
               ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
@@ -5313,6 +5582,10 @@ def main(argv):
         if not rest:
             sys.exit("usage: pitfalls <ID> [--scan] [--base REF]")
         return cmd_pitfalls(rest[0], "--scan" in rest, kv.get("base"))
+    if cmd == "deps":
+        if not rest:
+            sys.exit("usage: deps <ID>")
+        return cmd_deps(rest[0])
     if cmd == "learnings":
         return cmd_learnings(rest) or 0
     if cmd == "status":

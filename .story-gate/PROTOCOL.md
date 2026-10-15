@@ -39,7 +39,7 @@ If your client can't spawn sub-agents, or can't pick their model, do the steps y
 
 2. **Intake** (model: `intake`). Fetch the story from the source in `config.json` → `sources`:
    - Linear issue, repo file, control-hub document, or a `command` source (`gate.py source <ID>`).
-   - Write it **verbatim** into `story.md`. Fill the front matter: `source`, `depends_on`, `consumers`.
+   - Write it **verbatim** into `story.md`. Fill the front matter: `source` and `depends_on`. For every ID in `depends_on`, add a `### <ID>` block under `## Dependencies` with `when: before-start|before-merge` and `why:`. Fill `## Risks` (`### R1: title` with `likelihood`, `impact`, optional `mitigation`) and `## Blockers` (`### B1: title` with `owner`, `status: open|resolved`), or write `None`. `consumers` is legacy: leave it out for new stories. See `docs/dependencies.md`.
    - If the story comes from a Spec Kit spec or an OpenSpec change, also add `spec: <path>` (e.g. `specs/001-x/spec.md`, `specs/001-x/spec.md#US1`, or `openspec/changes/<change>`).
    - Don't improve the story here. Gaps are findings, not something to fix silently.
 
@@ -160,7 +160,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 8. `gate.py publish` sends events to the configured sinks (control-hub, webhook, custom command).
 
-9. Notify the downstream consumers listed in `story.md` that the handoff is ready, using the same channels.
+9. Notify the downstream consumers that the handoff is ready, using the same channels. They are worked out from other stories' `depends_on`: run `gate.py deps <ID>` (don't rely on a `consumers:` line).
 
 ## ACCEPTANCE (the human's part)
 
