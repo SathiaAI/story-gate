@@ -11275,3 +11275,332 @@ class TestPitfalls(Base):
         # git may check the file out with CRLF (Windows autocrlf); only the BOM handling is compared here
         self.assertEqual(ci_text.replace("\r\n", "\n"), local_text.replace("\r\n", "\n"))
         self.assertEqual(PF.parse_feed(ci_text)[0], [])
+
+
+class TestDependencies(Base):
+    """D1: story dependencies, risks and blockers (docs/dependencies.md). A link is stored once, on the waiting story."""
+    PAT = r"[A-Z][A-Z0-9]+-[0-9]+"
+    BRANCH = "feature/SAT-1-thing"
+
+    def g(self, *a):
+        return subprocess.run(["git", *a], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(SRC)); import importlib; self.S = importlib.import_module("sg_stories")
+        self.remote = Path(tempfile.mkdtemp()) / "r.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
+        self.g("remote", "add", "origin", str(self.remote)); self.g("push", "-q", "origin", "main")
+        self.addCleanup(shutil.rmtree, str(self.remote.parent), True)
+
+    def put(self, sid, deps="", done=None, text=None):
+        """Write a story (and its done.json) in the current checkout."""
+        sd = self.repo / ".story-gate/stories" / sid; sd.mkdir(parents=True, exist_ok=True)
+        (sd / "story.md").write_text(text or "---\nid: %s\nsource: linear:%s\ndepends_on: [%s]\n---\n%s\nbody\n" % (sid, sid, deps, ""))
+        if done:
+            (sd / "done.json").write_text(json.dumps({"overall": done}))
+
+    def publish(self, branch, sid, *, deps="", done=None, text=None, cut_from=None):
+        """Commit a story on `branch` (made from `cut_from` or main when new), push it, come back to the working branch."""
+        try:
+            self.g("checkout", "-q", branch)
+        except subprocess.CalledProcessError:
+            self.g("checkout", "-q", "-b", branch, cut_from or "main")
+        self.put(sid, deps, done, text)
+        self.g("add", "-A"); self.g("commit", "-qm", sid); self.g("push", "-q", "origin", branch)
+        self.g("checkout", "-q", self.BRANCH)
+
+    def story(self, deps, section="", extra_fm=""):
+        """SAT-1 as a ready-to-score story with the given depends_on and extra markdown."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (sd / "story.md").write_text("---\nid: SAT-1\ntitle: T\nsource: linear:SAT-1\ndepends_on: [%s]\n%s---\n" % (deps, extra_fm)
+                                     + "As a user I want X so that Y. " * 20 + "\n" + section)
+        ctx = (sd / "context.md").read_text()
+        up = "".join("### %s\nhandoff\n" % d.strip() for d in deps.split(",") if d.strip())
+        (sd / "context.md").write_text(ctx.replace("None — no upstream dependencies\n", up or "None — no upstream dependencies\n"))
+
+    def ready(self):
+        r = run(self.repo, "score", "SAT-1", "ready")
+        v = json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text())
+        return v, v["checks"], r
+
+    @staticmethod
+    def dep_section(*pairs):
+        return "## Dependencies\n" + "".join("### %s\nwhen: %s\nwhy: because\n\n" % p for p in pairs)
+
+    # ---- the pure module
+    def test_front_matter_matches_dashboard(self):
+        import importlib; D = importlib.import_module("sg_dashboard"); g = load_gate(self.repo)
+        for t in ("---\nid: A\ndepends_on: [X-1, 'Y-2']\nconsumers: []\n---\nbody", "no front matter", "---\nk: v: w\nbad line\n---\n", "  \n---\na: b\n---\n---\nc: d\n---"):
+            self.assertEqual(g.front_matter(t), self.S.front_matter(t)); self.assertEqual(D.front(t), self.S.front_matter(t))
+        self.assertEqual(g.sections("## A\nx\n## B\ny\n"), self.S.sections("## A\nx\n## B\ny\n"))
+
+    def test_depends_on_ids(self):
+        self.assertEqual(self.S.depends_on_ids({"depends_on": ["A-1", "A-2"]}), ["A-1", "A-2"])
+        self.assertEqual(self.S.depends_on_ids({"depends_on": "A-1"}), ["A-1"])
+        self.assertEqual(self.S.depends_on_ids({"depends_on": "none"}), [])
+        self.assertEqual(self.S.depends_on_ids({}), [])
+
+    def test_parse_dependencies_good(self):
+        t = "---\nid: A\n---\n## Dependencies\n### SAT-9\nWHEN: before-start\nwhy: needs the API\n\n### SAT-10\nwhen: Before-Merge\nwhy: schema\n## Risks\nNone\n"
+        recs, errs, d1 = self.S.parse_dependencies(t, self.PAT)
+        self.assertTrue(d1); self.assertEqual(errs, [])
+        self.assertEqual(recs["SAT-9"], {"when": "before-start", "why": "needs the API", "line": 5})
+        self.assertEqual(recs["SAT-10"]["when"], "before-merge")
+
+    def test_parse_none_forms_and_absent(self):
+        for body in ("None", "none", "None - standalone story"):
+            self.assertEqual(self.S.parse_dependencies("## Dependencies\n%s\n" % body, self.PAT), ({}, [], True))
+        self.assertEqual(self.S.parse_dependencies("no sections", self.PAT), ({}, [], False))
+        self.assertEqual(self.S.parse_risks("x"), ([], [])); self.assertEqual(self.S.parse_blockers("x"), ([], []))
+        self.assertEqual(self.S.parse_risks("## Risks\nNone\n"), ([], []))
+
+    def test_parse_dependencies_errors_have_line_numbers_and_example(self):
+        cases = {
+            "## Dependencies\nsome prose\n": "line 2",
+            "## Dependencies\n### SAT-9\nwhen: later\nwhy: x\n": "line 3",
+            "## Dependencies\n### SAT-9\nwhen: before-start\n": "needs 'why:'",
+            "## Dependencies\n### SAT-9\nwhy: x\n": "needs 'when:'",
+            "## Dependencies\n### SAT-9\nwhen: before-start\nwhy: x\nfoo: y\n": "unknown key",
+            "## Dependencies\n### SAT-9\nwhen: before-start\nwhen: before-merge\nwhy: x\n": "appears twice",
+            "## Dependencies\n### SAT-9\nwhen: before-start\nwhy:\n": "no value",
+            "## Dependencies\n### SAT-9\nwhen: before-start\nwhy: x\n### SAT-9\nwhen: before-start\nwhy: x\n": "listed twice",
+            "## Dependencies\n### not an id\nwhen: before-start\nwhy: x\n": "not a story ID",
+            "## Dependencies\n### SAT-9\nwhen before-start\n": "expected 'key: value'",
+            "## Dependencies\n": "write 'None'",
+            "## Dependencies\nNone\n### SAT-9\nwhen: before-start\nwhy: x\n": "says None",
+        }
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                _, errs, d1 = self.S.parse_dependencies(text, self.PAT)
+                self.assertTrue(d1); self.assertTrue(errs); self.assertIn(want, " ".join(errs))
+                self.assertTrue(all("story.md line" in e and "Example:" in e for e in errs), errs)
+
+    def test_parse_risks_and_blockers(self):
+        t = "## Risks\n### R1: Big files time out\nlikelihood: medium\nimpact: HIGH\nmitigation: stream\n### R2: x\nlikelihood: low\nimpact: low\n## Blockers\n### B1: bucket\nowner: Paul\nstatus: open\n"
+        rk, e = self.S.parse_risks(t)
+        self.assertEqual(e, []); self.assertEqual([(r["id"], r["impact"], r["mitigation"]) for r in rk], [("R1", "high", "stream"), ("R2", "low", "")])
+        bl, e = self.S.parse_blockers(t)
+        self.assertEqual(e, []); self.assertEqual(bl[0]["owner"], "Paul"); self.assertEqual(bl[0]["status"], "open")
+        for bad, want in (("## Risks\n### Risk one\nlikelihood: low\nimpact: low\n", "R1: short title"),
+                          ("## Risks\n### R1: t\nlikelihood: sometimes\nimpact: low\n", "low | medium | high"),
+                          ("## Risks\n### R1: t\nimpact: low\n", "needs 'likelihood:'"),
+                          ("## Risks\n### R1: t\nlikelihood: low\nimpact: low\nowner: me\n", "unknown key")):
+            with self.subTest(bad=bad):
+                self.assertIn(want, " ".join(self.S.parse_risks(bad)[1]))
+        for bad, want in (("## Blockers\n### B1: t\nstatus: open\n", "needs 'owner:'"), ("## Blockers\n### B1: t\nowner: P\nstatus: maybe\n", "open | resolved"),
+                          ("## Blockers\n### Blocked\nowner: P\nstatus: open\n", "B1: short title")):
+            with self.subTest(bad=bad):
+                self.assertIn(want, " ".join(self.S.parse_blockers(bad)[1]))
+
+    def test_graph_helpers(self):
+        S = self.S
+        e = {"A-1": {"A-2"}, "A-2": {"A-3"}, "A-3": {"A-1"}, "A-5": {"A-5"}, "A-10": {"A-2"}}
+        self.assertEqual(S.graph_cycles(e), [["A-1", "A-2", "A-3"], ["A-5"]])
+        self.assertEqual(S.graph_cycles(e, through="A-2"), [["A-2", "A-3", "A-1"]])
+        self.assertEqual(S.graph_cycles({"A-1": {"A-2"}, "A-2": set()}), [])
+        self.assertEqual(S.blocks_of(e, "A-2"), ["A-1", "A-10"])
+        self.assertEqual(S.blocks_of(e, "A-10"), [])
+        edges = {"A-10": {"A-2"}, "A-2": set(), "A-3": {"A-4"}, "A-4": {"A-3"}, "A-9": set()}
+        self.assertEqual(S.topo_order(edges, ["A-10", "A-9", "A-2", "A-3", "A-4"]), ["A-2", "A-9", "A-10", "A-3", "A-4"])  # natural sort; cycle last
+        self.assertEqual(S.topo_order({"A-2": {"A-1"}}, ["A-2"]), ["A-2"])  # links outside ids don't count
+
+    # ---- READY, with real git
+    def test_skeleton_keeps_depends_on_and_gets_sections(self):
+        run(self.repo, "start", "SAT-1")
+        t = (self.repo / ".story-gate/stories/SAT-1/story.md").read_text()
+        self.assertIn("depends_on: []", t)
+        for h in ("## Dependencies\nNone", "## Risks\nNone", "## Blockers\nNone"):
+            self.assertIn(h, t)
+        self.assertEqual(self.S.parse_dependencies(t, self.PAT), ({}, [], True))
+
+    def test_no_deps_no_remote_adds_no_checks(self):
+        shutil.rmtree(self.remote.parent); self.g("remote", "remove", "origin")
+        self.story("")
+        v, checks, _ = self.ready()
+        for k in ("dependencies", "blockers_resolved", "risks_handled", "consumers_match"):
+            self.assertNotIn(k, checks)
+        self.assertEqual(v["overall"], "PASS", v)
+        self.assertNotIn("base_commit", v)
+
+    def test_legacy_story_warns_only(self):
+        self.publish("main", "SAT-9", done="PASS")
+        self.story("SAT-9")
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "WARN"); self.assertIn("add a ## Dependencies section with when/why for: SAT-9", checks["dependencies"]["why"])
+        self.assertEqual(v["overall"], "PASS", v)
+        self.assertEqual(v["base_commit"], self.g("rev-parse", "origin/main").strip())
+
+    def test_d1_mismatch_fails_both_ways(self):
+        self.publish("main", "SAT-9", done="PASS"); self.publish("main", "SAT-8", done="PASS")
+        self.story("SAT-9, SAT-8", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL"); self.assertIn("SAT-8 is in depends_on but has no '### SAT-8'", checks["dependencies"]["why"])
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start"), ("SAT-8", "before-merge")))
+        _, checks, _ = self.ready()
+        self.assertIn("'### SAT-8' is in ## Dependencies but not in depends_on", checks["dependencies"]["why"])
+
+    def test_malformed_d1_is_never_legacy(self):
+        self.publish("main", "SAT-9", done="PASS")
+        self.story("SAT-9", "## Dependencies\n### SAT-9\nwhen: whenever\nwhy: x\n")
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL"); self.assertIn("story.md line", checks["dependencies"]["why"])
+
+    def test_dependency_missing_everywhere_fails(self):
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-merge")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("SAT-9 isn't on this branch, on main, or on any other branch", checks["dependencies"]["why"])
+
+    def test_invalid_id_and_self_dependency_fail(self):
+        self.story("../etc, SAT-1", "")
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("not a story ID", checks["dependencies"]["why"]); self.assertIn("SAT-1 depends on itself", checks["dependencies"]["why"])
+
+    def test_before_start_done_on_main_passes(self):
+        self.publish("main", "SAT-9", done="PASS")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "PASS"); self.assertEqual(v["overall"], "PASS", v)
+
+    def test_done_on_main_after_branch_was_cut_counts(self):
+        """The tip of main is used, not the merge-base: SAT-9 finished after this branch was cut."""
+        cut = self.g("rev-parse", "HEAD").strip()
+        self.publish("main", "SAT-9", done="PASS")
+        self.assertNotIn("SAT-9", self.g("ls-tree", "-r", "--name-only", cut))
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "PASS")
+
+    def test_before_start_not_done_fails(self):
+        self.publish("main", "SAT-9", done="FAIL")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL"); self.assertIn("SAT-9 must be finished and merged first (when: before-start)", checks["dependencies"]["why"])
+        self.assertEqual(v["overall"], "FAIL")
+
+    def test_before_merge_on_other_branch_warns_with_branch_name(self):
+        self.publish("feature/SAT-10-x", "SAT-10")
+        self.story("SAT-10", self.dep_section(("SAT-10", "before-merge")))
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "WARN")
+        self.assertIn("SAT-10 isn't finished yet (found on origin/feature/SAT-10-x, unverified). This story can't merge until it is", checks["dependencies"]["why"])
+        self.assertEqual(v["overall"], "PASS", v)
+
+    def test_before_start_on_other_branch_fails_and_never_counts_as_done(self):
+        self.publish("feature/SAT-10-x", "SAT-10", done="PASS")  # a done.json on a branch is not proof
+        self.story("SAT-10", self.dep_section(("SAT-10", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+
+    def test_waived_dependency_counts_as_done_with_warning(self):
+        self.publish("main", "SAT-9", done="WAIVED")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "WARN"); self.assertIn("SAT-9 is done (waived)", checks["dependencies"]["why"])
+        self.assertEqual(v["overall"], "PASS", v)
+
+    def test_branch_that_changes_the_dependency_voids_its_done_verdict(self):
+        self.publish("main", "SAT-9", done="PASS")
+        self.put("SAT-9", text="---\nid: SAT-9\nsource: x\ndepends_on: []\n---\nchanged on this branch\n")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("this branch changes SAT-9", checks["dependencies"]["why"])
+
+    def test_two_story_cycle_fails_and_is_shown(self):
+        self.publish("main", "SAT-2", deps="SAT-1", done="PASS")
+        self.story("SAT-2", self.dep_section(("SAT-2", "before-merge")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL"); self.assertIn("circular dependency: SAT-1 -> SAT-2 -> SAT-1", checks["dependencies"]["why"])
+
+    def test_default_branch_missing_fails_with_fetch_hint(self):
+        shutil.rmtree(self.remote.parent); self.g("remote", "remove", "origin"); self.g("branch", "-m", "work")
+        self.g("update-ref", "-d", "refs/heads/main")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "FAIL")
+        self.assertIn("can't find the default branch 'main' to check dependencies; run `git fetch origin`", checks["dependencies"]["why"])
+
+    def test_open_blocker_fails_and_cannot_be_waived(self):
+        sec = "## Blockers\n### B1: waiting on the S3 bucket name from ops\nowner: Paul\nstatus: open\n"
+        self.story("", sec)
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["blockers_resolved"]["status"], "FAIL")
+        self.assertIn("B1 'waiting on the S3 bucket name from ops' is still open (owner: Paul)", checks["blockers_resolved"]["why"])
+        self.assertEqual(v["overall"], "FAIL")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        st = {"blockers_resolved": (False, "open")}
+        got = g.verdict(st, {"judge": "self", "scores": {}}, [], {"blockers_resolved": {"by": "x", "reason": "y"}}, g.cfg())
+        self.assertEqual(got["checks"]["blockers_resolved"]["status"], "FAIL")
+        r = run(self.repo, "waive", "SAT-1", "blockers_resolved", "--by", "x", "--reason", "y")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_resolved_blocker_and_none_pass(self):
+        self.story("", "## Blockers\n### B1: bucket name\nowner: Paul\nstatus: resolved\n\n## Risks\nNone\n")
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["blockers_resolved"]["status"], "PASS"); self.assertEqual(checks["risks_handled"]["status"], "PASS")
+
+    def test_malformed_blockers_and_risks_fail(self):
+        self.story("", "## Blockers\n### B1: t\nstatus: open\n## Risks\n### R1: t\nimpact: high\n")
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["blockers_resolved"]["status"], "FAIL"); self.assertEqual(checks["risks_handled"]["status"], "FAIL")
+
+    def test_high_impact_risk_without_mitigation_is_concerns(self):
+        self.story("", "## Risks\n### R1: big files time out\nlikelihood: medium\nimpact: high\n")
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["risks_handled"]["status"], "CONCERNS"); self.assertEqual(v["overall"], "CONCERNS")
+        self.story("", "## Risks\n### R1: big files time out\nlikelihood: medium\nimpact: high\nmitigation: stream rows\n")
+        self.assertEqual(self.ready()[1]["risks_handled"]["status"], "PASS")
+
+    def test_legacy_consumers_mismatch_warns(self):
+        self.publish("main", "SAT-3", deps="SAT-1")
+        self.story("", "", extra_fm="consumers: [SAT-3, SAT-4]\n")
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["consumers_match"]["status"], "WARN")
+        self.assertIn("Declared but nothing depends on this story: SAT-4", checks["consumers_match"]["why"])
+        self.assertEqual(v["overall"], "PASS", v)
+        self.story("", "", extra_fm="consumers: [SAT-3]\n")
+        self.assertEqual(self.ready()[1]["consumers_match"]["status"], "PASS")
+
+    def test_next_step_names_a_failing_dependency(self):
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-merge")))
+        r = run(self.repo, "next", "SAT-1")
+        self.assertIn("SAT-9 isn't on this branch", r.stdout)
+
+    # ---- DONE
+    def test_dependencies_done_needs_before_merge_dep_finished(self):
+        self.publish("feature/SAT-10-x", "SAT-10")
+        self.story("SAT-10", self.dep_section(("SAT-10", "before-merge")))
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        out = g.struct_done(sd, "SAT-1", [], g.cfg(), write=False)
+        self.assertFalse(out["dependencies_done"][0]); self.assertIn("SAT-10 isn't finished on main yet (found on origin/feature/SAT-10-x, unverified)", out["dependencies_done"][1])
+        self.publish("main", "SAT-10", done="PASS")  # (this also swept SAT-1's untracked files onto main, so write them again)
+        self.story("SAT-10", self.dep_section(("SAT-10", "before-merge")))
+        out = g.struct_done(sd, "SAT-1", [], g.cfg(), write=False)
+        self.assertTrue(out["dependencies_done"][0])
+
+    def test_dependencies_done_open_blocker_fails_and_no_deps_adds_nothing(self):
+        self.story("", "## Blockers\n### B1: t\nowner: P\nstatus: open\n")
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        self.assertFalse(g.struct_done(sd, "SAT-1", [], g.cfg(), write=False)["dependencies_done"][0])
+        self.story("")
+        self.assertNotIn("dependencies_done", g.struct_done(sd, "SAT-1", [], g.cfg(), write=False))
+
+    # ---- the deps command
+    def test_deps_command_shows_both_directions(self):
+        self.publish("main", "SAT-9", done="PASS")
+        self.publish("main", "SAT-3", deps="SAT-1", text="---\nid: SAT-3\nsource: x\ndepends_on: [SAT-1]\n---\n## Dependencies\n### SAT-1\nwhen: before-merge\nwhy: shares the schema\n")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")) + "\n## Risks\n### R1: slow\nlikelihood: low\nimpact: low\n\n## Blockers\n### B1: bucket\nowner: Paul\nstatus: open\n")
+        r = run(self.repo, "deps", "SAT-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for want in ("SAT-9  before-start  done", "SAT-3  before-merge  - shares the schema", "B1  bucket  (owner: Paul, open)", "R1  slow"):
+            self.assertIn(want, r.stdout)
+        self.assertEqual(r.stdout, run(self.repo, "deps", "SAT-1").stdout)  # deterministic
+        self.assertEqual(run(self.repo, "deps", "nope").returncode, 1)
+        self.assertEqual(run(self.repo, "deps", "SAT-77").returncode, 1)

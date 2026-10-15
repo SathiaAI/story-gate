@@ -15,6 +15,7 @@ Rules this module keeps:
 import base64, hashlib, html, http.server, json, os, re, secrets, signal, statistics, subprocess, tempfile, threading, time, urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sg_stories
 
 SCHEMA = 1
 MAX_BLOB = 1_000_000          # bytes per record file
@@ -147,16 +148,7 @@ def jsonl_rows(raw, limit=500):
 
 
 def front(text):
-    m = re.match(r"\s*---\s*\n(.*?)\n---", text, re.S)
-    out = {}
-    for line in (m.group(1).splitlines() if m else []):
-        if ":" in line:
-            k, v = line.split(":", 1)
-            v = v.strip()
-            if v.startswith("[") and v.endswith("]"):
-                v = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()]
-            out[k.strip()] = v
-    return out
+    return sg_stories.front_matter(text)
 
 
 def verdict(v):
