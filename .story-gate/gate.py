@@ -873,12 +873,21 @@ class DepWorld:
             d = {}
         overall = d.get("overall") if isinstance(d, dict) else None
         if overall in ("PASS", "WAIVED"):
-            if tree and tree.replace("\r\n", "\n") != base.replace("\r\n", "\n"):
+            if tree and self.changed_here(sid, tree, base):
                 st["note"] = "this branch changes %s, so its finished verdict on %s is for the old version" % (sid, self.ref)
             else:
                 st.update(done=True, waived=overall == "WAIVED", where=self.ref)
         self._seen[sid] = st
         return st
+
+    def changed_here(self, sid, tree, base):
+        """True when THIS branch edited the story: its copy differs from both the default branch's tip and the commit the
+        branch was cut from. A branch that is merely behind the default branch has not changed it."""
+        n = lambda s: s.replace("\r\n", "\n")
+        if n(tree) == n(base):
+            return False
+        mb = git("merge-base", "HEAD", self.sha).strip()
+        return not mb or n(tree) != n(git("show", "%s:%s" % (mb, STORY_FILE % (sid, "story.md"))))
 
     def stories(self):
         """{id: story.md text} for every story on this branch and on the default branch's tip (this branch wins)."""
@@ -2664,6 +2673,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     sd = sdir(sid)
     if not sd.exists():
         sys.exit("no story folder; run: start %s" % sid)
+    DEP_BASE.clear()  # CI scores several stories in one run: never carry one story's base_commit into another's verdict
     mx = int(c["judge"].get("max_chars", 90000))
     if phase == "ready":
         structural, fm = struct_ready(sd)

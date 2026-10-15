@@ -58,9 +58,10 @@ def has_section(story_text, name):
 
 
 def _find(lines, name):
-    """(index of the '## name' heading or None, index of the next '## ' heading or len(lines))."""
+    """(index of the '## name' heading or None, index of the next '## ' heading or len(lines)). The LAST such heading
+    counts: story-gate's own sections come after the word-for-word story, which may contain the same heading."""
     want = "## " + name.lower()
-    start = next((i for i, ln in enumerate(lines) if ln.startswith("## ") and ln.strip().lower() == want), None)
+    start = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith("## ") and lines[i].strip().lower() == want), None)
     if start is None:
         return None, len(lines)
     return start, next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
@@ -94,7 +95,8 @@ def _blocks(story_text, name, keys):
             if re.match(r"none(?![A-Za-z0-9_])", text, re.I) and not saw_none:
                 saw_none = i + 1
             else:
-                err(i, "write only 'None' or '### ' blocks here, not %r" % text[:40])
+                err(i, "write only 'None' or '### ' blocks here, not %r (if this heading came from the pasted story, add "
+                       "story-gate's own '## %s' section at the end of story.md)" % (text[:40], name))
         elif ":" not in text:
             err(i, "expected 'key: value', got %r" % text[:40])
         else:
