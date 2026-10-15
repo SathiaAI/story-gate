@@ -11657,6 +11657,34 @@ class TestDependencies(Base):
         self.assertEqual(checks["dependencies"]["status"], "FAIL")
         self.assertIn("this branch changes SAT-9", checks["dependencies"]["why"])
 
+    def test_branch_merely_behind_main_keeps_the_dependency_done(self):
+        """SAT-9's story changed on main after this branch took it in: the branch didn't change it, so main's verdict counts."""
+        v1 = "---\nid: SAT-9\nsource: x\ndepends_on: []\n---\nfirst version\n"
+        self.publish("main", "SAT-9", done="PASS", text=v1)
+        self.g("merge", "-q", "--no-edit", "main")
+        self.publish("main", "SAT-9", done="PASS", text=v1.replace("first", "second"))
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        _, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "PASS", checks["dependencies"])
+
+    def test_base_commit_is_not_carried_into_another_story(self):
+        """CI scores several stories in one process: a story without dependencies never gets another story's base_commit."""
+        import contextlib, io
+        self.story("")
+        g = load_gate(self.repo)
+        g.DEP_BASE["commit"] = "0" * 40  # left behind by an earlier story in the same run
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.cmd_score("SAT-1", "ready", quiet=True)
+        self.assertNotIn("base_commit", json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()))
+
+    def test_last_heading_wins_over_the_pasted_story(self):
+        """A '## Dependencies' heading inside the word-for-word story doesn't hide story-gate's own section at the end."""
+        pasted = "## Story (word for word from the source)\n## Dependencies\nNeeds the billing team first.\n"
+        recs, errs, d1 = self.S.parse_dependencies(pasted + "\n## Dependencies\nNone\n", self.PAT)
+        self.assertEqual((recs, errs, d1), ({}, [], True))
+        _, errs, _ = self.S.parse_dependencies(pasted, self.PAT)
+        self.assertTrue(errs and "came from the pasted story" in errs[0], errs)
+
     def test_two_story_cycle_fails_and_is_shown(self):
         self.publish("main", "SAT-2", deps="SAT-1", done="PASS")
         self.story("SAT-2", self.dep_section(("SAT-2", "before-merge")))
