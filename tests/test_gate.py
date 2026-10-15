@@ -11240,5 +11240,6 @@ class TestPitfalls(Base):
         g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
         ci_text, _ = g.pitfalls_feed_ci(dict(g.cfg(), base_branch="main", pitfalls={"mode": "warn", "source": "feeds/p.json"}))
         local_text, _ = PF.read_feed("feeds/p.json", self.repo)
-        self.assertEqual(ci_text, local_text)
+        # git may check the file out with CRLF (Windows autocrlf); only the BOM handling is compared here
+        self.assertEqual(ci_text.replace("\r\n", "\n"), local_text.replace("\r\n", "\n"))
         self.assertEqual(PF.parse_feed(ci_text)[0], [])
