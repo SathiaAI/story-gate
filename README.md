@@ -25,14 +25,14 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
 
-## New in v0.9.2
+## New in v0.10.0
 
-- **Guardrails you decide**: set limits that a story's code must meet (bundle size, failing tests, build warnings: [budgets](docs/budgets.md)) and guardrail areas that run your own scanners when a change touches what they cover, such as security checks with SARIF output or how old the price data in your app is ([guardrails](docs/guardrails.md)). Start in warn mode; an enforced area fails DONE when its check fails or can't be checked.
-- **Pull request code runs as a throwaway account in CI**: tests, scenarios and checks run as a separate account with no secrets, so they can't change story-gate's results. It needs a Linux runner where story-gate can create an account; GitHub's own runners can. On self-hosted runners or Docker-based test suites, see [`ci_isolation`](docs/guide.md#pull-request-code-runs-as-a-separate-account-in-ci) before you upgrade: the default, `strict`, runs nothing where isolation can't be set up.
-- **Safer CI output**: text from pull requests, trackers and APIs can't add GitHub commands to story-gate's output, and a test checks every place that prints one.
-- **Approved hooks stay in place**: if a branch removes or reorders an approved hook, checkout puts it back where the default branch has it, so a branch can't quietly switch a check off (a changed hook is still taken off disk). Deleting the whole hook file is the one exception, and it shows in the pull request's diff ([guide](docs/guide.md)).
-- **Fixes from a full review of the code**: `setup-repo` updates the CODEOWNERS file GitHub actually uses, your Jira Server token goes only to the server set on the remote default branch, the local setup page refuses requests from other host names, and more tool config files are pinned.
-- **Review lessons**: mistakes reviewers kept finding are written down in [review lessons](docs/review-lessons.md), most with an automatic check.
+- **Story dependencies, risks and blockers**: a story says what it waits for (`depends_on` plus a `## Dependencies` section with `when: before-start | before-merge` and `why:`), what could go wrong (`## Risks`) and what's blocking it (`## Blockers`). READY checks that every dependency exists, that there is no loop, and that a before-start dependency is finished on the latest main. DONE makes sure every dependency is finished before the story can merge. An open blocker fails READY, and that can't be waived. The link is written once, on the waiting story; "blocks" is worked out from the other side, so finished stories are never edited ([dependencies](docs/dependencies.md)).
+- **See it on the dashboard**: a new **Waiting** stage, a "Depends on / Blocks" column, a warning for dependency loops and a suggested build order. `gate.py deps <ID>` prints both directions.
+- **Known pitfalls** (off by default): READY shows each story the mistakes other projects kept making, from a learner's feed, and asks the story to acknowledge the critical ones ([pitfalls](docs/pitfalls.md)).
+- **Judge**: with `TYPESAFE_API_KEY` set, story-gate asks TypeSafe's Jev judge directly first and uses OpenRouter only if that fails (turn it off with `judge.jev_fallback: false`).
+
+> **Upgrading: one behaviour change.** A story that lists `depends_on` but has no `## Dependencies` section now treats each dependency as *before-start*. If you re-score it while that dependency isn't merged yet, READY fails (before, it only checked for a handoff). The fix is one edit: add a `## Dependencies` section and mark parallel work `when: before-merge`. Stories without dependencies behave exactly as before.
 
 ## Sound familiar?
 
@@ -78,18 +78,18 @@ Nothing to set up, and your own projects aren't touched.
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.2/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.9.2/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.0/install.ps1 | iex"
 ```
 
 Then run `story-gate try`. It makes a throwaway project with one small story and a real bug, runs each goal, shows one pass and one fail, and opens the validation page. No GitHub, no judge key, no network.
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.2` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.0` instead.
 
 ## Set it up in 5 steps
 
@@ -246,7 +246,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.9.2`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.0`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).
