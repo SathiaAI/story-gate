@@ -163,7 +163,7 @@ import sg_judges as J  # noqa: E402
 import sg_trust as T  # noqa: E402
 import sg_stories as SS  # noqa: E402
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 

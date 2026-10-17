@@ -25,6 +25,12 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
 
+## New in v0.10.1
+
+- **Setup no longer writes your computer's Python path** into the committed `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`. The cloud fallback is now `python3 .story-gate/gate.py` (`python` on Windows). If you set up a repository with v0.10.0, run `story-gate install` in it again to refresh those files.
+- **DONE steps name every argument** that `record-tests` and `learn` need.
+- **The dashboard only edits its own issue:** the issue its workflow opened, even when many other labelled issues come first. It never edits a pull request.
+
 ## New in v0.10.0
 
 - **Story dependencies, risks and blockers**: a story says what it waits for (`depends_on` plus a `## Dependencies` section with `when: before-start | before-merge` and `why:`), what could go wrong (`## Risks`) and what's blocking it (`## Blockers`). READY checks that every dependency exists, that there is no loop, and that a before-start dependency is finished on the latest main. DONE makes sure every dependency is finished before the story can merge. An open blocker fails READY, and that can't be waived. The link is written once, on the waiting story; "blocks" is worked out from the other side, so finished stories are never edited ([dependencies](docs/dependencies.md)).
@@ -78,18 +84,18 @@ Nothing to set up, and your own projects aren't touched.
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.1/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.0/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.1/install.ps1 | iex"
 ```
 
 Then run `story-gate try`. It makes a throwaway project with one small story and a real bug, runs each goal, shows one pass and one fail, and opens the validation page. No GitHub, no judge key, no network.
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.0` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.1` instead.
 
 ## Set it up in 5 steps
 
@@ -246,7 +252,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.0`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.1`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).
