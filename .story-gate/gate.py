@@ -4377,10 +4377,10 @@ INSTRUCTION_BLOCK = BLOCK_START + """
 Every code change belongs to a story and passes the story gate. Full steps: `.story-gate/PROTOCOL.md`.
 Run story-gate as `story-gate <command>`: that is the verified copy installed on this computer. If `story-gate` isn't
 found, use the full command a story-gate message prints. Only where story-gate isn't installed (cloud agents, where hooks
-don't run) use `{py} .story-gate/gate.py <command>`.
+don't run) use `python3 .story-gate/gate.py <command>` (`python` on Windows).
 1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
-3. Before saying you are done: run tests via `story-gate record-tests`, run the feature for every acceptance criterion with `story-gate scenario`, measure any budgets with `story-gate measure <STORY-ID>`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn`, then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
+3. Before saying you are done: run tests via `story-gate record-tests <STORY-ID> -- <test command>`, run the feature for every acceptance criterion with `story-gate scenario`, measure any budgets with `story-gate measure <STORY-ID>`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn <STORY-ID> --type learning|error|pattern|none --summary "..."` (error and pattern also need `--root-cause` and `--rule`), then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
 5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, validation.md, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
@@ -4440,11 +4440,12 @@ def session_context(c):
             "\n1. Before editing code:%s" % (c.get("mode"), alias, steps)).strip()  # the long path appears once, not per step
 
 
-def put_block(path, py):
-    """Insert or refresh the managed instruction block in a repository file."""
+def put_block(path, py=None):
+    """Insert or refresh the managed instruction block in a repository file. The block is committed and read on every
+    machine, so it names no local interpreter: `py` (this computer's Python) is ignored on purpose."""
     p = ROOT / path
     text = rd(p)
-    block = INSTRUCTION_BLOCK.replace("{py}", py)
+    block = INSTRUCTION_BLOCK
     if BLOCK_START in text:
         text = re.sub(re.escape(BLOCK_START) + ".*?" + re.escape(BLOCK_END), lambda m: block, text, flags=re.S)
     else:
