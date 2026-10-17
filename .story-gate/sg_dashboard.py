@@ -1004,6 +1004,12 @@ def source_state(G, repo, token, run, expected):
 SOURCE_LEGEND = ("Source (stories with issues copied in by spec-pull): verified = CI compared each copy with the live issue on "
                  "the pull request's latest commit and they match; changed = they differ; not checked = no comparison yet")
 
+def own_issues(issues):
+    """The labelled issues the dashboard may write to: real issues (not pull requests) opened by a bot, i.e. the workflow.
+    Anyone who can label issues could label their own, and the dashboard must not take it over."""
+    return [i for i in issues if not i.get("pull_request") and (i.get("user") or {}).get("type") == "Bot"]
+
+
 def publish_issue(G, repo, token, body, generated_at, issue_number=None):
     """Create or update the single dashboard issue. Never overwrites a newer snapshot. Returns a plain-English result.
     The issue is found by `dashboard_issue` in config (if a human set it), else by the story-gate-dashboard label."""
@@ -1015,7 +1021,7 @@ def publish_issue(G, repo, token, body, generated_at, issue_number=None):
         return "Issues are turned off in this repository, so the dashboard is only in the workflow summary and the report artifact."
     if st != 200 or not isinstance(issues, list):
         return "Could not read issues (HTTP %s); the dashboard is in the workflow summary." % st
-    issues = [i for i in issues if not i.get("pull_request")]
+    issues = own_issues(issues)
     if issue_number:
         st, one, _ = call(G, "GET", "/repos/%s/issues/%s" % (repo, int(issue_number)), token)
         if st == 200 and isinstance(one, dict) and not one.get("pull_request"):
@@ -1043,7 +1049,7 @@ FAIL_MARK = "<!-- story-gate-dashboard refresh-failed -->"
 def report_failure(G, repo, token, when, run_url="", issue_number=None):
     """A refresh failed: keep the last good snapshot, and say so at the top of the issue."""
     st, issues, _ = call(G, "GET", "/repos/%s/issues?labels=%s&state=all&per_page=20&sort=created&direction=asc" % (repo, LABEL), token)
-    issues = [i for i in (issues if st == 200 and isinstance(issues, list) else []) if not i.get("pull_request")]
+    issues = own_issues(issues if st == 200 and isinstance(issues, list) else [])
     if issue_number:
         st, one, _ = call(G, "GET", "/repos/%s/issues/%s" % (repo, int(issue_number)), token)
         issues = [one] if st == 200 and isinstance(one, dict) else issues

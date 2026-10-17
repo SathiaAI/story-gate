@@ -238,6 +238,25 @@ class TestInstallCI(Base):
             self.assertTrue((self.repo / f).exists(), f)
         self.assertIn(".story-gate/.active", (self.repo / ".gitignore").read_text())
 
+    def test_agent_instructions_name_no_local_python(self):
+        """AGENTS.md, CLAUDE.md and GEMINI.md are committed and read on every machine: the cloud fallback is the portable
+        `python3 .story-gate/gate.py`, never this computer's interpreter path (setup passed its own absolute path)."""
+        local = r"C:\Users\someone\AppData\Roaming\uv\tools\story-gate\Scripts\python.exe"
+        self.assertEqual(run(self.repo, "install", "--python", local).returncode, 0)
+        for f in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            t = (self.repo / f).read_text()
+            self.assertNotIn("someone", t, f); self.assertNotIn("Users", t, f)
+            self.assertIn("`python3 .story-gate/gate.py <command>`", t, f)
+
+    def test_agent_instructions_give_the_story_id_where_the_command_needs_it(self):
+        """The DONE steps name `<STORY-ID>` for record-tests and learn, which both require it (an agent following them
+        word for word otherwise gets a usage error)."""
+        self.assertEqual(run(self.repo, "install").returncode, 0)
+        a = (self.repo / "AGENTS.md").read_text()
+        self.assertIn("`story-gate record-tests <STORY-ID> -- <test command>`", a)
+        self.assertIn("`story-gate learn <STORY-ID>`", a)
+        self.assertNotRegex(a, r"`story-gate (record-tests|learn)`")
+
     def test_ci_warn_vs_enforce(self):
         (self.repo / "app.py").write_text("x = 9\n")
         r = run(self.repo, "ci")
@@ -3458,7 +3477,7 @@ class TestDashboard(Base):
             if m == "POST" and path.endswith("/labels"): return 201, {}, {}
             if m == "GET" and "/issues?" in path: return 200, state["issues"], {}
             if m == "POST" and path.endswith("/issues"):
-                state["issues"].append({"number": 7, "state": "open", "body": b["body"], "node_id": "N"}); return 201, state["issues"][-1], {}
+                state["issues"].append({"number": 7, "state": "open", "body": b["body"], "node_id": "N", "user": {"type": "Bot"}}); return 201, state["issues"][-1], {}
             if m == "PATCH": state["issues"][0].update(b); return 200, {}, {}
             return 500, {}, {}
         G.call = call; G.graphql = lambda *a: {}
@@ -3467,6 +3486,22 @@ class TestDashboard(Base):
         self.assertIn("Updated", self.D.publish_issue(G, "o/r", "t", "<!-- story-gate-dashboard generated_at=2026-10-02T02 -->", "2026-10-02T02"))
         self.assertEqual(state["issues"][0]["state"], "open")
         self.assertIn("Skipped", self.D.publish_issue(G, "o/r", "t", "old", "2026-10-02T00"))
+
+    def test_publish_ignores_a_labelled_issue_a_person_opened(self):
+        """Anyone who can label issues could label their own: the dashboard makes its own issue instead of taking theirs."""
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        theirs = {"number": 2, "state": "open", "body": "mine", "user": {"type": "User", "login": "someone"}}
+        made = []
+        def call(m, path, t=None, b=None, accept=None):
+            if m == "GET" and "/labels/" in path: return 200, {}, {}
+            if m == "GET" and "/issues?" in path: return 200, [theirs], {}
+            if m == "POST" and path.endswith("/issues"): made.append(b); return 201, {"number": 8, "node_id": "N"}, {}
+            if m == "PATCH": self.fail("must not edit someone else's issue")
+            return 500, {}, {}
+        G.call = call; G.graphql = lambda *a: {}
+        self.assertIn("Created the dashboard issue #8", self.D.publish_issue(G, "o/r", "t", "body", "2026-10-02T01"))
+        self.assertEqual(theirs["body"], "mine"); self.assertEqual(len(made), 1)
+        self.assertEqual(self.D.report_failure(G, "o/r", "t", "2026-10-02T05:00:00Z"), "no dashboard issue to annotate")
 
     def test_issue_pie_chart_uses_valid_mermaid(self):
         """The pinned issue's chart uses mermaid's documented `pie showData` keyword, so GitHub renders it."""
@@ -3620,7 +3655,7 @@ class TestDashboard(Base):
 
     def test_failed_refresh_is_shown_and_last_snapshot_kept(self):
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
-        issue = {"number": 3, "body": "<!-- x -->\n# Story-gate dashboard\n\nUpdated A.\n| Stories | 6 |\n"}
+        issue = {"number": 3, "body": "<!-- x -->\n# Story-gate dashboard\n\nUpdated A.\n| Stories | 6 |\n", "user": {"type": "Bot"}}
         def call(m, path, t=None, b=None, accept=None):
             if m == "GET": return 200, [issue], {}
             issue.update(b); return 200, {}, {}
@@ -3986,7 +4021,7 @@ class TestLiveDashboard(Base):
     def test_failed_refresh_marker_sits_at_the_top_and_says_stale(self):
         """A failed refresh puts a stale warning at the top of the issue and keeps the last snapshot."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
-        issue = {"number": 3, "body": self.D.to_markdown(self.data([self.story(1)]))}
+        issue = {"number": 3, "body": self.D.to_markdown(self.data([self.story(1)])), "user": {"type": "Bot"}}
         def call(m, path, t=None, b=None, accept=None):
             """Fake GitHub: GET returns the issue, PATCH updates it."""
             if m == "GET": return 200, [issue], {}
@@ -4000,7 +4035,7 @@ class TestLiveDashboard(Base):
     def test_publish_never_overwrites_a_newer_snapshot(self):
         """Publishing an older snapshot leaves a newer one in the issue untouched."""
         import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
-        issue = {"number": 3, "state": "open", "body": "<!-- story-gate-dashboard generated_at=2026-10-02T09:00:00Z schema=1 -->"}
+        issue = {"number": 3, "state": "open", "body": "<!-- story-gate-dashboard generated_at=2026-10-02T09:00:00Z schema=1 -->", "user": {"type": "Bot"}}
         G.call = lambda m, path, t=None, b=None, accept=None: (200, [issue], {}) if m == "GET" and "/issues?" in path else (200, {}, {})
         self.assertIn("Skipped", self.D.publish_issue(G, "o/r", "t", "new", "2026-10-02T08:00:00Z"))
 
