@@ -29,7 +29,7 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 
 - **Setup no longer writes your computer's Python path** into the committed `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`. The cloud fallback is now `python3 .story-gate/gate.py` (`python` on Windows). If you set up a repository with v0.10.0, run `story-gate install` in it again to refresh those files.
 - **DONE steps name every argument** that `record-tests` and `learn` need.
-- **The dashboard only edits its own issue:** one the dashboard workflow opened, found even behind many other labelled issues. It never edits a pull request.
+- **The dashboard only edits its own issue:** the issue its workflow opened, even when many other labelled issues come first. It never edits a pull request.
 
 ## New in v0.10.0
 
