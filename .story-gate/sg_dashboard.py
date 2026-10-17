@@ -1069,7 +1069,7 @@ def report_failure(G, repo, token, when, run_url="", issue_number=None):
     _, issues = find_issues(G, repo, token)
     if issue_number:
         st, one, _ = call(G, "GET", "/repos/%s/issues/%s" % (repo, int(issue_number)), token)
-        issues = [one] if st == 200 and isinstance(one, dict) else issues
+        issues = [one] if st == 200 and isinstance(one, dict) and not one.get("pull_request") else issues
     if not issues:
         return "no dashboard issue to annotate"
     issue = issues[0]

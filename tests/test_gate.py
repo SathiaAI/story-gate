@@ -3521,6 +3521,20 @@ class TestDashboard(Base):
         self.assertIn("Updated the dashboard issue #101", self.D.publish_issue(G, "o/r", "t", "new", "2026-10-02T01"))
         self.assertEqual(mine["body"], "new"); self.assertEqual(made, [])
 
+    def test_report_failure_never_marks_a_pull_request(self):
+        """A `dashboard_issue` number that turns out to be a pull request is skipped, as publishing already does: the
+        failure note never replaces a pull request's description."""
+        import importlib; G = importlib.import_module("sg_github"); keep_github_fakes_local(self, G)
+        patched = []
+        def call(m, path, t=None, b=None, accept=None):
+            if m == "GET" and "/issues?" in path: return 200, [], {}
+            if m == "GET" and path.endswith("/issues/5"): return 200, {"number": 5, "body": "PR text", "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/5"}}, {}
+            if m == "PATCH": patched.append(path); return 200, {}, {}
+            return 500, {}, {}
+        G.call = call
+        self.assertEqual(self.D.report_failure(G, "o/r", "t", "2026-10-02T05:00:00Z", issue_number=5), "no dashboard issue to annotate")
+        self.assertEqual(patched, [])
+
     def test_issue_pie_chart_uses_valid_mermaid(self):
         """The pinned issue's chart uses mermaid's documented `pie showData` keyword, so GitHub renders it."""
         md = self.D.to_markdown(self.data)
