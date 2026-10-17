@@ -1004,10 +1004,29 @@ def source_state(G, repo, token, run, expected):
 SOURCE_LEGEND = ("Source (stories with issues copied in by spec-pull): verified = CI compared each copy with the live issue on "
                  "the pull request's latest commit and they match; changed = they differ; not checked = no comparison yet")
 
+DASHBOARD_AUTHOR = "github-actions[bot]"  # the dashboard workflow publishes with GITHUB_TOKEN
+PAGES = 10  # up to 1,000 labelled issues are searched for the dashboard's own
+
+
 def own_issues(issues):
-    """The labelled issues the dashboard may write to: real issues (not pull requests) opened by a bot, i.e. the workflow.
-    Anyone who can label issues could label their own, and the dashboard must not take it over."""
-    return [i for i in issues if not i.get("pull_request") and (i.get("user") or {}).get("type") == "Bot"]
+    """The labelled issues the dashboard may write to: real issues (not pull requests) opened by the dashboard workflow.
+    Anyone who can label issues could label their own, or another bot's, and the dashboard must not take it over."""
+    return [i for i in issues if not i.get("pull_request") and (i.get("user") or {}).get("login") == DASHBOARD_AUTHOR]
+
+
+def find_issues(G, repo, token):
+    """(HTTP status, the dashboard's own labelled issues, oldest first). Reads page after page until one is found, so
+    labelled issues opened by people can't push the dashboard's own off the first page."""
+    found = []
+    for page in range(1, PAGES + 1):
+        st, issues, _ = call(G, "GET", "/repos/%s/issues?labels=%s&state=all&per_page=100&sort=created&direction=asc&page=%d"
+                             % (repo, LABEL, page), token)
+        if st != 200 or not isinstance(issues, list):
+            return st, found
+        found = own_issues(issues)
+        if found or len(issues) < 100:
+            return 200, found
+    return 200, found
 
 
 def publish_issue(G, repo, token, body, generated_at, issue_number=None):
@@ -1016,12 +1035,11 @@ def publish_issue(G, repo, token, body, generated_at, issue_number=None):
     st, _, _ = call(G, "GET", "/repos/%s/labels/%s" % (repo, LABEL), token)
     if st == 404:
         call(G, "POST", "/repos/%s/labels" % repo, token, {"name": LABEL, "color": "FFD84D", "description": "Managed by story-gate"})
-    st, issues, _ = call(G, "GET", "/repos/%s/issues?labels=%s&state=all&per_page=20&sort=created&direction=asc" % (repo, LABEL), token)
+    st, issues = find_issues(G, repo, token)
     if st == 410:
         return "Issues are turned off in this repository, so the dashboard is only in the workflow summary and the report artifact."
-    if st != 200 or not isinstance(issues, list):
+    if st != 200:
         return "Could not read issues (HTTP %s); the dashboard is in the workflow summary." % st
-    issues = own_issues(issues)
     if issue_number:
         st, one, _ = call(G, "GET", "/repos/%s/issues/%s" % (repo, int(issue_number)), token)
         if st == 200 and isinstance(one, dict) and not one.get("pull_request"):
@@ -1048,8 +1066,7 @@ FAIL_MARK = "<!-- story-gate-dashboard refresh-failed -->"
 
 def report_failure(G, repo, token, when, run_url="", issue_number=None):
     """A refresh failed: keep the last good snapshot, and say so at the top of the issue."""
-    st, issues, _ = call(G, "GET", "/repos/%s/issues?labels=%s&state=all&per_page=20&sort=created&direction=asc" % (repo, LABEL), token)
-    issues = own_issues(issues if st == 200 and isinstance(issues, list) else [])
+    _, issues = find_issues(G, repo, token)
     if issue_number:
         st, one, _ = call(G, "GET", "/repos/%s/issues/%s" % (repo, int(issue_number)), token)
         issues = [one] if st == 200 and isinstance(one, dict) else issues

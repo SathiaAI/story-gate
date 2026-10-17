@@ -4377,10 +4377,10 @@ INSTRUCTION_BLOCK = BLOCK_START + """
 Every code change belongs to a story and passes the story gate. Full steps: `.story-gate/PROTOCOL.md`.
 Run story-gate as `story-gate <command>`: that is the verified copy installed on this computer. If `story-gate` isn't
 found, use the full command a story-gate message prints. Only where story-gate isn't installed (cloud agents, where hooks
-don't run) use `python3 .story-gate/gate.py <command>`.
+don't run) use `python3 .story-gate/gate.py <command>` (`python` on Windows).
 1. Before editing code: `story-gate start <STORY-ID>`, fill the story folder, then `story-gate score <STORY-ID> ready`.
 2. Drift between story and PRD/TRD is never resolved silently: escalate, then record `story-gate decide`.
-3. Before saying you are done: run tests via `story-gate record-tests <STORY-ID> -- <test command>`, run the feature for every acceptance criterion with `story-gate scenario`, measure any budgets with `story-gate measure <STORY-ID>`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn <STORY-ID>`, then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
+3. Before saying you are done: run tests via `story-gate record-tests <STORY-ID> -- <test command>`, run the feature for every acceptance criterion with `story-gate scenario`, measure any budgets with `story-gate measure <STORY-ID>`, fill in `validation.md` and `handoff.md`, record learnings with `story-gate learn <STORY-ID> --type learning|error|pattern|none --summary "..."` (error and pattern also need `--root-cause` and `--rule`), then `story-gate score <STORY-ID> done`. Show the owner the page from `story-gate report <STORY-ID> --open`.
 4. Read past learnings first: `story-gate learnings <keywords>`.
 5. Write for a non-coder: short sentences, active voice, plain words, and a Mermaid diagram where a picture is clearer (`.story-gate/PROTOCOL.md` > Writing). This covers replies, PR descriptions, story summaries, validation.md, handoffs and learnings.
 Mode is in `.story-gate/config.json` (warn = report only, enforce = block).
