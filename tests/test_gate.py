@@ -4999,6 +4999,31 @@ class TestGuidedSetup(unittest.TestCase):
         G.call = call
         rows = S.version_report(["o/new", "o/old", "o/none"], "t", "9.9", out=lambda *_: None)
         self.assertEqual(rows, [("o/new", "9.9", "current", ""), ("o/old", "0.1", "behind", "#4"), ("o/none", "-", "not set up", "")])
+        rows = S.version_report(["o/new", "o/old"], "t", "0.10", out=lambda *_: None)  # versions compare as numbers
+        self.assertEqual([r[2] for r in rows], ["ahead", "behind"])
+        self.assertEqual(S._vtuple("0.10"), S._vtuple("0.10.0")); self.assertIsNone(S._vtuple("dev"))
+
+    def test_org_listing_keeps_a_personal_accounts_listing_on_every_page(self):
+        """--org with a person's account: every page comes from the same listing, and your own includes private repos."""
+        import importlib, io, contextlib
+        from unittest import mock
+        gate = importlib.import_module("gate"); G = self.G
+        seen = []
+        def call(m, p, tok=None, body=None, accept=None):
+            seen.append(p)
+            if p.startswith("/orgs/"):
+                return 404, {}, {}
+            if p.startswith("/user/repos"):
+                page = int(p.rsplit("=", 1)[1])
+                return 200, [{"full_name": "me/r%d-%d" % (page, i)} for i in range(100 if page == 1 else 3)], {}
+            return 404, {}, {}
+        G.call = call; G.whoami = lambda tok: "me"
+        with mock.patch.object(G, "human_token", return_value="t"), mock.patch.object(self.S, "version_report",
+                                                                                         return_value=[]) as rep, \
+                contextlib.redirect_stdout(io.StringIO()):
+            gate.cmd_upgrade_repo({"org": "me"}, ["--report"])
+        self.assertEqual(len(rep.call_args[0][0]), 103)
+        self.assertEqual([p.split("?")[0] for p in seen], ["/orgs/me/repos", "/user/repos", "/user/repos"])
 
     def test_setup_pr_is_split_when_the_agent_app_is_installed(self):
         """With the agent App installed, the setup PR (which adds workflow files) is written by the person for the workflow

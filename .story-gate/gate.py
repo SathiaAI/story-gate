@@ -4804,10 +4804,14 @@ def cmd_upgrade_repo(kv, rest):
         org, page = kv["org"], 1
         if not REPO_OWNER.fullmatch(org):
             sys.exit("--org must be a GitHub organization or user name")
+        listing = "/orgs/" + org + "/repos?per_page=100&page=%d"
         while True:
-            st, got, _ = G_.call("GET", "/orgs/%s/repos?per_page=100&page=%d" % (org, page), tok)
-            if st == 404 and page == 1:
-                st, got, _ = G_.call("GET", "/users/%s/repos?per_page=100&page=%d" % (org, page), tok)
+            st, got, _ = G_.call("GET", listing % page, tok)
+            if st == 404 and page == 1:  # a person's account, not an organization: keep that listing for every page
+                me = G_.whoami(tok) if tok else None
+                listing = ("/user/repos?affiliation=owner&per_page=100&page=%d" if me and me.lower() == org.lower()
+                           else "/users/" + org + "/repos?per_page=100&page=%d")  # your own: private ones too
+                st, got, _ = G_.call("GET", listing % page, tok)
             if st != 200 or not isinstance(got, list):
                 sys.exit("couldn't list the repositories of %s (HTTP %s)" % (org, st))
             names += [r["full_name"] for r in got if isinstance(r, dict) and not r.get("archived") and r.get("full_name")]

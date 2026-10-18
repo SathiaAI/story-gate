@@ -892,6 +892,17 @@ def upgrade_many(repos, py, dry=False, token=None, out=print):
     return results
 
 
+def _vtuple(v):
+    """'0.10.1' -> (0, 10, 1) with trailing zeros dropped, so 0.10 and 0.10.0 compare equal; None when it isn't a version."""
+    parts = (v or "").split(".")
+    if not v or not all(p.isdigit() for p in parts):
+        return None
+    t = [int(p) for p in parts]
+    while len(t) > 1 and t[-1] == 0:
+        t.pop()
+    return tuple(t)
+
+
 def version_report(repos, token, latest, out=print):
     """Which story-gate version each repository's default branch has, and its open upgrade pull request. -> rows."""
     import base64
@@ -910,7 +921,9 @@ def version_report(repos, token, latest, out=print):
         owner = repo.split("/", 1)[0]
         st2, prs, _ = G.call("GET", "/repos/%s/pulls?state=open&head=%s" % (repo, urllib.parse.quote("%s:%s" % (owner, UPGRADE_BRANCH))), token)
         pr = "#%s" % prs[0]["number"] if st2 == 200 and isinstance(prs, list) and prs else ""
-        state = "not set up" if not ver else ("current" if ver == latest else "behind")
+        a, b = _vtuple(ver), _vtuple(latest)
+        state = ("not set up" if not ver else "unknown" if a is None or b is None
+                 else "current" if a == b else "behind" if a < b else "ahead")
         rows.append((repo, ver or "-", state, pr))
     w = max([len(r[0]) for r in rows] + [10])
     out("%-*s  %-10s %-11s %s" % (w, "repository", "version", "status", "upgrade PR"))
