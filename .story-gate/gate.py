@@ -4791,9 +4791,15 @@ def runtime_copy_check(files, base):
         was = ""
     listed = set(man.get("files") or {})
     # what the PR holds (tracked, plus not-ignored new files); Python's own __pycache__ is refused above when a PR adds it
-    tracked = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".story-gate/"],
-                             cwd=str(ROOT), capture_output=True).stdout
-    rels = {p[len(".story-gate/"):] for p in tracked.decode("utf-8", "replace").split("\0") if p}
+    try:
+        ls = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".story-gate/"],
+                            cwd=str(ROOT), capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        ls = None
+    if ls is None or ls.returncode != 0:  # never pass the copy without having looked at it
+        return ("story-gate couldn't list the files in this PR's story-gate copy (git ls-files failed), so it can't confirm the "
+                "copy holds only signed code. Re-run the check."), ""
+    rels = {p[len(".story-gate/"):] for p in ls.stdout.decode("utf-8", "replace").split("\0") if p}
     extra = sorted(r for r in rels if r.lower().endswith(IMPORTABLE) and r not in listed and "__pycache__" not in r
                    and not r.startswith("stories/"))
     if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code

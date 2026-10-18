@@ -1016,6 +1016,19 @@ class TestStoryGateOnlyPullRequests(Base):
                     subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
                     subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
 
+    def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
+        """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
+        real = subprocess.run
+        def broken(cmd, *a, **k):
+            """git ls-files fails; everything else runs for real."""
+            if cmd[:2] == ["git", "ls-files"]:
+                return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
+            return real(cmd, *a, **k)
+        with patch("subprocess.run", side_effect=broken):
+            rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("couldn't list the files", out)
+
     def test_config_only_changes_never_need_a_signed_release(self):
         """config.json is the repository's own settings: changing only it never asks for a signed release."""
         rc, out, _ = self.ci(accepted=True, signed=None)
