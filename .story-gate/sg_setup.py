@@ -118,7 +118,8 @@ def setup_links(top, ref):
     out = []
     for line in r.stdout.splitlines():
         meta, _, path = line.partition("\t")
-        if meta.split(" ")[0] == "120000" and path.split("/")[0] in SETUP_PATHS:
+        # any letter case: on Windows and macOS `.Github` and `.github` are the same folder
+        if meta.split(" ")[0] == "120000" and path.split("/")[0].lower() in {p.lower() for p in SETUP_PATHS}:
             out.append(path)
     return out
 

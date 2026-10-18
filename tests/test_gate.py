@@ -4976,6 +4976,18 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(self.S.setup_links(self.top, "origin/main"), [".story-gate"])
 
+    def test_setup_link_check_ignores_letter_case(self):
+        """A branch link named `.Github` or `agents.md` is caught too: on Windows and macOS it is the same path."""
+        outside = self.tmp / "outside"; outside.mkdir()
+        try:
+            for name in (".Github", "agents.md"):
+                os.symlink(str(outside), str(self.top / name))
+        except (OSError, NotImplementedError):
+            self.skipTest("this system can't make symlinks (Windows without the privilege)")
+        for a in (["add", "-A"], ["commit", "-qm", "links"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        self.assertEqual(sorted(self.S.setup_links(self.top, "origin/main")), [".Github", "agents.md"])
+
     def test_setup_link_check_covers_every_folder_install_writes_hooks_into(self):
         """Every folder install writes AI-tool hook files into is on the symlink stop-list, so a new hook folder can't slip by."""
         import gate
