@@ -3400,6 +3400,17 @@ class TestReleaseSignatures(unittest.TestCase):
         with self.assertRaisesRegex(self.T.TrustError, "folder itself"):
             self.T.verify_release(link, self.signers)
 
+    def test_a_linked_vendor_folder_fails_even_with_identical_files(self):
+        """vendor/ swapped for a link to a folder of identical files: the hashes match, but it still fails."""
+        real = self.d / "vendor-elsewhere"
+        shutil.move(str(self.rel / "vendor"), str(real))
+        try:
+            os.symlink(str(real), str(self.rel / "vendor"))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        with self.assertRaisesRegex(self.T.TrustError, "not links: vendor/"):
+            self.T.verify_release(self.rel, self.signers)
+
     def test_changed_file_fails(self):
         with open(self.rel / "gate.py", "a") as f:
             f.write("# evil\n")
@@ -4595,11 +4606,25 @@ class TestGitHubSetupHelpers(unittest.TestCase):
     def test_split_pr_update_lets_the_person_undo_an_earlier_workflow_change(self):
         """Updating with no workflow files left to change: the person's commit still resets the workflows (the App
         can't), and the App's commit comes last."""
-        self.fake_api_by_token(self.split_update_routes("old-tree", "Bot"))
+        self.fake_api_by_token({**self.workflow_trees("wf-old"), **self.split_update_routes("old-tree", "Bot")})
         self.G.open_setup_pr("human", "o/r", {"b": b"y"}, app_token="app", update_existing=True)
         commits = [(t, b["tree"]) for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
         self.assertEqual([t for t, _ in commits], ["human", "app"])
         self.assertEqual(commits[0][1], "tree0")  # the base branch's workflows exactly
+
+    def workflow_trees(self, branch_wf):
+        """Fake tree reads: the base (tree0) has workflows folder wf-base; the branch (old-tree) has `branch_wf`."""
+        return {("GET", "/repos/o/r/git/trees/tree0"): (200, {"tree": [{"path": ".github", "type": "tree", "sha": "gh-base"}]}),
+                ("GET", "/repos/o/r/git/trees/old-tree"): (200, {"tree": [{"path": ".github", "type": "tree", "sha": "gh-br"}]}),
+                ("GET", "/repos/o/r/git/trees/gh-base"): (200, {"tree": [{"path": "workflows", "type": "tree", "sha": "wf-base"}]}),
+                ("GET", "/repos/o/r/git/trees/gh-br"): (200, {"tree": [{"path": "workflows", "type": "tree", "sha": branch_wf}]})}
+
+    def test_split_pr_update_without_workflow_changes_has_no_commit_by_the_person(self):
+        """No workflow file to change or undo (the branch's workflows match the base): only the App commits."""
+        self.fake_api_by_token({**self.workflow_trees("wf-base"), **self.split_update_routes("old-tree", "Bot")})
+        self.G.open_setup_pr("human", "o/r", {"b": b"y"}, app_token="app", update_existing=True)
+        commits = [t for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual(commits, ["app"])
 
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))

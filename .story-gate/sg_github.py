@@ -1004,6 +1004,22 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
 
 
+def _workflow_folders(ok, r, tree_sha):
+    """[(path, tree sha)] of every .github/workflows folder (any letter case) in a commit tree."""
+    out = []
+    for gh in ok("GET", "%s/git/trees/%s" % (r, tree_sha)).get("tree") or []:
+        if gh.get("type") == "tree" and gh.get("path", "").lower() == ".github":
+            for wf in ok("GET", "%s/git/trees/%s" % (r, gh["sha"])).get("tree") or []:
+                if wf.get("path", "").lower() == "workflows":
+                    out.append((gh["path"] + "/" + wf["path"], wf["sha"]))
+    return sorted(out)
+
+
+def _workflows_differ(ok, r, tree_a, tree_b):
+    """True when two commit trees hold different workflow files."""
+    return _workflow_folders(ok, r, tree_a) != _workflow_folders(ok, r, tree_b)
+
+
 def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base, parent, update_existing):
     """open_setup_pr when the human writes the workflow files and the agent App writes the rest and opens the PR."""
     r = "/repos/%s" % repo
@@ -1037,9 +1053,10 @@ def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base
         head_commit = ok("GET", f"{r}/git/commits/{head}")
         if head_commit["tree"]["sha"] == want and _by_bot(app_ok, r, head):
             return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True, "updated": False}
-        if head_commit["tree"]["sha"] != want:
+        if head_commit["tree"]["sha"] != want and (wf or _workflows_differ(ok, r, base_tree, head_commit["tree"]["sha"])):
             # You bring the workflow files to exactly what they should be (also when that means undoing an earlier
-            # workflow change on the branch); the App's commit then changes only the other files.
+            # workflow change on the branch); the App's commit then changes only the other files. With no workflow
+            # change to make or undo, there is no commit of yours.
             head = ok("POST", r + "/git/commits", {"message": title + " (workflow files)", "tree": wf_tree, "parents": [head]})["sha"]
             ok("PATCH", ref, {"sha": head})
         app = app_ok("POST", r + "/git/commits", {"message": title, "tree": want, "parents": [head]})
