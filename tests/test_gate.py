@@ -4930,6 +4930,17 @@ class TestGuidedSetup(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "story-gate init"):
             self.S.upgrade_files(self.top, "main", sys.executable)
 
+    def test_setup_sends_lf_text_from_windows_but_keeps_binary_and_crlf_files(self):
+        """A Windows run writes CRLF; setup sends LF so an up-to-date repo isn't 'changed'. Binary files and files the
+        branch already stores with CRLF stay byte for byte."""
+        with patch.object(self.S, "_at", return_value=b"a\nb\n"):
+            self.assertEqual(self.S._lf(self.top, "main", "x.yml", b"a\r\nb\r\n"), b"a\nb\n")
+            self.assertEqual(self.S._lf(self.top, "main", "x.woff2", b"\0\r\n"), b"\0\r\n")
+        with patch.object(self.S, "_at", return_value=b"a\r\nb\r\n"):
+            self.assertEqual(self.S._lf(self.top, "main", "x.bat", b"a\r\nb\r\nc\r\n"), b"a\r\nb\r\nc\r\n")
+        with patch.object(self.S, "_at", return_value=None):
+            self.assertEqual(self.S._lf(self.top, "main", "new.md", b"a\r\n"), b"a\n")
+
     def test_upgrade_files_are_empty_when_up_to_date_and_restore_changed_and_drop_obsolete_files(self):
         """Up to date: nothing. An older copy: the changed runtime file comes back, and a runtime file the old release
         listed but this version no longer has is deleted (None). The person's own files are never touched."""

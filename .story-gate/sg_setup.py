@@ -98,10 +98,10 @@ def setup_files(top, base, py):
                 i += 1  # a rename or copy is followed by the old path
             p = entry[3:]
             if p and (wt / p).is_file() and "__pycache__" not in p:
-                out[p] = (wt / p).read_bytes()
+                out[p] = _lf(top, base, p, (wt / p).read_bytes())
         cfgf = dest / "config.json"  # an unchanged, already-tracked config is still the one setup's choices go into
         if cfgf.is_file():
-            out.setdefault(".story-gate/config.json", cfgf.read_bytes())
+            out.setdefault(".story-gate/config.json", _lf(top, base, ".story-gate/config.json", cfgf.read_bytes()))
         return out
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(top), capture_output=True)
@@ -783,6 +783,14 @@ def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command="",
 
 # ---- story-gate upgrade-repo: bring a set-up repository to this story-gate version, in a pull request you approve
 UPGRADE_BRANCH = "story-gate-upgrade"
+
+
+def _lf(top, base, path, data):
+    """`data` with Windows line endings (CRLF) turned into LF, so a setup run on Windows sends the same text a Mac or Linux
+    run does. Binary files, and files the branch already stores with CRLF, are left as they are."""
+    if b"\r\n" not in data or b"\0" in data or b"\r\n" in (_at(top, "origin/" + base, path) or b""):
+        return data
+    return data.replace(b"\r\n", b"\n")
 
 
 def _at(top, ref, path):
