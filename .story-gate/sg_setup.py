@@ -859,9 +859,12 @@ def upgrade_repo(top, py, dry=False, token=None, out=print):
     if st != 200 or not isinstance(info, dict) or not info.get("default_branch"):
         return "error", "couldn't read %s from GitHub (HTTP %s)" % (repo, st)
     base = info["default_branch"]
-    if subprocess.run(["git", "fetch", "--quiet", "origin", base], cwd=str(top), capture_output=True).returncode:
+    if subprocess.run(["git", "fetch", "--quiet", "origin", base], cwd=str(top), capture_output=True, env=_clone_env(tok)).returncode:
         return "error", "couldn't fetch %s from GitHub" % base
     before = version_at(top, "origin/" + base) or "unknown"
+    if _vtuple(before) and _vtuple(version) and _vtuple(before) > _vtuple(version):
+        return "ahead", ("%s is on story-gate %s, newer than the %s on this computer: nothing to do. Upgrade this computer "
+                         "(`story-gate upgrade`) first." % (repo, before, version))
     try:
         files = upgrade_files(top, base, py)
     except RuntimeError as ex:
@@ -891,6 +894,19 @@ def upgrade_repo(top, py, dry=False, token=None, out=print):
     return status, "%s #%s %s" % (repo, pr["number"], pr["url"])
 
 
+def _clone_env(token):
+    """Environment for `git clone` that sends `token` to github.com without it appearing in the command line or the
+    clone's saved config, and never stops to ask for a password."""
+    import base64
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    if token:
+        basic = base64.b64encode(("x-access-token:%s" % token).encode()).decode()
+        n = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+        env.update({"GIT_CONFIG_COUNT": str(n + 1), "GIT_CONFIG_KEY_%d" % n: "http.https://github.com/.extraheader",
+                    "GIT_CONFIG_VALUE_%d" % n: "AUTHORIZATION: basic " + basic})
+    return env
+
+
 def upgrade_many(repos, py, dry=False, token=None, out=print):
     """upgrade_repo for each owner/name, each in a fresh temporary clone. -> [(repo, status, detail)]; one repo's failure
     never stops the others."""
@@ -899,7 +915,7 @@ def upgrade_many(repos, py, dry=False, token=None, out=print):
         tmp = Path(tempfile.mkdtemp(prefix="sg-upgrade-"))
         try:
             r = subprocess.run(["git", "clone", "-q", "--filter=blob:none", "https://github.com/%s.git" % repo, str(tmp / "r")],
-                               capture_output=True, text=True, timeout=600, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+                               capture_output=True, text=True, timeout=600, env=_clone_env(token or G.human_token()))
             if r.returncode:
                 results.append((repo, "error", "couldn't clone it: %s" % (r.stderr.strip().splitlines() or ["?"])[-1]))
                 continue

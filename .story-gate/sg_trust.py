@@ -178,7 +178,8 @@ def verify_release(src, signers=RELEASE_SIGNERS):
     files = man.get("files") or {}
     if not files:
         raise TrustError("signed release lists no files")
-    links = [f for f in list(files) + list(RELEASE_PROOF) if (src / f).is_symlink()]
+    links = (["(the folder itself)"] if src.is_symlink() else []) + \
+        [f for f in list(files) + list(RELEASE_PROOF) if (src / f).is_symlink()]
     if links:
         raise TrustError("release files must be real files, not links: %s" % ", ".join(links[:5]))
     bad = [f for f, h in files.items() if not (src / f).is_file() or sha256(src / f) != h]

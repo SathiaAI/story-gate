@@ -1027,7 +1027,9 @@ def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base
         head_commit = ok("GET", f"{r}/git/commits/{head}")
         if head_commit["tree"]["sha"] == want and _by_bot(app_ok, r, head):
             return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True, "updated": False}
-        if wf and head_commit["tree"]["sha"] != want:
+        if head_commit["tree"]["sha"] != want:
+            # You bring the workflow files to exactly what they should be (also when that means undoing an earlier
+            # workflow change on the branch); the App's commit then changes only the other files.
             head = ok("POST", r + "/git/commits", {"message": title + " (workflow files)", "tree": wf_tree, "parents": [head]})["sha"]
             ok("PATCH", ref, {"sha": head})
         app = app_ok("POST", r + "/git/commits", {"message": title, "tree": want, "parents": [head]})
@@ -1046,8 +1048,13 @@ def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base
     except RuntimeError as ex:
         if "HTTP 422" not in str(ex):
             raise
-        # The branch exists but no pull request does: an earlier run stopped half way. Point it at the new commit
-        # (force: nothing on it was ever proposed for review), as you when it holds workflow changes.
+        # The branch exists but no pull request does. Reuse it only when its tip is story-gate's own commit from a run
+        # that stopped half way; anything else may be someone's work, so stop and say so.
+        tip_now = ok("GET", f"{r}/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
+        msg = (ok("GET", f"{r}/git/commits/{tip_now}").get("message") or "").strip()
+        if msg not in (title, title + " (workflow files)"):
+            raise RuntimeError("the branch '%s' already exists on %s and isn't one story-gate left behind. Merge or delete it "
+                               "on GitHub, then run this again." % (branch, repo))
         creator("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": start, "force": True})
     # the App's commit always comes last (even when it changes nothing), so the App is the last pusher
     app_tree = _tree_with(app_ok, r, wf_tree, rest) if rest else wf_tree

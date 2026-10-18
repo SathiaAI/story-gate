@@ -987,6 +987,12 @@ class TestStoryGateOnlyPullRequests(Base):
         rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"], signed="0.9.0")
         self.assertEqual(rc, 1, out); self.assertIn("older than the 0.10.1", out)
 
+    def test_turning_the_copy_into_a_link_is_refused(self):
+        """A .story-gate that becomes a link would let a later PR change the code it points to unchecked."""
+        g = load_gate(self.repo)
+        bad, _ = g.runtime_copy_check([".story-gate"], "main")
+        self.assertIn("into a link", bad)
+
     def test_compiled_python_in_the_copy_is_refused(self):
         """A .pyc file could run in place of the checked .py, so a PR may not add one (even force-added past .gitignore)."""
         g = load_gate(self.repo)
@@ -3385,6 +3391,15 @@ class TestReleaseSignatures(unittest.TestCase):
             (copy / f).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(Path(dest) / f, copy / f)
         self.assertEqual(self.T.verify_release(copy, self.signers)["version"], "9.9.9")
 
+    def test_a_linked_release_folder_fails(self):
+        link = self.d / "link"
+        try:
+            os.symlink(str(self.rel), str(link))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        with self.assertRaisesRegex(self.T.TrustError, "folder itself"):
+            self.T.verify_release(link, self.signers)
+
     def test_changed_file_fails(self):
         with open(self.rel / "gate.py", "a") as f:
             f.write("# evil\n")
@@ -4556,14 +4571,35 @@ class TestGitHubSetupHelpers(unittest.TestCase):
         refs = [(m, b["sha"], t) for m, p, b, t in self.tcalls if "/git/refs" in p]
         self.assertEqual(refs, [("POST", "human-c", "human"), ("PATCH", "app-c", "app")])
 
-    def test_split_pr_reuses_a_branch_left_by_a_run_that_stopped_half_way(self):
-        """The branch exists but no PR does: it is pointed at the new commits and the PR is opened."""
-        r = self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})})
-        self.fake_api_by_token(r)
-        out = self.G.open_setup_pr("human", "o/r", {".github/workflows/a.yml": b"x", "b": b"y"}, app_token="app")
-        self.assertEqual(out["number"], 7)
-        forced = [(t, b) for m, p, b, t in self.tcalls if m == "PATCH" and p.endswith("/story-gate-setup") and b.get("force")]
-        self.assertEqual([t for t, _ in forced], ["human"])
+    def test_split_pr_reuses_only_a_branch_story_gate_left_behind(self):
+        """The branch exists but no PR does: reused when its tip is story-gate's own commit from a stopped run; any other
+        branch of that name is someone's work, so it is never overwritten."""
+        for msg, reused in (("Set up story-gate (workflow files)", True), ("Set up story-gate", True), ("my own work", False)):
+            with self.subTest(msg=msg):
+                r = {("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"}),
+                     ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "old"}}),
+                     ("GET", "/repos/o/r/git/commits/old"): (200, {"message": msg + "\n", "tree": {"sha": "t"}})}
+                for k, v in self.pr_routes().items():
+                    r.setdefault(k, v)
+                self.fake_api_by_token(r)
+                files = {".github/workflows/a.yml": b"x", "b": b"y"}
+                if reused:
+                    self.assertEqual(self.G.open_setup_pr("human", "o/r", files, app_token="app")["number"], 7)
+                    forced = [t for m, p, b, t in self.tcalls if m == "PATCH" and p.endswith("/story-gate-setup") and b.get("force")]
+                    self.assertEqual(forced, ["human"])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "isn't one story-gate left behind"):
+                        self.G.open_setup_pr("human", "o/r", files, app_token="app")
+                    self.assertFalse([1 for m, p, b, t in self.tcalls if m == "PATCH" or p.endswith("/pulls")])
+
+    def test_split_pr_update_lets_the_person_undo_an_earlier_workflow_change(self):
+        """Updating with no workflow files left to change: the person's commit still resets the workflows (the App
+        can't), and the App's commit comes last."""
+        self.fake_api_by_token(self.split_update_routes("old-tree", "Bot"))
+        self.G.open_setup_pr("human", "o/r", {"b": b"y"}, app_token="app", update_existing=True)
+        commits = [(t, b["tree"]) for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual([t for t, _ in commits], ["human", "app"])
+        self.assertEqual(commits[0][1], "tree0")  # the base branch's workflows exactly
 
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
@@ -4997,6 +5033,33 @@ class TestGuidedSetup(unittest.TestCase):
             got = S.upgrade_many(["o/ok", "o/bad", "o/crash"], sys.executable)
         self.assertEqual([(r, st) for r, st, _ in got], [("o/ok", "opened"), ("o/bad", "error"), ("o/crash", "error")])
         self.assertIn("not found", got[1][2]); self.assertIn("boom", got[2][2])
+
+    def test_upgrade_repo_never_downgrades_a_newer_repository(self):
+        G, S = self.G, self.S
+        self.signed_runtime()
+        self.set_up_main()
+        self.push_main(".story-gate/release.json", json.dumps({"version": "99.0", "files": {}}), "newer")
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda *a, **k: self.fail("never a downgrade PR")
+        status, detail = S.upgrade_repo(self.top, sys.executable, token="human")
+        self.assertEqual(status, "ahead"); self.assertIn("99.0", detail)
+
+    def test_clone_sends_the_token_without_putting_it_in_the_command(self):
+        env = self.S._clone_env("tok123")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        n = int(env["GIT_CONFIG_COUNT"]) - 1
+        self.assertEqual(env["GIT_CONFIG_KEY_%d" % n], "http.https://github.com/.extraheader")
+        import base64
+        self.assertIn(base64.b64encode(b"x-access-token:tok123").decode(), env["GIT_CONFIG_VALUE_%d" % n])
+        self.assertEqual(self.S._clone_env(None).get("GIT_CONFIG_COUNT"), os.environ.get("GIT_CONFIG_COUNT"))  # no token: nothing added
+
+    def test_upgrade_repo_rejects_unknown_options(self):
+        """A typo like --dryrun would otherwise swallow the next argument and upgrade for real."""
+        import importlib
+        gate = importlib.import_module("gate")
+        with self.assertRaises(SystemExit) as cm:
+            gate.cmd_upgrade_repo({"dryrun": "o/r"}, [])
+        self.assertIn("unknown option --dryrun", str(cm.exception))
 
     def test_version_report_lists_each_repository(self):
         import base64

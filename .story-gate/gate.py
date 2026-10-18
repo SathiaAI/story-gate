@@ -4765,6 +4765,9 @@ def runtime_copy_check(files, base):
     """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
     branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
     Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
+    if ".story-gate" in files or (ROOT / ".story-gate").is_symlink():
+        return ("This PR turns the .story-gate folder into a link. The checks would then run code from wherever it points, "
+                "outside what this check reviews. Keep .story-gate a real folder."), ""
     changed = [f for f in files if f.startswith(".story-gate/") and f not in (".story-gate/config.json", ".story-gate/budgets.json")
                and not f.startswith((".story-gate/stories/", ".story-gate/judge-calibration"))]
     if not changed:
@@ -4796,6 +4799,10 @@ def cmd_upgrade_repo(kv, rest):
     import sg_setup as S
     import sg_github as G_
     tok = G_.human_token()
+    unknown = sorted(set(kv) - {"org", "python"})
+    if unknown:  # a typo like --dryrun would otherwise swallow the next argument and run for real
+        sys.exit("upgrade-repo: unknown option %s. It takes --org ORG, --python PATH, --dry-run and --report."
+                 % ", ".join("--" + k for k in unknown))
     names = [a for a in rest if REPO_NAME.fullmatch(a)]
     odd = [a for a in rest if not a.startswith("--") and not REPO_NAME.fullmatch(a)]
     if odd:
