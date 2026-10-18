@@ -69,6 +69,11 @@ def setup_files(top, base, py):
         for f in T.runtime_files(HERE):  # the same files the runtime is made of, plus the repo's own settings
             (dest / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(HERE / f, dest / f)
+        for f in T.RELEASE_PROOF:  # the release signature, so CI can check the copy is a signed release
+            if (HERE / f).is_file():
+                shutil.copyfile(HERE / f, dest / f)
+            elif (dest / f).is_file():
+                (dest / f).unlink()  # an old signature would no longer match these files
         env = dict(os.environ, STORY_GATE_ROOT=str(wt))
         r = subprocess.run([sys.executable, str(dest / "gate.py"), "install", "--python", py], cwd=str(wt), env=env,
                            capture_output=True, text=True)
@@ -418,10 +423,13 @@ class Wizard:
                       "**Before any story can finish**, set `test_command` (how CI runs your tests), make it write a JUnit XML "
                       "report, and set `junit_path` to that file in `.story-gate/config.json`, in a pull request of its own.")
                    if nojudge else ""))
-        # the setup pull request adds workflow files, which the agent App can't change: pr_author picks you, or says what to do
+        # the setup pull request adds workflow files, which the agent App can't change: you write those, the App writes the
+        # rest and opens it ('split'); without the App, pr_author picks you or says what to do
         who, tok, why = G.pr_author(self.repo, base, self.token, self.login, touches_workflows=True)
+        human, app = tok if who == "split" else (tok, None)
         # running init again before that pull request is merged brings the open one up to date instead of leaving it stale
-        self.pr = G.open_setup_pr(tok, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base, update_existing=True)
+        self.pr = G.open_setup_pr(human, self.repo, files, body=body + "\n\nOpened by: %s." % why, base=base,
+                                  update_existing=True, app_token=app)
         self.set("merge", "working", "Waiting for you to merge the setup pull request")
         self.background(lambda: self._wait_merge(base), "merge")
 
@@ -751,3 +759,144 @@ def run(top, py, open_browser=True, port=0, serve_seconds=3600, test_command="",
     else:
         print("story-gate setup stopped before the end. Run `story-gate init` again to continue.")
     return 0 if wz.st["done"]["status"] == "ok" else 1
+
+
+# ---- story-gate upgrade-repo: bring a set-up repository to this story-gate version, in a pull request you approve
+UPGRADE_BRANCH = "story-gate-upgrade"
+
+
+def _at(top, ref, path):
+    """The bytes of `path` at `ref` in the repository at `top`, or None when it isn't there."""
+    r = subprocess.run(["git", "show", "%s:%s" % (ref, path)], cwd=str(top), capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def upgrade_files(top, base, py):
+    """{path: bytes or None} that bring origin/<base> to this story-gate version: changed and new files, and None for
+    story-gate runtime files the new version no longer has. Raises when the repository isn't set up yet."""
+    ref = "origin/" + base
+    if _at(top, ref, ".story-gate/config.json") is None:
+        raise RuntimeError("story-gate isn't set up in this repository yet (no .story-gate/config.json on %s). "
+                           "Run `story-gate init` instead." % base)
+    out = {p: c for p, c in setup_files(top, base, py).items() if _at(top, ref, p) != c}
+    import sg_trust as T
+    try:
+        old = json.loads((_at(top, ref, ".story-gate/release.json") or b"{}").decode("utf-8")).get("files") or {}
+    except ValueError:
+        old = {}
+    new = set(T.runtime_files(HERE))
+    for f in sorted(set(old) - new):  # runtime files the new version no longer has
+        parts = str(f).replace("\\", "/").split("/")
+        if not f or str(f).startswith(("/", "\\")) or ":" in str(f) or any(x in ("", ".", "..") for x in parts):
+            continue  # only plain names inside .story-gate/ are ever deleted
+        p = ".story-gate/" + f
+        if _at(top, ref, p) is not None:
+            out[p] = None
+    return out
+
+
+def version_at(top, ref):
+    """The story-gate version recorded in .story-gate/release.json at `ref`, or '' when there is none."""
+    try:
+        return json.loads((_at(top, ref, ".story-gate/release.json") or b"{}").decode("utf-8")).get("version") or ""
+    except ValueError:
+        return ""
+
+
+def this_version():
+    """The version of the story-gate running this code (its gate.py VERSION)."""
+    import re
+    m = re.search(r'^VERSION = "([^"]+)"', (HERE / "gate.py").read_text(encoding="utf-8"), re.M)
+    return m.group(1) if m else "unknown"
+
+
+def upgrade_repo(top, py, dry=False, token=None, out=print):
+    """Upgrade the repository at `top` to this story-gate version in one pull request ('story-gate-upgrade'). You commit
+    the workflow files, the agent App commits the rest and opens it (pr_author), so your approval counts.
+    -> (status, detail): status 'up-to-date', 'dry-run', 'opened', 'updated', 'unchanged' or 'error'."""
+    version = this_version()
+    repo = github_repo(top)
+    if not repo:
+        return "error", "this folder isn't a clone of a GitHub repository"
+    tok = token or G.human_token()
+    if not tok:
+        return "error", "sign in to GitHub first: `gh auth login` (or set STORY_GATE_HUMAN_TOKEN)"
+    st, info, _ = G.call("GET", "/repos/%s" % repo, tok)
+    if st != 200 or not isinstance(info, dict) or not info.get("default_branch"):
+        return "error", "couldn't read %s from GitHub (HTTP %s)" % (repo, st)
+    base = info["default_branch"]
+    if subprocess.run(["git", "fetch", "--quiet", "origin", base], cwd=str(top), capture_output=True).returncode:
+        return "error", "couldn't fetch %s from GitHub" % base
+    before = version_at(top, "origin/" + base) or "unknown"
+    try:
+        files = upgrade_files(top, base, py)
+    except RuntimeError as ex:
+        return "error", str(ex)
+    if not files:
+        return "up-to-date", "%s is on story-gate %s" % (repo, version)
+    wf = sorted(p for p in files if G.is_workflow_path(p))
+    login = G.whoami(tok)
+    try:
+        who, t, why = G.pr_author(repo, base, tok, login, touches_workflows=bool(wf))
+    except G.NoAuthor as ex:
+        return "error", str(ex)
+    human, app = t if who == "split" else (t, None)
+    plan = "%s: %s -> %s, %d file(s) (%d workflow file(s)); %s" % (repo, before, version, len(files), len(wf), why)
+    if dry:
+        out("Would open: " + plan)
+        for p in sorted(files):
+            out("  %s %s" % ("delete" if files[p] is None else "write ", p))
+        return "dry-run", plan
+    body = ("Upgrades story-gate from %s to %s: the copied runtime in `.story-gate/`, the workflows (your own steps between "
+            "the 'your steps' markers are kept) and the agent instructions. Prepared by `story-gate upgrade-repo` with the "
+            "signed story-gate %s installed on the owner's computer. Review it like any change to your CI, then merge.\n\n"
+            "Opened by: %s." % (before, version, version, why))
+    pr = G.open_setup_pr(human, repo, files, branch=UPGRADE_BRANCH, title="Upgrade story-gate to v%s" % version,
+                         body=body, base=base, update_existing=True, app_token=app)
+    status = ("updated" if pr.get("updated") else "unchanged") if pr.get("existing") else "opened"
+    return status, "%s #%s %s" % (repo, pr["number"], pr["url"])
+
+
+def upgrade_many(repos, py, dry=False, token=None, out=print):
+    """upgrade_repo for each owner/name, each in a fresh temporary clone. -> [(repo, status, detail)]; one repo's failure
+    never stops the others."""
+    results = []
+    for repo in repos:
+        tmp = Path(tempfile.mkdtemp(prefix="sg-upgrade-"))
+        try:
+            r = subprocess.run(["git", "clone", "-q", "--filter=blob:none", "https://github.com/%s.git" % repo, str(tmp / "r")],
+                               capture_output=True, text=True, timeout=600)
+            if r.returncode:
+                results.append((repo, "error", "couldn't clone it: %s" % (r.stderr.strip().splitlines() or ["?"])[-1]))
+                continue
+            status, detail = upgrade_repo(tmp / "r", py, dry=dry, token=token, out=out)
+            results.append((repo, status, detail))
+        except Exception as ex:  # report and go on to the next repository
+            results.append((repo, "error", str(ex)))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return results
+
+
+def version_report(repos, token, latest, out=print):
+    """Which story-gate version each repository's default branch has, and its open upgrade pull request. -> rows."""
+    import base64
+    rows = []
+    for repo in repos:
+        st, f, _ = G.call("GET", "/repos/%s/contents/.story-gate/release.json" % repo, token)
+        ver = ""
+        if st == 200 and isinstance(f, dict) and f.get("content"):
+            try:
+                ver = json.loads(base64.b64decode(f["content"]).decode("utf-8")).get("version") or "?"
+            except (ValueError, TypeError):
+                ver = "?"
+        owner = repo.split("/", 1)[0]
+        st2, prs, _ = G.call("GET", "/repos/%s/pulls?state=open&head=%s" % (repo, urllib.parse.quote("%s:%s" % (owner, UPGRADE_BRANCH))), token)
+        pr = "#%s" % prs[0]["number"] if st2 == 200 and isinstance(prs, list) and prs else ""
+        state = "not set up" if not ver else ("current" if ver == latest else "behind")
+        rows.append((repo, ver or "-", state, pr))
+    w = max([len(r[0]) for r in rows] + [10])
+    out("%-*s  %-10s %-11s %s" % (w, "repository", "version", "status", "upgrade PR"))
+    for r in rows:
+        out("%-*s  %-10s %-11s %s" % (w, *r))
+    return rows

@@ -90,11 +90,32 @@ Commit and merge the CODEOWNERS file, then run `setup-repo` again to turn the br
 
 **Who opens story-gate's pull requests.** GitHub never counts an approval from whoever opened a pull request. So when story-gate opens one for you (`tracker-setup`, `settings --pr`, `setup-repo`'s CODEOWNERS change, `init`), it decides who opens it before writing anything:
 
-1. The agent App, when it's installed on the repository (`story-gate setup-agent`). It opens; you approve. Not for changes to workflow files, which the App can't make.
+1. The agent App, when it's installed on the repository (`story-gate setup-agent`). It opens; you approve.
 2. You, when the default branch doesn't need an approval yet, or another code owner can approve.
 3. Otherwise it stops and says what to do: install the agent App, or add a second code owner.
 
-It never switches to your login because something went wrong with the App: any error other than "not set up" stops the command. The review screen and the pull request say who opened it and why.
+**Pull requests that change workflow files** (setup and every upgrade) are split between you and the App. The App can't change workflow files, and it must never be able to: a login that can change workflows can run a workflow with your repository's secrets without any review. So you add the workflow files, then the App adds everything else, makes the last commit and opens the pull request. The App is the author and the last pusher, so your approval counts, even when you are the only code owner.
+
+```mermaid
+flowchart LR
+  A[You: commit the workflow files] --> B[Agent App: commit the rest, open the PR]
+  B --> C[You: read the diff and approve]
+  C --> D[Merge]
+```
+
+story-gate refuses an agent App that has the `workflows` permission, for any pull request. It never switches to your login because something went wrong with the App: any error other than "not set up" stops the command. The review screen and the pull request say who opened it and why.
+
+**Upgrading a repository.** Your computer's story-gate (`story-gate upgrade`) and each repository's copy are upgraded separately. Upgrade the copy in a repository with:
+
+```bash
+story-gate upgrade-repo                         # inside the repository
+story-gate upgrade-repo owner/repo owner/other  # several at once (each in a temporary clone)
+story-gate upgrade-repo --org Viaknox           # every repository of an organization that has story-gate
+story-gate upgrade-repo --dry-run ...           # show what would change; write nothing
+story-gate upgrade-repo --report --org Viaknox  # which version each repository is on
+```
+
+It copies the signed story-gate on your computer into the repository, keeps your own steps between the "your steps" markers, removes files the new version no longer has, and opens (or updates) one pull request, `story-gate-upgrade`, split as above. The story-gate check on that pull request confirms the copied code is a signed story-gate release; hand-edited story-gate code fails the check. Run it after each `story-gate upgrade`, and after any security release (watch the repository's releases on GitHub to hear about them). A repository you don't upgrade keeps working on its older signed copy.
 
 **If GitHub blocks the merge with "rule violation" but every check is green:** GitHub may have switched on **Require an additional approval for unattributed Copilot pull requests** in the ruleset. It asks for a second approval on every pull request the AI opens, which a solo owner can't give. Setup turns it off; to fix an older repository, run `story-gate setup-repo` again, or untick it in **Settings › Rules › Rulesets › story-gate: human acceptance**.
 
@@ -147,7 +168,7 @@ jobs:
 | Your rules | Always from your main branch's `.story-gate/config.json`, never from the pull request |
 | Secrets | Passed by name, one by one (never `secrets: inherit`). The job that runs the pull request's tests gets none |
 | The check's name | GitHub names it `story-gate / story-gate` (after the job in your short workflow, so keep that job called `story-gate`, with no `name:`; doctor checks). `story-gate setup-repo` makes your branch rules require that name (it also updates an existing story-gate ruleset) |
-| Upgrading | Change the SHA and the version comment to a newer release, in a pull request of its own. A code owner approves it |
+| Upgrading | Change the SHA and the version comment to a newer release, in a pull request of its own, or run `story-gate upgrade-repo`. A code owner approves it |
 | Your own steps | The reusable workflow can't run steps you added between the "your steps" markers. `install --ci reusable` stops if you have some; move them out first, or use `--force` to drop them |
 
 Use the copied workflows (`install --ci copy`, the default) if your organization only allows workflows from its own repositories, or runs GitHub Enterprise Server. The reusable workflow needs github.com.
@@ -755,7 +776,8 @@ Every number in the issue and the report says how it's calculated, and estimates
 - **Release key:** releases are signed with an ed25519 key held by the maintainer. A development copy installs only with `--unsigned`, and doctor says so.
 - **Working on story-gate itself:** agents can't run the branch's `gate.py` through the hooks. Test a change with the test suite (`python -m unittest tests/test_gate.py tests/test_packaging.py`), or, as the human, install the branch as your verified copy with `install --user --unsigned` and reinstall the release afterwards.
 - **Local judge key:** the key for local scoring (`judge.env` in your story-gate folder, or `STORY_GATE_ENV_FILE`) can be read by anything that runs as you, AI agents included. Give it its own key with a spending limit. Merges never depend on it: CI judges with the key in your GitHub secrets. To remove it from this computer, delete that file; `uninstall --user` keeps it and prints where it is.
-- **Agent key:** the agent App's key lives on your computer. It can only act as the agent, never as you, and it can't edit CI or branch rules.
+- **Agent key:** the agent App's key lives on your computer, where your AI can read it. It can only act as the agent, never as you, and it can't edit CI, workflow files or branch rules (story-gate refuses an App that can). It can open pull requests and push branches, so an AI could use it to do that, but never to approve or merge: that takes a code owner.
+- **Your GitHub login on this computer:** `gh` and git credentials can usually be used by anything running as you, AI agents included, and they can do whatever you can (change branch rules, merge). story-gate's hooks refuse known commands that do that, but that is a guard, not a wall. Lockdown (Claude Code) makes it stronger. Keep admin logins out of AI sessions where you can.
 
 ## Tests
 
