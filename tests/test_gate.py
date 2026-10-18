@@ -5027,17 +5027,26 @@ class TestGuidedSetup(unittest.TestCase):
         self.assertEqual(self.S.version_at(self.top, "origin/main"), "0.0.1")
 
     def test_upgrade_drops_old_runtime_files_even_without_a_release_list(self):
-        """A repository set up before release.json was copied: dropped runtime files are found from git itself, and the
-        repository's settings, budgets and stories are never deleted."""
+        """A repository set up before release.json was copied: a dropped file story-gate once shipped is deleted, but a
+        .py of your own in .story-gate/, and the repository's settings, budgets and stories, are never deleted."""
         self.set_up_main()
         self.push_main(".story-gate/sg_gone.py", "# dropped\n", "old")
         self.push_main(".story-gate/vendor/old.css", "x", "old2")
+        self.push_main(".story-gate/my_tool.py", "# mine\n", "mine0")
         self.push_main(".story-gate/budgets.json", "{}", "mine")
         self.push_main(".story-gate/stories/SAT-1/story.md", "# mine\n", "mine2")
-        got = self.S.upgrade_files(self.top, "main", sys.executable)
+        shipped = self.S.SHIPPED_RUNTIME_FILES | {"sg_gone.py", "vendor/old.css"}
+        with patch.object(self.S, "SHIPPED_RUNTIME_FILES", shipped):
+            got = self.S.upgrade_files(self.top, "main", sys.executable)
         self.assertEqual({p for p, c in got.items() if c is None}, {".story-gate/sg_gone.py", ".story-gate/vendor/old.css"})
+        self.assertNotIn(".story-gate/my_tool.py", got)
         self.assertFalse(self.S.is_runtime_name("../x.py")); self.assertFalse(self.S.is_runtime_name("stories/a.py"))
         self.assertFalse(self.S.is_runtime_name("config.json")); self.assertTrue(self.S.is_runtime_name("gate.py"))
+
+    def test_every_runtime_file_is_on_the_shipped_list(self):
+        """A new runtime file must be added to SHIPPED_RUNTIME_FILES, or a later upgrade could never delete it."""
+        import sg_trust as T
+        self.assertEqual(set(T.runtime_files(SRC)) - self.S.SHIPPED_RUNTIME_FILES, set())
 
     def test_upgrade_keeps_your_own_workflow_steps(self):
         """Steps you added between the 'your steps' markers survive an upgrade of the workflow file."""

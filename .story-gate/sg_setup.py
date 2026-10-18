@@ -814,11 +814,26 @@ def upgrade_files(top, base, py):
     # missing or edited): only story-gate's own runtime files, so settings, budgets and stories are never touched.
     listed = subprocess.run(["git", "ls-tree", "-r", "--name-only", ref, ".story-gate/"], cwd=str(top), capture_output=True,
                             text=True).stdout.splitlines()
+    owned = set(SHIPPED_RUNTIME_FILES)
+    try:  # a repository copy from v0.11 on carries its release.json: the names that release shipped are story-gate's too
+        owned |= set((json.loads((_at(top, ref, ".story-gate/release.json") or b"{}").decode("utf-8")).get("files") or {}))
+    except (ValueError, AttributeError):
+        pass
     for p in listed:
         f = p[len(".story-gate/"):]
-        if is_runtime_name(f) and f not in new:
-            out[p] = None  # a runtime file the new version no longer has
+        if is_runtime_name(f) and f not in new and f in owned:
+            out[p] = None  # a runtime file the new version no longer has; a file of your own there is never deleted
     return out
+
+
+# Every runtime file name story-gate shipped up to v0.11 (from its git history). Upgrades delete an obsolete file only
+# when it is on this list or in the repository's own release.json, so a file you added to .story-gate/ stays.
+SHIPPED_RUNTIME_FILES = frozenset((
+    "PROTOCOL.md", "SKILL.md", "gate.py", "sg_areas.py", "sg_dashboard.py", "sg_github.py", "sg_guard.py", "sg_isolate.py",
+    "sg_judges.py", "sg_measure.py", "sg_pin.py", "sg_pitfalls.py", "sg_report.py", "sg_reusable.py", "sg_settings.py",
+    "sg_setup.py", "sg_specpull.py", "sg_stories.py", "sg_trackers.py", "sg_trackersetup.py", "sg_trust.py",
+    "sg_validation.py", "sg_writing.py", "vendor/ClashDisplay-600.woff2", "vendor/FONTS-LICENSE", "vendor/Switzer-400.woff2",
+    "vendor/Switzer-600.woff2", "vendor/TABLER-LICENSE", "vendor/tabler.min.css", "vendor/viaknox-wordmark.svg"))
 
 
 def is_runtime_name(f):
