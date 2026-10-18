@@ -58,6 +58,11 @@ def has_agent():
 
 def setup_files(top, base, py):
     """The files the setup pull request adds: story-gate installed into a clean copy of the default branch."""
+    links = setup_links(top, "origin/" + base)
+    if links:
+        raise RuntimeError("%s has links (symlinks) where story-gate writes its files (%s). Writing through them could change "
+                           "files outside the repository, so story-gate stops. Replace them with real files or folders, then try "
+                           "again." % (base, ", ".join(links[:5])))
     tmp = Path(tempfile.mkdtemp(prefix="sg-setup-"))
     wt = tmp / "wt"
     try:
@@ -101,6 +106,21 @@ def setup_files(top, base, py):
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(top), capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+SETUP_PATHS = (".story-gate", ".github", ".agents", ".claude", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore", "CODEOWNERS",
+               "docs")
+
+
+def setup_links(top, ref):
+    """Symlinks at `ref` on any path setup (and install) writes into, or on a folder above one. -> their paths."""
+    r = subprocess.run(["git", "ls-tree", "-r", "-t", "--full-tree", ref], cwd=str(top), capture_output=True, text=True)
+    out = []
+    for line in r.stdout.splitlines():
+        meta, _, path = line.partition("\t")
+        if meta.split(" ")[0] == "120000" and path.split("/")[0] in SETUP_PATHS:
+            out.append(path)
+    return out
 
 
 def run_without_judge(files):

@@ -4875,6 +4875,21 @@ class TestGuidedSetup(unittest.TestCase):
         for a in (["add", "-A"], ["commit", "-qm", "set up"], ["push", "-q", "origin", "main"]):
             subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
 
+    def test_setup_refuses_a_branch_with_links_where_it_writes(self):
+        """A default branch that records .story-gate (or .github, AGENTS.md...) as a symlink could make setup or upgrade-repo
+        write outside the repository: both stop before writing anything."""
+        outside = self.tmp / "outside"; outside.mkdir()
+        try:
+            os.symlink(str(outside), str(self.top / ".story-gate"))
+        except (OSError, NotImplementedError):
+            self.skipTest("this system can't make symlinks (Windows without the privilege)")
+        for a in (["add", "-A"], ["commit", "-qm", "link"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        with self.assertRaisesRegex(RuntimeError, "symlinks"):
+            self.S.setup_files(self.top, "main", sys.executable)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.S.setup_links(self.top, "origin/main"), [".story-gate"])
+
     def test_upgrade_files_need_a_set_up_repository(self):
         with self.assertRaisesRegex(RuntimeError, "story-gate init"):
             self.S.upgrade_files(self.top, "main", sys.executable)
