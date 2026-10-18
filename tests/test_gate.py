@@ -1021,7 +1021,7 @@ class TestStoryGateOnlyPullRequests(Base):
         real = subprocess.run
         def broken(cmd, *a, **k):
             """git ls-files fails; everything else runs for real."""
-            if cmd[:2] == ["git", "ls-files"]:
+            if cmd[:1] == ["git"] and "ls-files" in cmd:
                 return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
             return real(cmd, *a, **k)
         with patch("subprocess.run", side_effect=broken):
