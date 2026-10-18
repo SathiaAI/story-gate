@@ -108,8 +108,8 @@ def setup_files(top, base, py):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-SETUP_PATHS = (".story-gate", ".github", ".agents", ".claude", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore", "CODEOWNERS",
-               "docs")
+SETUP_PATHS = (".story-gate", ".github", ".agents", ".claude", ".codex", ".cursor", ".gemini", ".devin", ".windsurf", ".grok",
+               "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore", "CODEOWNERS", "docs")  # every folder of gate.HOOK_FILES too
 
 
 def setup_links(top, ref):

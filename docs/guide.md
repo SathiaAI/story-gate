@@ -103,7 +103,7 @@ flowchart LR
   C --> D[Merge]
 ```
 
-story-gate refuses an agent App that has the `workflows` permission, for any pull request. It never switches to your login because something went wrong with the App: any error other than "not set up" stops the command. The review screen and the pull request say who opened it and why.
+story-gate refuses an agent App that has the `workflows` permission, for any pull request. Every agent token is also asked for only contents, pull requests and issues (write), metadata and checks (read), so an App given more access still hands your AI a token without it. It never switches to your login because something went wrong with the App: any error other than "not set up" stops the command. The review screen and the pull request say who opened it and why.
 
 **Upgrading a repository.** Your computer's story-gate (`story-gate upgrade`) and each repository's copy are upgraded separately. Upgrade the copy in a repository with:
 

@@ -4842,6 +4842,31 @@ class TestAuthorPolicy(unittest.TestCase):
                             self.real_agent_token("o/r")
                         self.assertEqual(isinstance(cm.exception, G.AgentMissing), missing)
 
+    def test_agent_token_asks_only_for_builder_access_even_when_the_app_has_more(self):
+        """An App given workflows/secrets/checks: write still hands the AI a token capped at AGENT_MAX_PERMS (and never
+        more than the App holds); the App's own access is reported so setup can refuse it."""
+        from unittest import mock
+        G = self.G
+        home = Path(tempfile.mkdtemp())
+        (home / "agent.json").write_text(json.dumps({"key": str(home / "k.pem"), "install_url": "https://x"}))
+        have = {"contents": "write", "pull_requests": "write", "issues": "read", "metadata": "read", "checks": "write",
+                "workflows": "write", "secrets": "write"}
+        sent = []
+
+        def call(method, path, tok, body=None):
+            """Fake GitHub: the installation (with the App's access), then the token request, which is recorded."""
+            if path.endswith("/installation"):
+                return 200, {"id": 7, "permissions": have}, {}
+            sent.append(body)
+            return 201, {"token": "t", "permissions": body["permissions"]}, {}
+        with mock.patch.dict(os.environ, {"STORY_GATE_HOME": str(home)}), mock.patch.object(G, "app_jwt", return_value="jwt"), \
+                mock.patch.object(G, "call", side_effect=call):
+            _, _, rec = self.real_agent_token("o/r")
+        self.assertEqual(sent[0]["permissions"], {"contents": "write", "pull_requests": "write", "issues": "read",
+                                                  "metadata": "read", "checks": "read"})
+        self.assertEqual(sent[0]["repositories"], ["r"])
+        self.assertEqual(rec["installation_permissions"], have)
+
 
 class TestGuidedSetup(unittest.TestCase):
     """story-gate init: the browser page and the setup pull request (GitHub calls are faked; no network)."""
@@ -4925,6 +4950,12 @@ class TestGuidedSetup(unittest.TestCase):
             self.S.setup_files(self.top, "main", sys.executable)
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(self.S.setup_links(self.top, "origin/main"), [".story-gate"])
+
+    def test_setup_link_check_covers_every_folder_install_writes_hooks_into(self):
+        """Every folder install writes AI-tool hook files into is on the symlink stop-list, so a new hook folder can't slip by."""
+        import gate
+        tops = {f.split("/")[0] for f in gate.HOOK_FILES}
+        self.assertEqual(tops - set(self.S.SETUP_PATHS), set())
 
     def test_upgrade_files_need_a_set_up_repository(self):
         with self.assertRaisesRegex(RuntimeError, "story-gate init"):

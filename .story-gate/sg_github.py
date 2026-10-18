@@ -784,17 +784,18 @@ def pr_author(repo, branch, token, login, touches_workflows=False):
     try:
         tok, _, rec = agent_token(repo)
         perms = rec.get("permissions") or {}
+        granted = rec.get("installation_permissions") or perms  # what the App itself holds, beyond this token
         short = [p for p in ("contents", "pull_requests") if perms.get(p) != "write"]
         if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
             raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
                                "and accept them on the installation, then try again." % (repo, " and ".join(short)))
-        extra = sorted(k for k, v in perms.items() if _RANK.get(v, 3) > _RANK[AGENT_MAX_PERMS.get(k, "none")])
+        extra = sorted(k for k, v in granted.items() if _RANK.get(v, 3) > _RANK[AGENT_MAX_PERMS.get(k, "none")])
         if extra:
             # the builder must never be able to change workflows, branch rules, secrets or check results: refuse such an App
             raise RuntimeError("the agent App on %s has more access than an AI builder may have (%s). With it, your AI could "
                                "change workflows, branch rules, secrets or check results without review. Remove those "
                                "permissions in the App's settings (it needs only %s), accept the change on the installation, "
-                               "then try again." % (repo, ", ".join("%s: %s" % (k, perms[k]) for k in extra),
+                               "then try again." % (repo, ", ".join("%s: %s" % (k, granted[k]) for k in extra),
                                                      ", ".join("%s: %s" % kv for kv in sorted(AGENT_MAX_PERMS.items()))))
         slug = rec.get("slug", "story-gate-agent")
         if not touches_workflows:
@@ -867,10 +868,19 @@ def agent_token(repo):
         raise AgentMissing("the agent App is not installed on %s. Install it: %s" % (repo, rec["install_url"]))
     if st != 200:
         raise RuntimeError("GitHub didn't say whether the agent App is installed on %s (HTTP %s)" % (repo, st))
-    st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt, {"repositories": [repo.split("/", 1)[1]]})
+    have = inst.get("permissions") or {}
+    # Ask only for what an AI builder may have (AGENT_MAX_PERMS), never more than the App holds: an App given extra
+    # access (workflows, secrets, ...) still hands the AI a token without it.
+    want = {k: (v if _RANK.get(have[k], 0) >= _RANK[v] else have[k]) for k, v in AGENT_MAX_PERMS.items()
+            if _RANK.get(have.get(k), 0) > 0}
+    if not want:
+        raise RuntimeError("the agent App on %s has none of the access an AI builder needs (%s)" % (
+            repo, ", ".join("%s: %s" % kv for kv in sorted(AGENT_MAX_PERMS.items()))))
+    st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt,
+                      {"repositories": [repo.split("/", 1)[1]], "permissions": want})
     if st not in (200, 201):
         raise RuntimeError("GitHub refused an agent token (HTTP %s)" % st)
-    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {})
+    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {}, installation_permissions=have)
 
 
 def bot_identity(rec):
