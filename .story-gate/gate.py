@@ -3933,17 +3933,14 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         ctx = G.pr_context()
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
-                         or (f.startswith(".story-gate/") and (f.endswith(".py") or f.startswith(".story-gate/vendor/"))))
+                         or (f.startswith(".story-gate/") and (f.endswith((".py", ".pyc")) or f.startswith(".story-gate/vendor/")
+                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
         if touched:
-            runtime = [f for f in touched if f.startswith(".story-gate/") and f != ".story-gate/config.json"]
-            if runtime:  # the PR's copy of story-gate must be a signed release, checked with the BASE branch's release key
-                try:
-                    man = T.verify_release(ROOT / ".story-gate")
-                    notes.append("story-gate's copied code in this PR is the signed story-gate %s release." % man.get("version", "?"))
-                except T.TrustError as ex:
-                    problems.append("This PR changes story-gate's copied code (%s), but that copy is not a signed story-gate "
-                                    "release: %s. Upgrade with `story-gate upgrade-repo`, which copies a signed release, and "
-                                    "don't approve hand-edited story-gate code." % (", ".join(runtime[:5]), ex))
+            bad_copy, good_copy = runtime_copy_check(files, base)
+            if bad_copy:
+                problems.append(bad_copy)
+            if good_copy:
+                notes.append(good_copy)
             who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
             owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
                           or git("show", "%s:docs/CODEOWNERS" % base) or "")  # the same lookup as story acceptance below
@@ -4756,12 +4753,53 @@ def cmd_install(py, ci="copy", kv=None, rest=()):
           "      4) on each computer that runs AI tools: gate.py install --user  (turns on the hooks, safely)")
 
 
+RUNTIME_COPY_EXTRA = (".story-gate/PROTOCOL.md", ".story-gate/SKILL.md", ".story-gate/release.json", ".story-gate/release.json.sig")
+
+
+def _ver(v):
+    """A version like '0.10.1' as a tuple to compare; () when it isn't one."""
+    return tuple(int(x) for x in v.split(".")) if re.fullmatch(r"\d+(\.\d+)*", v or "") else ()
+
+
+def runtime_copy_check(files, base):
+    """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
+    branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
+    Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
+    changed = [f for f in files if f.startswith(".story-gate/") and f not in (".story-gate/config.json", ".story-gate/budgets.json")
+               and not f.startswith((".story-gate/stories/", ".story-gate/judge-calibration"))]
+    if not changed:
+        return "", ""
+    bad = [f for f in changed if "__pycache__" in f or f.endswith(".pyc")]
+    if bad:
+        return ("This PR adds compiled Python files to story-gate's copy (%s). Python could run them instead of the checked "
+                "code. Remove them." % ", ".join(bad[:5])), ""
+    what = ", ".join(changed[:5])
+    try:
+        man = T.verify_release(ROOT / ".story-gate")
+    except T.TrustError as ex:
+        return ("This PR changes story-gate's copied code (%s), but that copy is not a signed story-gate release: %s. Upgrade "
+                "with `story-gate upgrade-repo`, which copies a signed release, and don't approve hand-edited story-gate code."
+                % (what, ex)), ""
+    try:
+        was = json.loads(git("show", "%s:.story-gate/release.json" % base) or "{}").get("version") or ""
+    except ValueError:
+        was = ""
+    now = man.get("version") or ""
+    if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
+        return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "
+                "release can have holes later releases fixed. Use `story-gate upgrade-repo` with the newest release." % (now, was)), ""
+    return "", "story-gate's copied code in this PR is the signed story-gate %s release." % now
+
+
 def cmd_upgrade_repo(kv, rest):
     """upgrade-repo: the current folder's repository, the owner/name ones listed, or every one of --org ORG."""
     import sg_setup as S
     import sg_github as G_
     tok = G_.human_token()
     names = [a for a in rest if REPO_NAME.fullmatch(a)]
+    odd = [a for a in rest if not a.startswith("--") and not REPO_NAME.fullmatch(a)]
+    if odd:
+        sys.exit("upgrade-repo: %s isn't a repository name. Write them as owner/name." % ", ".join(odd))
     if kv.get("org"):
         org, page = kv["org"], 1
         if not REPO_OWNER.fullmatch(org):

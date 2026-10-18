@@ -766,6 +766,11 @@ def approval_required(repo, branch, token):
     return bool(b.get("protected"))
 
 
+# The most the agent App may hold (what setup-agent asks for). Anything more is refused, never used.
+AGENT_MAX_PERMS = {"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read", "checks": "read"}
+_RANK = {None: 0, "": 0, "none": 0, "read": 1, "write": 2, "admin": 3}
+
+
 def pr_author(repo, branch, token, login, touches_workflows=False):
     """Who opens a pull request story-gate makes, decided before anything is written. GitHub never counts an approval
     from whoever opened a pull request, so:
@@ -783,11 +788,14 @@ def pr_author(repo, branch, token, login, touches_workflows=False):
         if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
             raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
                                "and accept them on the installation, then try again." % (repo, " and ".join(short)))
-        if perms.get("workflows") not in (None, "", "none"):
-            # the builder must never be able to change workflow files: refuse rather than use such an App
-            raise RuntimeError("the agent App on %s can change workflow files (permission 'workflows'). That lets your AI run a "
-                               "workflow with this repository's secrets without review. Remove the 'workflows' permission in "
-                               "the App's settings, accept the change on the installation, then try again." % repo)
+        extra = sorted(k for k, v in perms.items() if _RANK.get(v, 3) > _RANK[AGENT_MAX_PERMS.get(k, "none")])
+        if extra:
+            # the builder must never be able to change workflows, branch rules, secrets or check results: refuse such an App
+            raise RuntimeError("the agent App on %s has more access than an AI builder may have (%s). With it, your AI could "
+                               "change workflows, branch rules, secrets or check results without review. Remove those "
+                               "permissions in the App's settings (it needs only %s), accept the change on the installation, "
+                               "then try again." % (repo, ", ".join("%s: %s" % (k, perms[k]) for k in extra),
+                                                     ", ".join("%s: %s" % kv for kv in sorted(AGENT_MAX_PERMS.items()))))
         slug = rec.get("slug", "story-gate-agent")
         if not touches_workflows:
             return "app", tok, "the agent App (%s[bot]) opens it, so a code owner's approval counts" % slug
@@ -1014,9 +1022,12 @@ def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base
         head = ok("GET", f"{r}/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
         wf_tree = _tree_with(ok, r, base_tree, wf) if wf else base_tree
         want = _tree_with(app_ok, r, wf_tree, rest) if rest else wf_tree
-        if ok("GET", f"{r}/git/commits/{head}")["tree"]["sha"] == want:
+        # the title and body are always story-gate's own, whoever opened the pull request first
+        app_ok("PATCH", f"{r}/pulls/{found['number']}", {"title": title, "body": body})
+        head_commit = ok("GET", f"{r}/git/commits/{head}")
+        if head_commit["tree"]["sha"] == want and _by_bot(app_ok, r, head):
             return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True, "updated": False}
-        if wf:
+        if wf and head_commit["tree"]["sha"] != want:
             head = ok("POST", r + "/git/commits", {"message": title + " (workflow files)", "tree": wf_tree, "parents": [head]})["sha"]
             ok("PATCH", ref, {"sha": head})
         app = app_ok("POST", r + "/git/commits", {"message": title, "tree": want, "parents": [head]})
@@ -1033,15 +1044,23 @@ def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base
     try:
         creator("POST", r + "/git/refs", {"ref": "refs/heads/" + branch, "sha": start})
     except RuntimeError as ex:
-        if "HTTP 422" in str(ex):
-            raise RuntimeError("the branch '%s' already exists on %s. Merge or delete it on GitHub, then run this again." % (branch, repo))
-        raise
+        if "HTTP 422" not in str(ex):
+            raise
+        # The branch exists but no pull request does: an earlier run stopped half way. Point it at the new commit
+        # (force: nothing on it was ever proposed for review), as you when it holds workflow changes.
+        creator("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": start, "force": True})
     # the App's commit always comes last (even when it changes nothing), so the App is the last pusher
     app_tree = _tree_with(app_ok, r, wf_tree, rest) if rest else wf_tree
     app = app_ok("POST", r + "/git/commits", {"message": title, "tree": app_tree, "parents": [start]})
     app_ok("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": app["sha"]})
     pr = app_ok("POST", r + "/pulls", {"title": title, "head": branch, "base": base, "body": body})
     return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
+
+
+def _by_bot(ok, r, sha):
+    """True when commit `sha` was committed by a bot (the agent App), so a person's approval of it counts."""
+    c = ok("GET", f"{r}/commits/{sha}")
+    return ((c.get("committer") or {}).get("type") == "Bot") or ((c.get("author") or {}).get("type") == "Bot")
 
 
 def _tree_with(ok, r, base_tree, files):

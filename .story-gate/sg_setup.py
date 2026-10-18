@@ -780,19 +780,27 @@ def upgrade_files(top, base, py):
                            "Run `story-gate init` instead." % base)
     out = {p: c for p, c in setup_files(top, base, py).items() if _at(top, ref, p) != c}
     import sg_trust as T
-    try:
-        old = json.loads((_at(top, ref, ".story-gate/release.json") or b"{}").decode("utf-8")).get("files") or {}
-    except ValueError:
-        old = {}
     new = set(T.runtime_files(HERE))
-    for f in sorted(set(old) - new):  # runtime files the new version no longer has
-        parts = str(f).replace("\\", "/").split("/")
-        if not f or str(f).startswith(("/", "\\")) or ":" in str(f) or any(x in ("", ".", "..") for x in parts):
-            continue  # only plain names inside .story-gate/ are ever deleted
-        p = ".story-gate/" + f
-        if _at(top, ref, p) is not None:
-            out[p] = None
+    # What the repository's copy holds now, read from git itself (never from its release.json, which may be old,
+    # missing or edited): only story-gate's own runtime files, so settings, budgets and stories are never touched.
+    listed = subprocess.run(["git", "ls-tree", "-r", "--name-only", ref, ".story-gate/"], cwd=str(top), capture_output=True,
+                            text=True).stdout.splitlines()
+    for p in listed:
+        f = p[len(".story-gate/"):]
+        if is_runtime_name(f) and f not in new:
+            out[p] = None  # a runtime file the new version no longer has
     return out
+
+
+def is_runtime_name(f):
+    """True for a path (inside .story-gate/) that is one of story-gate's runtime files by name: a top-level *.py,
+    PROTOCOL.md, SKILL.md, or a file directly in vendor/."""
+    parts = f.split("/")
+    if any(x in ("", ".", "..") for x in parts) or ":" in f or "\\" in f:
+        return False
+    if len(parts) == 1:
+        return f.endswith(".py") or f in ("PROTOCOL.md", "SKILL.md")
+    return len(parts) == 2 and parts[0] == "vendor"
 
 
 def version_at(top, ref):
@@ -815,6 +823,12 @@ def upgrade_repo(top, py, dry=False, token=None, out=print):
     the workflow files, the agent App commits the rest and opens it (pr_author), so your approval counts.
     -> (status, detail): status 'up-to-date', 'dry-run', 'opened', 'updated', 'unchanged' or 'error'."""
     version = this_version()
+    import sg_trust as T
+    try:
+        T.verify_release(HERE)  # copy only a signed release into repositories
+    except T.TrustError as ex:
+        return "error", ("upgrade-repo copies the story-gate on this computer into your repositories, so it must be a "
+                         "signed release: %s. Install one (`story-gate upgrade`), then try again." % ex)
     repo = github_repo(top)
     if not repo:
         return "error", "this folder isn't a clone of a GitHub repository"
@@ -865,7 +879,7 @@ def upgrade_many(repos, py, dry=False, token=None, out=print):
         tmp = Path(tempfile.mkdtemp(prefix="sg-upgrade-"))
         try:
             r = subprocess.run(["git", "clone", "-q", "--filter=blob:none", "https://github.com/%s.git" % repo, str(tmp / "r")],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, timeout=600, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
             if r.returncode:
                 results.append((repo, "error", "couldn't clone it: %s" % (r.stderr.strip().splitlines() or ["?"])[-1]))
                 continue
@@ -890,6 +904,9 @@ def version_report(repos, token, latest, out=print):
                 ver = json.loads(base64.b64decode(f["content"]).decode("utf-8")).get("version") or "?"
             except (ValueError, TypeError):
                 ver = "?"
+        if not ver:  # set up before release.json was copied: still a story-gate repository, version unknown
+            st3, _, _ = G.call("GET", "/repos/%s/contents/.story-gate/config.json" % repo, token)
+            ver = "?" if st3 == 200 else ""
         owner = repo.split("/", 1)[0]
         st2, prs, _ = G.call("GET", "/repos/%s/pulls?state=open&head=%s" % (repo, urllib.parse.quote("%s:%s" % (owner, UPGRADE_BRANCH))), token)
         pr = "#%s" % prs[0]["number"] if st2 == 200 and isinstance(prs, list) and prs else ""
