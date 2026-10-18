@@ -3933,7 +3933,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         ctx = G.pr_context()
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
-                         or (f.startswith(".story-gate/") and (f.endswith((".py", ".pyc")) or f.startswith(".story-gate/vendor/")
+                         or (f.startswith(".story-gate/") and (f.lower().endswith(IMPORTABLE) or f.startswith(".story-gate/vendor/")
                                                                 or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
         if touched:
             bad_copy, good_copy = runtime_copy_check(files, base)
@@ -4753,6 +4753,8 @@ def cmd_install(py, ci="copy", kv=None, rest=()):
           "      4) on each computer that runs AI tools: gate.py install --user  (turns on the hooks, safely)")
 
 
+# Every file name ending Python can import a module from (source, compiled, native), on any OS.
+IMPORTABLE = (".py", ".pyw", ".pyc", ".pyo", ".so", ".pyd", ".dylib")
 RUNTIME_COPY_EXTRA = (".story-gate/PROTOCOL.md", ".story-gate/SKILL.md", ".story-gate/release.json", ".story-gate/release.json.sig")
 
 
@@ -4787,6 +4789,16 @@ def runtime_copy_check(files, base):
         was = json.loads(git("show", "%s:.story-gate/release.json" % base) or "{}").get("version") or ""
     except ValueError:
         was = ""
+    listed = set(man.get("files") or {})
+    # what the PR holds (tracked, plus not-ignored new files); Python's own __pycache__ is refused above when a PR adds it
+    tracked = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".story-gate/"],
+                             cwd=str(ROOT), capture_output=True).stdout
+    rels = {p[len(".story-gate/"):] for p in tracked.decode("utf-8", "replace").split("\0") if p}
+    extra = sorted(r for r in rels if r.lower().endswith(IMPORTABLE) and r not in listed and "__pycache__" not in r
+                   and not r.startswith("stories/"))
+    if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
+        return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
+                "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
     now = man.get("version") or ""
     if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
         return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "

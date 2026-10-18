@@ -899,6 +899,7 @@ class TestStoryGateOnlyPullRequests(Base):
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
         for f in touch or []:  # a story-gate file other than config.json
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
             with open(self.repo / f, "a", encoding="utf-8") as fh:
                 fh.write("\n# changed\n")
         g = load_gate(self.repo)
@@ -919,7 +920,7 @@ class TestStoryGateOnlyPullRequests(Base):
             """Fake release check: a signed copy of `signed`, or (signed=None) a copy that isn't a signed release."""
             if signed is None:
                 raise T.TrustError("files differ from the signed release: sg_report.py")
-            return {"version": signed}
+            return {"version": signed, "files": {f: "h" for f in T.runtime_files(src)}}  # like the real one: it lists them all
         saved_verify = T.verify_release
         self.addCleanup(setattr, T, "verify_release", saved_verify)
         T.verify_release = verify
@@ -999,6 +1000,21 @@ class TestStoryGateOnlyPullRequests(Base):
         bad, good = g.runtime_copy_check([".story-gate/__pycache__/gate.cpython-312.pyc", ".story-gate/gate.py"], "main")
         self.assertIn("compiled Python files", bad); self.assertEqual(good, "")
         self.assertEqual(g.runtime_copy_check([".story-gate/config.json", ".story-gate/stories/SAT-1/story.md", "app.py"], "main"), ("", ""))
+
+    def test_importable_files_the_signed_release_does_not_list_are_refused(self):
+        """A native module (sg_trust.so) or a package folder (sg_trust/__init__.py) could load instead of the signed
+        sg_trust.py: the PR counts as a story-gate code change and fails, even when the listed files are signed."""
+        for extra in (".story-gate/sg_trust.so", ".story-gate/sg_trust/__init__.py", ".story-gate/JSON.PYD"):
+            with self.subTest(extra=extra):
+                try:
+                    rc, out, _ = self.ci(accepted=True, touch=[extra])
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("importable files the signed release doesn't list", out)
+                    self.assertIn(extra[len(".story-gate/"):], out)
+                finally:
+                    subprocess.run(["git", "checkout", "-qf", "main"], cwd=self.repo, check=True)
+                    subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
+                    subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
 
     def test_config_only_changes_never_need_a_signed_release(self):
         """config.json is the repository's own settings: changing only it never asks for a signed release."""
