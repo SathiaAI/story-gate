@@ -25,6 +25,9 @@ Commands (run from the repo root):
   release-sign --key KEY             maintainers: sign the files in .story-gate as a release
   try [--no-browser]                 see story-gate catch a bug in two minutes: a throwaway example, no setup, no network
   init [--test-command CMD] [--junit-path FILE]  guided setup in your browser: sign in, the AI's own login, judge key, one pull request.
+  upgrade-repo [--dry-run] [owner/name ... | --org ORG]   bring set-up repositories to this story-gate version, one pull
+                                     request each (you add the workflow files, the agent App the rest and opens it; you approve)
+  upgrade-repo --report [owner/name ... | --org ORG]     which story-gate version each repository is on
                                      CMD runs the project's tests on a clean Linux machine (CI); with it, a red check blocks merges
   hook-selftest                      run each installed user-level hook the way the AI tool would, and time it
   feature <F> --title T [--description D]   register a feature (stories point to it with `feature:` in story.md)
@@ -1268,6 +1271,7 @@ def spec_scenarios(text, unread=None):
 SNAPSHOT_NAME = re.compile(r"^\.story-gate/stories/([^/]+)/issue-(?:([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})--([A-Za-z0-9_.-]{1,100})-)?"
                            r"([0-9]{1,9})\.md$")
 REPO_NAME = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/(?!\.{1,2}$)[A-Za-z0-9_.-]{1,100}")  # never '.' or '..' 
+REPO_OWNER = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}")
 
 
 def snapshot_name(rel):
@@ -3362,7 +3366,7 @@ def shell_writes(cmd):
 
 
 ADMIN_COMMANDS = {"install", "uninstall", "enroll", "unenroll", "upgrade", "rollback", "release-sign", "setup-repo", "setup-agent",
-                  "judge-calibrate", "lockdown", "filter", "hook-trust", "init", "tracker-setup"}
+                  "judge-calibrate", "lockdown", "filter", "hook-trust", "init", "tracker-setup", "upgrade-repo"}
 # Ways to switch off or route around the checkout filter (sg_guard), or to change what "the default branch" means.
 # Nothing an agent needs; refused in any shell command (matched with quotes removed). The hooks also check the filter
 # itself on every call (sg_guard.tampered), because text matching can't see every spelling.
@@ -3929,8 +3933,14 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         ctx = G.pr_context()
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
-                         or (f.startswith(".story-gate/") and (f.endswith(".py") or f.startswith(".story-gate/vendor/"))))
+                         or (f.startswith(".story-gate/") and (f.lower().endswith(IMPORTABLE) or f.startswith(".story-gate/vendor/")
+                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
         if touched:
+            bad_copy, good_copy = runtime_copy_check(files, base)
+            if bad_copy:
+                problems.append(bad_copy)
+            if good_copy:
+                notes.append(good_copy)
             who = G.label_added_by(ctx, token, CHANGE_LABEL) if ctx and token else None
             owners_txt = (git("show", "%s:.github/CODEOWNERS" % base) or git("show", "%s:CODEOWNERS" % base)
                           or git("show", "%s:docs/CODEOWNERS" % base) or "")  # the same lookup as story acceptance below
@@ -4743,6 +4753,117 @@ def cmd_install(py, ci="copy", kv=None, rest=()):
           "      4) on each computer that runs AI tools: gate.py install --user  (turns on the hooks, safely)")
 
 
+# Every file name ending Python can import a module from (source, compiled, native), on any OS.
+IMPORTABLE = (".py", ".pyw", ".pyc", ".pyo", ".so", ".pyd", ".dylib")
+RUNTIME_COPY_EXTRA = (".story-gate/PROTOCOL.md", ".story-gate/SKILL.md", ".story-gate/release.json", ".story-gate/release.json.sig")
+
+
+def _ver(v):
+    """A version like '0.10.1' as a tuple to compare; () when it isn't one."""
+    return tuple(int(x) for x in v.split(".")) if re.fullmatch(r"\d+(\.\d+)*", v or "") else ()
+
+
+def runtime_copy_check(files, base):
+    """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
+    branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
+    Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
+    if ".story-gate" in files or (ROOT / ".story-gate").is_symlink():
+        return ("This PR turns the .story-gate folder into a link. The checks would then run code from wherever it points, "
+                "outside what this check reviews. Keep .story-gate a real folder."), ""
+    changed = [f for f in files if f.startswith(".story-gate/") and f not in (".story-gate/config.json", ".story-gate/budgets.json")
+               and not f.startswith((".story-gate/stories/", ".story-gate/judge-calibration"))]
+    if not changed:
+        return "", ""
+    bad = [f for f in changed if "__pycache__" in f or f.endswith(".pyc")]
+    if bad:
+        return ("This PR adds compiled Python files to story-gate's copy (%s). Python could run them instead of the checked "
+                "code. Remove them." % ", ".join(bad[:5])), ""
+    what = ", ".join(changed[:5])
+    try:
+        man = T.verify_release(ROOT / ".story-gate")
+    except T.TrustError as ex:
+        return ("This PR changes story-gate's copied code (%s), but that copy is not a signed story-gate release: %s. Upgrade "
+                "with `story-gate upgrade-repo`, which copies a signed release, and don't approve hand-edited story-gate code."
+                % (what, ex)), ""
+    try:
+        was = json.loads(git("show", "%s:.story-gate/release.json" % base) or "{}").get("version") or ""
+    except ValueError:
+        was = ""
+    listed = set(man.get("files") or {})
+    # what the PR holds (tracked, plus not-ignored new files); Python's own __pycache__ is refused above when a PR adds it
+    try:  # must(): story-gate's locked-down git, and a failure or time-out raises instead of looking like no files
+        ls = must("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".story-gate/")
+    except RuntimeError as ex:  # never pass the copy without having looked at it
+        return ("story-gate couldn't list the files in this PR's story-gate copy (%s), so it can't confirm the copy holds only "
+                "signed code. Re-run the check." % ex), ""
+    rels = {p[len(".story-gate/"):] for p in ls.split("\0") if p}
+    extra = sorted(r for r in rels if r.lower().endswith(IMPORTABLE) and r not in listed and "__pycache__" not in r
+                   and not r.startswith("stories/"))
+    if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
+        return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
+                "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
+    now = man.get("version") or ""
+    if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
+        return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "
+                "release can have holes later releases fixed. Use `story-gate upgrade-repo` with the newest release." % (now, was)), ""
+    return "", "story-gate's copied code in this PR is the signed story-gate %s release." % now
+
+
+def cmd_upgrade_repo(kv, rest):
+    """upgrade-repo: the current folder's repository, the owner/name ones listed, or every one of --org ORG."""
+    import sg_setup as S
+    import sg_github as G_
+    tok = G_.human_token()
+    unknown = sorted(set(kv) - {"org", "python"})
+    if unknown:  # a typo like --dryrun would otherwise swallow the next argument and run for real
+        sys.exit("upgrade-repo: unknown option %s. It takes --org ORG, --python PATH, --dry-run and --report."
+                 % ", ".join("--" + k for k in unknown))
+    names = [a for a in rest if REPO_NAME.fullmatch(a)]
+    odd = [a for a in rest if not a.startswith("--") and not REPO_NAME.fullmatch(a)]
+    if odd:
+        sys.exit("upgrade-repo: %s isn't a repository name. Write them as owner/name." % ", ".join(odd))
+    if kv.get("org"):
+        org, page = kv["org"], 1
+        if not REPO_OWNER.fullmatch(org):
+            sys.exit("--org must be a GitHub organization or user name")
+        listing = "/orgs/" + org + "/repos?per_page=100&page=%d"
+        while True:
+            st, got, _ = G_.call("GET", listing % page, tok)
+            if st == 404 and page == 1:  # a person's account, not an organization: keep that listing for every page
+                me = G_.whoami(tok) if tok else None
+                listing = ("/user/repos?affiliation=owner&per_page=100&page=%d" if me and me.lower() == org.lower()
+                           else "/users/" + org + "/repos?per_page=100&page=%d")  # your own: private ones too
+                st, got, _ = G_.call("GET", listing % page, tok)
+            if st != 200 or not isinstance(got, list):
+                sys.exit("couldn't list the repositories of %s (HTTP %s)" % (org, st))
+            names += [r["full_name"] for r in got if isinstance(r, dict) and not r.get("archived") and r.get("full_name")]
+            if len(got) < 100:
+                break
+            page += 1
+    if "--report" in rest:
+        if not names:
+            sys.exit("say which repositories: owner/name ... or --org ORG")
+        if not tok:
+            sys.exit("sign in to GitHub first: `gh auth login`")
+        S.version_report(names, tok, VERSION)
+        return 0
+    dry = "--dry-run" in rest
+    py = os.path.abspath(kv.get("python") or sys.executable)
+    if not names:
+        top = T.repo_identity(os.getcwd())[0]
+        if not top:
+            sys.exit("run this inside a set-up repository, or name them: upgrade-repo owner/name ... (or --org ORG)")
+        status, detail = S.upgrade_repo(top, py, dry=dry)
+        print("%s: %s" % (status, detail))
+        return 1 if status == "error" else 0
+    if kv.get("org"):  # only the repositories story-gate is set up in
+        names = [r[0] for r in S.version_report(names, tok, VERSION, out=lambda *_: None) if r[1] != "-"]
+    results = S.upgrade_many(names, py, dry=dry)
+    for repo, status, detail in results:
+        print("%-11s %s" % (status, detail if detail.startswith(repo) else "%s: %s" % (repo, detail)))
+    return 1 if any(r[1] == "error" for r in results) else 0
+
+
 def dash_yml():
     base = re.sub(r"^origin/", "", cfg().get("base_branch", "main"))
     return DASH_YML.replace("{base}", json.dumps(base)).replace("{{", "{").replace("}}", "}")
@@ -5408,7 +5529,8 @@ def cmd_setup(cmd, kv, rest):
 # Flags that take no value. Every flag a command looks for in `rest` must be listed here (a test checks), or flags()
 # would read the next argument as its value.
 BOOL_FLAGS = ("--strict", "--dry-run", "--no-browser", "--git-credential", "--user", "--unsigned", "--offline", "--open", "--serve", "--publish",
-              "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force", "--revoke", "--scan")
+              "--report-failure", "--prove", "--on", "--off", "--explain", "--allow-local-policy", "--remove", "--force", "--revoke", "--scan",
+              "--report")
 
 
 def flags(argv):
@@ -5522,6 +5644,8 @@ def main(argv):
         import sg_setup
         return sg_setup.run(top, os.path.abspath(kv.get("python") or sys.executable), open_browser="--no-browser" not in rest,
                             test_command=kv.get("test-command", ""), junit_path=kv.get("junit-path", ""))
+    if cmd == "upgrade-repo":
+        return cmd_upgrade_repo(kv, rest)
     if cmd == "try":
         return cmd_try(open_="--no-browser" not in rest)
     if cmd == "runtime-path":

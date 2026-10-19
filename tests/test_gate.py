@@ -891,7 +891,7 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None):
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1"):
         """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
         subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
         (self.repo / ".github").mkdir(exist_ok=True)
@@ -899,6 +899,7 @@ class TestStoryGateOnlyPullRequests(Base):
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
         for f in touch or []:  # a story-gate file other than config.json
+            (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
             with open(self.repo / f, "a", encoding="utf-8") as fh:
                 fh.write("\n# changed\n")
         g = load_gate(self.repo)
@@ -914,6 +915,15 @@ class TestStoryGateOnlyPullRequests(Base):
             {"accepted": True, "approver": "paul", "why": "approved by paul"} if accepted
             else {"accepted": False, "why": "waiting for a code owner (paul) to approve the latest commit abc1234"})
         G.protection = lambda repo, branch, token, check=None: (True, [])
+        T = g.T
+        def verify(src, *a, **k):
+            """Fake release check: a signed copy of `signed`, or (signed=None) a copy that isn't a signed release."""
+            if signed is None:
+                raise T.TrustError("files differ from the signed release: sg_report.py")
+            return {"version": signed, "files": {f: "h" for f in T.runtime_files(src)}}  # like the real one: it lists them all
+        saved_verify = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved_verify)
+        T.verify_release = verify
         import io, contextlib
         out = io.StringIO()
         # like run(): never read the CI runner's own pull request (GitHub sets GITHUB_BASE_REF on pull_request runs)
@@ -950,6 +960,80 @@ class TestStoryGateOnlyPullRequests(Base):
         self.assertEqual(rc, 0, out)
         self.assertIn("can't judge whether that loosens the gate: read the diff", out)
         self.assertIn(".story-gate/sg_report.py", out)
+
+    def test_gate_code_must_be_a_signed_release(self):
+        """Changed story-gate code that isn't a signed release (hand-edited, or an AI's edit) is a problem even when a code
+        owner approved; a signed release is named in the notes."""
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"], signed=None)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not a signed story-gate release", out)
+        self.assertIn("upgrade-repo", out)
+
+    def test_gate_code_from_a_signed_release_is_named(self):
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("is the signed story-gate 0.10.1 release", out)
+
+    def test_protocol_changes_also_need_a_signed_release(self):
+        """PROTOCOL.md and SKILL.md are part of the signed release too."""
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/PROTOCOL.md"], signed=None)
+        self.assertEqual(rc, 1, out); self.assertIn("not a signed story-gate release", out)
+
+    def test_an_older_signed_release_is_refused(self):
+        """A signed release older than the base branch's (a downgrade to a release with known holes) fails the check."""
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+        (self.repo / ".story-gate/release.json").write_text(json.dumps({"version": "0.10.1", "files": {}}))
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "release"], cwd=self.repo, check=True)
+        rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"], signed="0.9.0")
+        self.assertEqual(rc, 1, out); self.assertIn("older than the 0.10.1", out)
+
+    def test_turning_the_copy_into_a_link_is_refused(self):
+        """A .story-gate that becomes a link would let a later PR change the code it points to unchecked."""
+        g = load_gate(self.repo)
+        bad, _ = g.runtime_copy_check([".story-gate"], "main")
+        self.assertIn("into a link", bad)
+
+    def test_compiled_python_in_the_copy_is_refused(self):
+        """A .pyc file could run in place of the checked .py, so a PR may not add one (even force-added past .gitignore)."""
+        g = load_gate(self.repo)
+        bad, good = g.runtime_copy_check([".story-gate/__pycache__/gate.cpython-312.pyc", ".story-gate/gate.py"], "main")
+        self.assertIn("compiled Python files", bad); self.assertEqual(good, "")
+        self.assertEqual(g.runtime_copy_check([".story-gate/config.json", ".story-gate/stories/SAT-1/story.md", "app.py"], "main"), ("", ""))
+
+    def test_importable_files_the_signed_release_does_not_list_are_refused(self):
+        """A native module (sg_trust.so) or a package folder (sg_trust/__init__.py) could load instead of the signed
+        sg_trust.py: the PR counts as a story-gate code change and fails, even when the listed files are signed."""
+        for extra in (".story-gate/sg_trust.so", ".story-gate/sg_trust/__init__.py", ".story-gate/JSON.PYD"):
+            with self.subTest(extra=extra):
+                try:
+                    rc, out, _ = self.ci(accepted=True, touch=[extra])
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("importable files the signed release doesn't list", out)
+                    self.assertIn(extra[len(".story-gate/"):], out)
+                finally:
+                    subprocess.run(["git", "checkout", "-qf", "main"], cwd=self.repo, check=True)
+                    subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
+                    subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
+
+    def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
+        """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
+        real = subprocess.run
+        def broken(cmd, *a, **k):
+            """git ls-files fails; everything else runs for real."""
+            if cmd[:1] == ["git"] and "ls-files" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, b"", b"fatal")
+            return real(cmd, *a, **k)
+        with patch("subprocess.run", side_effect=broken):
+            rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("couldn't list the files", out)
+
+    def test_config_only_changes_never_need_a_signed_release(self):
+        """config.json is the repository's own settings: changing only it never asks for a signed release."""
+        rc, out, _ = self.ci(accepted=True, signed=None)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("signed story-gate release", out)
 
     def test_mixed_pull_request_still_needs_a_split_or_the_label(self):
         rc, out, _ = self.ci(accepted=True, extra=["feature.py"])
@@ -3320,6 +3404,42 @@ class TestReleaseSignatures(unittest.TestCase):
         self.assertNotIn(b"\r", (self.rel / "release.json").read_bytes())
         self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
 
+    def test_installed_runtime_keeps_the_signature_so_repository_copies_verify(self):
+        """install_runtime keeps release.json + .sig beside the runtime (doctor still finds it intact), and a repository
+        copy made from it the way init and upgrade-repo do verifies as the same signed release."""
+        from unittest import mock
+        home = self.d / "home"
+        with mock.patch.dict(os.environ, {"STORY_GATE_HOME": str(home)}):
+            dest = self.T.install_runtime(self.rel, "9.9.9", signers=self.signers)
+            for f in self.T.RELEASE_PROOF:
+                self.assertEqual((Path(dest) / f).read_bytes(), (self.rel / f).read_bytes())
+            act = self.T.read_json(self.T.active_path())
+            self.assertEqual(self.T.runtime_problems(dest, act.get("manifest_sha256")), [])
+        copy = self.d / "repo-copy"; copy.mkdir()
+        for f in list(self.T.runtime_files(dest)) + list(self.T.RELEASE_PROOF):
+            (copy / f).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(Path(dest) / f, copy / f)
+        self.assertEqual(self.T.verify_release(copy, self.signers)["version"], "9.9.9")
+
+    def test_a_linked_release_folder_fails(self):
+        link = self.d / "link"
+        try:
+            os.symlink(str(self.rel), str(link))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        with self.assertRaisesRegex(self.T.TrustError, "folder itself"):
+            self.T.verify_release(link, self.signers)
+
+    def test_a_linked_vendor_folder_fails_even_with_identical_files(self):
+        """vendor/ swapped for a link to a folder of identical files: the hashes match, but it still fails."""
+        real = self.d / "vendor-elsewhere"
+        shutil.move(str(self.rel / "vendor"), str(real))
+        try:
+            os.symlink(str(real), str(self.rel / "vendor"))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        with self.assertRaisesRegex(self.T.TrustError, "not links: vendor/"):
+            self.T.verify_release(self.rel, self.signers)
+
     def test_changed_file_fails(self):
         with open(self.rel / "gate.py", "a") as f:
             f.write("# evil\n")
@@ -4291,7 +4411,8 @@ class TestGitHubSetupHelpers(unittest.TestCase):
              ("GET", "/repos/o/r/git/commits/tip1"): (200, {"tree": {"sha": "tree0"}}), ("GET", "/repos/o/r"): (200, {"default_branch": "main"}),
              ("POST", "/repos/o/r/git/blobs"): (201, {"sha": "blob1"}), ("POST", "/repos/o/r/git/trees"): (201, {"sha": "tree1"}),
              ("POST", "/repos/o/r/git/commits"): (201, {"sha": "c1"}), ("POST", "/repos/o/r/git/refs"): (201, {}),
-             ("POST", "/repos/o/r/pulls"): (201, {"number": 7, "html_url": "https://github.com/o/r/pull/7"})}
+             ("POST", "/repos/o/r/pulls"): (201, {"number": 7, "html_url": "https://github.com/o/r/pull/7"}),
+             ("PATCH", "/repos/o/r/git/refs/heads/"): (200, {})}
         r.update(extra or {}); return r
 
     def test_open_setup_pr_sequence(self):
@@ -4370,6 +4491,169 @@ class TestGitHubSetupHelpers(unittest.TestCase):
                 out = self.G.open_setup_pr("t", "o/r", {"x": b"1"}, update_existing=True)
                 self.assertEqual(out["number"], 7); self.assertNotIn("existing", out)
                 self.assertFalse([1 for m, _, _ in self.calls if m == "PATCH"])
+
+    def fake_api_by_token(self, routes):
+        """fake_api that also records which token made each call: (method, path, body, token)."""
+        self.tcalls = []
+        def fake(m, p, t=None, b=None, accept=None):
+            self.calls.append((m, p, b)); self.tcalls.append((m, p, b, t))
+            for (rm, rp), resp in routes.items():
+                if rm == m and p.startswith(rp):
+                    return resp[0], resp[1], {}
+            return 404, {"message": "no route"}, {}
+        self.G.call = fake
+
+    def test_split_pr_the_person_writes_workflows_the_app_writes_the_rest_and_opens_it(self):
+        """Split mode: only the person's token writes workflow files; the App writes every other file, makes the last
+        commit and opens the PR, so GitHub counts the person's approval. The App never sends a workflow file."""
+        files = {".github/workflows/story-gate.yml": b"wf", ".story-gate/config.json": b"{}", ".github/CODEOWNERS": b"* @p\n"}
+        self.fake_api_by_token(self.pr_routes())
+        out = self.G.open_setup_pr("human", "o/r", files, app_token="app")
+        self.assertEqual(out["number"], 7)
+        app_blobs = [b for m, p, b, t in self.tcalls if t == "app" and p.endswith("/git/trees")]
+        human_trees = [b for m, p, b, t in self.tcalls if t == "human" and p.endswith("/git/trees")]
+        self.assertEqual([{e["path"] for e in b["tree"]} for b in human_trees], [{".github/workflows/story-gate.yml"}])
+        self.assertEqual([{e["path"] for e in b["tree"]} for b in app_blobs], [{".story-gate/config.json", ".github/CODEOWNERS"}])
+        for m, p, b, t in self.tcalls:
+            if t == "app" and m == "POST" and p.endswith("/git/trees"):
+                self.assertFalse([e for e in b["tree"] if e["path"].startswith(".github/workflows/")])
+        writes = [(m, p.split("?")[0], t) for m, p, b, t in self.tcalls if m in ("POST", "PATCH") and not p.endswith(("/blobs", "/trees"))]
+        self.assertEqual(writes, [("POST", "/repos/o/r/git/commits", "human"), ("POST", "/repos/o/r/git/refs", "human"),
+                                  ("POST", "/repos/o/r/git/commits", "app"),
+                                  ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup", "app"),
+                                  ("POST", "/repos/o/r/pulls", "app")])
+
+    def test_split_pr_with_only_workflow_files_still_ends_with_the_apps_commit(self):
+        """No other files: the App still makes the last (empty) commit, so it is the last pusher."""
+        self.fake_api_by_token(self.pr_routes())
+        self.G.open_setup_pr("human", "o/r", {".github/workflows/a.yml": b"x"}, app_token="app")
+        last = [(m, t) for m, p, b, t in self.tcalls if m in ("POST", "PATCH") and p.endswith(("/git/commits", "/story-gate-setup", "/pulls"))]
+        self.assertEqual(last[-3:], [("POST", "app"), ("PATCH", "app"), ("POST", "app")])
+
+    def test_split_pr_without_workflow_files_is_all_the_apps(self):
+        """Nothing for the person to write: the App creates the branch, commits and opens the PR alone."""
+        self.fake_api_by_token(self.pr_routes())
+        self.G.open_setup_pr("human", "o/r", {"a.txt": b"x"}, app_token="app")
+        self.assertFalse([1 for m, p, b, t in self.tcalls if t == "human" and m in ("POST", "PATCH")])
+
+    def test_split_pr_refuses_to_update_a_pr_a_person_opened(self):
+        """An open setup PR opened by a person (the old way) is never fed new commits: their approval would never count."""
+        mine = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "main"}, "head": {"repo": {"full_name": "o/r"}},
+                                                     "user": {"login": "paul", "type": "User"}}])}
+        self.fake_api_by_token(self.pr_routes(mine))
+        with self.assertRaisesRegex(RuntimeError, "Close it"):
+            self.G.open_setup_pr("human", "o/r", {".github/workflows/a.yml": b"x", "b": b"y"}, app_token="app", update_existing=True)
+        self.assertFalse([1 for m, p, b, t in self.tcalls if m in ("POST", "PATCH")])
+
+    def test_split_pr_brings_the_apps_open_pr_up_to_date(self):
+        """The App's open setup PR: the person commits the workflow files, the App commits the rest last; no second PR."""
+        bot = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "main"}, "head": {"repo": {"full_name": "o/r"}},
+                                                    "user": {"login": "sg-agent[bot]", "type": "Bot"}}]),
+               ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "btip"}}),
+               ("GET", "/repos/o/r/git/commits/btip"): (200, {"tree": {"sha": "btree"}}),
+               ("GET", "/repos/o/r/commits/btip"): (200, {"committer": {"type": "Bot"}}),
+               ("PATCH", "/repos/o/r/pulls/3"): (200, {}),
+               ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (200, {})}
+        r = dict(bot)
+        for k, v in self.pr_routes().items():
+            r.setdefault(k, v)
+        self.fake_api_by_token(r)
+        out = self.G.open_setup_pr("human", "o/r", {".github/workflows/a.yml": b"x", "b": b"y"}, app_token="app", update_existing=True)
+        self.assertEqual((out["number"], out["updated"]), (3, True))
+        writes = [(m, t) for m, p, b, t in self.tcalls if ((m == "POST" and p.endswith("/git/commits")) or m == "PATCH")
+                  and "/pulls/" not in p]
+        self.assertEqual(writes, [("POST", "human"), ("PATCH", "human"), ("POST", "app"), ("PATCH", "app")])
+        self.assertFalse([p for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/pulls")])
+        retitle = [b for m, p, b, t in self.tcalls if m == "PATCH" and p.endswith("/pulls/3")]
+        self.assertEqual((retitle[0]["title"], [t for m, p, b, t in self.tcalls if p.endswith("/pulls/3")]), ("Set up story-gate", ["app"]))
+
+    def split_update_routes(self, head_tree, last_by):
+        """An open App setup PR whose branch tip has `head_tree`, last committed by `last_by` ('Bot' or 'User')."""
+        r = {("GET", "/repos/o/r/pulls?"): (200, [{"number": 3, "html_url": "u", "base": {"ref": "main"}, "head": {"repo": {"full_name": "o/r"}},
+                                                  "user": {"login": "sg-agent[bot]", "type": "Bot"}}]),
+             ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "btip"}}),
+             ("GET", "/repos/o/r/git/commits/btip"): (200, {"tree": {"sha": head_tree}}),
+             ("GET", "/repos/o/r/commits/btip"): (200, {"committer": {"type": last_by}}),
+             ("PATCH", "/repos/o/r/pulls/3"): (200, {}),
+             ("PATCH", "/repos/o/r/git/refs/heads/story-gate-setup"): (200, {})}
+        for k, v in self.pr_routes().items():
+            r.setdefault(k, v)
+        return r
+
+    def test_split_pr_up_to_date_only_when_the_app_pushed_last(self):
+        """Same content: nothing to do when the App made the last commit; when a person did (a run that stopped half way),
+        the App adds an empty last commit so the person's approval counts."""
+        files = {".github/workflows/a.yml": b"x"}  # pr_routes' trees all come back as tree1
+        self.fake_api_by_token(self.split_update_routes("tree1", "Bot"))
+        self.assertIs(self.G.open_setup_pr("human", "o/r", files, app_token="app", update_existing=True)["updated"], False)
+        self.assertFalse([1 for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")])
+        self.fake_api_by_token(self.split_update_routes("tree1", "User"))
+        out = self.G.open_setup_pr("human", "o/r", files, app_token="app", update_existing=True)
+        self.assertIs(out["updated"], True)
+        commits = [(t, b["tree"], b["parents"]) for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual(commits, [("app", "tree1", ["btip"])])  # no second human commit; the App's comes last
+
+    def test_split_pr_app_commit_sits_on_the_human_commit_and_is_the_branch_tip(self):
+        """The App's commit's parent is the person's commit, and the branch ends on the App's commit."""
+        r = self.pr_routes()
+        shas = iter(["human-c", "app-c"])
+        self.fake_api_by_token(r)
+        real = self.G.call
+        def call(m, p, t=None, b=None, accept=None):
+            if m == "POST" and p.endswith("/git/commits"):
+                real(m, p, t, b, accept)
+                return 201, {"sha": next(shas)}, {}
+            return real(m, p, t, b, accept)
+        self.G.call = call
+        self.G.open_setup_pr("human", "o/r", {".github/workflows/a.yml": b"x", "b": b"y"}, app_token="app")
+        commits = [b for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual(commits[1]["parents"], ["human-c"])
+        refs = [(m, b["sha"], t) for m, p, b, t in self.tcalls if "/git/refs" in p]
+        self.assertEqual(refs, [("POST", "human-c", "human"), ("PATCH", "app-c", "app")])
+
+    def test_split_pr_reuses_only_a_branch_story_gate_left_behind(self):
+        """The branch exists but no PR does: reused when its tip is story-gate's own commit from a stopped run; any other
+        branch of that name is someone's work, so it is never overwritten."""
+        for msg, reused in (("Set up story-gate (workflow files)", True), ("Set up story-gate", True), ("my own work", False)):
+            with self.subTest(msg=msg):
+                r = {("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"}),
+                     ("GET", "/repos/o/r/git/ref/heads/story-gate-setup"): (200, {"object": {"sha": "old"}}),
+                     ("GET", "/repos/o/r/git/commits/old"): (200, {"message": msg + "\n", "tree": {"sha": "t"}})}
+                for k, v in self.pr_routes().items():
+                    r.setdefault(k, v)
+                self.fake_api_by_token(r)
+                files = {".github/workflows/a.yml": b"x", "b": b"y"}
+                if reused:
+                    self.assertEqual(self.G.open_setup_pr("human", "o/r", files, app_token="app")["number"], 7)
+                    forced = [t for m, p, b, t in self.tcalls if m == "PATCH" and p.endswith("/story-gate-setup") and b.get("force")]
+                    self.assertEqual(forced, ["human"])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "isn't one story-gate left behind"):
+                        self.G.open_setup_pr("human", "o/r", files, app_token="app")
+                    self.assertFalse([1 for m, p, b, t in self.tcalls if m == "PATCH" or p.endswith("/pulls")])
+
+    def test_split_pr_update_lets_the_person_undo_an_earlier_workflow_change(self):
+        """Updating with no workflow files left to change: the person's commit still resets the workflows (the App
+        can't), and the App's commit comes last."""
+        self.fake_api_by_token({**self.workflow_trees("wf-old"), **self.split_update_routes("old-tree", "Bot")})
+        self.G.open_setup_pr("human", "o/r", {"b": b"y"}, app_token="app", update_existing=True)
+        commits = [(t, b["tree"]) for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual([t for t, _ in commits], ["human", "app"])
+        self.assertEqual(commits[0][1], "tree0")  # the base branch's workflows exactly
+
+    def workflow_trees(self, branch_wf):
+        """Fake tree reads: the base (tree0) has workflows folder wf-base; the branch (old-tree) has `branch_wf`."""
+        return {("GET", "/repos/o/r/git/trees/tree0"): (200, {"tree": [{"path": ".github", "type": "tree", "sha": "gh-base"}]}),
+                ("GET", "/repos/o/r/git/trees/old-tree"): (200, {"tree": [{"path": ".github", "type": "tree", "sha": "gh-br"}]}),
+                ("GET", "/repos/o/r/git/trees/gh-base"): (200, {"tree": [{"path": "workflows", "type": "tree", "sha": "wf-base"}]}),
+                ("GET", "/repos/o/r/git/trees/gh-br"): (200, {"tree": [{"path": "workflows", "type": "tree", "sha": branch_wf}]})}
+
+    def test_split_pr_update_without_workflow_changes_has_no_commit_by_the_person(self):
+        """No workflow file to change or undo (the branch's workflows match the base): only the App commits."""
+        self.fake_api_by_token({**self.workflow_trees("wf-base"), **self.split_update_routes("old-tree", "Bot")})
+        self.G.open_setup_pr("human", "o/r", {"b": b"y"}, app_token="app", update_existing=True)
+        commits = [t for m, p, b, t in self.tcalls if m == "POST" and p.endswith("/git/commits")]
+        self.assertEqual(commits, ["app"])
 
     def test_open_setup_pr_existing_branch_and_empty(self):
         self.fake_api(self.pr_routes({("POST", "/repos/o/r/git/refs"): (422, {"message": "Reference already exists"})}))
@@ -4553,14 +4837,48 @@ class TestAuthorPolicy(unittest.TestCase):
         """The rule story-gate creates has no bypass actors, so neither the agent App nor an admin can skip approval."""
         self.assertEqual(self.G.ruleset_json("story-gate")["bypass_actors"], [])
 
-    def test_workflow_changes_skip_the_agent_app(self):
-        """The agent App can't change workflow files, so such a PR never uses it."""
-        self.agent = "app-tok"
+    def test_workflow_changes_are_split_between_the_person_and_the_agent_app(self):
+        """The App can't change workflow files, so the person writes those and the App writes the rest and opens the PR.
+        That works even when the person is the only code owner of a protected branch (the solo builder)."""
+        self.agent = "app-tok"; self.protected = True
+        self.rules = [{"type": "pull_request", "parameters": {"require_code_owner_review": True}}]
+        who, tok, why = self.author(touches_workflows=True)
+        self.assertEqual((who, tok), ("split", ("human-tok", "app-tok")))
+        self.assertIn("sg-agent[bot]", why)
+
+    def test_workflow_changes_without_the_agent_app_need_another_approver(self):
+        """No agent App: a workflow PR is the person's, so it needs an unprotected branch or a second code owner."""
         who, tok, _ = self.author(touches_workflows=True)
         self.assertEqual((who, tok), ("human", "human-tok"))
         self.protected = True
-        with self.assertRaisesRegex(self.G.NoAuthor, "workflow files"):
+        with self.assertRaisesRegex(self.G.NoAuthor, "setup-agent"):
             self.author(touches_workflows=True)
+
+    def test_an_agent_app_with_more_than_builder_access_is_refused(self):
+        """Only contents/pull requests/issues write, metadata/checks read: branch rules, secrets, Actions or check results
+        are refused, so the AI's token can never change the rules or fake a check."""
+        self.agent = "app-tok"
+        for extra in ({"administration": "write"}, {"secrets": "read"}, {"actions": "write"}, {"statuses": "write"},
+                      {"checks": "write"}, {"workflows": "write"}):
+            self.perms = dict({"contents": "write", "pull_requests": "write", "metadata": "read"}, **extra)
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(RuntimeError, "more access") as cm:
+                    self.author()
+                self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
+        self.perms = {"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read", "checks": "read"}
+        self.assertEqual(self.author()[0], "app")
+
+    def test_an_agent_app_that_can_change_workflows_is_refused(self):
+        """A builder App with the 'workflows' permission could run unreviewed workflows with the repository's secrets, so
+        story-gate never uses it, for any pull request, and never falls back to the person's login instead."""
+        self.agent = "app-tok"
+        for level in ("write", "read"):
+            self.perms = {"contents": "write", "pull_requests": "write", "workflows": level}
+            for kw in ({}, {"touches_workflows": True}):
+                with self.subTest(level=level, **kw):
+                    with self.assertRaisesRegex(RuntimeError, "workflows: ") as cm:
+                        self.author(**kw)
+                    self.assertNotIsInstance(cm.exception, self.G.NoAuthor)
 
     def test_agent_missing_is_only_for_a_missing_or_uninstalled_app(self):
         """agent_token raises AgentMissing for 'not set up here' and 'not installed on the repo'; other failures stay errors."""
@@ -4577,6 +4895,31 @@ class TestAuthorPolicy(unittest.TestCase):
                         with self.assertRaises(RuntimeError) as cm:
                             self.real_agent_token("o/r")
                         self.assertEqual(isinstance(cm.exception, G.AgentMissing), missing)
+
+    def test_agent_token_asks_only_for_builder_access_even_when_the_app_has_more(self):
+        """An App given workflows/secrets/checks: write still hands the AI a token capped at AGENT_MAX_PERMS (and never
+        more than the App holds); the App's own access is reported so setup can refuse it."""
+        from unittest import mock
+        G = self.G
+        home = Path(tempfile.mkdtemp())
+        (home / "agent.json").write_text(json.dumps({"key": str(home / "k.pem"), "install_url": "https://x"}))
+        have = {"contents": "write", "pull_requests": "write", "issues": "read", "metadata": "read", "checks": "write",
+                "workflows": "write", "secrets": "write"}
+        sent = []
+
+        def call(method, path, tok, body=None):
+            """Fake GitHub: the installation (with the App's access), then the token request, which is recorded."""
+            if path.endswith("/installation"):
+                return 200, {"id": 7, "permissions": have}, {}
+            sent.append(body)
+            return 201, {"token": "t", "permissions": body["permissions"]}, {}
+        with mock.patch.dict(os.environ, {"STORY_GATE_HOME": str(home)}), mock.patch.object(G, "app_jwt", return_value="jwt"), \
+                mock.patch.object(G, "call", side_effect=call):
+            _, _, rec = self.real_agent_token("o/r")
+        self.assertEqual(sent[0]["permissions"], {"contents": "write", "pull_requests": "write", "issues": "read",
+                                                  "metadata": "read", "checks": "read"})
+        self.assertEqual(sent[0]["repositories"], ["r"])
+        self.assertEqual(rec["installation_permissions"], have)
 
 
 class TestGuidedSetup(unittest.TestCase):
@@ -4639,6 +4982,257 @@ class TestGuidedSetup(unittest.TestCase):
         files = self.S.setup_files(self.top, "main", sys.executable)
         self.assertIn("CLAUDE.md", files); self.assertNotIn("LAUDE.md", files)
         self.assertIn(b"my own notes", files["CLAUDE.md"])
+
+    def set_up_main(self):
+        """Commit what setup would add to main and push it: a repository story-gate is already set up in."""
+        for rel, data in self.S.setup_files(self.top, "main", sys.executable).items():
+            p = self.top / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(data)
+        for a in (["add", "-A"], ["commit", "-qm", "set up"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+
+    def test_setup_refuses_a_branch_with_links_where_it_writes(self):
+        """A default branch that records .story-gate (or .github, AGENTS.md...) as a symlink could make setup or upgrade-repo
+        write outside the repository: both stop before writing anything."""
+        outside = self.tmp / "outside"; outside.mkdir()
+        try:
+            os.symlink(str(outside), str(self.top / ".story-gate"))
+        except (OSError, NotImplementedError):
+            self.skipTest("this system can't make symlinks (Windows without the privilege)")
+        for a in (["add", "-A"], ["commit", "-qm", "link"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        with self.assertRaisesRegex(RuntimeError, "symlinks"):
+            self.S.setup_files(self.top, "main", sys.executable)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.S.setup_links(self.top, "origin/main"), [".story-gate"])
+
+    def test_setup_link_check_ignores_letter_case(self):
+        """A branch link named `.Github` or `agents.md` is caught too: on Windows and macOS it is the same path."""
+        outside = self.tmp / "outside"; outside.mkdir()
+        try:
+            for name in (".Github", "agents.md"):
+                os.symlink(str(outside), str(self.top / name))
+        except (OSError, NotImplementedError):
+            self.skipTest("this system can't make symlinks (Windows without the privilege)")
+        for a in (["add", "-A"], ["commit", "-qm", "links"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", *a], cwd=self.top, check=True, capture_output=True)
+        self.assertEqual(sorted(self.S.setup_links(self.top, "origin/main")), [".Github", "agents.md"])
+
+    def test_setup_link_check_covers_every_folder_install_writes_hooks_into(self):
+        """Every folder install writes AI-tool hook files into is on the symlink stop-list, so a new hook folder can't slip by."""
+        import gate
+        tops = {f.split("/")[0] for f in gate.HOOK_FILES}
+        self.assertEqual(tops - set(self.S.SETUP_PATHS), set())
+
+    def test_upgrade_files_need_a_set_up_repository(self):
+        with self.assertRaisesRegex(RuntimeError, "story-gate init"):
+            self.S.upgrade_files(self.top, "main", sys.executable)
+
+    def test_setup_sends_lf_text_from_windows_but_keeps_binary_and_crlf_files(self):
+        """A Windows run writes CRLF; setup sends LF so an up-to-date repo isn't 'changed'. Binary files and files the
+        branch already stores with CRLF stay byte for byte."""
+        with patch.object(self.S, "_at", return_value=b"a\nb\n"):
+            self.assertEqual(self.S._lf(self.top, "main", "x.yml", b"a\r\nb\r\n"), b"a\nb\n")
+            self.assertEqual(self.S._lf(self.top, "main", "x.woff2", b"\0\r\n"), b"\0\r\n")
+        with patch.object(self.S, "_at", return_value=b"a\r\nb\r\n"):
+            self.assertEqual(self.S._lf(self.top, "main", "x.bat", b"a\r\nb\r\nc\r\n"), b"a\r\nb\r\nc\r\n")
+        with patch.object(self.S, "_at", return_value=None):
+            self.assertEqual(self.S._lf(self.top, "main", "new.md", b"a\r\n"), b"a\n")
+
+    def test_upgrade_files_are_empty_when_up_to_date_and_restore_changed_and_drop_obsolete_files(self):
+        """Up to date: nothing. An older copy: the changed runtime file comes back, and a runtime file the old release
+        listed but this version no longer has is deleted (None). The person's own files are never touched."""
+        self.set_up_main()
+        self.assertEqual(self.S.upgrade_files(self.top, "main", sys.executable), {})
+        self.push_main(".story-gate/sg_pin.py", "# an older copy\n", "old")
+        self.push_main(".story-gate/sg_gone.py", "# dropped in this version\n", "old2")
+        self.push_main(".story-gate/release.json", json.dumps({"version": "0.0.1", "files": {
+            "sg_gone.py": "x", "sg_pin.py": "y", "../app.py": "z", "/etc/x": "z", "a/../../app.py": "z", "config.json": "z"}}), "old3")
+        self.push_main("notes/mine.md", "my own file\n", "mine")
+        got = self.S.upgrade_files(self.top, "main", sys.executable)
+        self.assertEqual(got[".story-gate/sg_pin.py"], (SRC / "sg_pin.py").read_bytes())
+        self.assertIsNone(got[".story-gate/sg_gone.py"])
+        self.assertNotIn("notes/mine.md", got)
+        self.assertFalse([p for p in got if ".." in p or p.startswith("/") or not p.startswith((".story-gate/", ".github/", ".agents/", ".claude/", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore"))], got)
+        self.assertEqual(self.S.version_at(self.top, "origin/main"), "0.0.1")
+
+    def test_upgrade_drops_old_runtime_files_even_without_a_release_list(self):
+        """A repository set up before release.json was copied: a dropped file story-gate once shipped is deleted, but a
+        .py of your own in .story-gate/, and the repository's settings, budgets and stories, are never deleted."""
+        self.set_up_main()
+        self.push_main(".story-gate/sg_gone.py", "# dropped\n", "old")
+        self.push_main(".story-gate/vendor/old.css", "x", "old2")
+        self.push_main(".story-gate/my_tool.py", "# mine\n", "mine0")
+        self.push_main(".story-gate/budgets.json", "{}", "mine")
+        self.push_main(".story-gate/stories/SAT-1/story.md", "# mine\n", "mine2")
+        shipped = self.S.SHIPPED_RUNTIME_FILES | {"sg_gone.py", "vendor/old.css"}
+        with patch.object(self.S, "SHIPPED_RUNTIME_FILES", shipped):
+            got = self.S.upgrade_files(self.top, "main", sys.executable)
+        self.assertEqual({p for p, c in got.items() if c is None}, {".story-gate/sg_gone.py", ".story-gate/vendor/old.css"})
+        self.assertNotIn(".story-gate/my_tool.py", got)
+        self.assertFalse(self.S.is_runtime_name("../x.py")); self.assertFalse(self.S.is_runtime_name("stories/a.py"))
+        self.assertFalse(self.S.is_runtime_name("config.json")); self.assertTrue(self.S.is_runtime_name("gate.py"))
+
+    def test_every_runtime_file_is_on_the_shipped_list(self):
+        """A new runtime file must be added to SHIPPED_RUNTIME_FILES, or a later upgrade could never delete it."""
+        import sg_trust as T
+        self.assertEqual(set(T.runtime_files(SRC)) - self.S.SHIPPED_RUNTIME_FILES, set())
+
+    def test_upgrade_keeps_your_own_workflow_steps(self):
+        """Steps you added between the 'your steps' markers survive an upgrade of the workflow file."""
+        self.set_up_main()
+        wf = (self.top / ".github/workflows/story-gate.yml").read_text()
+        import importlib
+        a, b = importlib.import_module("gate").USER_STEPS
+        mine = "      - uses: actions/setup-node@v4\n"
+        old = wf.replace(a + b, a + mine + b).replace("checkout@", "checkout@OLD")  # an older copy, with your step
+        self.assertIn(mine, old)
+        self.push_main(".github/workflows/story-gate.yml", old, "older workflow with my step")
+        got = self.S.upgrade_files(self.top, "main", sys.executable)[".github/workflows/story-gate.yml"].decode()
+        self.assertIn(mine, got); self.assertNotIn("checkout@OLD", got)
+
+    def signed_runtime(self):
+        """Pretend this story-gate is a signed release (the test copy isn't signed)."""
+        from unittest import mock
+        import sg_trust as T
+        p = mock.patch.object(T, "verify_release", return_value={"version": "x"}); p.start(); self.addCleanup(p.stop)
+
+    def test_upgrade_repo_refuses_an_unsigned_story_gate(self):
+        """Only a signed release is ever copied into repositories."""
+        self.set_up_main()
+        status, detail = self.S.upgrade_repo(self.top, sys.executable, token="human")
+        self.assertEqual(status, "error"); self.assertIn("signed release", detail)
+
+    def test_upgrade_repo_opens_a_split_pr_and_dry_run_writes_nothing(self):
+        G, S = self.G, self.S
+        self.signed_runtime()
+        self.set_up_main()
+        self.push_main(".story-gate/sg_pin.py", "# an older copy\n", "old")
+        prs = []
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main", "login": "me"}, {})
+        G.pr_author = lambda repo, base, tok, login, touches_workflows=False: ("split", (tok, "app-tok"), "split")
+        G.open_setup_pr = lambda tok, repo, files, **kw: prs.append((tok, files, kw)) or {"number": 5, "url": "u", "branch": kw["branch"]}
+        lines = []
+        self.assertEqual(S.upgrade_repo(self.top, sys.executable, dry=True, token="human", out=lines.append)[0], "dry-run")
+        self.assertEqual(prs, []); self.assertTrue(any("sg_pin.py" in l for l in lines))
+        status, detail = S.upgrade_repo(self.top, sys.executable, token="human")
+        self.assertEqual(status, "opened"); self.assertIn("#5", detail)
+        tok, files, kw = prs[0]
+        self.assertEqual((tok, kw["app_token"], kw["branch"], kw["update_existing"]), ("human", "app-tok", "story-gate-upgrade", True))
+        self.assertIn(".story-gate/sg_pin.py", files)
+        self.assertIn("Upgrade story-gate to v", kw["title"])
+
+    def test_upgrade_repo_says_up_to_date_and_never_opens_a_pr(self):
+        G, S = self.G, self.S
+        self.signed_runtime()
+        self.set_up_main()
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda *a, **k: self.fail("no PR when up to date")
+        self.assertEqual(S.upgrade_repo(self.top, sys.executable, token="human")[0], "up-to-date")
+
+    def test_upgrade_repo_is_for_the_person_only_and_parses_its_flags(self):
+        """An agent can't run upgrade-repo (it opens pull requests that change workflows); --report takes no value."""
+        import importlib
+        gate = importlib.import_module("gate")
+        self.assertIn("upgrade-repo", gate.ADMIN_COMMANDS)
+        for cmd in ("python3 .story-gate/gate.py upgrade-repo", "python3 .story-gate/gate.py upgrade-repo --org Viaknox"):
+            self.assertTrue(gate.touches_gate(cmd), cmd)  # the hooks refuse it from an agent's shell
+        kv, rest = gate.flags(["--report", "o/a", "o/b"])
+        self.assertEqual((kv, rest), ({}, ["--report", "o/a", "o/b"]))
+        self.assertEqual(gate.flags(["--org", "Viaknox", "--dry-run"]), ({"org": "Viaknox"}, ["--dry-run"]))
+
+    def test_upgrade_many_reports_each_repository_and_keeps_going_after_a_failure(self):
+        from unittest import mock
+        S = self.S
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 128 if "o/bad" in cmd[-2] else 0, "", "fatal: repository not found")
+        with mock.patch.object(S.subprocess, "run", side_effect=run), \
+                mock.patch.object(S, "upgrade_repo", side_effect=[("opened", "o/ok #1 u"), RuntimeError("boom")]):
+            got = S.upgrade_many(["o/ok", "o/bad", "o/crash"], sys.executable)
+        self.assertEqual([(r, st) for r, st, _ in got], [("o/ok", "opened"), ("o/bad", "error"), ("o/crash", "error")])
+        self.assertIn("not found", got[1][2]); self.assertIn("boom", got[2][2])
+
+    def test_upgrade_repo_never_downgrades_a_newer_repository(self):
+        G, S = self.G, self.S
+        self.signed_runtime()
+        self.set_up_main()
+        self.push_main(".story-gate/release.json", json.dumps({"version": "99.0", "files": {}}), "newer")
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.open_setup_pr = lambda *a, **k: self.fail("never a downgrade PR")
+        status, detail = S.upgrade_repo(self.top, sys.executable, token="human")
+        self.assertEqual(status, "ahead"); self.assertIn("99.0", detail)
+
+    def test_clone_sends_the_token_without_putting_it_in_the_command(self):
+        env = self.S._clone_env("tok123")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        n = int(env["GIT_CONFIG_COUNT"]) - 1
+        self.assertEqual(env["GIT_CONFIG_KEY_%d" % n], "http.https://github.com/.extraheader")
+        import base64
+        self.assertIn(base64.b64encode(b"x-access-token:tok123").decode(), env["GIT_CONFIG_VALUE_%d" % n])
+        self.assertEqual(self.S._clone_env(None).get("GIT_CONFIG_COUNT"), os.environ.get("GIT_CONFIG_COUNT"))  # no token: nothing added
+
+    def test_upgrade_repo_rejects_unknown_options(self):
+        """A typo like --dryrun would otherwise swallow the next argument and upgrade for real."""
+        import importlib
+        gate = importlib.import_module("gate")
+        with self.assertRaises(SystemExit) as cm:
+            gate.cmd_upgrade_repo({"dryrun": "o/r"}, [])
+        self.assertIn("unknown option --dryrun", str(cm.exception))
+
+    def test_version_report_lists_each_repository(self):
+        import base64
+        G, S = self.G, self.S
+        def call(m, p, tok=None, body=None, accept=None):
+            if p.startswith("/repos/o/new/contents"):
+                return 200, {"content": base64.b64encode(json.dumps({"version": "9.9"}).encode()).decode()}, {}
+            if p.startswith("/repos/o/old/contents"):
+                return 200, {"content": base64.b64encode(json.dumps({"version": "0.1"}).encode()).decode()}, {}
+            if p.startswith("/repos/o/old/pulls"):
+                return 200, [{"number": 4}], {}
+            if "/pulls" in p:
+                return 200, [], {}
+            return 404, {}, {}
+        G.call = call
+        rows = S.version_report(["o/new", "o/old", "o/none"], "t", "9.9", out=lambda *_: None)
+        self.assertEqual(rows, [("o/new", "9.9", "current", ""), ("o/old", "0.1", "behind", "#4"), ("o/none", "-", "not set up", "")])
+        rows = S.version_report(["o/new", "o/old"], "t", "0.10", out=lambda *_: None)  # versions compare as numbers
+        self.assertEqual([r[2] for r in rows], ["ahead", "behind"])
+        self.assertEqual(S._vtuple("0.10"), S._vtuple("0.10.0")); self.assertIsNone(S._vtuple("dev"))
+
+    def test_org_listing_keeps_a_personal_accounts_listing_on_every_page(self):
+        """--org with a person's account: every page comes from the same listing, and your own includes private repos."""
+        import importlib, io, contextlib
+        from unittest import mock
+        gate = importlib.import_module("gate"); G = self.G
+        seen = []
+        def call(m, p, tok=None, body=None, accept=None):
+            seen.append(p)
+            if p.startswith("/orgs/"):
+                return 404, {}, {}
+            if p.startswith("/user/repos"):
+                page = int(p.rsplit("=", 1)[1])
+                return 200, [{"full_name": "me/r%d-%d" % (page, i)} for i in range(100 if page == 1 else 3)], {}
+            return 404, {}, {}
+        G.call = call; G.whoami = lambda tok: "me"
+        with mock.patch.object(G, "human_token", return_value="t"), mock.patch.object(self.S, "version_report",
+                                                                                         return_value=[]) as rep, \
+                contextlib.redirect_stdout(io.StringIO()):
+            gate.cmd_upgrade_repo({"org": "me"}, ["--report"])
+        self.assertEqual(len(rep.call_args[0][0]), 103)
+        self.assertEqual([p.split("?")[0] for p in seen], ["/orgs/me/repos", "/user/repos", "/user/repos"])
+
+    def test_setup_pr_is_split_when_the_agent_app_is_installed(self):
+        """With the agent App installed, the setup PR (which adds workflow files) is written by the person for the workflow
+        files and by the App for the rest, and the App opens it: a solo owner's approval then counts."""
+        G, S = self.G, self.S
+        got = {}
+        G.call = lambda m, p, tok=None, body=None, accept=None: (200, {"default_branch": "main"}, {})
+        G.pr_author = lambda repo, base, tok, login, touches_workflows=False: ("split", (tok, "app-tok"), "split")
+        G.open_setup_pr = lambda tok, repo, files, **kw: got.update(tok=tok, kw=kw) or {"number": 7, "url": "u", "branch": "b"}
+        S.Wizard._wait_merge = lambda self, base: None
+        wz = S.Wizard(self.top, "me/proj", sys.executable, token="human", open_browser=False)
+        wz.login = "me"
+        wz.open_pr()
+        self.assertEqual((got["tok"], got["kw"]["app_token"]), ("human", "app-tok"))
 
     def test_setup_pr_keeps_the_existing_codeowners_rules(self):
         G, S = self.G, self.S

@@ -22,6 +22,7 @@ RELEASE_NAMESPACE = "story-gate-release"
 RELEASE_SIGNERS = "story-gate-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIN8LkolTGexkEFLGhW/dq7fmyAMw8qW8tsQUx1koD3y"
 RELEASE_FINGERPRINT = "SHA256:YN6hCUUHe1XHbhYDj1VdYwoeVoIWDDlFJ6yEXDAcR+4"
 RUNTIME_GLOBS = ("*.py", "PROTOCOL.md", "SKILL.md", "vendor/*")
+RELEASE_PROOF = ("release.json", "release.json.sig")  # the signed list of runtime files, and its signature
 HOOK_SIGNATURE = re.compile(r'(?:gate|launch)\.py"?\s+hook\s+--client')  # every story-gate hook command, repo or runtime
 LAUNCHER = '''"""story-gate launcher: hooks and git filters call this stable path; it runs the active, pinned runtime."""
 import json, os, subprocess, sys
@@ -177,6 +178,18 @@ def verify_release(src, signers=RELEASE_SIGNERS):
     files = man.get("files") or {}
     if not files:
         raise TrustError("signed release lists no files")
+    def linked(rel):
+        """True when the file, or any folder between src and it (vendor/, ...), is a link."""
+        p = src
+        for part in Path(rel).parts:
+            p = p / part
+            if p.is_symlink():
+                return True
+        return False
+    links = (["(the folder itself)"] if src.is_symlink() else []) + \
+        [f for f in list(files) + list(RELEASE_PROOF) if linked(f)]
+    if links:
+        raise TrustError("release files must be real files, not links: %s" % ", ".join(links[:5]))
     bad = [f for f, h in files.items() if not (src / f).is_file() or sha256(src / f) != h]
     if bad:
         raise TrustError("files differ from the signed release: %s" % ", ".join(bad[:5]))
@@ -270,6 +283,9 @@ def install_runtime(src, version, unsigned=False, signers=RELEASE_SIGNERS):
     if signed and man["files"] != {f: h for f, h in signed["files"].items() if f in man["files"]}:
         shutil.rmtree(stage)
         raise TrustError("copied files do not match the signed release")
+    if signed:  # kept so a repository's copy (init, upgrade-repo) carries the signature its CI check verifies
+        for f in RELEASE_PROOF:
+            shutil.copyfile(src / f, stage / f)
     man.update({"signed": bool(signed), "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "signer": key_fingerprint(signers) if signed else None})
     (stage / "manifest.json").write_text(json.dumps(man, indent=2) + "\n", encoding="utf-8")

@@ -766,24 +766,46 @@ def approval_required(repo, branch, token):
     return bool(b.get("protected"))
 
 
+# The most the agent App may hold (what setup-agent asks for). Anything more is refused, never used.
+AGENT_MAX_PERMS = {"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read", "checks": "read"}
+_RANK = {None: 0, "": 0, "none": 0, "read": 1, "write": 2, "admin": 3}
+
+
 def pr_author(repo, branch, token, login, touches_workflows=False):
     """Who opens a pull request story-gate makes, decided before anything is written. GitHub never counts an approval
     from whoever opened a pull request, so:
-      1. the agent App, when it is installed on the repository (it opens, you approve);
+      1. the agent App, when it is installed on the repository (it opens, you approve). The App can't change workflow
+         files, so with `touches_workflows` the answer is 'split': you commit the workflow files, then the App commits the
+         rest and opens the pull request (token is then the pair (yours, the App's));
       2. otherwise you, when `branch` needs no approval yet or another code owner on it can approve;
-      3. otherwise NoAuthor, with the next step. An agent error other than "not set up" is raised, never swallowed.
-    The App can't change workflow files, so `touches_workflows` skips step 1. -> (who, token, why) with who 'app' or 'human'."""
-    if not touches_workflows:
-        try:
-            tok, _, rec = agent_token(repo)
-            perms = rec.get("permissions") or {}
-            short = [p for p in ("contents", "pull_requests") if perms.get(p) != "write"]
-            if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
-                raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
-                                   "and accept them on the installation, then try again." % (repo, " and ".join(short)))
-            return "app", tok, "the agent App (%s[bot]) opens it, so a code owner's approval counts" % rec.get("slug", "story-gate-agent")
-        except AgentMissing:
-            pass
+      3. otherwise NoAuthor, with the next step. An agent error other than "not set up" is raised, never swallowed, and an
+         App that can change workflow files is refused (it would let your AI run unreviewed workflows with your secrets).
+    -> (who, token, why) with who 'app', 'split' or 'human'."""
+    try:
+        tok, _, rec = agent_token(repo)
+        perms = rec.get("permissions") or {}
+        granted = rec.get("installation_permissions") or perms  # what the App itself holds, beyond this token
+        short = [p for p in ("contents", "pull_requests") if perms.get(p) != "write"]
+        if short:  # installed, but it couldn't push the branch or open the pull request: say so, don't switch to you
+            raise RuntimeError("the agent App on %s lacks write access to %s. Update its permissions in the App's settings "
+                               "and accept them on the installation, then try again." % (repo, " and ".join(short)))
+        extra = sorted(k for k, v in granted.items() if _RANK.get(v, 3) > _RANK[AGENT_MAX_PERMS.get(k, "none")])
+        if extra:
+            # the builder must never be able to change workflows, branch rules, secrets or check results: refuse such an App
+            raise RuntimeError("the agent App on %s has more access than an AI builder may have (%s). With it, your AI could "
+                               "change workflows, branch rules, secrets or check results without review. Remove those "
+                               "permissions in the App's settings (it needs only %s), accept the change on the installation, "
+                               "then try again." % (repo, ", ".join("%s: %s" % (k, granted[k]) for k in extra),
+                                                     ", ".join("%s: %s" % kv for kv in sorted(AGENT_MAX_PERMS.items()))))
+        slug = rec.get("slug", "story-gate-agent")
+        if not touches_workflows:
+            return "app", tok, "the agent App (%s[bot]) opens it, so a code owner's approval counts" % slug
+        # Workflow files: you write them (the App can't), then the App adds the rest and opens the pull request. It is the
+        # author and the last pusher, so your approval counts, and the App never gets the power to change workflows.
+        return "split", (token, tok), ("you added the workflow files; the agent App (%s[bot]) added the rest and opened it, "
+                                       "so a code owner's approval counts" % slug)
+    except AgentMissing:
+        pass
     need = approval_required(repo, branch, token)
     if need is False:
         return "human", token, "you open it: %s doesn't require an approval yet" % branch
@@ -794,9 +816,7 @@ def pr_author(repo, branch, token, login, touches_workflows=False):
            if need else "story-gate couldn't read the rules on %s, and nobody else is a code owner there" % branch)
     raise NoAuthor("%s. Do one, then try again: run `story-gate setup-agent` and install the agent App on %s (the App opens "
                    "story-gate's pull requests and you approve them), or add a second code owner to .github/CODEOWNERS."
-                   % (why, repo) if not touches_workflows else
-                   "%s, and this pull request changes workflow files, which the agent App can't do. Add a second code owner "
-                   "to .github/CODEOWNERS, then try again." % why)
+                   % (why, repo))
 
 
 def agent_record():
@@ -848,10 +868,19 @@ def agent_token(repo):
         raise AgentMissing("the agent App is not installed on %s. Install it: %s" % (repo, rec["install_url"]))
     if st != 200:
         raise RuntimeError("GitHub didn't say whether the agent App is installed on %s (HTTP %s)" % (repo, st))
-    st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt, {"repositories": [repo.split("/", 1)[1]]})
+    have = inst.get("permissions") or {}
+    # Ask only for what an AI builder may have (AGENT_MAX_PERMS), never more than the App holds: an App given extra
+    # access (workflows, secrets, ...) still hands the AI a token without it.
+    want = {k: (v if _RANK.get(have[k], 0) >= _RANK[v] else have[k]) for k, v in AGENT_MAX_PERMS.items()
+            if _RANK.get(have.get(k), 0) > 0}
+    if not want:
+        raise RuntimeError("the agent App on %s has none of the access an AI builder needs (%s)" % (
+            repo, ", ".join("%s: %s" % kv for kv in sorted(AGENT_MAX_PERMS.items()))))
+    st, tok, _ = call("POST", "/app/installations/%s/access_tokens" % inst["id"], jwt,
+                      {"repositories": [repo.split("/", 1)[1]], "permissions": want})
     if st not in (200, 201):
         raise RuntimeError("GitHub refused an agent token (HTTP %s)" % st)
-    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {})
+    return tok["token"], tok.get("expires_at"), dict(rec, permissions=tok.get("permissions") or {}, installation_permissions=have)
 
 
 def bot_identity(rec):
@@ -907,23 +936,40 @@ def device_flow(client_id, scope="repo workflow", on_code=None, sleep=time.sleep
 
 
 # ------------------------------------------------------------------ setup pull request (Git Data API)
+WORKFLOW_DIR = ".github/workflows/"
+
+
+def is_workflow_path(path):
+    """True for a file GitHub treats as a workflow (only a token with the 'workflows' permission may change it)."""
+    return path.replace("\\", "/").lower().startswith(WORKFLOW_DIR)
+
+
 def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up story-gate",
                   body="Adds story-gate files. Review and merge to turn the gate on.", base=None, parent=None,
-                  update_existing=False):
+                  update_existing=False, app_token=None):
     """One commit with every file in `files` ({posix path: bytes}) on a new branch, then a PR. -> {number, url, branch}.
     `parent`: the base commit the files were computed from (default: the base branch's tip now).
     When a PR from `branch` into `base` is already open it is returned with `existing: True`. With `update_existing`,
     that branch first gets one commit on top of its tip whose content is exactly the base branch now plus `files`
     (anything else pushed to the branch is undone; no commit when it already matches), and `updated` says whether it
-    did. An open PR from `branch` into another base is an error, never updated."""
+    did. An open PR from `branch` into another base is an error, never updated.
+    With `app_token` (pr_author said 'split'): `token` (yours) commits only the workflow files, then the agent App commits
+    everything else on top and opens the pull request, so the App is its author and last pusher and your approval counts.
+    The App never writes a workflow file."""
     if not files:
         raise RuntimeError("nothing to commit: no files were given")
 
-    def ok(method, path, payload=None, want=(200, 201)):
-        st, data, _ = call(method, path, token, payload)
-        if st not in want or not isinstance(data, (dict, list)):
-            raise RuntimeError("GitHub refused %s %s (HTTP %s %s)" % (method, path, st, (data or {}).get("message", "") if isinstance(data, dict) else ""))
-        return data
+    def checked(tok):
+        def ok(method, path, payload=None, want=(200, 201)):
+            st, data, _ = call(method, path, tok, payload)
+            if st not in want or not isinstance(data, (dict, list)):
+                raise RuntimeError("GitHub refused %s %s (HTTP %s %s)" % (method, path, st, (data or {}).get("message", "") if isinstance(data, dict) else ""))
+            return data
+        return ok
+
+    ok = checked(token)
+    if app_token:
+        return _open_split_pr(ok, checked(app_token), app_token, repo, files, branch, title, body, base, parent, update_existing)
 
     r = "/repos/%s" % repo
     owner = repo.split("/", 1)[0]
@@ -958,11 +1004,107 @@ def open_setup_pr(token, repo, files, branch="story-gate-setup", title="Set up s
     return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
 
 
+def _workflow_folders(ok, r, tree_sha):
+    """[(path, tree sha)] of every .github/workflows folder (any letter case) in a commit tree."""
+    out = []
+    for gh in ok("GET", "%s/git/trees/%s" % (r, tree_sha)).get("tree") or []:
+        if gh.get("type") == "tree" and gh.get("path", "").lower() == ".github":
+            for wf in ok("GET", "%s/git/trees/%s" % (r, gh["sha"])).get("tree") or []:
+                if wf.get("path", "").lower() == "workflows":
+                    out.append((gh["path"] + "/" + wf["path"], wf["sha"]))
+    return sorted(out)
+
+
+def _workflows_differ(ok, r, tree_a, tree_b):
+    """True when two commit trees hold different workflow files."""
+    return _workflow_folders(ok, r, tree_a) != _workflow_folders(ok, r, tree_b)
+
+
+def _open_split_pr(ok, app_ok, app_token, repo, files, branch, title, body, base, parent, update_existing):
+    """open_setup_pr when the human writes the workflow files and the agent App writes the rest and opens the PR."""
+    r = "/repos/%s" % repo
+    wf = {p: c for p, c in files.items() if is_workflow_path(p)}
+    rest = {p: c for p, c in files.items() if not is_workflow_path(p)}
+    owner = repo.split("/", 1)[0]
+    st, open_prs, _ = call("GET", "%s/pulls?state=open&head=%s" % (r, urllib.parse.quote("%s:%s" % (owner, branch))), app_token)
+    found = next((pr for pr in open_prs if isinstance(pr, dict) and ((pr.get("head") or {}).get("repo") or {}).get("full_name") == repo),
+                 None) if st == 200 and isinstance(open_prs, list) else None
+    if found and not update_existing:
+        return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True}
+    if found and ((found.get("user") or {}).get("type") != "Bot"):
+        # opened as a person: that person's approval would never count, so don't keep feeding it
+        raise RuntimeError("pull request #%s from '%s' was opened by %s, whose approval GitHub won't count. Close it (and delete "
+                           "the branch), then press the button again: the agent App will open a new one."
+                           % (found["number"], branch, (found.get("user") or {}).get("login", "a person")))
+    base = base or ok("GET", r)["default_branch"]
+    tip = parent or ok("GET", "%s/git/ref/heads/%s" % (r, urllib.parse.quote(base)))["object"]["sha"]
+    base_tree = ok("GET", "%s/git/commits/%s" % (r, tip))["tree"]["sha"]
+    if found:
+        into = (found.get("base") or {}).get("ref")
+        if into != base:
+            raise RuntimeError(f"pull request #{found['number']} from '{branch}' goes into '{into}', not '{base}'. "
+                               "Close it, then run this again.")
+        ref = f"{r}/git/refs/heads/{urllib.parse.quote(branch)}"
+        head = ok("GET", f"{r}/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
+        wf_tree = _tree_with(ok, r, base_tree, wf) if wf else base_tree
+        want = _tree_with(app_ok, r, wf_tree, rest) if rest else wf_tree
+        # the title and body are always story-gate's own, whoever opened the pull request first
+        app_ok("PATCH", f"{r}/pulls/{found['number']}", {"title": title, "body": body})
+        head_commit = ok("GET", f"{r}/git/commits/{head}")
+        if head_commit["tree"]["sha"] == want and _by_bot(app_ok, r, head):
+            return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True, "updated": False}
+        if head_commit["tree"]["sha"] != want and (wf or _workflows_differ(ok, r, base_tree, head_commit["tree"]["sha"])):
+            # You bring the workflow files to exactly what they should be (also when that means undoing an earlier
+            # workflow change on the branch); the App's commit then changes only the other files. With no workflow
+            # change to make or undo, there is no commit of yours.
+            head = ok("POST", r + "/git/commits", {"message": title + " (workflow files)", "tree": wf_tree, "parents": [head]})["sha"]
+            ok("PATCH", ref, {"sha": head})
+        app = app_ok("POST", r + "/git/commits", {"message": title, "tree": want, "parents": [head]})
+        app_ok("PATCH", ref, {"sha": app["sha"]})
+        return {"number": found["number"], "url": found["html_url"], "branch": branch, "existing": True, "updated": True}
+    start = tip
+    if wf:
+        wf_tree = _tree_with(ok, r, base_tree, wf)
+        start = ok("POST", r + "/git/commits", {"message": title + " (workflow files)", "tree": wf_tree, "parents": [tip]})["sha"]
+    else:
+        wf_tree = base_tree
+    # the branch is created by whoever wrote its first commit: you when there are workflow files, else the App
+    creator = ok if wf else app_ok
+    try:
+        creator("POST", r + "/git/refs", {"ref": "refs/heads/" + branch, "sha": start})
+    except RuntimeError as ex:
+        if "HTTP 422" not in str(ex):
+            raise
+        # The branch exists but no pull request does. Reuse it only when its tip is story-gate's own commit from a run
+        # that stopped half way; anything else may be someone's work, so stop and say so.
+        tip_now = ok("GET", f"{r}/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
+        msg = (ok("GET", f"{r}/git/commits/{tip_now}").get("message") or "").strip()
+        if msg not in (title, title + " (workflow files)"):
+            raise RuntimeError("the branch '%s' already exists on %s and isn't one story-gate left behind. Merge or delete it "
+                               "on GitHub, then run this again." % (branch, repo))
+        creator("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": start, "force": True})
+    # the App's commit always comes last (even when it changes nothing), so the App is the last pusher
+    app_tree = _tree_with(app_ok, r, wf_tree, rest) if rest else wf_tree
+    app = app_ok("POST", r + "/git/commits", {"message": title, "tree": app_tree, "parents": [start]})
+    app_ok("PATCH", f"{r}/git/refs/heads/{urllib.parse.quote(branch)}", {"sha": app["sha"]})
+    pr = app_ok("POST", r + "/pulls", {"title": title, "head": branch, "base": base, "body": body})
+    return {"number": pr["number"], "url": pr["html_url"], "branch": branch}
+
+
+def _by_bot(ok, r, sha):
+    """True when commit `sha` was committed by a bot (the agent App), so a person's approval of it counts."""
+    c = ok("GET", f"{r}/commits/{sha}")
+    return ((c.get("committer") or {}).get("type") == "Bot") or ((c.get("author") or {}).get("type") == "Bot")
+
+
 def _tree_with(ok, r, base_tree, files):
-    """A tree: `base_tree` with every file in `files` ({posix path: bytes}) written over it. -> its sha.
+    """A tree: `base_tree` with every file in `files` ({posix path: bytes, or None to delete it}) written over it. -> its sha.
     `ok` is open_setup_pr's checked GitHub call."""
     entries = []
     for path, content in sorted(files.items()):
+        if content is None:  # delete the file
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+            continue
         blob = ok("POST", r + "/git/blobs", {"content": base64.b64encode(content).decode(), "encoding": "base64"})
         entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
     return ok("POST", r + "/git/trees", {"base_tree": base_tree, "tree": entries})["sha"]
