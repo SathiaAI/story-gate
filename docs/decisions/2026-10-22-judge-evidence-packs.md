@@ -1,0 +1,44 @@
+# The judge asks narrow questions over evidence packs (2026-10-22)
+
+**Problem.** The judge sends one request with about ten broad questions per phase. At DONE it sees the diff cut to 45,000 characters (`judge.max_chars / 2`). On a real story (Viaknox/vkgate VKG-005: 8 acceptance criteria, about 65,000 characters of diff, 113 passing tests), "the diff implements every acceptance criterion" scored 0.21. With the whole diff visible it rose only to 0.32. The judge returns numbers only (Jev never writes text), so nobody could tell which criterion it doubted. An independent review, one criterion at a time, found three real bugs the judge never pointed to.
+
+**Decision.** Two signed releases. A frontier panel chose this design 4 to 0.
+
+- **Release 1 (this record): narrow questions.** Each broad check becomes several small Jev questions: one per acceptance criterion or per group of files. Each question gets only the evidence that relates to it: an *evidence pack*. Code combines the answers. The report names the criterion, file or group that scored low.
+- **Release 2 (next): a written "why".** A check that still fails gets a 1-2 sentence advisory reason from a model of a different family from the coder. The reason can never change a score or a verdict. It has its own decision record.
+
+**Rejected.** Sending the whole diff with the same broad questions: it did not fix the real failure. Replacing Jev with a general model that writes reasons: it loses calibrated scores and mixes text into the verdict. Scoring "the best chunk" for each criterion: a criterion implemented across several files would look unmet. That is why packs are chosen per criterion instead.
+
+## How Release 1 works
+
+```mermaid
+flowchart LR
+  D[Diff, split by file] --> R[Relevance: one Jev request per file<br/>'does this file serve AC n?']
+  R --> P[Evidence pack per AC:<br/>its tests + relevant files, up to the budget]
+  P --> Q[One Jev question per AC]
+  D --> G[File groups up to the budget]
+  G --> S[Scope, deferral and TRD questions per group]
+  Q --> C[Code combines: lowest AC, lowest group]
+  S --> C
+  C --> V[Verdict and report:<br/>which AC, file or group is low]
+```
+
+- **Modes.** `judge.decompose` is `off`, `shadow` or `on`. The default in Release 1 is `shadow`: the old judge still decides, and the new scores are recorded next to it for comparison. The owner switches a repository to `on` after comparing. `off` behaves exactly like today.
+- **DONE.** `impl_matches_acs` is the lowest of the per-AC scores, and `tests_implemented` is also scored per AC. `impl_no_unplanned_scope`, `no_deferrals` and `drift_trd_after` are scored per file group, and each is the lowest group. The drift direction comes from the group with the lowest TRD score. `handoff_out` and `learnings_specific` stay as they are, because their evidence is small.
+- **READY.** `ac_testable` and `tests_plan_adequate` are scored per AC, and each is the lowest AC. `dor_no_blockers` says what counts: follow-ups for after the merge, recorded decisions and dated known exceptions are not open questions.
+- **Fail closed.** If evidence is cut (a pack or a file is over its budget), or the request cap is reached, that check cannot PASS. It shows CONCERNS at best, and its `why` names what was cut or not asked.
+- **Cost.** About 1 + files + ACs + groups requests per DONE score, a few cents at most, capped by `judge.max_requests` (default 60). Requests run 4 at a time.
+- **Records.** `ready.json` and `done.json` gain a `decomposed` object: schema `decompose-1`, mode, per-item scores, the files in each pack, truncation flags, the model id and an evidence hash. Old readers ignore it. The judge schema and mode are part of the policy fingerprint, so a changed method re-scores instead of reusing an old verdict.
+- **Rollback.** Set `judge.decompose` to `off`, or roll back the release with `gate.py rollback`.
+
+## Done when (Release 1)
+
+1. With `decompose: off`, every request, record and verdict is the same as before (the existing tests pass unchanged).
+2. With `shadow`, the binding verdict is the old one, and `decomposed` holds the new scores plus a would-be overall.
+3. With `on`, the new scores decide. For each failing check the report shows the lowest items with their scores, for example `AC3 0.21 (files: scripts/check.mjs, test/check.test.mjs)`.
+4. An AC implemented across two files scores from one pack that holds both files. No per-chunk maximum is taken anywhere.
+5. A pack or file over its budget, or the request cap, makes that check unable to PASS, and the report says why.
+6. Each question's evidence holds only that question's pack, plus the story fields it needs.
+7. Changing the mode, the judge schema or the judge model makes an earlier verdict stale.
+8. Offline tests use a content-aware fake judge, including a fixture shaped like VKG-005 (8 ACs, about 65,000 characters of diff spread across files).
+9. A live shadow run on 5 vkgate stories (VKG-005, 009, 001, 006, 007) records old and new scores side by side for the owner.
