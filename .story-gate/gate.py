@@ -163,6 +163,7 @@ sys.dont_write_bytecode = True  # never leave __pycache__ inside the repo
 HERE = Path(__file__).resolve().parent
 sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE))]  # never import modules from the working tree
 import sg_judges as J  # noqa: E402
+import sg_decompose as DC  # noqa: E402
 import sg_trust as T  # noqa: E402
 import sg_stories as SS  # noqa: E402
 
@@ -226,8 +227,11 @@ DEFAULT_CONFIG = {
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
     "judge_mode": "full",
+    # decompose (sg_decompose.py): "off" asks the judge broad questions over the whole diff, as before. "shadow" (default) does
+    # that and ALSO asks narrow questions over evidence packs, recording the result beside the verdict without using it.
+    # "on" lets the narrow questions decide. max_requests caps the narrow requests per score; past it a check cannot PASS.
     "judge": {"provider": "openrouter", "emulated_allow_pass": False,
-              "allow_self_judge_pass": False, "max_chars": 90000},
+              "allow_self_judge_pass": False, "max_chars": 90000, "decompose": "shadow", "max_requests": 60},
     "approvers": [],
     "reviewers": [],  # empty until the owner names review bots or people; a code owner's approval always counts
     "require_independent_review": True,
@@ -413,6 +417,9 @@ def check_config(c):
         raise ConfigError('.story-gate/config.json: "ci_isolation" must be "strict" or "relaxed" (got %r) - the gate fails closed until fixed' % c.get("ci_isolation"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
+    why = DC.settings_problem(c.get("judge"))
+    if why:
+        raise ConfigError('.story-gate/config.json: %s - the gate fails closed until fixed' % why)
     try:
         import sg_areas as A
         A.load(c.get("guardrails"))
@@ -614,7 +621,7 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     import sg_pitfalls as PF
     pf = {"pf": [PF.mode(c), c["pitfalls"].get("source")]} if PF.mode(c) != "off" else {}  # off: every stored verdict keeps its hash
-    return json.dumps({**pf, "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+    return json.dumps({**pf, **DC.fingerprint(c), "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
                        "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
@@ -719,19 +726,29 @@ def judge(phase, state, c, sd, skip=()):
     r = J.ask(c, state, questions)
     if r.get("tier") in ("jev", "emulated"):
         a = r["answers"]
-        tier, note = r["tier"], None
-        if tier == "emulated":  # a general model must never grade work written by its own model family
-            coder = load_json(sd / "coder.json").get("model") or ""
-            if not coder:
-                note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
-            elif J.family(coder) == J.family(r.get("model") or ""):
-                tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
-            elif calibrated(c):
-                tier = "emulated-calibrated"
+        tier, note = judge_tier(r, c, sd)
         return {"judge": tier, "judge_note": note, "provider": r.get("provider"), "model": r.get("model"),
                 "scores": {k: a[k]["noul"] for k in qs_text}, "drift": a["drift_direction"]["choice"],
                 "drift_conf": a["drift_direction"]["confidence"], "cost": r.get("cost")}
-    jerr = r.get("error")
+    return judge_fallback(phase, sd, qs_text, choices, r.get("error"))
+
+
+def judge_tier(r, c, sd):
+    """(tier, note) for an answer from J.ask: a general model must never grade work written by its own model family."""
+    tier, note = r["tier"], None
+    if tier == "emulated":
+        coder = load_json(sd / "coder.json").get("model") or ""
+        if not coder:
+            note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
+        elif J.family(coder) == J.family(r.get("model") or ""):
+            tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
+        elif calibrated(c):
+            tier = "emulated-calibrated"
+    return tier, note
+
+
+def judge_fallback(phase, sd, qs_text, choices, jerr):
+    """No judge answered: the agent's own scores (never PASS) if it wrote any, else nothing."""
     selfp = sd / ("%s.self.json" % phase)
     if selfp.exists():
         s = load_json(selfp)
@@ -1564,6 +1581,11 @@ def spec_coverage(sd, fm, c):
     return not why, "; ".join(why)
 
 
+def is_test_path(f, c):
+    """True when `f` matches one of config's test_globs (the one rule for what a test file is)."""
+    return any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch("/" + f, g) for g in c.get("test_globs") or [])
+
+
 def test_corpus(c):
     """Current contents of test files in the working tree (deleted tests and production code never count)."""
     files = set(zlist("ls-files")) | set(zlist("ls-files", "--others", "--exclude-standard"))
@@ -1571,7 +1593,7 @@ def test_corpus(c):
     for f in sorted(files):
         if f.startswith(".story-gate/"):
             continue
-        if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch("/" + f, g) for g in c.get("test_globs") or []):
+        if is_test_path(f, c):
             p = ROOT / f
             if p.is_file() and p.stat().st_size < 2_000_000:
                 out.append(rd(p))
@@ -1764,7 +1786,15 @@ def verdict(structural, judged, decisions, waivers, c):
         st = band(p, th)
         if st == "PASS" and not can_pass(judged["judge"], c):
             st = "CONCERNS"  # an uncalibrated or self judge cannot award a PASS
+        if st == "PASS" and k in judged.get("capped", ()):
+            st = "CONCERNS"  # narrow questions: evidence was cut or a question was not asked, so this check cannot PASS
         checks[k] = {"status": st, "score": round(p, 3), "kind": judged["judge"], "group": CHECK_GROUP.get(k, "")}
+        if st != "PASS" and judged.get("why", {}).get(k):
+            checks[k]["why"] = judged["why"][k]  # built by code from the lowest items, e.g. "AC3 0.21 (files: a.js, b.test.js)"
+        if judged.get("items", {}).get(k):
+            checks[k]["items"] = [{x: i[x] for x in ("id", "score", "files", "truncated")} for i in judged["items"][k]]
+    for k, why in judged.get("unscored", {}).items():  # narrow questions that were never answered: shown, never a PASS
+        checks[k] = {"status": "CONCERNS", "why": why, "kind": judged["judge"], "group": CHECK_GROUP.get(k, "")}
     if judged["judge"] == "none":
         checks["judge_available"] = {"status": "FAIL", "why": "no judge and no self-scores: semantic checks did not run (%s)" % judged.get("jev_error"), "kind": "structural"}
     drift = judged.get("drift", "none")
@@ -2683,6 +2713,37 @@ def writing_report(sd, sid, phase, c, files=()):
     return rep_
 
 
+def decomposed_judge(phase, state, c, sd, skip, diff=""):
+    """The narrow-question score (sg_decompose.py) for a phase. -> (judged or None, record). `judged` has the shape judge()
+    returns, so verdict() can use it; `record` is what goes in the verdict file under "decomposed". Never raises: a failure
+    gives (None, a record that says why)."""
+    base = {"schema": DC.SCHEMA, "mode": DC.mode(c)}
+    try:
+        mx = int(c["judge"].get("max_chars", 90000))
+        questions = {k: v for k, v in (READY_Q if phase == "ready" else DONE_Q).items() if k not in skip}
+        t = load_json(sd / "tests.json")
+        plan = {str(a.get("id")): a for a in (t.get("acceptance_criteria") or []) if isinstance(a, dict)}
+        ev = {"phase": phase, "state": state, "diff": diff, "questions": questions, "max_chars": mx, "th": c["thresholds"],
+              "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
+              "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
+              "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band}
+        out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
+    except Exception as e:  # a bug here must never fail a score
+        return None, dict(base, error="narrow questions failed (%s)" % e.__class__.__name__)
+    if out.get("error"):
+        return None, dict(base, error=out["error"])
+    tier, note = judge_tier(out, c, sd)
+    judged = {"judge": tier, "judge_note": note, "provider": out["provider"], "model": out["model"], "scores": out["scores"],
+              "drift": out["drift"], "drift_conf": out["drift_conf"], "cost": out["cost"], "why": out["why"],
+              "items": out["items"], "capped": out["capped"], "unscored": out["unscored"]}
+    rec = dict(base, model=out["model"], evidence_hash=out["evidence_hash"], requests=out["requests"],
+               max_requests=out["max_requests"], checks=out["checks"], packs=out["packs"], groups=out["groups"],
+               drift=out["drift"], tier=tier)
+    if out.get("not_asked"):
+        rec["not_asked"] = out["not_asked"]
+    return judged, rec
+
+
 def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     """ci_trust: None = local run (waivers/decisions shown as proposals), True = CI with a code owner's approval
     on the head commit (honoured), False = CI without it (ignored). results = per-test outcomes from CI's own run."""
@@ -2720,9 +2781,26 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         sys.exit("phase must be ready or done")
     if (c.get("writing") or {}).get("enforce"):  # opt-in, after calibration: plain writing becomes a real check
         structural["plain_writing"] = (not wr["advice"], "; ".join(wr["advice"]))
-    judged = judge(phase, state, c, sd, skip)
+    dmode = "off" if objective(c) else DC.mode(c)  # no judge in objective mode, so nothing to decompose
+    dgot, drec = None, None
+    ddiff = diff if phase == "done" else ""
+    if dmode == "on":  # the narrow questions decide; if they cannot run, the judge counts as unavailable (fail closed)
+        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
+        judged = dgot or judge_fallback(phase, sd, [k for k in (READY_Q if phase == "ready" else DONE_Q) if k not in skip],
+                                        DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, drec.get("error"))
+    else:
+        judged = judge(phase, state, c, sd, skip)
+        if dmode == "shadow":  # never binding, never able to fail the score
+            if "jev_error" in judged:  # the broad judge did not answer, so there is nothing to compare with
+                drec = {"schema": DC.SCHEMA, "mode": "shadow", "error": "not run: the judge did not answer (%s)" % (judged.get("jev_error") or "no key")}
+            else:
+                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     v = verdict(structural, judged, dec, wav, c)
+    if drec is not None:
+        if dgot is not None:
+            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(structural, dgot, dec, wav, c)["overall"]
+        v["decomposed"] = drec
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
@@ -3073,6 +3151,8 @@ def print_verdict(v):
     for a in w.get("advice") or []:
         if "plain_writing" not in v["checks"]:
             print("  advice     " + a)
+    for line in DC.summary_lines(v):
+        print("  " + line)
 
 
 def append_decision(sid, rec):
