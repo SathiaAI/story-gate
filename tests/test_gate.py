@@ -13015,16 +13015,29 @@ class TestDecompose(Base):
 class TestDecomposePure(unittest.TestCase):
     """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
     def test_the_story_records_stay_out_of_the_packs(self):
-        """The story folder and a copy named <ID>.md are not evidence (the judge has the story); other files are."""
-        import importlib, sys
-        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        """The gate's own records in the story folder are not evidence (the judge has the story); a copy named <ID>.md
+        stays out of AC packs but in the file groups; any other file is ordinary evidence."""
+        D = self.D
         ev = {"story_dir": ".story-gate/stories/VKG-5", "story_id": "VKG-5"}
-        for p in (".story-gate/stories/VKG-5/story.md", ".story-gate/stories/VKG-5/tests.json", "docs/stories/VKG-5.md"):
+        for p in (".story-gate/stories/VKG-5/story.md", ".story-gate/stories/VKG-5/tests.json", ".story-gate/stories/VKG-5/done.json"):
             self.assertTrue(D.story_record(p, ev), p)
-        for p in (".story-gate/stories/VKG-50/story.md", "docs/stories/VKG-6.md", "docs/VKG-5.mdx", ".story-gate/config.json",
-                  "src/app.py"):
+        # other files in the folder, and look-alike paths, are ordinary evidence
+        for p in (".story-gate/stories/VKG-5/extra.py", ".story-gate/stories/VKG-5/sub/story.md", ".story-gate/stories/VKG-50/story.md",
+                  "docs/stories/VKG-5.md", "docs/VKG-5.mdx", ".story-gate/config.json", "src/app.py"):
             self.assertFalse(D.story_record(p, ev), p)
-        self.assertFalse(D.story_record("docs/stories/VKG-5.md", {}))
+        self.assertTrue(D.story_copy("docs/stories/VKG-5.md", ev))
+        self.assertFalse(D.story_copy(".story-gate/stories/VKG-5/story.md", ev))
+        self.assertFalse(D.story_copy("docs/stories/VKG-6.md", ev))
+        self.assertFalse(D.story_record(".story-gate/stories/VKG-5/story.md", {}))
+        # end to end: the copy is in a group (scope sees it) but in no pack; a stray file in the folder is in both checks
+        diff = (self.file_diff(".story-gate/stories/VKG-5/story.md", "story") + self.file_diff(".story-gate/stories/VKG-5/extra.py", "x = 1")
+                + self.file_diff("docs/stories/VKG-5.md", "copy") + self.file_diff("src/a.js", "// AC1_MARK"))
+        out = D.run("done", dict(self.ev(diff, [{"id": "AC1", "text": "one", "refs": [], "plan": {}}]), **ev), self.fake_ask())
+        grouped = [p for g in out["groups"] for p in g["files"]]
+        self.assertIn("docs/stories/VKG-5.md", grouped); self.assertIn(".story-gate/stories/VKG-5/extra.py", grouped)
+        self.assertNotIn(".story-gate/stories/VKG-5/story.md", grouped)
+        self.assertNotIn("docs/stories/VKG-5.md", [p for k in out["packs"].values() for p in k["files"]])
+        self.assertEqual(out["story_records"], [".story-gate/stories/VKG-5/story.md"])
 
     def test_a_pack_holds_only_the_tests_its_ac_links_to(self):
         """A test file larger than a pack: the AC's pack keeps only the test blocks its test_refs define, so it fits."""

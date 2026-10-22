@@ -497,11 +497,25 @@ def _run_ready(ev, ask):
     return _finish(ev, checks, cd["choice"], cd["confidence"], results, reqs, {"packs": {}, "groups": []})
 
 
+# The files the gate itself keeps in a story folder. Anything else there is ordinary work and stays in the evidence.
+STORY_RECORDS = {"story.md", "context.md", "tests.json", "handoff.md", "validation.md", "trace.md", "scenarios.json",
+                 "scenario_results.json", "test_results.json", "budgets.json", "budget_results.json", "guardrail_results.json",
+                 "checkpoints.jsonl", "decisions.jsonl", "coder.json", "pitfalls.json", "manifest.json", "evidence.json",
+                 "ready.json", "done.json", "ready.self.json", "done.self.json"}
+
+
 def story_record(path, ev):
-    """True for the story's own records: its story folder, and a copy of the story file named <ID>.md anywhere. The judge
-    already gets the story in its fields, so sending these again only crowds the evidence out of a pack."""
-    d, sid = (ev.get("story_dir") or "").rstrip("/"), ev.get("story_id") or ""
-    return bool((d and (path == d or path.startswith(d + "/"))) or (sid and path.rsplit("/", 1)[-1] == sid + ".md"))
+    """True for a record the gate keeps in this story's folder (story.md, tests.json, verdicts...). The judge already gets
+    the story in its fields, so these never go into packs or groups. Other files in the folder are evidence like any file."""
+    d = (ev.get("story_dir") or "").rstrip("/")
+    return bool(d and path.startswith(d + "/") and path[len(d) + 1:] in STORY_RECORDS)
+
+
+def story_copy(path, ev):
+    """True for a file named <ID>.md outside the story folder (a project copy of the story). It stays out of the AC packs,
+    which already carry the story, but stays in the file groups, so scope, deferral and drift still see it."""
+    sid = ev.get("story_id") or ""
+    return bool(sid and path.rsplit("/", 1)[-1] == sid + ".md" and not story_record(path, ev))
 
 
 def _run_done(ev, ask):
@@ -511,11 +525,12 @@ def _run_done(ev, ask):
     files = split_diff(ev["diff"])
     excluded = sorted(f["path"] for f in files if story_record(f["path"], ev))
     files = [f for f in files if not story_record(f["path"], ev)]
+    copies = {f["path"] for f in files if story_copy(f["path"], ev)}
     for f in files:
         f["test"] = bool(ev["is_test"](f["path"]))
     code = [f for f in files if not f["test"]]
     rest = rest_request(ev)
-    rel_reqs = [relevance_request(f, acs, per_file) for f in code] if acs else []
+    rel_reqs = [relevance_request(f, acs, per_file) for f in code if f["path"] not in copies] if acs else []
     stage1, dropped1 = take([rest] + rel_reqs, cap)
     res1 = execute(stage1, ask)
     err = first_error(stage1, res1)
