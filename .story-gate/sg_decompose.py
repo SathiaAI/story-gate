@@ -33,6 +33,7 @@ NO_BLOCKERS = ("There are no unresolved open questions that would force the deve
 PER_AC_READY = ("ac_testable", "tests_plan_adequate")
 PER_AC_DONE = ("impl_matches_acs", "tests_implemented")
 PER_GROUP_DONE = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
+SPLIT_NOTE = "the change was split into %d groups, so effects across files in different groups were not judged together"
 REST_DONE = ("handoff_out", "learnings_specific")
 GROUP_NOTE = " Judge only the files shown here; they are one part of the change."
 # The handoff and learnings are also checked against each group's code, so a claim the code contradicts is caught.
@@ -168,6 +169,7 @@ def visible_text(f):
 
 
 # A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
+STRING_QUOTES = ('"""', "'''", "`")  # multi-line string delimiters: Python triple quotes, JS/Go backticks
 CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
@@ -183,6 +185,22 @@ def ends_test(text, depth):
     the test: a helper, fixture, decorator or statement placed after it is not that test's body."""
     s = text.strip()
     return bool(s) and not CLOSING.match(s) and not s.startswith(("#", "//")) and indent(text) <= depth
+
+
+def test_end(rest, start, stop, depth):
+    """The first line in rest[start:stop] that ends the test (see ends_test), or stop. Lines inside a multi-line string
+    (a triple-quoted or backtick snapshot, often unindented) are the test's own and never end it."""
+    open_q = None
+    for j in range(start, stop):
+        if rest[j][:1] not in " +":
+            continue
+        line = rest[j][1:].rstrip("\n")
+        if open_q is None and ends_test(line, depth):
+            return j
+        for q in STRING_QUOTES:
+            if (open_q in (None, q)) and line.count(q) % 2:
+                open_q = None if open_q == q else q
+    return stop
 
 
 def linked_spans(f, refs, defined):
@@ -210,7 +228,7 @@ def linked_spans(f, refs, defined):
             continue
         stop = bounds[n + 1] if n + 1 < len(bounds) else len(rest)
         depth = indent(line[1:] if rest[i].startswith("@@") else line)  # header context keeps one space after "@@"
-        stop = next((j for j in range(i + 1, stop) if rest[j][:1] in " +" and ends_test(rest[j][1:].rstrip("\n"), depth)), stop)
+        stop = test_end(rest, i + 1, stop, depth)
         live = [j for j in range(i, stop) if not rest[j].startswith("-")]
         more = max(len(live) - TEST_BLOCK_MAX, 0)
         spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more))
@@ -726,6 +744,8 @@ def _run_done(ev, ask):
                 low_drift = p
                 ch = by[rid]["answers"]["drift_direction"]
                 drift, conf = ch["choice"], ch["confidence"]
+        if len(groups) > 1:  # no request saw every file: scope or drift built from parts in two groups is not seen whole
+            items.append(item("all groups together", None, [], True, [SPLIT_NOTE % len(groups)]))
         checks[key] = combine(items, th, band)
     if low_drift is None and groups:  # no group was asked about drift: unknown is not "none"
         drift, conf = "architect_must_decide", 0.0

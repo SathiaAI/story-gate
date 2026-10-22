@@ -11082,8 +11082,8 @@ class TestGuardrails(Base):
             os.symlink("/etc/hostname", self.repo / "link.txt")  # an untracked link isn't read: it can't rule a pattern out
             self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
             (self.repo / "link.txt").unlink()
-        with patch.object(Path, "read_text", side_effect=OSError("unreadable")):
-            (self.repo / "small.txt").write_text("hello")
+        (self.repo / "small.txt").write_text("hello")
+        with patch.object(Path, "read_bytes", side_effect=OSError("unreadable")):  # untracked_text reads bytes
             self.assertIn("c", gate.areas_that_apply(content_cfg, "main")[0])
         (self.repo / "small.txt").unlink()
         with patch.object(gate, "must", side_effect=diff_fails):
@@ -13240,8 +13240,11 @@ class TestDecomposePure(unittest.TestCase):
         self.assertFalse(any(i["truncated"] for i in impl["items"]))
         self.assertFalse(out["packs"]["AC-5"]["truncated"])
         self.assertEqual(out["checks"]["tests_implemented"]["band"], "PASS")
-        self.assertEqual(out["capped"], [])
-        self.assertGreaterEqual(len(out["groups"]), 2)  # 65,000 characters do not fit in one 45,000 group
+        # 65,000 characters do not fit in one 45,000 group: the per-group checks never saw every file together, so they
+        # are capped (the per-AC checks are not)
+        self.assertGreaterEqual(len(out["groups"]), 2)
+        self.assertEqual(sorted(out["capped"]), ["drift_trd_after", "impl_no_unplanned_scope", "no_deferrals"])
+        self.assertIn("split into %d groups" % len(out["groups"]), out["checks"]["impl_no_unplanned_scope"]["why"])
         self.assertEqual(sorted(p for g in out["groups"] for p in g["files"]), sorted(f["path"] for f in D.split_diff(diff)))
         self.assertFalse(any(g["truncated"] for g in out["groups"]))
         self.assertEqual(sorted(out["packs"]["AC-4"]["files"]), ["src/c.js", "src/d.js", "tests/test_two.py",
@@ -13527,6 +13530,29 @@ class TestDecomposePure(unittest.TestCase):
         self.assertIn("const user = make();", part); self.assertIn("+  });", part); self.assertNotIn("allowAll", part)
         self.assertIn("+  function allowAll()", D.residual_edits(f, ["test_login", "test_other"], lambda r, t: r in t))
 
+    def test_a_single_group_is_not_capped_for_being_split(self):
+        """When the whole change fits one group, scope, deferrals and drift saw every file together: no split cap."""
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK") + self.file_diff("src/b.js", "// other")
+        out = D.run("done", self.ev(diff, [{"id": "AC-1", "text": "one", "refs": [], "plan": {}}]), self.fake_ask())
+        self.assertEqual(len(out["groups"]), 1)
+        self.assertNotIn("split into", out["checks"]["impl_no_unplanned_scope"]["why"])
+        self.assertEqual(out["checks"]["impl_no_unplanned_scope"]["band"], "PASS")
+
+    def test_an_unindented_multiline_string_stays_in_its_test(self):
+        """A snapshot in triple quotes or backticks may start at column 0; its lines and the assertions after it stay
+        in the test (Bugbot), while a helper after the test still ends it."""
+        D = self.D
+        body = ('def test_snap():\n    expected = """\nline one\nline two\n"""\n    assert render() == expected\n\n'
+                "def helper():\n    return 1\n")
+        f = {"path": "tests/test_x.py", "test": True, "text": self.file_diff("tests/test_x.py", body)}
+        part, _ = D.test_blocks(f, ["test_snap"], self.defined)
+        self.assertIn("+line two", part); self.assertIn("assert render() == expected", part); self.assertNotIn("def helper", part)
+        js = "it('test_snap', () => {\n  const s = `\n<div>\n</div>\n`;\n  expect(view()).toBe(s);\n});\nfunction helper() {}\n"
+        f = {"path": "tests/a.test.js", "test": True, "text": self.file_diff("tests/a.test.js", js)}
+        part, _ = D.test_blocks(f, ["test_snap"], lambda r, t: r in t)
+        self.assertIn("expect(view()).toBe(s);", part); self.assertNotIn("function helper", part)
+
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
         relevance answer: each gets its own request."""
@@ -13599,7 +13625,8 @@ class TestDecomposePure(unittest.TestCase):
         diff, acs_ = self.vkg_shaped()
         code = [f for f in D.split_diff(diff) if not self.is_test(f["path"])]
         out = D.run("done", self.ev(diff, acs_, max_requests=1 + len(code) + 3 + len(acs_)), self.fake_ask())  # no room for groups (3: test files' other edits)
-        self.assertTrue(out["items"]["drift_trd_after"] and all(i["not_asked"] for i in out["items"]["drift_trd_after"]))
+        grp = [i for i in out["items"]["drift_trd_after"] if i["id"].startswith("group ")]
+        self.assertTrue(grp and all(i["not_asked"] for i in grp))
         self.assertEqual((out["drift"], out["drift_conf"]), ("architect_must_decide", 0.0))
 
     def test_handoff_and_learnings_are_also_checked_against_each_group(self):
