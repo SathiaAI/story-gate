@@ -170,7 +170,7 @@ def visible_text(f):
 
 # A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
 STRING_QUOTES = ('"""', "'''", "`")  # multi-line string delimiters: Python triple quotes, JS/Go backticks
-DEFINES = re.compile(r"^\s*(?:@|(?:(?:export|async|pub(?:\([\w:]+\))?|public|private|internal|protected|static|suspend)\s+)*(?:def|class|function|const|let|var|import|from|func|fn|fun)\b|[\w.]+\s*(?::[^=]*)?=(?!=))")
+DEFINES = re.compile(r"^\s*(?:@|(?:(?:export|async|pub(?:\([\w:]+\))?|public|private|internal|protected|static|suspend)\s+)*(?:def|class|function|const|let|var|import|from|func|fn|fun|sub|type|impl)\b|[\w.]+\s*(?::[^=]*)?=(?!=))")
 HASH_COMMENT_EXT = (".py", ".rb", ".sh", ".bash", ".pl", ".r", ".yml", ".yaml", ".toml", ".ex", ".exs", ".jl", ".nim", ".cr")
 CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
