@@ -196,6 +196,27 @@ def test_blocks(f, refs, defined):
     return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
 
 
+def residual_edits(f, refs, defined):
+    """The parts of a test file's diff that test_blocks shows to no AC: helpers, fixtures and imports above the first
+    linked test, unlinked tests, and the lines past a cut block. Added or removed lines there can change what a linked
+    test proves, so they go through relevance like code. -> the file header plus those lines, or "" when none changed."""
+    lines = f["text"].splitlines(keepends=True)
+    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
+    rest = lines[n_head:]
+    vis = [i for i, ln in enumerate(rest) if not ln.startswith("-")]  # index in rest of each line test_blocks can show
+    starts = [k for k, i in enumerate(vis) if TEST_START.search(rest[i])]
+    covered = set()
+    for n, k in enumerate(starts):
+        if any(defined(r, rest[vis[k]][1:]) for r in refs):
+            stop = starts[n + 1] if n + 1 < len(starts) else len(vis)
+            end = min(stop, k + TEST_BLOCK_MAX)
+            covered.update(range(vis[k], vis[end - 1] + 1))  # a removed line inside a shown block belongs to that block
+    left = [ln for i, ln in enumerate(rest) if i not in covered]
+    if not any(ln[:1] in "+-" for ln in left):
+        return ""
+    return "".join(lines[:n_head]) + "".join(left)
+
+
 def clip(text, n):
     """(text cut to n characters with a visible marker, True when it was cut). Same marker the gate uses."""
     if len(text) <= n:
@@ -547,7 +568,14 @@ def _run_done(ev, ask):
         f["test"] = bool(ev["is_test"](f["path"]))
         # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
         f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
-    code = [f for f in files if not f["test"] or f["unlinked"]]
+    # a linked test file's other edits (a helper or fixture the linked tests call) reach no pack as test blocks: judge them too
+    residual = []
+    for f in files:
+        if f["test"] and not f["unlinked"] and f["path"] not in copies:
+            r = residual_edits(f, all_refs, ev["defined"])
+            if r:
+                residual.append(dict(f, path=f["path"] + " (edits outside its linked tests)", text=r, test=False))
+    code = [f for f in files if not f["test"] or f["unlinked"]] + residual
     rest = rest_request(ev)
     rel_reqs = [relevance_request(f, acs, per_file) for f in code if f["path"] not in copies] if acs else []
     stage1, dropped1 = take([rest] + rel_reqs, cap)
@@ -563,7 +591,7 @@ def _run_done(ev, ask):
             rel[f["path"]] = {a["id"]: p_of(res, "rel:" + a["id"]) for a in acs}
     unassessed = [r["state"]["file"] for r in dropped1]
     # evidence packs, one per AC
-    packs = {a["id"]: build_pack(a, files, rel, ev["defined"], budget, per_file, unassessed) for a in acs}
+    packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed) for a in acs}
     ac_reqs = [ac_request(a, packs[a["id"]], "done") for a in acs if packs[a["id"]]["pieces"]]
     groups = build_groups(files, budget)
     grp_reqs = [group_request(g, i, len(groups), ev) for i, g in enumerate(groups)]

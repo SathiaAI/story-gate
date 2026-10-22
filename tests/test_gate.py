@@ -13199,8 +13199,9 @@ class TestDecomposePure(unittest.TestCase):
         self.assertGreaterEqual(len(out["groups"]), 2)  # 65,000 characters do not fit in one 45,000 group
         self.assertEqual(sorted(p for g in out["groups"] for p in g["files"]), sorted(f["path"] for f in D.split_diff(diff)))
         self.assertFalse(any(g["truncated"] for g in out["groups"]))
-        self.assertEqual(sorted(out["packs"]["AC-4"]["files"]), ["src/c.js", "src/d.js", "tests/test_two.py"])  # one pack holds both code files
-        self.assertEqual(out["requests"], 1 + 7 + 8 + len(out["groups"]))
+        self.assertEqual(sorted(out["packs"]["AC-4"]["files"]), ["src/c.js", "src/d.js", "tests/test_two.py",
+                                                                 "tests/test_two.py (edits outside its linked tests)"])  # one pack holds both code files
+        self.assertEqual(out["requests"], 1 + 7 + 3 + 8 + len(out["groups"]))  # 3: each test file's lines above its tests
         self.assertEqual(len(log), out["requests"])
         for st, qs in log:
             if any(k.startswith("impl_ac:") for k in qs):
@@ -13330,6 +13331,27 @@ class TestDecomposePure(unittest.TestCase):
         self.assertTrue([st for st, qs in log if st.get("file") == "tests/test_ac1.py" and any(k.startswith("rel:") for k in qs)])
         self.assertIn("tests/test_ac1.py", out["packs"]["AC-1"]["files"])
 
+    def test_a_linked_test_files_other_edits_are_judged_for_relevance(self):
+        """A helper edited above a linked test is not in the test's block: it goes through relevance and can reach a pack."""
+        D = self.D
+        body = "def check(x):\n    return True  # AC1_MARK always passes\n\n\ndef test_ac1():\n    assert check(1)"
+        diff = self.file_diff("src/a.js", "// AC1_MARK") + self.file_diff("tests/test_ac1.py", body)
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        f = [x for x in D.split_diff(diff) if x["path"] == "tests/test_ac1.py"][0]
+        defined = lambda r, t: ("def %s(" % r) in t
+        self.assertIn("return True", D.residual_edits(f, ["test_ac1"], defined))
+        self.assertNotIn("assert check(1)", D.residual_edits(f, ["test_ac1"], defined))
+        self.assertNotIn("return True", D.test_blocks(f, ["test_ac1"], defined)[0])
+        log = []
+        out = D.run("done", self.ev(diff, acs_), self.fake_ask(log=log))
+        name = "tests/test_ac1.py (edits outside its linked tests)"
+        self.assertTrue([st for st, qs in log if st.get("file") == name and any(k.startswith("rel:") for k in qs)])
+        self.assertIn(name, out["packs"]["AC-1"]["files"])
+        self.assertNotIn(name, [p for g in out["groups"] for p in g["files"]])  # groups already hold the whole file
+        # a linked test file with nothing outside its tests adds no request
+        only = self.file_diff("tests/test_ac1.py", "def test_ac1():\n    assert True")
+        self.assertEqual(D.residual_edits(D.split_diff(only)[0], ["test_ac1"], defined), "")
+
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""
         D = self.D
@@ -13344,7 +13366,7 @@ class TestDecomposePure(unittest.TestCase):
         D = self.D
         diff, acs_ = self.vkg_shaped()
         code = [f for f in D.split_diff(diff) if not self.is_test(f["path"])]
-        out = D.run("done", self.ev(diff, acs_, max_requests=1 + len(code) + len(acs_)), self.fake_ask())  # no room for groups
+        out = D.run("done", self.ev(diff, acs_, max_requests=1 + len(code) + 3 + len(acs_)), self.fake_ask())  # no room for groups (3: test files' other edits)
         self.assertTrue(out["items"]["drift_trd_after"] and all(i["not_asked"] for i in out["items"]["drift_trd_after"]))
         self.assertEqual((out["drift"], out["drift_conf"]), ("architect_must_decide", 0.0))
 
