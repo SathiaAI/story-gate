@@ -13476,6 +13476,33 @@ class TestDecomposePure(unittest.TestCase):
         self.assertIn("assert a == 1", part); self.assertNotIn("test_ac2", part)
         self.assertIn("-def test_ac2():", D.residual_edits(f, ["test_ac1", "test_ac2"], self.defined))
 
+    def test_a_helper_between_two_linked_tests_is_judged_for_relevance(self):
+        """A helper placed after one linked test and before the next is not that test's body: it goes to the residual
+        (relevance) instead of being shown only with the test above it (Codex security finding)."""
+        D = self.D
+        body = ("def test_footer():\n    assert footer() == 'ok'\n\n"
+                "def allow_all(user):  # AUTH_MARK\n    return True\n\n"
+                "@pytest.fixture\ndef session():\n    return make()\n\n"
+                "def test_auth():\n    assert allow_all(user)\n")
+        f = {"path": "tests/test_x.py", "test": True, "text": self.file_diff("tests/test_x.py", body)}
+        refs = ["test_footer", "test_auth"]
+        footer, _ = D.test_blocks(f, ["test_footer"], self.defined)
+        self.assertIn("assert footer()", footer); self.assertNotIn("allow_all(user):", footer); self.assertNotIn("def session", footer)
+        left = D.residual_edits(f, refs, self.defined)
+        self.assertIn("+def allow_all(user):  # AUTH_MARK", left); self.assertIn("+@pytest.fixture", left)
+        self.assertNotIn("assert footer()", left); self.assertNotIn("assert allow_all(user)", left)
+
+    def test_a_test_keeps_its_own_nested_lines_and_closing_brackets(self):
+        """Deeper lines (a const inside the test) and a closing "});" stay in the block; a helper at the test's own depth
+        inside a describe ends it."""
+        D = self.D
+        body = ("describe('auth', () => {\n  it('test_login', () => {\n    const user = make();\n    expect(login(user)).toBe(true);\n"
+                "  });\n  function allowAll() { return true; }\n  it('test_other', () => {\n    expect(1).toBe(1);\n  });\n});\n")
+        f = {"path": "tests/auth.test.js", "test": True, "text": self.file_diff("tests/auth.test.js", body)}
+        part, _ = D.test_blocks(f, ["test_login"], lambda r, t: r in t)
+        self.assertIn("const user = make();", part); self.assertIn("+  });", part); self.assertNotIn("allowAll", part)
+        self.assertIn("+  function allowAll()", D.residual_edits(f, ["test_login", "test_other"], lambda r, t: r in t))
+
     def test_an_oversized_plan_is_cut_and_caps_its_items(self):
         """Planned cases over PLAN_MAX are cut in the request (so the judge accepts it) and the AC cannot PASS."""
         D = self.D

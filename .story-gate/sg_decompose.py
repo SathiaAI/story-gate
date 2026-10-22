@@ -168,17 +168,30 @@ def visible_text(f):
 
 
 # A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
+CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
 
+def indent(text):
+    return len(text) - len(text.lstrip(" \t"))
+
+
+def ends_test(text, depth):
+    """A live line at or left of the test's own indentation that is not blank, a comment or only closing brackets ends
+    the test: a helper, fixture, decorator or statement placed after it is not that test's body."""
+    s = text.strip()
+    return bool(s) and not CLOSING.match(s) and not s.startswith(("#", "//")) and indent(text) <= depth
+
+
 def linked_spans(f, refs, defined):
     """(header lines, body lines, spans) for a test file's diff. A span is (first, past_last, lines_not_shown): the body
-    lines of one test definition that names one of `refs`, up to the next test definition or hunk header (a new hunk is
-    another place in the file), at most TEST_BLOCK_MAX shown lines. A hunk whose header names a linked test in git's
-    function context starts a span too. Removed lines inside a span stay in it, so a deleted
-    assertion is evidence too; only live lines can start a test, and a removed definition ends the span above it."""
+    lines of one test definition that names one of `refs`, up to the next test definition, hunk header (a new hunk is
+    another place in the file) or line that ends the test (see ends_test), at most TEST_BLOCK_MAX shown lines. A hunk
+    whose header names a linked test in git's function context starts a span too. Removed lines inside a span stay in
+    it, so a deleted assertion is evidence too; only live lines can start a test, and a removed definition ends the
+    span above it."""
     lines = f["text"].splitlines(keepends=True)
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
@@ -196,6 +209,8 @@ def linked_spans(f, refs, defined):
         if not any(defined(r, line) for r in refs):
             continue
         stop = bounds[n + 1] if n + 1 < len(bounds) else len(rest)
+        depth = indent(line[1:] if rest[i].startswith("@@") else line)  # header context keeps one space after "@@"
+        stop = next((j for j in range(i + 1, stop) if rest[j][:1] in " +" and ends_test(rest[j][1:].rstrip("\n"), depth)), stop)
         live = [j for j in range(i, stop) if not rest[j].startswith("-")]
         more = max(len(live) - TEST_BLOCK_MAX, 0)
         spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more))
