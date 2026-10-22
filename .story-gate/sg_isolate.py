@@ -54,7 +54,7 @@ DIAG_PROGRAMS = re.compile(r"useradd|passwd|nscd|sssd\w*|systemd-userdbd|sudo")
 def _probe(argv):
     """One diagnostic command (no shell, own short timeout): (exit code, output), or (None, why it gave nothing)."""
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=DIAG_TIMEOUT)
+        r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=DIAG_TIMEOUT)
     except subprocess.TimeoutExpired:
         return None, "timed out after %s s" % DIAG_TIMEOUT
     except (OSError, subprocess.SubprocessError) as e:
@@ -109,7 +109,10 @@ def _run(argv, timeout=120, check=True):
     except (OSError, subprocess.SubprocessError) as e:
         msg = "%s couldn't run (%s)" % (argv[len(_priv())] if len(argv) > len(_priv()) else argv[0], e)
         if isinstance(e, subprocess.TimeoutExpired):
-            msg += "; diagnostics: " + _timeout_diagnostics()
+            try:
+                msg += "; diagnostics: " + _timeout_diagnostics()
+            except Exception as e2:  # never let the diagnosis replace the timeout itself
+                msg += "; diagnostics failed (%s)" % type(e2).__name__
         raise IsolationError(msg)
     if check and r.returncode != 0:
         raise IsolationError("%s failed: %s" % (" ".join(argv[len(_priv()):][:3]), (r.stderr or r.stdout).strip()[:200]))

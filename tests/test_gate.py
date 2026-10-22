@@ -11636,6 +11636,22 @@ class TestCiIsolation(Base):
         self.assertIn("ps timed out after 0.5 s", msg); self.assertIn("sudo -n true: exit 0", msg)
         self.assertIn("systemctl is-active: nscd active, sssd active", msg)
 
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_the_timeout_is_still_reported_when_a_probe_misbehaves(self):
+        """A probe printing bytes that aren't text is read with replacements, and any other failure while diagnosing
+        still raises IsolationError with the timeout, so callers that catch only IsolationError keep cleaning up."""
+        I = self.I()
+        with patch.object(I.subprocess, "run", wraps=subprocess.run) as run:  # real process, real decoding
+            code, out = I._probe([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\xff\\n')"])
+        self.assertEqual(code, 0); self.assertTrue(out.startswith("ok ")); self.assertEqual(run.call_count, 1)
+
+        def probe(argv, **kw):
+            """Something unexpected goes wrong while diagnosing."""
+            raise ValueError("boom")
+        msg = self.timed_out_useradd(I, probe)
+        self.assertTrue(msg.startswith("useradd couldn't run (Command "), msg); self.assertIn("timed out after", msg)
+        self.assertTrue(msg.endswith("; diagnostics failed (ValueError)"), msg)
+
     def test_file_evidence_covers_the_whole_file(self):
         """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
         still changes the digest; a folder or a missing file has none."""
