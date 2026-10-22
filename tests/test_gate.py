@@ -13666,6 +13666,21 @@ class TestDecomposePure(unittest.TestCase):
         f.pop("new_text")  # without the file the hunk starts outside any string: the old guess, kept as a fallback
         self.assertIn("assert True", D.test_blocks(f, ["test_auth_case"], self.defined)[0])
 
+    def test_a_hunk_header_naming_a_test_inside_a_string_starts_no_block(self):
+        """git's function context does not know strings: a header naming a "test" written inside a string opened above
+        the hunk starts no block, while a header naming a real test still does (Bugbot)."""
+        D = self.D
+        new = 'payload = """\ndef test_auth_case():\n    a = 1\n    b = 2\n    c = 3\n    assert True\n"""\n'
+        hunk = ("diff --git a/tests/test_p.py b/tests/test_p.py\n--- a/tests/test_p.py\n+++ b/tests/test_p.py\n"
+                "@@ -5,2 +5,3 @@ def test_auth_case():\n     c = 3\n+    assert 1\n     assert True\n")
+        f = {"path": "tests/test_p.py", "test": True, "text": hunk, "new_text": new}
+        self.assertEqual(D.test_blocks(f, ["test_auth_case"], self.defined), ("", False))
+        self.assertIn("assert 1", D.residual_edits(f, ["test_auth_case"], self.defined))
+        f["new_text"] = new.replace('payload = """\n', "").replace('"""\n', "")  # the same test, for real
+        hunk2 = hunk.replace("@@ -5,2 +5,3 @@", "@@ -4,2 +4,3 @@")
+        part, _ = D.test_blocks(dict(f, text=hunk2), ["test_auth_case"], self.defined)
+        self.assertIn("assert 1", part)
+
     def test_regex_slashes_decorators_and_renamed_methods(self):
         """`\\/\\//` in a JS regex is not a comment; a skip decorator above a test is part of its block; an @Test whose
         method was renamed still joins the new declaration (Codex, Bugbot)."""

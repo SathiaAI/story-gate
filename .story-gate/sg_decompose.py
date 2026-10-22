@@ -235,15 +235,32 @@ def string_state(line, open_q, hash_comments=True, raw_backtick=False):
     return open_q if open_q in STRING_QUOTES or i > n else None  # i > n: the last backslash escaped the line end
 
 
+def file_states(new_text, hash_comments=True, raw_backtick=False):
+    """[None, then for each line n of the changed file the multi-line string open just before it] (see string_state)."""
+    pre, q = [None], None
+    for ln in (new_text or "").splitlines():
+        pre.append(q)
+        q = string_state(ln, q, hash_comments, raw_backtick)
+    return pre
+
+
+def header_names_text(header, ctx, new_text, pre):
+    """True when the definition git names in a hunk header's function context is not a definition: it cannot be found
+    above the hunk in the changed file, or it sits inside a string there (a fake test written into a string)."""
+    m = re.match(r"@@ -\S+ \+(\d+)", header)
+    n, want, lines = int(m.group(1)) if m else 0, ctx.strip()[:60], new_text.splitlines()
+    for k in range(min(n - 1, len(lines)), 0, -1):  # line k of the file, nearest the hunk first
+        if want and lines[k - 1].strip().startswith(want):
+            return pre[k] is not None
+    return True
+
+
 def string_states(rest, hash_comments=True, raw_backtick=False, new_text=None):
     """For each line of a diff body, the multi-line string open just before it (see string_state), plus one entry for
     the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing. A hunk header starts
     the next hunk in the state the whole changed file has at that line (new_text, read from the working tree), so a
     string opened above the hunk is still open in it; without new_text the hunk starts outside any string."""
-    pre, q = [None], None  # pre[n]: the string open before line n of the changed file
-    for ln in (new_text or "").splitlines():
-        pre.append(q)
-        q = string_state(ln, q, hash_comments, raw_backtick)
+    pre = file_states(new_text, hash_comments, raw_backtick)
     out, open_q = [], None
     for ln in rest:
         out.append(open_q)
@@ -285,6 +302,9 @@ def linked_spans(f, refs, defined):
             # test opens with lines of that test, so it stays in the test's block instead of depending on relevance
             line = rest[i].split("@@", 2)[2] if rest[i].count("@@") >= 2 else ""
             depth = indent(line[1:])  # header context keeps one space after "@@"
+            if f.get("new_text") is not None and header_names_text(rest[i], line, f["new_text"], file_states(
+                    f["new_text"], path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT))):
+                continue  # git's context regex does not know strings: the file decides
         else:
             while ANNOTATION.match(rest[k][1:]):
                 j = k + 1
