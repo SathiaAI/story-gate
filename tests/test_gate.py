@@ -12569,3 +12569,558 @@ class TestDependencies(Base):
         self.assertEqual(r.stdout, run(self.repo, "deps", "SAT-1").stdout)  # deterministic
         self.assertEqual(run(self.repo, "deps", "nope").returncode, 1)
         self.assertEqual(run(self.repo, "deps", "SAT-77").returncode, 1)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Narrow judge questions over evidence packs (sg_decompose.py; docs/decisions/2026-10-22-judge-evidence-packs.md)
+def mark(ac_id):
+    """The marker the content-aware fake judge looks for: AC-3 -> AC3_MARK."""
+    import re
+    return re.sub(r"\W", "", ac_id) + "_MARK"
+
+
+class MarkerJudge:
+    """A fake Jev (decisions format) that reads the evidence. A relevance question is high when the file's diff holds the
+    AC's marker; a per-AC question is high only when the pack holds it. Every other question gets `base`.
+    `overrides` sets a question's answer; `fail_on` makes any request with a question starting like that return HTTP 500.
+    Every request body is kept in `requests`."""
+    def __init__(self, hi=0.9, lo=0.05, base=0.95, overrides=None, fail_on=(), model="typesafe/jev-1.13", delay=None):
+        import http.server, threading
+        me = self
+        self.hi, self.lo, self.base, self.overrides, self.fail_on, self.model, self.delay = hi, lo, base, overrides or {}, tuple(fail_on), model, delay
+        self.requests, self.lock = [], threading.Lock()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode())
+                with me.lock:
+                    me.requests.append(body)
+                if me.delay:
+                    time.sleep(me.delay(body))
+                if any(k.startswith(me.fail_on) for k in body["questions"]) if me.fail_on else False:
+                    raw = b'{"error": "boom"}'
+                    self.send_response(500); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+                    return
+                ans = {k: me.answer(k, q, body["state"]) for k, q in body["questions"].items()}
+                raw = json.dumps({"model": me.model, "answers": ans}).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def answer(self, k, q, state):
+        if q["type"] == "choice":
+            return {"choice": "none", "confidence": 0.9}
+        if k in self.overrides:
+            return {"noul": self.overrides[k]}
+        for pre in ("rel:", "impl_ac:", "tests_ac:"):
+            if k.startswith(pre):
+                return {"noul": self.hi if mark(k[len(pre):]) in state.get("diff", "") else self.lo}
+        return {"noul": self.base}
+
+    def with_questions(self, prefix):
+        return [r for r in self.requests if any(k.startswith(prefix) for k in r["questions"])]
+
+    def close(self):
+        self.srv.shutdown(); self.srv.server_close()
+
+
+class TestDecompose(Base):
+    """Narrow questions over evidence packs: off, shadow and on."""
+    def setUp(self):
+        super().setUp()
+        self.judges = []
+        self.addCleanup(lambda: [j.close() for j in self.judges])
+
+    def judge(self, **kw):
+        j = MarkerJudge(**kw)
+        self.judges.append(j)
+        return j
+
+    def configure(self, j, decompose, **extra):
+        self.cfg(judge=dict({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": j.url + "/decisions",
+                             "decompose": decompose}, **extra))
+
+    def build(self, n=3, missing=(), two_files=(), filler=0):
+        """A story with n ACs, one code file and one test file per AC (none for `missing` ACs; two code files for `two_files`)."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (sd / "tests.json").write_text(json.dumps({"acceptance_criteria": [
+            {"id": "AC-%d" % i, "text": "behaviour number %d works" % i, "positive": ["p"], "negative": ["n"], "edge": ["e"],
+             "regression": [], "not_applicable": {"regression": "new"}, "test_refs": ["test_ac%d" % i]} for i in range(1, n + 1)]}))
+        (self.repo / "src").mkdir(exist_ok=True); (self.repo / "tests").mkdir(exist_ok=True)
+        for i in range(1, n + 1):
+            if i in missing:
+                continue
+            code = "// %s\nexport const f%d = () => %d;\n" % (mark("AC-%d" % i), i, i) + "// filler\n" * filler
+            (self.repo / "src" / ("feat%d.js" % i)).write_text(code)
+            (self.repo / "tests" / ("test_ac%d.py" % i)).write_text("def test_ac%d():\n    # %s\n    assert True\n" % (i, mark("AC-%d" % i)))
+            if i in two_files:
+                (self.repo / "src" / ("feat%db.js" % i)).write_text("// %s\nexport const g%d = () => %d;\n" % (mark("AC-%d" % i), i, i))
+
+    def score(self, phase="done"):
+        r = run(self.repo, "score", "SAT-1", phase, env={"JUDGE_API_KEY": "k"})
+        return json.loads((self.repo / ".story-gate/stories/SAT-1" / ("%s.json" % phase)).read_text()), r
+
+    def gate(self):
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
+        return g
+
+    # ---- Done when 1: off is today's behaviour
+    def test_off_asks_the_same_broad_questions_and_writes_the_same_record(self):
+        j = self.judge(); self.configure(j, "off")
+        self.build()
+        g = self.gate()
+        v, r = self.score("done")
+        self.assertEqual(len(j.requests), 1, r.stdout)
+        self.assertEqual(set(j.requests[0]["questions"]), set(g.DONE_Q) | {"drift_direction"})
+        for k, text in g.DONE_Q.items():
+            self.assertEqual(j.requests[0]["questions"][k]["instructions"], text)
+        self.assertEqual(j.requests[0]["state"]["diff_truncated"], False)
+        self.assertNotIn("decomposed", v)
+        self.assertNotIn('"dc"', g.policy_fingerprint(g.cfg()))  # off keeps every stored hash
+        j.requests.clear()
+        vr, _ = self.score("ready")
+        self.assertEqual(len(j.requests), 1)
+        self.assertEqual(j.requests[0]["questions"]["dor_no_blockers"]["instructions"], g.READY_Q["dor_no_blockers"])
+        self.assertNotIn("decomposed", vr)
+
+    def test_the_fingerprint_changes_only_when_the_method_does(self):
+        j = self.judge(); self.configure(j, "off")
+        g = self.gate()
+        off = g.policy_fingerprint(g.cfg())
+        self.configure(j, "shadow"); shadow = g.policy_fingerprint(g.cfg())
+        self.configure(j, "on"); on = g.policy_fingerprint(g.cfg())
+        self.assertEqual(len({off, shadow, on}), 3)
+        self.assertIn("decompose-1", shadow)
+        self.configure(j, "on", max_requests=10)
+        self.assertNotEqual(g.policy_fingerprint(g.cfg()), on)  # the cap changes what can pass
+
+    # ---- Done when 2: shadow
+    def test_shadow_keeps_the_broad_verdict_and_records_the_narrow_one(self):
+        j = self.judge(); self.configure(j, "off")
+        self.build(n=3, missing=(3,))
+        off, _ = self.score("done")
+        self.configure(j, "shadow")
+        j.requests.clear()
+        v, r = self.score("done")
+        for k in ("impl_matches_acs", "tests_implemented", "no_deferrals", "drift_trd_after"):
+            self.assertEqual(v["checks"][k]["score"], off["checks"][k]["score"], k)  # the binding verdict is the broad one
+        self.assertEqual(v["checks"]["impl_matches_acs"]["status"], "PASS")
+        d = v["decomposed"]
+        self.assertEqual((d["schema"], d["mode"]), ("decompose-1", "shadow"))
+        self.assertTrue(d["evidence_hash"] and d["model"] and "would_be_overall" in d)
+        self.assertEqual(d["checks"]["impl_matches_acs"]["band"], "FAIL")  # AC-3 is not in the code
+        self.assertIn("AC-3", d["checks"]["impl_matches_acs"]["why"])
+        self.assertNotEqual(d["would_be_overall"], "PASS")
+        self.assertIn("Shadow (not binding)", r.stdout)
+        self.assertIn("Score (Jev, binding)", r.stdout)
+        broad = [q for q in j.requests if "impl_matches_acs" in q["questions"]]
+        self.assertEqual(len(broad), 1)  # one broad request, exactly as in off mode
+
+    def test_shadow_never_fails_the_score_when_the_narrow_questions_error(self):
+        j = self.judge(fail_on=("rel:", "impl_ac:", "group")); self.configure(j, "shadow")
+        j.fail_on = ("rel:",)
+        self.build()
+        v, r = self.score("done")
+        self.assertIn("error", v["decomposed"], v["decomposed"])
+        self.assertEqual(v["judge"], "jev")
+        self.assertEqual(v["checks"]["impl_matches_acs"]["score"], 0.95)
+
+    def test_shadow_with_no_judge_answer_is_recorded_not_raised(self):
+        self.cfg(judge={"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": "http://127.0.0.1:9/decisions", "decompose": "shadow"})
+        self.build()
+        v, r = self.score("done")
+        self.assertIn("did not answer", v["decomposed"]["error"])
+
+    # ---- Done when 3 and 5: on
+    def test_on_composes_the_lowest_ac_and_names_it(self):
+        j = self.judge(overrides={"impl_ac:AC-2": 0.2}); self.configure(j, "on")
+        self.build(n=3)
+        v, r = self.score("done")
+        c = v["checks"]["impl_matches_acs"]
+        self.assertEqual(c["score"], 0.2)  # the lowest AC, not an average or a maximum
+        self.assertEqual(c["status"], "FAIL")
+        self.assertIn("AC-2 0.20 (files: tests/test_ac2.py, src/feat2.js)", c["why"])
+        self.assertNotIn("AC-1", c["why"])
+        self.assertEqual({i["id"]: i["score"] for i in c["items"]}, {"AC-1": 0.9, "AC-2": 0.2, "AC-3": 0.9})
+        self.assertEqual(v["checks"]["tests_implemented"]["status"], "PASS")
+        self.assertEqual(v["decomposed"]["mode"], "on")
+        self.assertIn("AC-2 0.20", r.stdout)  # the report names the item
+        self.assertIn("Score (Jev, binding)", r.stdout)
+        self.assertEqual(v["decomposed"]["would_be_overall"], v["overall"])
+
+    def test_on_fails_an_ac_that_is_missing_from_the_code(self):
+        j = self.judge(); self.configure(j, "on")
+        self.build(n=3, missing=(2,))
+        v, r = self.score("done")
+        c = v["checks"]["impl_matches_acs"]
+        self.assertEqual(c["status"], "FAIL")
+        self.assertIn("AC-2 0.00 (no changed file relates to it)", c["why"])
+        self.assertEqual(v["checks"]["tests_implemented"]["status"], "FAIL")
+        self.assertEqual(v["overall"], "FAIL")
+        self.assertFalse([q for q in j.requests if any(k.endswith(":AC-2") and not k.startswith("rel:") for k in q["questions"])])  # no pack, no request
+
+    def test_on_takes_the_lowest_group_for_scope_deferrals_and_drift(self):
+        j = self.judge(base=0.95); self.configure(j, "on", max_chars=2400)  # small groups: one file each
+        self.build(n=3, filler=40)
+        j.answer_base = j.answer
+        def answer(k, q, state):
+            if q["type"] == "choice":
+                return {"choice": "spec_should_change" if "src/feat2.js" in state.get("group_files", []) else "none", "confidence": 0.8}
+            if k == "no_deferrals" and "src/feat2.js" in state.get("group_files", []):
+                return {"noul": 0.1}
+            if k == "drift_trd_after":
+                return {"noul": 0.3 if "src/feat2.js" in state.get("group_files", []) else 0.9}
+            return j.answer_base(k, q, state)
+        j.answer = answer
+        v, r = self.score("done")
+        d = v["checks"]["no_deferrals"]
+        self.assertEqual(d["score"], 0.1)
+        self.assertIn("src/feat2.js", d["why"])
+        self.assertEqual(v["checks"]["drift_trd_after"]["score"], 0.3)
+        self.assertEqual(v["drift"], "spec_should_change")  # the direction of the group with the lowest TRD score
+
+    # ---- Done when 4 and 6: packs
+    def test_an_ac_built_in_two_files_is_judged_from_one_pack_that_holds_both(self):
+        j = self.judge(); self.configure(j, "on")
+        self.build(n=3, two_files=(2,))
+        v, r = self.score("done")
+        reqs = [q for q in j.requests if "impl_ac:AC-2" in q["questions"]]
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(sorted(reqs[0]["state"]["files"]), ["src/feat2.js", "src/feat2b.js", "tests/test_ac2.py"])
+        c = v["checks"]["impl_matches_acs"]
+        self.assertEqual(c["status"], "PASS", c)
+        self.assertEqual({i["id"]: i["score"] for i in c["items"]}["AC-2"], 0.9)  # no per-chunk maximum anywhere
+
+    def test_each_ac_request_holds_only_its_own_pack(self):
+        j = self.judge(); self.configure(j, "on")
+        self.build(n=3)
+        self.score("done")
+        for i in (1, 2, 3):
+            req = [q for q in j.requests if "impl_ac:AC-%d" % i in q["questions"]]
+            self.assertEqual(len(req), 1)
+            st = req[0]["state"]
+            self.assertEqual(sorted(st["files"]), ["src/feat%d.js" % i, "tests/test_ac%d.py" % i])
+            self.assertIn(mark("AC-%d" % i), st["diff"])
+            for o in (1, 2, 3):
+                if o != i:
+                    self.assertNotIn(mark("AC-%d" % o), st["diff"])
+            self.assertEqual(set(st), {"acceptance_criterion", "planned_cases", "test_refs", "files", "diff", "evidence_truncated", "evidence_note", "_note"})
+            self.assertEqual(set(req[0]["questions"]), {"impl_ac:AC-%d" % i, "tests_ac:AC-%d" % i})
+            self.assertIn("Count only behaviour present in the diff", req[0]["questions"]["impl_ac:AC-%d" % i]["instructions"])
+
+    # ---- Done when 5: fail closed
+    def test_a_pack_over_its_budget_cannot_pass(self):
+        j = self.judge(); self.configure(j, "on", max_chars=4000)  # pack budget 2000
+        self.build(n=2, filler=400)  # feat1.js is about 4,000 characters of diff
+        v, r = self.score("done")
+        c = v["checks"]["impl_matches_acs"]
+        self.assertEqual(c["status"], "CONCERNS", c)  # high scores, but the evidence was cut
+        self.assertEqual(c["score"], 0.9)
+        self.assertIn("evidence over the 2000-character budget", c["why"])
+        self.assertTrue({i["id"]: i["truncated"] for i in c["items"]}["AC-1"])
+        self.assertEqual(v["decomposed"]["packs"]["AC-1"]["truncated"], True)
+        self.assertNotEqual(v["overall"], "PASS")
+
+    def test_the_request_cap_stops_asking_and_the_check_cannot_pass(self):
+        j = self.judge(); self.configure(j, "on", max_requests=4)  # rest + 3 relevance requests: nothing left for the ACs
+        self.build(n=3)
+        v, r = self.score("done")
+        self.assertEqual(len(j.requests), 4)
+        c = v["checks"]["impl_matches_acs"]
+        self.assertEqual(c["status"], "CONCERNS", c)
+        self.assertIn("request cap", c["why"])
+        self.assertIn("AC-1", c["why"])
+        self.assertNotIn("score", c)  # nothing was scored
+        self.assertEqual(v["decomposed"]["requests"], 4)
+
+    def test_a_file_never_checked_for_relevance_makes_every_ac_unprovable(self):
+        j = self.judge(); self.configure(j, "on", max_requests=3)  # rest + 2 of 3 relevance requests
+        self.build(n=3)
+        v, r = self.score("done")
+        c = v["checks"]["impl_matches_acs"]
+        self.assertNotEqual(c["status"], "PASS")
+        self.assertIn("not checked for relevance (request cap)", c["why"])
+
+    def test_a_request_error_in_on_mode_makes_the_judge_unavailable(self):
+        j = self.judge(fail_on=("rel:",)); self.configure(j, "on")
+        self.build()
+        v, r = self.score("done")
+        self.assertIn("boom", v["decomposed"]["error"])
+        self.assertNotEqual(v["overall"], "PASS")
+        self.assertIn(v["judge"], ("self", "none"))
+
+    # ---- READY
+    def test_ready_scores_each_ac_and_states_what_a_blocker_is(self):
+        j = self.judge(overrides={"ac_testable:AC-2": 0.2}); self.configure(j, "on")
+        self.build(n=3)
+        v, r = self.score("ready")
+        c = v["checks"]["ac_testable"]
+        self.assertEqual((c["score"], c["status"]), (0.2, "FAIL"))
+        self.assertIn("AC-2 0.20", c["why"])
+        self.assertEqual(v["checks"]["tests_plan_adequate"]["score"], 0.95)
+        rest = [q for q in j.requests if "dor_no_blockers" in q["questions"]]
+        self.assertEqual(len(rest), 1)
+        text = rest[0]["questions"]["dor_no_blockers"]["instructions"]
+        for want in ("True means no open question forces the developer to guess", "Follow-ups planned for after the merge",
+                     "decisions already recorded", "dated known exceptions with an owner are NOT open questions"):
+            self.assertIn(want, text)
+        self.assertNotIn("ac_testable", rest[0]["questions"])
+        self.assertEqual(len([q for q in j.requests if any(k.startswith("ac_testable:") for k in q["questions"])]), 3)  # one per AC
+        ac = [q for q in j.requests if "ac_testable:AC-1" in q["questions"]][0]
+        self.assertNotIn("AC-2", json.dumps(ac["state"]))  # a per-AC request holds only that AC
+
+    def test_ready_in_shadow_keeps_the_old_wording_in_the_binding_request(self):
+        j = self.judge(); self.configure(j, "shadow")
+        self.build(n=2)
+        g = self.gate()
+        v, r = self.score("ready")
+        old = [q for q in j.requests if "ac_testable" in q["questions"]]
+        self.assertEqual(len(old), 1)
+        self.assertEqual(old[0]["questions"]["dor_no_blockers"]["instructions"], g.READY_Q["dor_no_blockers"])
+        self.assertEqual(v["decomposed"]["checks"]["dor_no_blockers"]["band"], "PASS")
+
+    # ---- Done when 7: stale
+    def test_changing_the_mode_the_schema_or_the_model_makes_a_verdict_stale(self):
+        j = self.judge(); self.configure(j, "shadow")
+        self.build()
+        v, r = self.score("done")
+        g = self.gate()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        c = g.cfg()
+        self.assertFalse(g.stale(v, c, sd))
+        self.configure(j, "on")
+        self.assertTrue(g.stale(v, g.cfg(), sd))
+        self.configure(j, "off")
+        self.assertTrue(g.stale(v, g.cfg(), sd))
+        self.configure(j, "shadow")
+        self.assertFalse(g.stale(v, g.cfg(), sd))
+        with patch.object(g.DC, "SCHEMA", "decompose-2"):
+            self.assertTrue(g.stale(v, g.cfg(), sd))
+        self.configure(j, "shadow", model="typesafe/jev-1.14")
+        self.assertTrue(g.stale(v, g.cfg(), sd))
+
+    def test_a_passing_verdict_is_not_reusable_after_the_mode_changes(self):
+        j = self.judge(); self.configure(j, "shadow")
+        self.build(n=1)
+        vr, r = self.score("ready")
+        g = self.gate()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        self.assertTrue(g.passed(dict(vr, overall="PASS"), g.cfg(), sd))
+        self.configure(j, "on")
+        self.assertFalse(g.passed(dict(vr, overall="PASS"), g.cfg(), sd))
+
+    # ---- settings
+    def test_bad_decompose_settings_are_a_config_error(self):
+        g = self.gate()
+        c = g.cfg()
+        for bad in ({"decompose": "maybe"}, {"decompose": True}, {"max_requests": 0}, {"max_requests": "60"}, {"max_requests": True}):
+            c2 = json.loads(json.dumps(c)); c2["judge"].update(bad)
+            with self.assertRaises(g.ConfigError, msg=bad):
+                g.check_config(c2)
+        self.assertEqual(c["judge"]["decompose"], "shadow")
+        self.assertEqual(c["judge"]["max_requests"], 60)
+
+    def test_objective_mode_asks_nothing(self):
+        j = self.judge(); self.configure(j, "on")
+        self.cfg(judge_mode="objective")
+        self.build()
+        v, r = self.score("done")
+        self.assertEqual(j.requests, [])
+        self.assertNotIn("decomposed", v)
+
+    def test_the_validation_page_shows_the_narrow_scores(self):
+        j = self.judge(); self.configure(j, "shadow")
+        self.build()
+        self.score("done")
+        out = self.repo / "page.html"
+        r = run(self.repo, "report", "SAT-1", "--out", str(out))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        page = out.read_text()
+        self.assertIn("How the judge scored it", page)
+        self.assertIn("Shadow (not binding)", page)
+
+
+class TestDecomposePure(unittest.TestCase):
+    """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SRC))
+        import importlib
+        cls.D = importlib.import_module("sg_decompose")
+
+    GLOBS = ("**/test_*.py", "**/tests/**", "**/*.test.*")
+
+    @staticmethod
+    def is_test(path):
+        import fnmatch
+        return any(fnmatch.fnmatch(path, g) or fnmatch.fnmatch("/" + path, g) for g in TestDecomposePure.GLOBS)
+
+    @staticmethod
+    def defined(ref, text):
+        import re
+        return bool(re.search(r"\b(?:def|function)\s+" + re.escape(ref) + r"\s*\(", text))
+
+    @staticmethod
+    def file_diff(path, body, status="new file mode 100644"):
+        return "diff --git a/%s b/%s\n%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n%s" % (
+            path, path, status, path, "".join("+" + l + "\n" for l in body.splitlines()))
+
+    def fake_ask(self, overrides=None, delay=None, hi=0.9, lo=0.05, log=None):
+        overrides = overrides or {}
+
+        def ask(state, questions):
+            if log is not None:
+                log.append((state, questions))
+            if delay:
+                time.sleep(delay(questions))
+            ans = {}
+            for k, q in questions.items():
+                if q["type"] == "choice":
+                    ans[k] = {"choice": "none", "confidence": 0.9}
+                    continue
+                if k in overrides:
+                    ans[k] = {"noul": overrides[k]}
+                    continue
+                for pre in ("rel:", "impl_ac:", "tests_ac:"):
+                    if k.startswith(pre):
+                        ans[k] = {"noul": hi if mark(k[len(pre):]) in state.get("diff", "") else lo}
+                        break
+                else:
+                    ans[k] = {"noul": 0.95}
+            return {"tier": "jev", "provider": "x", "model": "typesafe/jev-1.13", "answers": ans, "cost": 0.001}
+        return ask
+
+    def ev(self, diff, acs, phase="done", max_chars=90000, max_requests=60, state=None):
+        qs = {k: "Q %s" % k for k in ("impl_matches_acs", "impl_no_unplanned_scope", "drift_trd_after", "tests_implemented", "no_deferrals",
+                                      "handoff_out", "learnings_specific")}
+        return {"phase": phase, "state": state or {"story": "S", "context": "C", "changed_files": []}, "diff": diff, "acs": acs,
+                "questions": qs, "choices": {"none": "n", "work_should_change": "w"}, "max_chars": max_chars, "max_requests": max_requests,
+                "th": {"pass": 0.7, "concerns": 0.4}, "is_test": self.is_test, "defined": self.defined,
+                "band": lambda p, th: "PASS" if p >= th["pass"] else ("CONCERNS" if p >= th["concerns"] else "FAIL")}
+
+    # ---- splitting
+    def test_split_diff_keeps_paths_and_handles_renames_deletions_and_binaries(self):
+        D = self.D
+        diff = ("diff --git a/src/a.js b/src/a.js\nindex 1..2 100644\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1,2 @@\n x\n+y\n"
+                "diff --git a/old name.txt b/new name.txt\nsimilarity index 90%\nrename from old name.txt\nrename to new name.txt\n"
+                "diff --git a/img.png b/img.png\nindex 1..2 100644\nBinary files a/img.png and b/img.png differ\n"
+                "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+                "diff --git a/n.py b/n.py\nnew file (untracked)\n+++ b/n.py\n+z\n"
+                "diff --git \"a/we\\tird.py\" \"b/we\\tird.py\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/we\\tird.py\"\n@@ -0,0 +1 @@\n+q\n")
+        got = [(f["path"], f["old_path"], f["status"], f["binary"]) for f in D.split_diff(diff)]
+        self.assertEqual(got, [("src/a.js", "src/a.js", "modified", False), ("new name.txt", "old name.txt", "renamed", False),
+                               ("img.png", "img.png", "modified", True), ("gone.py", "gone.py", "deleted", False),
+                               ("n.py", "n.py", "added", False), ("we\tird.py", "we\tird.py", "added", False)])
+        self.assertEqual("".join(f["text"] for f in D.split_diff(diff)), diff)  # nothing lost, nothing duplicated
+        self.assertEqual(D.split_diff(""), [])
+
+    def test_a_deleted_test_does_not_count_as_defining_a_test(self):
+        D = self.D
+        f = D.split_diff("diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1,2 +1,1 @@\n-def test_ac1():\n+pass\n")[0]
+        self.assertFalse(self.defined("test_ac1", D.visible_text(f)))
+
+    # ---- order independence
+    def vkg_shaped(self):
+        """8 ACs, 7 code files and 3 test files of about 6,500 characters each (about 65,000 in all)."""
+        files = {}
+        for n, (path, acs_) in enumerate([("src/a.js", (1,)), ("src/b.js", (2,)), ("src/c.js", (3, 4)), ("src/d.js", (4,)), ("src/e.js", (5,)),
+                                          ("src/f.js", (6,)), ("src/g.js", (7, 8)), ("tests/test_one.py", (1, 2, 3)),
+                                          ("tests/test_two.py", (4, 5, 6)), ("tests/test_three.py", (7, 8))]):
+            body = "".join("// %s\n" % mark("AC-%d" % a) for a in acs_)
+            if path.startswith("tests/"):
+                body += "".join("def test_ac%d():\n    pass\n" % a for a in acs_)
+            files[path] = body + "".join("// line %d of %s padding padding padding padding\n" % (i, path) for i in range(105))
+        diff = "".join(self.file_diff(p, b) for p, b in files.items())
+        acs_ = [{"id": "AC-%d" % i, "text": "criterion %d" % i, "refs": ["test_ac%d" % i], "plan": {"positive": ["p"]}} for i in range(1, 9)]
+        return diff, acs_
+
+    def test_a_vkg_005_shaped_story_composes_and_is_not_marked_truncated_when_packs_fit(self):
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        self.assertGreater(len(diff), 60000)
+        self.assertLess(len(diff), 70000)
+        log = []
+        out = D.run("done", self.ev(diff, acs_), self.fake_ask(overrides={"impl_ac:AC-5": 0.35}, log=log))
+        self.assertNotIn("error", out)
+        impl = out["checks"]["impl_matches_acs"]
+        self.assertEqual(impl["score"], 0.35)
+        self.assertIn("AC-5 0.35 (files: ", impl["why"])
+        self.assertEqual([i["score"] for i in impl["items"] if i["id"] != "AC-5"], [0.9] * 7)
+        self.assertFalse(any(i["truncated"] for i in impl["items"]))
+        self.assertFalse(out["packs"]["AC-5"]["truncated"])
+        self.assertEqual(out["checks"]["tests_implemented"]["band"], "PASS")
+        self.assertEqual(out["capped"], [])
+        self.assertGreaterEqual(len(out["groups"]), 2)  # 65,000 characters do not fit in one 45,000 group
+        self.assertEqual(sorted(p for g in out["groups"] for p in g["files"]), sorted(f["path"] for f in D.split_diff(diff)))
+        self.assertFalse(any(g["truncated"] for g in out["groups"]))
+        self.assertEqual(sorted(out["packs"]["AC-4"]["files"]), ["src/c.js", "src/d.js", "tests/test_two.py"])  # one pack holds both code files
+        self.assertEqual(out["requests"], 1 + 7 + 8 + len(out["groups"]))
+        self.assertEqual(len(log), out["requests"])
+        for st, qs in log:
+            if any(k.startswith("impl_ac:") for k in qs):
+                self.assertLessEqual(len(st["diff"]), 45000)
+
+    def test_results_do_not_depend_on_the_order_answers_arrive_in(self):
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        import random
+        outs = []
+        for seed in (1, 2, 3):
+            rnd = random.Random(seed)
+            outs.append(D.run("done", self.ev(diff, acs_), self.fake_ask(overrides={"impl_ac:AC-2": 0.5}, delay=lambda q: rnd.random() * 0.02)))
+        self.assertEqual(outs[0], outs[1]); self.assertEqual(outs[1], outs[2])
+        slow_first = D.run("done", self.ev(diff, acs_), self.fake_ask(overrides={"impl_ac:AC-2": 0.5},
+                                                                      delay=lambda q: 0.03 if "rel:AC-1" in q or "impl_ac:AC-1" in q else 0))
+        self.assertEqual(slow_first, outs[0])
+
+    def test_execute_runs_four_at_a_time_and_returns_results_in_request_order(self):
+        D = self.D
+        import threading
+        live, peak, lock = [0], [0], threading.Lock()
+
+        def ask(state, questions):
+            with lock:
+                live[0] += 1; peak[0] = max(peak[0], live[0])
+            time.sleep(0.05)
+            with lock:
+                live[0] -= 1
+            return {"tier": "jev", "answers": {}, "n": state["n"]}
+        reqs = [{"id": str(i), "state": {"n": i}, "questions": {}} for i in range(12)]
+        got = D.execute(reqs, ask)
+        self.assertEqual([r["n"] for r in got], list(range(12)))
+        self.assertEqual(peak[0], 4)
+
+    def test_relevance_below_the_line_keeps_a_file_out_of_the_pack(self):
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK\n") + self.file_diff("src/other.js", "// nothing\n") + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        out = self.D.run("done", self.ev(diff, acs_), self.fake_ask())
+        self.assertEqual(sorted(out["packs"]["AC-1"]["files"]), ["src/a.js", "tests/test_ac1.py"])
+
+    def test_no_acceptance_criteria_is_a_failing_score_not_a_crash(self):
+        out = self.D.run("done", self.ev(self.file_diff("src/a.js", "x"), []), self.fake_ask())
+        self.assertEqual(out["checks"]["impl_matches_acs"]["band"], "FAIL")
+        self.assertIn("no acceptance criteria", out["checks"]["impl_matches_acs"]["why"])
+
+    def test_a_file_over_the_per_file_budget_marks_its_packs_truncated(self):
+        D = self.D
+        diff = self.file_diff("src/big.js", "// AC1_MARK\n" + "// pad\n" * 1200) + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        out = D.run("done", self.ev(diff, acs_, max_chars=20000), self.fake_ask())  # per-file budget 5,000; the file is about 8,000
+        c = out["checks"]["impl_matches_acs"]
+        self.assertEqual((c["score"], c["band"]), (0.9, "CONCERNS"))
+        self.assertIn("read only in part", c["why"])
+        self.assertEqual(c["items"][0]["files"], ["tests/test_ac1.py", "src/big.js"])
+
+    def test_a_deterministic_evidence_hash(self):
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        a = D.run("done", self.ev(diff, acs_), self.fake_ask())
+        b = D.run("done", self.ev(diff, acs_), self.fake_ask())
+        c = D.run("done", self.ev(diff.replace("padding", "paddinx", 1), acs_), self.fake_ask())
+        self.assertEqual(a["evidence_hash"], b["evidence_hash"])
+        self.assertNotEqual(a["evidence_hash"], c["evidence_hash"])
