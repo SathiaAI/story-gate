@@ -13381,6 +13381,11 @@ class TestDecomposePure(unittest.TestCase):
         self.assertNotIn("assert x == 1", part)
         rest = D.residual_edits(f, ["test_ac1"], self.defined)
         self.assertIn("-    assert x == 1", rest); self.assertNotIn("assert b == 2", rest)
+        # git names the enclosing test in the hunk header: that later hunk is part of the linked test's block
+        g = dict(f, text=text.replace("@@ -20,2 +19,2 @@\n", "@@ -20,2 +19,2 @@ def test_ac1():\n"))
+        self.assertIn("-    assert x == 1", D.test_blocks(g, ["test_ac1"], self.defined)[0])
+        self.assertEqual(D.residual_edits(g, ["test_ac1"], self.defined), "")
+        self.assertNotIn("assert x == 1", D.test_blocks(g, ["test_ac2"], self.defined)[0])
 
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""

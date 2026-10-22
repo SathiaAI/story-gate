@@ -174,7 +174,8 @@ TEST_BLOCK_MAX = 200  # lines kept from one test definition
 def linked_spans(f, refs, defined):
     """(header lines, body lines, spans) for a test file's diff. A span is (first, past_last, lines_not_shown): the body
     lines of one test definition that names one of `refs`, up to the next test definition or hunk header (a new hunk is
-    another place in the file), at most TEST_BLOCK_MAX shown lines. Removed lines inside a span stay in it, so a deleted
+    another place in the file), at most TEST_BLOCK_MAX shown lines. A hunk whose header names a linked test in git's
+    function context starts a span too. Removed lines inside a span stay in it, so a deleted
     assertion is evidence too; only live lines can start a test."""
     lines = f["text"].splitlines(keepends=True)
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
@@ -184,7 +185,10 @@ def linked_spans(f, refs, defined):
     spans = []
     for n, k in enumerate(bounds):
         i = vis[k]
-        if rest[i].startswith("@@") or not any(defined(r, rest[i][1:]) for r in refs):
+        # a hunk header carries git's function context ("@@ -20,2 +19,2 @@ def test_x():"): a later hunk of a linked test
+        # opens with lines of that test, so it stays in the test's block instead of depending on relevance
+        line = rest[i].split("@@", 2)[2] if rest[i].startswith("@@") and rest[i].count("@@") >= 2 else rest[i][1:]
+        if not any(defined(r, line) for r in refs):
             continue
         stop = bounds[n + 1] if n + 1 < len(bounds) else len(vis)
         end = min(stop, k + TEST_BLOCK_MAX)
