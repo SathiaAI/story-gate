@@ -13387,6 +13387,17 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(D.residual_edits(g, ["test_ac1"], self.defined), "")
         self.assertNotIn("assert x == 1", D.test_blocks(g, ["test_ac2"], self.defined)[0])
 
+    def test_an_untracked_test_file_is_split_like_a_tracked_one(self):
+        """An untracked file's diff has no hunk header: its linked tests and other lines still split apart."""
+        D = self.D
+        text = ("diff --git a/tests/test_n.py b/tests/test_n.py\nnew file (untracked)\n+++ b/tests/test_n.py\n"
+                "+def helper():\n+    return True\n+def test_ac1():\n+    assert helper()\n+def test_other():\n+    pass\n")
+        f = {"path": "tests/test_n.py", "test": True, "text": text}
+        part, _ = D.test_blocks(f, ["test_ac1"], self.defined)
+        self.assertIn("assert helper()", part); self.assertNotIn("test_other", part); self.assertNotIn("return True", part)
+        rest = D.residual_edits(f, ["test_ac1"], self.defined)
+        self.assertIn("return True", rest); self.assertIn("test_other", rest); self.assertNotIn("assert helper()", rest)
+
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""
         D = self.D

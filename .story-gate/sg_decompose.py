@@ -178,7 +178,9 @@ def linked_spans(f, refs, defined):
     function context starts a span too. Removed lines inside a span stay in it, so a deleted
     assertion is evidence too; only live lines can start a test."""
     lines = f["text"].splitlines(keepends=True)
-    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
+    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
+    if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
+        n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
     rest = lines[n_head:]
     vis = [i for i, ln in enumerate(rest) if not ln.startswith("-")]
     bounds = [k for k, i in enumerate(vis) if rest[i].startswith("@@") or TEST_START.search(rest[i])]
