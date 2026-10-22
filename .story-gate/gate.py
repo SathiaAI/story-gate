@@ -2726,7 +2726,8 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
         ev = {"phase": phase, "state": state, "diff": diff, "questions": questions, "max_chars": mx, "th": c["thresholds"],
               "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
               "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
-              "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band}
+              "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band,
+              "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
         out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
     except Exception as e:  # a bug here must never fail a score
         return None, dict(base, error="narrow questions failed (%s)" % e.__class__.__name__)
@@ -2741,6 +2742,8 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
                drift=out["drift"], tier=tier)
     if out.get("not_asked"):
         rec["not_asked"] = out["not_asked"]
+    if out.get("story_records"):
+        rec["story_records"] = out["story_records"]  # left out of the packs: the judge gets the story in its fields
     return judged, rec
 
 

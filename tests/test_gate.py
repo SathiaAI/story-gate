@@ -12979,6 +12979,18 @@ class TestDecompose(Base):
 
 class TestDecomposePure(unittest.TestCase):
     """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
+    def test_the_story_records_stay_out_of_the_packs(self):
+        """The story folder and a copy named <ID>.md are not evidence (the judge has the story); other files are."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        ev = {"story_dir": ".story-gate/stories/VKG-5", "story_id": "VKG-5"}
+        for p in (".story-gate/stories/VKG-5/story.md", ".story-gate/stories/VKG-5/tests.json", "docs/stories/VKG-5.md"):
+            self.assertTrue(D.story_record(p, ev), p)
+        for p in (".story-gate/stories/VKG-50/story.md", "docs/stories/VKG-6.md", "docs/VKG-5.mdx", ".story-gate/config.json",
+                  "src/app.py"):
+            self.assertFalse(D.story_record(p, ev), p)
+        self.assertFalse(D.story_record("docs/stories/VKG-5.md", {}))
+
     def test_a_pack_holds_only_the_tests_its_ac_links_to(self):
         """A test file larger than a pack: the AC's pack keeps only the test blocks its test_refs define, so it fits."""
         import importlib, sys

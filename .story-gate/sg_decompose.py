@@ -473,11 +473,20 @@ def _run_ready(ev, ask):
     return _finish(ev, checks, cd["choice"], cd["confidence"], results, reqs, {"packs": {}, "groups": []})
 
 
+def story_record(path, ev):
+    """True for the story's own records: its story folder, and a copy of the story file named <ID>.md anywhere. The judge
+    already gets the story in its fields, so sending these again only crowds the evidence out of a pack."""
+    d, sid = (ev.get("story_dir") or "").rstrip("/"), ev.get("story_id") or ""
+    return bool((d and (path == d or path.startswith(d + "/"))) or (sid and path.rsplit("/", 1)[-1] == sid + ".md"))
+
+
 def _run_done(ev, ask):
     th, band, cap, mx = ev["th"], ev["band"], ev["max_requests"], ev["max_chars"]
     acs = ev["acs"]
     budget, per_file = mx // 2, mx // 4
     files = split_diff(ev["diff"])
+    excluded = sorted(f["path"] for f in files if story_record(f["path"], ev))
+    files = [f for f in files if not story_record(f["path"], ev)]
     for f in files:
         f["test"] = bool(ev["is_test"](f["path"]))
     code = [f for f in files if not f["test"]]
@@ -548,7 +557,7 @@ def _run_done(ev, ask):
     asked = stage1 + stage2
     extra = {"packs": {a["id"]: {"files": packs[a["id"]]["files"], "truncated": packs[a["id"]]["truncated"]} for a in acs},
              "groups": [{"files": g["files"], "truncated": g["truncated"]} for g in groups],
-             "not_asked": sorted(r["id"] for r in dropped1 + dropped2)}
+             "not_asked": sorted(r["id"] for r in dropped1 + dropped2), "story_records": excluded}
     return _finish(ev, checks, drift, conf, res1 + res2, asked, extra)
 
 
