@@ -159,6 +159,32 @@ def visible_text(f):
     return "".join(l for l in f["text"].splitlines(keepends=True) if not l.startswith("-"))
 
 
+# A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
+TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
+                        r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
+TEST_BLOCK_MAX = 200  # lines kept from one test definition
+
+
+def test_blocks(f, refs, defined):
+    """Only the parts of a test file's diff that define one of `refs`: from the defining line to the next test definition
+    (at most TEST_BLOCK_MAX lines), with the file header. A whole test file can be larger than a pack, so an AC's pack
+    carries just its own tests. -> text, or "" when none of `refs` is defined in this diff."""
+    lines = f["text"].splitlines(keepends=True)
+    head = []
+    for ln in lines:
+        if ln.startswith("@@"):
+            break
+        head.append(ln)
+    body = [ln for ln in lines[len(head):] if not ln.startswith("-")]
+    starts = [i for i, ln in enumerate(body) if TEST_START.search(ln)]
+    keep = []
+    for k, i in enumerate(starts):
+        if any(defined(r, body[i][1:]) for r in refs):
+            end = min(starts[k + 1] if k + 1 < len(starts) else len(body), i + TEST_BLOCK_MAX)
+            keep.append("".join(body[i:end]))
+    return "".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep) if keep else ""
+
+
 def clip(text, n):
     """(text cut to n characters with a visible marker, True when it was cut). Same marker the gate uses."""
     if len(text) <= n:
@@ -217,7 +243,11 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
     relevance to this AC is at least RELEVANT, most relevant first, until `budget` characters. A file that does not fit
     marks the pack truncated. -> {"pieces": [{"path", "text", "cut"}], "truncated", "notes", "files"}."""
     refs = a["refs"]
-    tests = [f for f in files if f["test"] and refs and any(defined(r, visible_text(f)) for r in refs)]
+    tests = []
+    for f in files:
+        if f["test"] and refs and any(defined(r, visible_text(f)) for r in refs):
+            part = test_blocks(f, refs, defined)
+            tests.append(dict(f, text=part) if part else f)  # just this AC's tests when they can be found, else the file
     code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if not f["test"] and f["path"] in rel),
                   key=lambda t: (-t[0], t[1]["path"]))
     chosen = tests + [f for p, f in code if p >= RELEVANT]

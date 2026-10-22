@@ -12979,6 +12979,21 @@ class TestDecompose(Base):
 
 class TestDecomposePure(unittest.TestCase):
     """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
+    def test_a_pack_holds_only_the_tests_its_ac_links_to(self):
+        """A test file larger than a pack: the AC's pack keeps only the test blocks its test_refs define, so it fits."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        body = "".join("+test('case %d', () => {\n" % k + "+  assert.ok(true); // padding %s\n" % ("x" * 400) * 10 + "+});\n" for k in range(40))
+        f = {"path": "test/big.test.mjs", "test": True, "text": "diff --git a/test/big.test.mjs b/test/big.test.mjs\n+++ b/test/big.test.mjs\n@@ -0,0 +1 @@\n" + body}
+        self.assertGreater(len(f["text"]), 150000)
+        defined = lambda r, t: ("test('%s'," % r) in t
+        part = D.test_blocks(f, ["case 7"], defined)
+        self.assertIn("case 7'", part); self.assertNotIn("case 8'", part); self.assertNotIn("case 6'", part)
+        self.assertLess(len(part), 6000)
+        pack = D.build_pack({"id": "AC1", "refs": ["case 7"]}, [f], {}, defined, 45000, 30000, [])
+        self.assertFalse(pack["truncated"], pack["notes"]); self.assertEqual(pack["files"], ["test/big.test.mjs"])
+        self.assertEqual(D.test_blocks(f, ["missing"], defined), "")
+
     @classmethod
     def setUpClass(cls):
         """Setupclass."""
