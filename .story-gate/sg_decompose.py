@@ -1,0 +1,980 @@
+"""story-gate narrow judging: the judge answers small questions over evidence packs, and code combines the answers.
+
+Why: one broad question over a whole diff ("the diff implements every acceptance criterion") hides which criterion the
+judge doubted, and a large diff does not fit in one request. Here each criterion (AC) gets its own request, and the
+evidence in that request is only what relates to that AC (its "evidence pack"). Code then takes the lowest score.
+Nothing here takes a maximum over chunks: an AC built across several files is judged from one pack that holds all of them.
+
+The judge (Jev) returns numbers only. Every `why` in this module is built by code from those numbers and from facts
+about the evidence (which files, what was cut). It is never model text.
+
+Pure functions plus run(), which takes the judge as a function (ask(state, questions) -> the shape sg_judges.ask returns),
+so it can be tested with a fake judge. Decision record: docs/decisions/2026-10-22-judge-evidence-packs.md.
+"""
+import concurrent.futures, hashlib, json, re
+
+SCHEMA = "decompose-1"
+MODES = ("off", "shadow", "on")
+DEFAULT_MODE = "shadow"
+DEFAULT_MAX_REQUESTS = 60
+MAX_REQUESTS_LIMIT = 1000
+PARALLEL = 4  # requests in flight at once
+RELEVANT = 0.5  # a changed file with at least this relevance to an AC goes into that AC's pack
+MIN_PART = 1000  # a file that doesn't fit is shown cut only if at least this many characters are left
+AC_TEXT_MAX = 2000  # an AC's text in the evidence: enough to read, bounded; a longer AC is marked cut
+REL_AC_MIN = 160  # the shortest an AC's text is cut to in a relevance request, however many ACs share it
+PLAN_MAX = 8000  # an AC's planned cases and test_refs, as JSON: bounded the same way
+AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")  # ids appear in question wording, so they must be plain names
+
+# Per-AC checks, per-group checks and the READY wording. The text of a question that only gets a criteria sentence is here.
+NO_BLOCKERS = ("There are no unresolved open questions that would force the developer to guess. True means no open question "
+               "forces the developer to guess. Follow-ups planned for after the merge, decisions already recorded, and dated "
+               "known exceptions with an owner are NOT open questions.")
+PER_AC_READY = ("ac_testable", "tests_plan_adequate")
+PER_AC_DONE = ("impl_matches_acs", "tests_implemented")
+PER_GROUP_DONE = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
+UNRUN_NOTE = ("no per-test results (junit_path): a test shown here may never run (one written inside a string, say), so "
+              "tests_implemented cannot PASS on what the gate can see alone")
+SPLIT_NOTE = "the change was split into %d groups, so effects across files in different groups were not judged together"
+REST_DONE = ("handoff_out", "learnings_specific")
+GROUP_NOTE = " Judge only the files shown here; they are one part of the change."
+# The handoff and learnings are also checked against each group's code, so a claim the code contradicts is caught.
+GROUP_DOCS = {"handoff_out": "handoff.md does not contradict the changes in these files, and names any interface, contract or "
+                             "command they add that the next story or agent would need.",
+              "learnings_specific": "The recorded learnings do not miss a workaround, failure or surprise that is visible in "
+                                    "these files (no learnings is fine when nothing here went wrong or was surprising)."}
+
+
+# ------------------------------------------------------------------ settings
+def mode(c):
+    """The configured mode: off, shadow or on (the default is shadow)."""
+    j = c.get("judge") if isinstance(c.get("judge"), dict) else {}
+    return j.get("decompose", DEFAULT_MODE)
+
+
+def max_requests(c):
+    j = c.get("judge") if isinstance(c.get("judge"), dict) else {}
+    v = j.get("max_requests", DEFAULT_MAX_REQUESTS)
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else DEFAULT_MAX_REQUESTS
+
+
+def settings_problem(j):
+    """None when judge.decompose and judge.max_requests are valid, else a plain-English reason."""
+    if not isinstance(j, dict):
+        return None
+    if j.get("decompose", DEFAULT_MODE) not in MODES:
+        return '"judge" > "decompose" must be "off", "shadow" or "on" (got %r)' % (j.get("decompose"),)
+    v = j.get("max_requests", DEFAULT_MAX_REQUESTS)
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= MAX_REQUESTS_LIMIT:
+        return '"judge" > "max_requests" must be a whole number from 1 to %d (got %r)' % (MAX_REQUESTS_LIMIT, v)
+    return None
+
+
+def fingerprint(c):
+    """What to add to the policy fingerprint: nothing when off (so every stored verdict keeps its hash), else the schema,
+    the mode and the request cap, so a changed method or cap re-scores instead of reusing an older verdict."""
+    m = mode(c)
+    return {} if m == "off" else {"dc": [SCHEMA, m, max_requests(c)]}
+
+
+# ------------------------------------------------------------------ splitting a diff
+def _unquote(s):
+    """A path git wrote in quotes ("a/b\\tc", octal escapes for bytes) as plain text."""
+    if not (len(s) >= 2 and s[0] == '"' and s[-1] == '"'):
+        return s
+    s, out, i = s[1:-1], bytearray(), 0
+    esc = {"t": 9, "n": 10, "r": 13, "\\": 92, '"': 34, "a": 7, "b": 8, "f": 12, "v": 11}
+    while i < len(s):
+        ch = s[i]
+        if ch == "\\" and i + 1 < len(s):
+            m = re.match(r"[0-7]{3}", s[i + 1:i + 4])
+            if m:
+                out.append(int(m.group(0), 8))
+                i += 4
+                continue
+            out.append(esc.get(s[i + 1], ord(s[i + 1]) & 0xFF))
+            i += 2
+            continue
+        out += ch.encode("utf-8")
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _header_paths(rest):
+    """(old, new) from the text after 'diff --git ': 'a/X b/Y'. Handles quotes and a path with spaces when both are equal."""
+    quoted = re.findall(r'"(?:[^"\\]|\\.)*"', rest)
+    if len(quoted) == 2:
+        a, b = (_unquote(q) for q in quoted)
+    elif len(quoted) == 1:  # one side quoted, the other not
+        q = quoted[0]
+        other = rest.replace(q, "", 1).strip()
+        a, b = (_unquote(q), other) if rest.startswith('"') else (other, _unquote(q))
+    else:
+        n = len(rest)
+        half = (n - 1) // 2  # 'a/P b/P' -> 2 + L + 1 + 2 + L
+        if n % 2 == 1 and rest[:half].startswith("a/") and rest[half] == " " and rest[half + 1:].startswith("b/") \
+                and rest[2:half] == rest[half + 3:]:
+            a, b = rest[:half], rest[half + 1:]
+        else:
+            m = re.match(r"^(a/.+?) (b/.+)$", rest)
+            a, b = (m.group(1), m.group(2)) if m else (rest, rest)
+    strip = lambda p, pre: p[len(pre):] if p.startswith(pre) else p
+    return strip(a, "a/"), strip(b, "b/")
+
+
+def diff_lines(text):
+    """text split after each \n only, keeping it, as git counts lines (splitlines would also split at \f, \x1c, \u2028...)."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
+def split_diff(diff):
+    """A unified diff as one entry per file, in the order given:
+    {"path", "old_path", "status": modified|added|deleted|renamed|copied, "binary", "text"}.
+    "text" is that file's part of the diff, header included. Text before the first file header is dropped."""
+    chunks, cur = [], None
+    for line in diff_lines(diff):
+        if line.startswith("diff --git "):
+            cur = [line]
+            chunks.append(cur)
+        elif cur is not None:
+            cur.append(line)
+    out = []
+    for lines in chunks:
+        old, new = _header_paths(lines[0].rstrip("\r\n")[len("diff --git "):])
+        status, binary, rename_to, plus = "modified", False, None, None
+        for ln in lines[1:]:
+            if ln.startswith("@@"):
+                break
+            s = ln.rstrip("\r\n")
+            if s.startswith(("index ", "new file mode ", "deleted file mode ", "old mode ", "new mode ")) and \
+                    re.search(r"\b160000\b", s):  # a submodule: the diff shows two commit ids, not the code they hold
+                binary = True
+            if s.startswith("new file"):  # 'new file mode ...' or the gate's 'new file (untracked)'
+                status = "added"
+            elif s.startswith("deleted file mode"):
+                status = "deleted"
+            elif s.startswith("rename from "):
+                old, status = _unquote(s[len("rename from "):]), "renamed"
+            elif s.startswith("rename to "):
+                rename_to = _unquote(s[len("rename to "):])
+            elif s.startswith("copy from "):
+                old, status = _unquote(s[len("copy from "):]), "copied"
+            elif s.startswith("copy to "):
+                rename_to = _unquote(s[len("copy to "):])
+            elif s.startswith("Binary files ") or s.startswith("GIT binary patch"):
+                binary = True
+
+            elif s.startswith("+++ ") and not s.startswith("+++ /dev/null"):
+                plus = _unquote(s[4:].split("\t")[0])
+        path = rename_to or (plus[2:] if plus and plus.startswith("b/") else plus) or new
+        if status == "deleted":
+            path = old
+        out.append({"path": path, "old_path": old if status in ("renamed", "copied") else path, "status": status,
+                    "binary": binary, "text": "".join(lines)})
+    return out
+
+
+def visible_text(f):
+    """A file's diff without the removed lines (a deleted test is not a definition)."""
+    return "".join(l for l in diff_lines(f["text"]) if not l.startswith("-"))
+
+
+# A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
+STRING_QUOTES = ('"""', "'''", "`")  # multi-line string delimiters: Python triple quotes, JS/Go backticks
+HASH_COMMENT_EXT = (".py", ".rb", ".sh", ".bash", ".pl", ".r", ".yml", ".yaml", ".toml", ".ex", ".exs", ".jl", ".nim", ".cr")
+CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
+TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
+                        r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
+ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
+DECORATOR = re.compile(r"^\s*(?:@\w|#\[)")  # a decorator or attribute line (@pytest.mark.skip, @Disabled, #[ignore])
+RAW_BACKTICK_EXT = (".go",)  # files whose backtick strings are raw: a backslash there escapes nothing
+RUST_RAW = re.compile(r'(?<![A-Za-z0-9_])b?r#*"')  # a Rust raw string (r"..", r#".."#): the string guess does not follow it
+TEST_BLOCK_MAX = 200  # lines kept from one test definition
+
+
+def indent(text):
+    return len(text) - len(text.lstrip(" \t"))
+
+
+def is_comment(s):
+    """A stripped line that is only a comment. One holding a line break git does not split at (a lone \r: Python and
+    JavaScript; U+2028/U+2029: JavaScript) runs the code after it, so it is not a comment line."""
+    return s.startswith(("#", "//")) and not any(c in s for c in "\r\u2028\u2029")
+
+
+def ends_test(text, depth, closed=False):
+    """A live line that is not blank, a comment or only closing brackets ends the test when it sits at or left of the
+    test's own indentation, or anywhere once the test's own closing line (closed) has passed: brace languages ignore
+    indentation, so a helper, fixture or statement placed after the test is not its body however it is indented."""
+    s = text.strip()
+    return bool(s) and not CLOSING.match(s) and not is_comment(s) and (closed or indent(text) <= depth)
+
+
+def test_end(rest, start, stop, depth, st):
+    """The first line in rest[start:stop] that ends the test (see ends_test), or stop. The string tracking (st is
+    string_states(rest)) is a guess, so it never keeps a line in the test: any statement at or left of the test's own
+    indentation ends it, even inside a string that looks open, so no fixture or helper can hide there whatever its form.
+    -> (that line or stop, True when the test ended inside a string that looked open: a snapshot written flush left may
+    have been cut short, so the block counts as cut)."""
+    closed = False
+    for j in range(start, stop):
+        if rest[j][:1] not in " +":
+            continue
+        t = rest[j][1:].rstrip("\n")
+        if ends_test(t, depth, closed):
+            return j, st[j] is not None
+        s = t.strip()  # "});" at the test's depth closes it; "):" ends a multi-line Python signature and opens the body
+        closed = closed or (bool(CLOSING.match(s)) and not s.endswith(":") and indent(t) <= depth)
+    return stop, st[stop] is not None
+
+
+def string_state(line, open_q, hash_comments=True, raw_backtick=False):
+    """The multi-line string still open after `line`: one of STRING_QUOTES, "/*" for a block comment (files without #
+    comments), a one-line string continued by a backslash at the end of the line, or None. Reads the line left to right like a tokenizer: a backslash escapes the next
+    character (except inside a raw backtick string, raw_backtick: Go), so an escaped quote or the `\\/` of a regex
+    literal is not a delimiter; outside a string a comment (# or //) ends the line and a /* */ comment is skipped, so a
+    quote inside either opens nothing."""
+    i, n = 0, len(line)
+    while i < n:
+        if open_q == "/*":
+            end = line.find("*/", i)
+            i, open_q = (end + 2, None) if end >= 0 else (n, "/*")
+            continue
+        if open_q:
+            if line[i] == "\\" and not (raw_backtick and open_q == "`"):
+                i += 2
+            elif line.startswith(open_q, i):
+                i, open_q = i + len(open_q), None
+            else:
+                i += 1
+            continue
+        c = line[i]
+        if c == "\\":
+            i += 2
+            continue
+        if (c == "#" if hash_comments else line.startswith("//", i)):
+            # the comment runs to the language's line end; one git does not split at (\r; U+2028/U+2029 in JavaScript)
+            # ends it early, and the code after it is read like any other
+            ends = [e for e in (line.find(t, i) for t in (("\r",) if hash_comments else ("\r", "\u2028", "\u2029"))) if e >= 0]
+            if not ends:
+                return None
+            i = min(ends) + 1
+            continue
+        if not hash_comments and line.startswith("/*", i):
+            i, open_q = i + 2, "/*"
+            continue
+        open_q = next((q for q in STRING_QUOTES if line.startswith(q, i)), c if c in "'\"" else None)
+        i += len(open_q) if open_q else 1
+    return open_q if open_q in STRING_QUOTES + ("/*",) or i > n else None  # i > n: the last backslash escaped the line end
+
+
+def file_states(new_text, hash_comments=True, raw_backtick=False):
+    """[None, then for each line n of the changed file the multi-line string open just before it] (see string_state)."""
+    pre, q = [None], None
+    for ln in (new_text or "").split("\n"):  # git counts lines by \n only (splitlines would also split at \f, \x1c...)
+        pre.append(q)
+        q = string_state(ln, q, hash_comments, raw_backtick)
+    return pre
+
+
+def header_names_text(header, ctx, new_text, pre):
+    """True when the definition git names in a hunk header's function context is not a definition: it cannot be found
+    above the hunk in the changed file, or it sits inside a string there (a fake test written into a string)."""
+    m = re.match(r"@@ -\S+ \+(\d+)", header)
+    n, want, lines = int(m.group(1)) if m else 0, ctx.strip()[:60], new_text.split("\n")
+    for k in range(min(n - 1, len(lines)), 0, -1):  # line k of the file, nearest the hunk first
+        if want and lines[k - 1].strip().startswith(want):
+            return pre[k] is not None
+    return True
+
+
+def string_states(rest, hash_comments=True, raw_backtick=False, new_text=None, pre=None):
+    """For each line of a diff body, the multi-line string open just before it (see string_state), plus one entry for
+    the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing. A hunk header starts
+    the next hunk in the state the whole changed file has at that line (new_text, read from the working tree), so a
+    string opened above the hunk is still open in it; without new_text the hunk starts outside any string."""
+    pre = pre if pre is not None else file_states(new_text, hash_comments, raw_backtick)
+    out, open_q = [], None
+    for ln in rest:
+        out.append(open_q)
+        if ln.startswith("@@"):
+            m = re.match(r"@@ -\S+ \+(\d+)", ln)
+            n = int(m.group(1)) if m else 0
+            open_q = pre[n] if 0 < n < len(pre) else None
+        elif ln[:1] in " +":
+            open_q = string_state(ln[1:].rstrip("\n"), open_q, hash_comments, raw_backtick)
+    return out + [open_q]
+
+
+def linked_spans(f, refs, defined):
+    """(header lines, body lines, spans) for a test file's diff. A span is (first, past_last, lines_not_shown): the body
+    lines of one test definition that names one of `refs`, up to the next test definition, hunk header (a new hunk is
+    another place in the file) or line that ends the test (see ends_test), at most TEST_BLOCK_MAX shown lines. A hunk
+    whose header names a linked test in git's function context starts a span too. Removed lines inside a span stay in
+    it, so a deleted assertion is evidence too; only live lines can start a test, and a removed definition ends the
+    span above it. A test definition inside a multi-line string is text, not a test: it never starts or ends a span. An
+    annotation line (@Test, #[test]) starts the span of the declaration under it (past removed lines, so a renamed method
+    still joins), and decorators or attributes right above a test (@pytest.mark.skip, @Disabled, #[ignore]) are in it."""
+    lines = diff_lines(f["text"])
+    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
+    if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
+        n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
+    rest = lines[n_head:]
+    path = f.get("path", "").lower()
+    pre = file_states(f.get("new_text"), path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT))  # once per file
+    st = string_states(rest, path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT), f.get("new_text"), pre)
+    # a removed test definition ends the block above it (its lines are not that test's) but never starts a block
+    bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or ln.startswith("-") and TEST_START.search(" " + ln[1:])
+              or st[i] is None and TEST_START.search(ln)]
+    spans, seen = [], -1
+    for i in bounds:
+        if rest[i].startswith("-") or i <= seen:
+            continue
+        k = i
+        if rest[i].startswith("@@"):
+            # a hunk header carries git's function context ("@@ -20,2 +19,2 @@ def test_x():"): a later hunk of a linked
+            # test opens with lines of that test, so it stays in the test's block instead of depending on relevance
+            line = rest[i].split("@@", 2)[2] if rest[i].count("@@") >= 2 else ""
+            depth = indent(line[1:])  # header context keeps one space after "@@"
+            if f.get("new_text") is not None and header_names_text(rest[i], line, f["new_text"], pre):
+                continue  # git's context regex does not know strings: the file decides
+        else:
+            while ANNOTATION.match(rest[k][1:]):
+                j = k + 1
+                while j < len(rest) and rest[j].startswith("-"):  # the old declaration of a renamed method
+                    j += 1
+                if j >= len(rest) or rest[j][:1] not in " +":
+                    break
+                k = j
+            line = "".join(ln[1:] for ln in rest[i:k + 1] if not ln.startswith("-"))
+            depth = indent(rest[i][1:])
+        if not any(defined(r, line) for r in refs):
+            continue
+        seen = k
+        stop = next((b for b in bounds if b > k), len(rest))
+        stop, in_string = test_end(rest, k + 1, stop, depth, st)
+        in_string = in_string or bool(f.get("context_unknown"))  # a string opened above the hunk cannot be ruled out
+        a = i  # a decorator above the test (a skip marker, say) changes what it proves, so it belongs to the block
+        while not rest[i].startswith("@@") and a > 0 and rest[a - 1][:1] in " +-" and DECORATOR.match(rest[a - 1][1:]) \
+                and indent(rest[a - 1][1:]) == depth:
+            a -= 1
+        live = [j for j in range(a, stop) if not rest[j].startswith("-")]
+        more = max(len(live) - TEST_BLOCK_MAX, 0)
+        spans.append((a, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more, in_string))
+    return lines[:n_head], rest, spans
+
+
+def test_blocks(f, refs, defined):
+    """Only the parts of a test file's diff that define one of `refs` (see linked_spans), with the file header. A whole
+    test file can be larger than a pack, so an AC's pack carries just its own tests. -> (text, cut): text is "" when none
+    of `refs` is defined in this diff; cut is True when a block was longer than TEST_BLOCK_MAX lines and its end is not shown,
+    or ended inside a string that looked open (see test_end)."""
+    head, rest, spans = linked_spans(f, refs, defined)
+    keep, cut = [], False
+    for a, b, more, in_string in spans:
+        keep.append("".join(rest[a:b]))
+        if more:
+            cut = True
+            keep.append("[... cut: %d more lines of this test not shown]\n" % more)
+        if in_string:
+            cut = True
+            keep.append("[... this test may continue inside a string the gate could not follow; the rest is shown "
+                        "elsewhere]\n")
+    if keep and f["path"].endswith(".rs") and RUST_RAW.search(f.get("new_text") or "".join(rest)):
+        cut = True  # a test-shaped line inside a raw string would look real: the block cannot prove a test exists
+        keep.append("[... this file has a Rust raw string the gate does not parse; these blocks may be string data]\n")
+    return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
+
+
+def residual_edits(f, refs, defined):
+    """The parts of a test file's diff that test_blocks shows to no AC: helpers, fixtures and imports outside the linked
+    tests, unlinked tests, edits in a hunk that holds no linked definition, and the lines past a cut block. Added or
+    removed lines there can change what a linked test proves, so they go through relevance like code.
+    -> the file header plus those lines, or "" when none changed."""
+    head, rest, spans = linked_spans(f, refs, defined)
+    covered = {i for a, b, _, _ in spans for i in range(a, b)}
+    left = [ln for i, ln in enumerate(rest) if i not in covered]
+    if not any(ln[:1] in "+-" for ln in left):
+        return ""
+    return "".join(head) + "".join(left)
+
+
+def sent_len(text):
+    """The length of text as a request sends it: json.dumps escapes non-ASCII, up to 12 characters for one. Budgets
+    count this, not Python characters, because the judge's limit applies to the sent request."""
+    return len(json.dumps(text)) - 2
+
+
+def clip(text, n):
+    """(text cut to at most n characters as a request sends it (sent_len) with a visible marker, True when it was cut).
+    Same marker the gate uses. For plain ASCII this is a cut at n characters."""
+    if sent_len(text) <= n:
+        return text, False
+    lo, hi = 0, min(len(text), n)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if sent_len(text[:mid]) <= n else (lo, mid - 1)
+    return text[:lo] + "\n[... cut: %d more characters not shown]" % (len(text) - lo), True
+
+
+# ------------------------------------------------------------------ requests
+def noul(text):
+    return {"type": "noul", "instructions": text}
+
+
+def ac_text(a):
+    return clip(a["text"], AC_TEXT_MAX)[0]
+
+
+def text_cut_note(a):
+    return (["the criterion's text is over %d characters and was cut" % AC_TEXT_MAX] if a.get("text_cut") else []) + \
+           (["the criterion's planned cases and test_refs are over %d characters and were cut" % PLAN_MAX] if a.get("plan_cut") else [])
+
+
+def ac_cut(a):
+    return bool(a.get("text_cut") or a.get("plan_cut"))
+
+
+def plan_json(a):
+    return json.dumps({"planned_cases": planned_cases(a), "test_refs": a["refs"]}, ensure_ascii=False)
+
+
+def relevance_text_max(acs, per_file):
+    """Each AC's text length in a relevance request. Every relevance request carries every AC, so their total is held to
+    about `per_file` (a floor of REL_AC_MIN each) instead of growing with the number of ACs."""
+    return min(AC_TEXT_MAX, max(REL_AC_MIN, per_file // max(len(acs), 1)))
+
+
+def relevance_request(f, acs, per_file):
+    """One request: does this file's change serve each AC? One question per AC."""
+    body, cut = clip(f["text"], per_file)
+    lim = relevance_text_max(acs, per_file)
+    state = {"file": f["path"], "status": f["status"], "diff": body, "truncated": cut,
+             "acceptance_criteria": [{"id": a["id"], "text": clip(a["text"], lim)[0]} for a in acs]}
+    qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports the acceptance criterion with id "
+                                 "%s in `acceptance_criteria`." % a["id"]) for a in acs}
+    return {"id": "rel:" + f["path"], "kind": "relevance", "state": state, "questions": qs}
+
+
+def planned_cases(a):
+    p = a.get("plan") or {}
+    return {**{k: p.get(k) or [] for k in ("positive", "negative", "edge", "regression")}, "not_applicable": p.get("not_applicable") or {}}
+
+
+def ac_request(a, pack, phase):
+    """One request per AC: DONE asks about the code and tests in its pack, READY about the AC and its plan."""
+    state = {"acceptance_criterion": {"id": a["id"], "text": ac_text(a)}, "planned_cases": planned_cases(a), "test_refs": a["refs"]}
+    if a.get("plan_cut"):  # an oversized plan would push the request past the judge's size limit
+        state.pop("test_refs"); state["planned_cases"] = clip(plan_json(a), PLAN_MAX)[0]
+    if phase == "done":
+        state.update(files=[p["path"] for p in pack["pieces"]], diff="\n".join(p["text"] for p in pack["pieces"]),
+                     evidence_truncated=pack["truncated"],
+                     evidence_note="Only the files in this evidence pack are shown. Count only behaviour present in the diff.")
+        qs = {"impl_ac:" + a["id"]: noul("The code and tests in this evidence pack implement the acceptance criterion in "
+                                         "`acceptance_criterion`. Count only behaviour present in the diff."),
+              "tests_ac:" + a["id"]: noul("The tests in this evidence pack cover the planned positive, negative and edge cases "
+                                          "(plus regression cases where the plan lists them) for the acceptance criterion in "
+                                          "`acceptance_criterion`. A category the plan marks not applicable, with a reason, needs no test.")}
+    else:
+        state["story"] = pack["story"]
+        qs = {"ac_testable:" + a["id"]: noul("The acceptance criterion in `acceptance_criterion` is binary and verifiable "
+                                              "(clearly pass or fail), not vague."),
+              "tests_plan_adequate:" + a["id"]: noul("The test plan in `planned_cases` for the acceptance criterion in "
+                                                      "`acceptance_criterion` has meaningful positive, negative, edge and "
+                                                      "regression cases, or a valid reason a category does not apply.")}
+    return {"id": "ac:" + a["id"], "kind": "ac", "state": state, "questions": qs}
+
+
+def build_pack(a, files, rel, defined, budget, per_file, unassessed, unread=()):
+    """The evidence for one AC: the diff of the test files that define any of its test_refs, then the code files whose
+    relevance to this AC is at least RELEVANT, most relevant first, until `budget` characters. A file that does not fit
+    marks the pack truncated. -> {"pieces": [{"path", "text", "cut"}], "truncated", "notes", "files"}."""
+    refs = a["refs"]
+    tests, cut_tests = [], []
+    for f in files:
+        if f["test"] and refs and any(defined(r, visible_text(f)) for r in refs):
+            part, cut = test_blocks(f, refs, defined)
+            if part:  # no block found (a "test" inside a string, an unknown framework): residual_edits sends the edits
+                tests.append(dict(f, text=part))  # through relevance; the whole file is never shown as test evidence
+            if cut:
+                cut_tests.append(f["path"])
+    code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if (not f["test"] or f.get("unlinked")) and f["path"] in rel),
+                  key=lambda t: (-t[0], t[1]["path"]))
+    chosen = tests + [f for p, f in code if p >= RELEVANT]
+    pieces, used, notes, truncated = [], 0, text_cut_note(a), ac_cut(a)
+    if cut_tests:
+        truncated = True
+        notes.append("a test longer than %d lines was cut in %s" % (TEST_BLOCK_MAX, ", ".join(cut_tests)))
+    partial = [f["path"] for p, f in code if p < RELEVANT and sent_len(f["text"]) > per_file]
+    if partial:  # relevance saw only the first part, so the rest of the file may still serve this AC
+        truncated = True
+        notes.append("left out after relevance read only part of %s" % ", ".join(partial[:3]) + (" and %d more" % (len(partial) - 3) if len(partial) > 3 else ""))
+    blind = [f["path"] for p, f in code if p < RELEVANT and f.get("binary")]
+    if blind:  # relevance saw only a binary's header, so "unrelated" is not known
+        truncated = True
+        notes.append("left out binary change%s whose contents could not be read: %s" % ("" if len(blind) == 1 else "s", ", ".join(blind[:3])))
+    for i, f in enumerate(chosen):
+        room = budget - used
+        if sent_len(f["text"]) <= room:
+            pieces.append({"path": f["path"], "text": f["text"], "cut": False})
+            used += sent_len(f["text"])
+            if f.get("binary"):  # only the header can be shown
+                truncated = True
+                notes.append("%s is a binary change; its contents are not shown" % f["path"])
+            if (not f["test"] or f.get("unlinked")) and sent_len(f["text"]) > per_file:  # relevance saw only the first part
+                truncated = True
+                notes.append("%s was read only in part when its relevance was judged" % f["path"])
+            continue
+        truncated = True
+        if room >= MIN_PART:
+            part, _ = clip(f["text"], room)
+            pieces.append({"path": f["path"], "text": part, "cut": True})
+        left = [x["path"] for x in chosen[i:]]
+        notes.append("evidence over the %d-character budget: %s %s" % (
+            budget, ", ".join(left[:3]) + (" and %d more" % (len(left) - 3) if len(left) > 3 else ""),
+            "cut or left out"))
+        break
+    if unread:
+        truncated = True
+        notes.append(unread_note(unread))
+    if unassessed:
+        truncated = True
+        notes.append("%d changed file%s not checked for relevance (request cap): %s" % (
+            len(unassessed), "" if len(unassessed) == 1 else "s", ", ".join(unassessed[:3]) + (" ..." if len(unassessed) > 3 else "")))
+    return {"pieces": pieces, "truncated": truncated, "notes": notes, "files": [p["path"] for p in pieces]}
+
+
+def unread_note(unread):
+    return "%d new file%s not read (too large, a link, or over the file limit): %s" % (
+        len(unread), "" if len(unread) == 1 else "s", ", ".join(unread[:3]) + (" ..." if len(unread) > 3 else ""))
+
+
+def build_groups(files, budget):
+    """Changed files in order, packed into groups of at most `budget` characters. A file over the budget is cut and
+    sits alone in its group, marked truncated. -> [{"pieces", "truncated", "notes", "files"}]."""
+    groups, cur, used = [], [], 0
+
+    def close():
+        nonlocal cur, used
+        if cur:
+            groups.append(cur)
+        cur, used = [], 0
+    for f in files:
+        if sent_len(f["text"]) > budget:
+            close()
+            part, _ = clip(f["text"], budget)
+            groups.append([{"path": f["path"], "text": part, "cut": True}])
+            continue
+        if used + sent_len(f["text"]) > budget:
+            close()
+        cur.append({"path": f["path"], "text": f["text"], "cut": False, "binary": bool(f.get("binary"))})
+        used += sent_len(f["text"])
+    close()
+    out = []
+    for g in groups:
+        cut = [p["path"] for p in g if p["cut"]]
+        binary = [p["path"] for p in g if p.get("binary")]
+        notes = ["%s is over the %d-character budget and was cut" % (cut[0], budget)] if cut else []
+        if binary:
+            notes.append("binary change, contents not shown: %s" % ", ".join(binary[:3]) + (" and %d more" % (len(binary) - 3) if len(binary) > 3 else ""))
+        out.append({"pieces": g, "truncated": bool(cut or binary), "files": [p["path"] for p in g], "notes": notes})
+    return out or [{"pieces": [], "truncated": False, "files": [], "notes": []}]  # no files: still ask once, on an empty change
+
+
+def group_request(g, i, n, ev):
+    st = ev["state"]
+    # the diff has half the budget (build_groups); the story records copied into every group get the other half, as sent
+    records, cut = fit_state({k: st.get(k, "") for k in ("story", "context", "handoff", "learnings")} |
+                             {"changed_files": st.get("changed_files", [])}, ev["max_chars"] // 2)
+    cut = cut or bool(ev.get("records_cut"))  # gate.py already sliced a record to fit: these copies are partial too
+    if cut:
+        g["truncated"] = g["records_cut"] = True
+        g["notes"].append(REST_CUT_NOTE % (ev["max_chars"] // 2))
+    state = {"story": records["story"], "context": records["context"], "changed_files": records["changed_files"],
+             "group": "%d of %d" % (i + 1, n), "group_files": g["files"], "diff": "\n".join(p["text"] for p in g["pieces"]),
+             "evidence_truncated": g["truncated"], "handoff": records["handoff"], "learnings": records["learnings"]}
+    questions = {k: noul(ev["questions"][k] + GROUP_NOTE) for k in PER_GROUP_DONE if k in ev["questions"]}
+    questions.update({"doc:" + k: noul(t + GROUP_NOTE) for k, t in GROUP_DOCS.items() if k in ev["questions"]})
+    questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and the "
+                                    "PRD/TRD point? " + GROUP_NOTE.strip(), "criteria": ev["choices"]}
+    return {"id": "group:%d" % (i + 1), "kind": "group", "state": state, "questions": questions}
+
+
+def rest_request(ev):
+    """The questions whose evidence is small and stays as it was (the story, handoff, learnings...), in one request."""
+    q = ev["questions"]
+    if ev["phase"] == "ready":
+        keys = [k for k in q if k not in PER_AC_READY]
+        questions = {k: noul(NO_BLOCKERS if k == "dor_no_blockers" else q[k]) for k in keys}
+        questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and "
+                                        "the PRD/TRD point?", "criteria": ev["choices"]}
+        state = dict(ev["state"])
+    else:
+        questions = {k: noul(q[k]) for k in REST_DONE if k in q}
+        state = {k: v for k, v in ev["state"].items() if k not in ("diff", "diff_truncated")}
+    state, cut = fit_state(state, ev["max_chars"])
+    cut = cut or bool(ev.get("records_cut"))  # gate.py already sliced a record to fit: the judge sees part of it
+    return {"id": "rest", "kind": "rest", "state": state, "questions": questions, "cut": cut}
+
+
+MORE = re.compile(r"^\.\.\. (\d+) more not shown$")  # the entry fit_state puts at the end of a shortened list
+CUT_MARKER_ROOM = 64  # clip appends "[... cut: N more characters not shown]" after the cut
+REST_CUT_NOTE = "the story records were cut to fit the %d-character request budget"
+
+
+def fit_state(state, budget):
+    """state with its longest text fields cut, then its lists (changed_files) halved with a "... N more not shown" entry,
+    until the whole is at most `budget` characters as sent (the story and plan were sliced by Python characters upstream;
+    emoji grow up to 12 times when sent). Every step makes it shorter, so it always ends. -> (state, True when cut)."""
+    state, cut = dict(state), False
+    while len(json.dumps(state)) > budget:  # json.dumps escapes as a request does: its length is the size sent
+        texts = [(sent_len(v), k) for k, v in state.items() if isinstance(v, str) and sent_len(v) > MIN_PART]
+        if texts:
+            size, k = max(texts)
+            new, _ = clip(state[k], max(MIN_PART, size - (len(json.dumps(state)) - budget) - CUT_MARKER_ROOM))
+            if sent_len(new) < size:  # the cut marker can leave a short text no shorter: then try the lists
+                state[k], cut = new, True
+                continue
+        real = {k: [x for x in v if not (isinstance(x, str) and MORE.match(x))] for k, v in state.items() if isinstance(v, list)}
+        lists = [(len(json.dumps(v)), k) for k, v in real.items() if len(v) > 1]
+        if not lists:
+            return state, True  # nothing left to shorten: still over, so the answers rest on cut evidence
+        k = max(lists)[1]
+        hidden = sum(int(MORE.match(x).group(1)) for x in state[k] if isinstance(x, str) and MORE.match(x))
+        keep = real[k][:len(real[k]) // 2]  # at least one item goes each time, so this always ends
+        state[k], cut = keep + ["... %d more not shown" % (hidden + len(real[k]) - len(keep))], True
+    return state, cut
+
+
+# ------------------------------------------------------------------ running requests
+def execute(reqs, ask, workers=PARALLEL):
+    """Ask every request, up to `workers` at a time. The results come back in the order of `reqs`, whatever order the
+    answers arrive in, so a run's outcome does not depend on timing."""
+    def one(r):
+        try:
+            return ask(r["state"], r["questions"])
+        except Exception as e:  # the judge's own ask() never raises; this is a seat belt
+            return {"tier": "none", "error": repr(e)[:200]}
+    if len(reqs) <= 1:
+        return [one(r) for r in reqs]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(one, reqs))
+
+
+def paid(results):
+    """What the answered requests cost, so a run that stops on an error still reports what was already paid."""
+    return combine_meta([r for r in results if isinstance(r, dict) and r.get("tier") in ("jev", "emulated")] or [{"tier": "none"}])["cost"]
+
+
+def first_error(reqs, results):
+    for r, res in zip(reqs, results):
+        if not isinstance(res, dict) or res.get("tier") not in ("jev", "emulated") or not isinstance(res.get("answers"), dict):
+            return "request %s: %s" % (r["id"], (res or {}).get("error") or "no answer")
+    return None
+
+
+def p_of(res, key):
+    return res["answers"][key]["noul"]
+
+
+# ------------------------------------------------------------------ combining
+def item(id_, score, files=(), truncated=False, notes=(), not_asked=False, detail=""):
+    """One scored piece of a check. The score stays raw: rounding before the band could lift 0.6996 to a PASS."""
+    return {"id": id_, "detail": detail, "score": None if score is None else float(score), "files": list(files),
+            "truncated": bool(truncated or not_asked), "not_asked": bool(not_asked), "notes": list(notes)}
+
+
+def short_files(files, n=4):
+    return ", ".join(files[:n]) + (" +%d more" % (len(files) - n) if len(files) > n else "")
+
+
+def combine(items, th, band):
+    """One check from its items: the lowest score (never a maximum), its band, and a `why` built from the items.
+    A truncated or not-asked item means the check cannot PASS. -> {"score", "band", "items", "why", "capped"}."""
+    scored = [i for i in items if i["score"] is not None]
+    score = min((i["score"] for i in scored), default=None)
+    capped = any(i["truncated"] for i in items)
+    low = sorted((i for i in scored if i["score"] < th["pass"]), key=lambda i: (i["score"], i["id"]))[:3]
+    parts = ["%s %.2f%s" % (i["id"], i["score"], " (files: %s)" % short_files(i["files"]) if i["files"] else
+                            " (%s)" % i["detail"] if i["detail"] else "") for i in low]
+    notes = []
+    for i in items:
+        for n in i["notes"]:
+            if n not in notes:
+                notes.append(n)
+    unasked = [i["id"] for i in items if i["not_asked"]]
+    if unasked:
+        notes.append("not asked (request cap reached): " + ", ".join(unasked[:5]) + (" ..." if len(unasked) > 5 else ""))
+    why = "; ".join(parts + notes)
+    st = "CONCERNS" if score is None else band(score, th)
+    if capped and st == "PASS":
+        st = "CONCERNS"
+    return {"score": score, "band": st, "items": items, "why": why, "capped": capped}
+
+
+def combine_meta(results):
+    """The judge that answered: 'jev' only if every answer came from Jev, else 'emulated'; the models, the cost."""
+    tier = "jev" if all(r["tier"] == "jev" for r in results) else "emulated"
+    models = sorted({str(r.get("model") or "") for r in results} - {""})
+    provs = sorted({str(r.get("provider") or "") for r in results} - {""})
+    costs = [r["cost"] for r in results if isinstance(r.get("cost"), (int, float)) and not isinstance(r.get("cost"), bool)]
+    return {"tier": tier, "provider": "+".join(provs) or None, "model": "+".join(models) or None,
+            "cost": round(sum(costs), 6) if costs else None}
+
+
+def evidence_hash(asked):
+    """A short hash of exactly what was sent: every request's id, evidence and questions."""
+    blob = json.dumps([[r["id"], r["state"], r["questions"]] for r in asked], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def take(reqs, left):
+    """(the requests to ask, the ones the cap leaves out)."""
+    return reqs[:max(left, 0)], reqs[max(left, 0):]
+
+
+# ------------------------------------------------------------------ the whole thing
+def run(phase, ev, ask):
+    """Score a phase with narrow questions. ev (built by gate.py): phase, state (the broad request's evidence), diff, acs
+    [{id, text, refs, plan}], questions (the broad questions asked, minus skipped), choices (drift choices), max_chars,
+    max_requests, th (thresholds), is_test(path), defined(ref, text), band(p, th).
+    -> {"error": why} or {"scores", "why", "items", "capped", "unscored", "drift", "drift_conf", "tier", "provider", "model",
+    "cost", "checks", "requests", "evidence_hash", "packs", "groups"}.  Never raises for a judge failure."""
+    ids = [str(a.get("id") or "").strip() for a in ev["acs"]]
+    dup = sorted({i for i in ids if ids.count(i) > 1}) if len(set(ids)) != len(ids) else []
+    if "" in ids or dup:  # packs and answers are keyed by id: two criteria with one id would share one score
+        return {"error": "acceptance criteria need unique, non-empty ids (repeated: %s)" % (", ".join(dup) or "an empty id")}
+    bad = [str(a.get("id")) for i, a in zip(ids, ev["acs"]) if not AC_ID.match(i) or str(a.get("id")) != i]  # stored ids are sent as is
+    if bad:  # an id is the only story text that reaches a question's wording
+        return {"error": "acceptance-criterion ids must be short plain names (letters, digits, . _ : -): %r" % bad[0][:60]}
+    # the cut flags come from clip itself, so a criterion is marked cut exactly when its sent text was cut
+    ev = dict(ev, acs=[dict(a, text_cut=clip(a.get("text") or "", AC_TEXT_MAX)[1]) for a in ev["acs"]])
+    ev["acs"] = [dict(a, plan_cut=clip(plan_json(a), PLAN_MAX)[1]) for a in ev["acs"]]
+    return _run_done(ev, ask) if phase == "done" else _run_ready(ev, ask)
+
+
+def _finish(ev, checks, drift, conf, all_results, asked, extra):
+    meta = combine_meta(all_results)
+    scores = {k: v["score"] for k, v in checks.items() if v["score"] is not None}
+    out = {"scores": scores, "drift": drift, "drift_conf": conf, **meta,
+           "why": {k: v["why"] for k, v in checks.items() if v["why"]},
+           "items": {k: v["items"] for k, v in checks.items() if v["items"]},
+           "capped": sorted(k for k, v in checks.items() if v["capped"]),
+           "unscored": {k: v["why"] or "no score" for k, v in checks.items() if v["score"] is None},
+           "checks": {k: {"score": v["score"], "band": v["band"], "why": v["why"],
+                          "items": [{"id": i["id"], "score": i["score"], "files": i["files"], "truncated": i["truncated"]}
+                                    for i in v["items"]]} for k, v in checks.items()},
+           "requests": len(asked), "max_requests": ev["max_requests"], "evidence_hash": evidence_hash(asked)}
+    out.update(extra)
+    return out
+
+
+def _run_ready(ev, ask):
+    th, band, cap = ev["th"], ev["band"], ev["max_requests"]
+    acs = ev["acs"]
+    rest = rest_request(ev)
+    story, _ = clip(ev["state"].get("story", ""), ev["max_chars"] // 3)
+    ac_reqs = [ac_request(a, {"story": story}, "ready") for a in acs]
+    reqs, dropped = take([rest] + ac_reqs, cap)
+    results = execute(reqs, ask)
+    err = first_error(reqs, results)
+    if err:
+        return {"error": err, "cost": paid(results)}
+    by = {r["id"]: res for r, res in zip(reqs, results)}
+    checks = {}
+    for k, q in rest["questions"].items():
+        if q["type"] == "noul":
+            p = p_of(by["rest"], k)
+            checks[k] = combine([item("the story records", p, [], True, [REST_CUT_NOTE % ev["max_chars"]])], th, band) \
+                if rest["cut"] else {"score": p, "band": band(p, th), "items": [], "why": "", "capped": False}  # raw: rounding could lift 0.6996 to a PASS
+    cd = by["rest"]["answers"]["drift_direction"]
+    if rest["cut"] and cd["choice"] == "none":  # the judge saw only part of the story: "no drift" is not known
+        cd = {"choice": "architect_must_decide", "confidence": 0.0}
+    dropped_ids = {r["id"] for r in dropped}
+    for key in PER_AC_READY:
+        if key not in ev["questions"]:
+            continue
+        items = []
+        for a in acs:
+            rid = "ac:" + a["id"]
+            if rid in dropped_ids:
+                items.append(item(a["id"], None, not_asked=True))
+            else:
+                items.append(item(a["id"], p_of(by[rid], key + ":" + a["id"]), (), ac_cut(a), text_cut_note(a)))
+        checks[key] = combine(items, th, band) if items else {
+            "score": 0.0, "band": "FAIL", "items": [], "why": "no acceptance criteria in tests.json", "capped": False}
+    return _finish(ev, checks, cd["choice"], cd["confidence"], results, reqs, {"packs": {}, "groups": []})
+
+
+# The files the gate itself keeps in a story folder. Anything else there is ordinary work and stays in the evidence.
+STORY_RECORDS = {"story.md", "context.md", "tests.json", "handoff.md", "validation.md", "trace.md", "scenarios.json",
+                 "scenario_results.json", "test_results.json", "budgets.json", "budget_results.json", "guardrail_results.json",
+                 "checkpoints.jsonl", "decisions.jsonl", "coder.json", "pitfalls.json", "manifest.json", "evidence.json",
+                 "ready.json", "done.json", "ready.self.json", "done.self.json"}
+
+
+def story_record(path, ev):
+    """True for a record the gate keeps in this story's folder (story.md, tests.json, verdicts...). The judge already gets
+    the story in its fields, so these never go into packs or groups. (gate.py's diff already leaves out the whole stories tree; this guards raw diffs.)"""
+    d = (ev.get("story_dir") or "").rstrip("/")
+    return bool(d and path.startswith(d + "/") and path[len(d) + 1:] in STORY_RECORDS)
+
+
+def story_copy(path, ev):
+    """True for a file named <ID>.md outside the story folder (a project copy of the story). It stays out of the AC packs,
+    which already carry the story, but stays in the file groups, so scope, deferral and drift still see it."""
+    sid, d = ev.get("story_id") or "", (ev.get("story_dir") or "").rstrip("/")
+    inside = bool(d and path.startswith(d + "/"))  # a file in the story folder is a record or ordinary evidence, never a copy
+    return bool(sid and path.rsplit("/", 1)[-1] == sid + ".md" and not inside)
+
+
+def _run_done(ev, ask):
+    th, band, cap, mx = ev["th"], ev["band"], ev["max_requests"], ev["max_chars"]
+    acs = ev["acs"]
+    budget, per_file = mx // 2, mx // 4
+    files = split_diff(ev["diff"])
+    excluded = sorted(f["path"] for f in files if story_record(f["path"], ev))
+    files = [f for f in files if not story_record(f["path"], ev)]
+    copies = {f["path"] for f in files if story_copy(f["path"], ev)}
+    all_refs = [r for a in acs for r in a["refs"]]
+    for f in files:
+        f["test"] = bool(ev["is_test"](f["path"]))
+        # the changed test file as a whole tells which hunks start inside a string (see string_states)
+        f["new_text"] = ev["read"](f["path"]) if f["test"] and ev.get("read") and f["status"] != "deleted" else None
+        # too large or unreadable: no hunk's starting state is known, so every linked block counts as cut
+        f["context_unknown"] = f["test"] and bool(ev.get("read")) and f["status"] != "deleted" and f["new_text"] is None
+        # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
+        f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
+    # a linked test file's other edits (a helper or fixture the linked tests call) reach no pack as test blocks: judge them too
+    residual, taken = [], {f["path"] for f in files}
+    for f in files:
+        if f["test"] and not f["unlinked"] and f["path"] not in copies:
+            r = residual_edits(f, all_refs, ev["defined"])
+            if r:
+                name = f["path"] + " (edits outside its linked tests)"
+                while name in taken:  # a changed file may carry this very name: answers are keyed by path
+                    name += "'"
+                taken.add(name)
+                residual.append(dict(f, path=name, text=r, test=False))
+    code = [f for f in files if not f["test"] or f["unlinked"]] + residual
+    rest = rest_request(ev)
+    rel_reqs = [relevance_request(f, acs, per_file) for f in code if f["path"] not in copies] if acs else []
+    stage1, dropped1 = take([rest] + rel_reqs, cap)
+    res1 = execute(stage1, ask)
+    err = first_error(stage1, res1)
+    if err:
+        return {"error": err, "cost": paid(res1)}
+    by = {r["id"]: res for r, res in zip(stage1, res1)}
+    rel = {}
+    for f in code:
+        res = by.get("rel:" + f["path"])
+        if res is not None:
+            rel[f["path"]] = {a["id"]: p_of(res, "rel:" + a["id"]) for a in acs}
+    unassessed = [r["state"]["file"] for r in dropped1]
+    # evidence packs, one per AC
+    unread = list(ev.get("unread") or [])  # new files the gate could not read: their contents are unknown evidence
+    packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed, unread) for a in acs}
+    lim = relevance_text_max(acs, per_file)
+    for a in acs if rel_reqs else ():  # the relevance questions saw a shortened AC: which files serve it is less certain
+        if sent_len(a["text"]) > lim:
+            pk = packs[a["id"]]
+            pk["truncated"] = pk["rel_cut"] = True
+            pk["notes"].append("the criterion's text was cut to %d characters in the file-relevance questions (%d criteria share "
+                               "each one)" % (lim, len(acs)))
+    ac_reqs = [ac_request(a, packs[a["id"]], "done") for a in acs if packs[a["id"]]["pieces"]]
+    groups = build_groups(files, budget)
+    for g in groups if unread else ():
+        g["truncated"] = True
+        g["notes"].append(unread_note(unread))
+    grp_reqs = [group_request(g, i, len(groups), ev) for i, g in enumerate(groups)]
+    stage2, dropped2 = take(ac_reqs + grp_reqs, cap - len(stage1))
+    res2 = execute(stage2, ask)
+    err = first_error(stage2, res2)
+    if err:
+        return {"error": err, "cost": paid(res1 + res2)}
+    by.update({r["id"]: res for r, res in zip(stage2, res2)})
+    gone = {r["id"] for r in dropped2}
+    checks = {}
+    for k in REST_DONE:
+        if k in ev["questions"]:
+            items = [item("the story records", p_of(by["rest"], k), [], rest["cut"], [REST_CUT_NOTE % ev["max_chars"]] if rest["cut"] else [])]
+            if unread and not groups:  # no group to carry the note: the unread files still cap the check
+                items.append(item("new files not read", None, unread, True, [unread_note(unread)]))
+            for i, g in enumerate(groups):
+                rid, name = "group:%d" % (i + 1), "group %d of %d" % (i + 1, len(groups))
+                if rid in gone:
+                    items.append(item(name, None, g["files"], g["truncated"], g["notes"], not_asked=True))
+                else:
+                    items.append(item(name, p_of(by[rid], "doc:" + k), g["files"], g["truncated"], g["notes"]))
+            checks[k] = combine(items, th, band)
+    for key, qk in (("impl_matches_acs", "impl_ac:"), ("tests_implemented", "tests_ac:")):
+        if key not in ev["questions"]:
+            continue
+        items = []
+        for a in acs:
+            pk, rid = packs[a["id"]], "ac:" + a["id"]
+            if not pk["pieces"] and (unassessed or unread or pk.get("rel_cut")):  # "nothing relates" is not known
+                items.append(item(a["id"], None, [], True, pk["notes"], not_asked=bool(unassessed)))
+            elif not pk["pieces"]:  # nothing in the diff relates to this AC: no request is needed to know it is missing
+                items.append(item(a["id"], 0.0, [], pk["truncated"], pk["notes"], detail="no changed file relates to it"))
+            elif rid in gone:
+                items.append(item(a["id"], None, pk["files"], pk["truncated"], pk["notes"], not_asked=True))
+            else:
+                items.append(item(a["id"], p_of(by[rid], qk + a["id"]), pk["files"], pk["truncated"], pk["notes"]))
+        if key == "tests_implemented" and items and not ev.get("executed"):  # seeing a test is not proof that it runs
+            items.append(item("per-test results", None, [], True, [UNRUN_NOTE]))
+        checks[key] = combine(items, th, band) if items else {
+            "score": 0.0, "band": "FAIL", "items": [], "why": "no acceptance criteria in tests.json", "capped": False}
+    drift, conf, low_drift = "none", 0.0, None
+    for key in PER_GROUP_DONE:
+        if key not in ev["questions"]:
+            continue
+        items = []
+        for i, g in enumerate(groups):
+            rid, name = "group:%d" % (i + 1), "group %d of %d" % (i + 1, len(groups))
+            if rid in gone:
+                items.append(item(name, None, g["files"], g["truncated"], g["notes"], not_asked=True))
+                continue
+            p = p_of(by[rid], key)
+            items.append(item(name, p, g["files"], g["truncated"], g["notes"]))
+            if key == "drift_trd_after" and (low_drift is None or p < low_drift):  # lowest TRD score; the first group on a tie
+                low_drift = p
+                ch = by[rid]["answers"]["drift_direction"]
+                drift, conf = ch["choice"], ch["confidence"]
+        if len(groups) > 1:  # no request saw every file: scope or drift built from parts in two groups is not seen whole
+            items.append(item("all groups together", None, [], True, [SPLIT_NOTE % len(groups)]))
+        checks[key] = combine(items, th, band)
+    unknown = groups and (low_drift is None or any("group:%d" % (i + 1) in gone or g.get("records_cut")
+                                                   for i, g in enumerate(groups)))
+    if unknown and drift == "none":  # a group not asked, or one that saw only part of the story, may hold the drift: unknown
+        drift, conf = "architect_must_decide", 0.0  # is not "none"; a direction an asked group gave (work_should_change) stands
+    asked = stage1 + stage2
+    extra = {"packs": {a["id"]: {"files": packs[a["id"]]["files"], "truncated": packs[a["id"]]["truncated"]} for a in acs},
+             "groups": [{"files": g["files"], "truncated": g["truncated"]} for g in groups],
+             "not_asked": sorted(r["id"] for r in dropped1 + dropped2), "story_records": excluded}
+    return _finish(ev, checks, drift, conf, res1 + res2, asked, extra)
+
+
+# ------------------------------------------------------------------ showing it
+def summary_lines(v):
+    """Plain-English lines about a verdict's narrow-question result (its `decomposed` record); [] when there is none.
+    "on": the narrow score is the binding one. "shadow": the broad score decides and this one is only for comparison."""
+    d = v.get("decomposed") if isinstance(v, dict) else None
+    if not isinstance(d, dict):
+        return []
+    who = {"jev": "Jev"}.get(v.get("judge"), str(v.get("judge") or "judge"))
+    if d.get("mode") == "on":
+        head = "Score (%s, binding): narrow questions over evidence packs" % who
+        if d.get("error"):
+            return [head + " did not run (%s), so the judge counts as unavailable." % d["error"]]
+        lines = [head + " (%d requests, evidence %s)." % (d.get("requests", 0), d.get("evidence_hash"))]
+    else:
+        head = "Shadow (not binding): narrow questions over evidence packs"
+        if d.get("error"):
+            return [head + " did not run: %s" % d["error"]]
+        lines = ["Score (%s, binding): broad questions over the whole change, as shown above." % who,
+                 head + " would give %s (%d requests, evidence %s)." % (d.get("would_be_overall", "?"), d.get("requests", 0), d.get("evidence_hash"))]
+    for k, x in sorted((d.get("checks") or {}).items()):
+        if x.get("band") != "PASS":
+            lines.append("  %s %s: %s" % (x.get("band"), k, x.get("why") or ("score %.2f" % x["score"] if x.get("score") is not None else "no score")))
+    return lines

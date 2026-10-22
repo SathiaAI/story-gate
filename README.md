@@ -208,7 +208,7 @@ story-gate works alongside your tests and your review bot: it runs your tests it
 
 **Do I need to code?** No. You need a GitHub account, and you click Approve and Merge on GitHub. Your AI does the rest.
 
-**What does it cost?** story-gate is free. The judge runs on [OpenRouter](https://openrouter.ai/keys), which charges per call. Each check is one small call, and your OpenRouter activity page shows the exact cost.
+**What does it cost?** story-gate is free. The judge runs on [OpenRouter](https://openrouter.ai/keys), which charges per call. Each check is one small call, and your OpenRouter activity page shows the exact cost. By default story-gate also runs a second, "shadow" pass of narrow questions (about one request per changed file, criterion and group of files, at most 60) to compare with the first. It never decides the result unless you set `judge.decompose` to `on`.
 
 **Will it slow my AI down?** A little. Each story takes extra time for the plan, the checks and the report. You get that back in less rework.
 

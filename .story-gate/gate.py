@@ -163,6 +163,7 @@ sys.dont_write_bytecode = True  # never leave __pycache__ inside the repo
 HERE = Path(__file__).resolve().parent
 sys.path[:] = [str(HERE)] + [p for p in sys.path if p not in ("", ".", str(HERE))]  # never import modules from the working tree
 import sg_judges as J  # noqa: E402
+import sg_decompose as DC  # noqa: E402
 import sg_trust as T  # noqa: E402
 import sg_stories as SS  # noqa: E402
 
@@ -226,8 +227,11 @@ DEFAULT_CONFIG = {
     # "full": an independent AI judge scores the semantic checks (needs a key). "objective": the owner chose to run without
     # one: only the checks story-gate can verify itself (structure, CI's own test and scenario runs, traceability) decide.
     "judge_mode": "full",
+    # decompose (sg_decompose.py): "off" asks the judge broad questions over the whole diff, as before. "shadow" (default) does
+    # that and ALSO asks narrow questions over evidence packs, recording the result beside the verdict without using it.
+    # "on" lets the narrow questions decide. max_requests caps the narrow requests per score; past it a check cannot PASS.
     "judge": {"provider": "openrouter", "emulated_allow_pass": False,
-              "allow_self_judge_pass": False, "max_chars": 90000},
+              "allow_self_judge_pass": False, "max_chars": 90000, "decompose": "shadow", "max_requests": 60},
     "approvers": [],
     "reviewers": [],  # empty until the owner names review bots or people; a code owner's approval always counts
     "require_independent_review": True,
@@ -413,6 +417,9 @@ def check_config(c):
         raise ConfigError('.story-gate/config.json: "ci_isolation" must be "strict" or "relaxed" (got %r) - the gate fails closed until fixed' % c.get("ci_isolation"))
     if c.get("judge_mode") not in ("full", "objective"):
         raise ConfigError('.story-gate/config.json: "judge_mode" must be "full" or "objective" (got %r) - the gate fails closed until fixed' % c.get("judge_mode"))
+    why = DC.settings_problem(c.get("judge"))
+    if why:
+        raise ConfigError('.story-gate/config.json: %s - the gate fails closed until fixed' % why)
     try:
         import sg_areas as A
         A.load(c.get("guardrails"))
@@ -614,7 +621,7 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     import sg_pitfalls as PF
     pf = {"pf": [PF.mode(c), c["pitfalls"].get("source")]} if PF.mode(c) != "off" else {}  # off: every stored verdict keeps its hash
-    return json.dumps({**pf, "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+    return json.dumps({**pf, **DC.fingerprint(c), "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
                        "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
@@ -641,7 +648,8 @@ def inputs_hash(sd, phase, c=None):
     blob = "".join(rd(sd / n) for n in names)
     if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
         tr = load_json(sd / "test_results.json")
-        blob += json.dumps({k: tr.get(k) for k in ("command", "exit_code", "fingerprint")}, sort_keys=True)
+        blob += json.dumps({**{k: tr.get(k) for k in ("command", "exit_code", "fingerprint")},  # per-test results decide
+                            "junit": tr.get("junit") or None}, sort_keys=True)  # whether tests_implemented may PASS
         blob += rd(sd / "validation.md") + rd(sd / "scenarios.json")
         import sg_validation as V
         sr = V.results_of(load_json(sd / "scenario_results.json"))
@@ -694,15 +702,18 @@ def jev(state, questions, c=None):
     return r if r.get("tier") != "none" else {"error": r.get("error")}
 
 
-def calibrated(c):
-    """An emulated judge may PASS only if the user opted in and its calibration run (same provider+model) passed."""
+def calibrated(c, model=""):
+    """An emulated judge may PASS only if the user opted in, its calibration run (same provider+model) passed, and every
+    model that answered (`model`, joined with '+' when a narrow run or a load-balanced alias used several) also answered
+    the calibration run. A record without that list predates the rule: run judge-calibrate again."""
     if not (c.get("judge") or {}).get("emulated_allow_pass"):
         return False
     try:
         rec = json.loads(policy_json("judge-calibration.json") or "{}")
     except ValueError:
         rec = {}
-    return rec.get("ok") is True and rec.get("identity") == J.identity(c)
+    seen = {m for m in (model or "").split("+") if m}
+    return rec.get("ok") is True and rec.get("identity") == J.identity(c) and bool(seen) and seen <= set(rec.get("models") or [])
 
 
 def judge(phase, state, c, sd, skip=()):
@@ -719,19 +730,29 @@ def judge(phase, state, c, sd, skip=()):
     r = J.ask(c, state, questions)
     if r.get("tier") in ("jev", "emulated"):
         a = r["answers"]
-        tier, note = r["tier"], None
-        if tier == "emulated":  # a general model must never grade work written by its own model family
-            coder = load_json(sd / "coder.json").get("model") or ""
-            if not coder:
-                note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
-            elif J.family(coder) == J.family(r.get("model") or ""):
-                tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
-            elif calibrated(c):
-                tier = "emulated-calibrated"
+        tier, note = judge_tier(r, c, sd)
         return {"judge": tier, "judge_note": note, "provider": r.get("provider"), "model": r.get("model"),
                 "scores": {k: a[k]["noul"] for k in qs_text}, "drift": a["drift_direction"]["choice"],
                 "drift_conf": a["drift_direction"]["confidence"], "cost": r.get("cost")}
-    jerr = r.get("error")
+    return judge_fallback(phase, sd, qs_text, choices, r.get("error"))
+
+
+def judge_tier(r, c, sd):
+    """(tier, note) for an answer from J.ask: a general model must never grade work written by its own model family."""
+    tier, note = r["tier"], None
+    if tier == "emulated":
+        coder = load_json(sd / "coder.json").get("model") or ""
+        if not coder:
+            note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
+        elif any(J.family(coder) == J.family(m) for m in (r.get("model") or "").split("+")):  # narrow runs join every model
+            tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
+        elif calibrated(c, r.get("model")):
+            tier = "emulated-calibrated"
+    return tier, note
+
+
+def judge_fallback(phase, sd, qs_text, choices, jerr):
+    """No judge answered: the agent's own scores (never PASS) if it wrote any, else nothing."""
     selfp = sd / ("%s.self.json" % phase)
     if selfp.exists():
         s = load_json(selfp)
@@ -1564,6 +1585,11 @@ def spec_coverage(sd, fm, c):
     return not why, "; ".join(why)
 
 
+def is_test_path(f, c):
+    """True when `f` matches one of config's test_globs (the one rule for what a test file is)."""
+    return any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch("/" + f, g) for g in c.get("test_globs") or [])
+
+
 def test_corpus(c):
     """Current contents of test files in the working tree (deleted tests and production code never count)."""
     files = set(zlist("ls-files")) | set(zlist("ls-files", "--others", "--exclude-standard"))
@@ -1571,7 +1597,7 @@ def test_corpus(c):
     for f in sorted(files):
         if f.startswith(".story-gate/"):
             continue
-        if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch("/" + f, g) for g in c.get("test_globs") or []):
+        if is_test_path(f, c):
             p = ROOT / f
             if p.is_file() and p.stat().st_size < 2_000_000:
                 out.append(rd(p))
@@ -1764,7 +1790,15 @@ def verdict(structural, judged, decisions, waivers, c):
         st = band(p, th)
         if st == "PASS" and not can_pass(judged["judge"], c):
             st = "CONCERNS"  # an uncalibrated or self judge cannot award a PASS
+        if st == "PASS" and k in judged.get("capped", ()):
+            st = "CONCERNS"  # narrow questions: evidence was cut or a question was not asked, so this check cannot PASS
         checks[k] = {"status": st, "score": round(p, 3), "kind": judged["judge"], "group": CHECK_GROUP.get(k, "")}
+        if st != "PASS" and judged.get("why", {}).get(k):
+            checks[k]["why"] = judged["why"][k]  # built by code from the lowest items, e.g. "AC3 0.21 (files: a.js, b.test.js)"
+        if judged.get("items", {}).get(k):
+            checks[k]["items"] = [{x: i[x] for x in ("id", "score", "files", "truncated")} for i in judged["items"][k]]
+    for k, why in judged.get("unscored", {}).items():  # narrow questions that were never answered: shown, never a PASS
+        checks[k] = {"status": "CONCERNS", "why": why, "kind": judged["judge"], "group": CHECK_GROUP.get(k, "")}
     if judged["judge"] == "none":
         checks["judge_available"] = {"status": "FAIL", "why": "no judge and no self-scores: semantic checks did not run (%s)" % judged.get("jev_error"), "kind": "structural"}
     drift = judged.get("drift", "none")
@@ -2633,20 +2667,53 @@ def untracked_diff(untracked):
     return untracked_text(untracked)[0]
 
 
+def untracked_readable(f):
+    """True when untracked_text reads this new file: a regular file, not a link, under UNTRACKED_BYTES, that opens for
+    reading (a file the gate cannot open is left out of the diff too, so it must count as unread)."""
+    if not (f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES):
+        return False
+    with open(f, "rb"):
+        return True
+
+
+def untracked_skipped():
+    """The new files (not records) that untracked_text leaves out of the diff: over the count limit, too large, a link."""
+    names = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
+    out = list(names[UNTRACKED_MAX:])
+    for n in names[:UNTRACKED_MAX]:
+        if any(c in n for c in "\r\n\t"):  # untracked_text does not show a name with a line break or a tab
+            out.append(n)
+            continue
+        try:
+            ok = untracked_readable(ROOT / n)
+        except OSError:
+            ok = False
+        if not ok:
+            out.append(n)
+    return out
+
+
 def untracked_text(untracked):
     """(new files as diff text, True when every one of them was read). A file story-gate skips (too many, too large, a
     link, unreadable) makes the second value False, so a content pattern can't be ruled out for it."""
     out, whole = "", len(untracked) <= UNTRACKED_MAX
     for n in untracked[:UNTRACKED_MAX]:
+        if any(c in n for c in "\r\n\t"):  # a line break would inject diff headers, a tab cuts the name: not shown, so not whole
+            whole = False
+            continue
         f = ROOT / n
         try:
-            ok = f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES
-            body = f.read_text(encoding="utf-8", errors="ignore") if ok else ""
+            ok = untracked_readable(f)
+            data = f.read_bytes() if ok else b""
         except OSError:
             ok = False
         if not ok:
             whole = False
             continue
+        if b"\0" in data[:8000]:  # binary, as git decides it: show only git's header, which marks the evidence cut
+            out += "\ndiff --git a/%s b/%s\nnew file (untracked)\nBinary files /dev/null and b/%s differ\n" % (n, n, n)
+            continue
+        body = data.decode("utf-8", errors="ignore")
         out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
     return out, whole
 
@@ -2683,6 +2750,68 @@ def writing_report(sd, sid, phase, c, files=()):
     return rep_
 
 
+def judge_cost(judged, drec, dmode):
+    """What the score cost: the binding judge, plus the narrow run's requests when they are not already in it (shadow mode,
+    or a binding run that stopped on an error before the fallback): both are paid."""
+    cost = judged.get("cost")
+    extra = (drec or {}).get("cost") if dmode == "shadow" or (drec or {}).get("error") else None
+    if isinstance(extra, (int, float)):
+        cost = round((cost if isinstance(cost, (int, float)) else 0) + extra, 6)
+    return cost
+
+
+def worktree_text(path):
+    """A changed file's text in the working tree, the "after" side of the DONE diff; None when it is missing, a link,
+    too large or unreadable."""
+    p = ROOT / path
+    try:
+        # like rd(): a path from the diff (which a crafted file name can inject) must resolve inside the repository, so
+        # it can never reach /proc/self/environ or other runner secrets through "..", a link, or a linked folder
+        real, root = os.path.realpath(p), os.path.realpath(ROOT)
+        if real == root or os.path.commonpath([real, root]) != root:  # path-aware: also right when ROOT is "/"
+            return None
+        if p.is_file() and not p.is_symlink() and p.stat().st_size < 2_000_000:
+            return p.read_bytes().decode("utf-8", "replace")  # bytes: read_text would turn a lone \r into a line break
+    except (OSError, ValueError):  # ValueError: commonpath across Windows drives (a link to another drive)
+        pass
+    return None
+
+
+def decomposed_judge(phase, state, c, sd, skip, diff="", executed=False, records_cut=False):
+    """The narrow-question score (sg_decompose.py) for a phase. -> (judged or None, record). `judged` has the shape judge()
+    returns, so verdict() can use it; `record` is what goes in the verdict file under "decomposed". Never raises: a failure
+    gives (None, a record that says why)."""
+    base = {"schema": DC.SCHEMA, "mode": DC.mode(c)}
+    try:
+        mx = int(c["judge"].get("max_chars", 90000))
+        questions = {k: v for k, v in (READY_Q if phase == "ready" else DONE_Q).items() if k not in skip}
+        t = load_json(sd / "tests.json")
+        plan = {str(a.get("id") or "AC-%d" % (i + 1)): a for i, a in enumerate(t.get("acceptance_criteria") or []) if isinstance(a, dict)}
+        ev = {"phase": phase, "state": state, "diff": diff, "questions": questions, "max_chars": mx, "th": c["thresholds"],
+              "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
+              "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
+              "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band,
+              "unread": untracked_skipped() if phase == "done" else [], "read": worktree_text, "executed": executed,
+              "records_cut": records_cut, "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
+        out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
+    except Exception as e:  # a bug here must never fail a score
+        return None, dict(base, error="narrow questions failed (%s)" % e.__class__.__name__)
+    if out.get("error"):
+        return None, dict(base, error=out["error"], cost=out.get("cost"))
+    tier, note = judge_tier(out, c, sd)
+    judged = {"judge": tier, "judge_note": note, "provider": out["provider"], "model": out["model"], "scores": out["scores"],
+              "drift": out["drift"], "drift_conf": out["drift_conf"], "cost": out["cost"], "why": out["why"],
+              "items": out["items"], "capped": out["capped"], "unscored": out["unscored"]}
+    rec = dict(base, model=out["model"], evidence_hash=out["evidence_hash"], requests=out["requests"], cost=out.get("cost"),
+               max_requests=out["max_requests"], checks=out["checks"], packs=out["packs"], groups=out["groups"],
+               drift=out["drift"], tier=tier)
+    if out.get("not_asked"):
+        rec["not_asked"] = out["not_asked"]
+    if out.get("story_records"):
+        rec["story_records"] = out["story_records"]  # left out of the packs: the judge gets the story in its fields
+    return judged, rec
+
+
 def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     """ci_trust: None = local run (waivers/decisions shown as proposals), True = CI with a code owner's approval
     on the head commit (honoured), False = CI without it (ignored). results = per-test outcomes from CI's own run."""
@@ -2700,8 +2829,9 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         wr = writing_report(sd, sid, "ready", c)
         pl = sections(rd(sd / "context.md")).get("## Prior learnings", "").strip().lower()
         skip = {"learnings_applied"} if pl.startswith("none") and "searched" in pl else set()  # skip only with search evidence
-        state = {"story": rd(sd / "story.md")[:mx // 3], "context": rd(sd / "context.md")[:mx // 3],
-                 "test_plan": rd(sd / "tests.json")[:mx // 3]}
+        full = {"story": rd(sd / "story.md"), "context": rd(sd / "context.md"), "test_plan": rd(sd / "tests.json")}
+        state = {k: v[:mx // 3] for k, v in full.items()}
+        records_cut = any(len(v) > mx // 3 for v in full.values())  # a record past its slice: the narrow checks saw part of it
     elif phase == "done":
         mb, files, diff = diff_against(base or c["base_branch"])
         budget = mx // 2
@@ -2711,23 +2841,48 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         wr = writing_report(sd, sid, "done", c, files)
         skip = set()
         learn = [l for l in rd(LEARNINGS).splitlines() if '"%s"' % sid in l]
-        state = {"story": rd(sd / "story.md")[:mx // 6], "context": rd(sd / "context.md")[:mx // 6],
-                 "test_plan": rd(sd / "tests.json")[:mx // 8], "handoff": rd(sd / "handoff.md")[:mx // 8],
-                 "learnings": "\n".join(learn)[:mx // 16], "changed_files": files[:300],
+        full = {"story": (rd(sd / "story.md"), mx // 6), "context": (rd(sd / "context.md"), mx // 6),
+                "test_plan": (rd(sd / "tests.json"), mx // 8), "handoff": (rd(sd / "handoff.md"), mx // 8),
+                "learnings": ("\n".join(learn), mx // 16), "changed_files": (files, 300)}
+        records_cut = any(len(v) > n for v, n in full.values())  # a record past its slice: the narrow checks saw part of it
+        state = {k: v[:n] for k, (v, n) in full.items()} | {
                  "validation": cut(rd(sd / "validation.md"), mx // 16), "scenarios": cut(rd(sd / "scenarios.json"), mx // 32),
                  "diff": diff[:budget], "diff_truncated": len(diff) > budget}
     else:
         sys.exit("phase must be ready or done")
     if (c.get("writing") or {}).get("enforce"):  # opt-in, after calibration: plain writing becomes a real check
         structural["plain_writing"] = (not wr["advice"], "; ".join(wr["advice"]))
-    judged = judge(phase, state, c, sd, skip)
+    dmode = "off" if objective(c) else DC.mode(c)  # no judge in objective mode, so nothing to decompose
+    dgot, drec = None, None
+    ddiff = diff if phase == "done" else ""
+    executed = phase == "done" and bool(results)  # CI's per-test results: a linked test really ran
+    if dmode == "on":  # the narrow questions decide; if they cannot run, the judge counts as unavailable (fail closed)
+        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed, records_cut)
+        judged = dgot or judge_fallback(phase, sd, [k for k in (READY_Q if phase == "ready" else DONE_Q) if k not in skip],
+                                        DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, drec.get("error"))
+        if dgot is None and judged["judge"] == "self":  # the agent's broad self-scores never stand in for the narrow ones
+            judged = dict(judged, judge="self-fallback")
+    else:
+        judged = judge(phase, state, c, sd, skip)
+        if dmode == "shadow":  # never binding, never able to fail the score
+            if "jev_error" in judged:  # the broad judge did not answer, so there is nothing to compare with
+                drec = {"schema": DC.SCHEMA, "mode": "shadow", "error": "not run: the judge did not answer (%s)" % (judged.get("jev_error") or "no key")}
+            else:
+                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed, records_cut)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
-    v = verdict(structural, judged, dec, wav, c)
+    # the broad judge's cut (the whole diff over half of max_chars) does not apply to the narrow questions: each pack and
+    # group carries its own truncation, which already caps its check
+    narrow_struct = {k: x for k, x in structural.items() if k != "evidence_complete"}
+    v = verdict(narrow_struct if dmode == "on" and dgot is not None else structural, judged, dec, wav, c)
+    if drec is not None:
+        if dgot is not None:
+            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(narrow_struct, dgot, dec, wav, c)["overall"]
+        v["decomposed"] = drec
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
                                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
-              "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
+              "drift_confidence": judged.get("drift_conf"), "cost": judge_cost(judged, drec, dmode), "gate_version": VERSION, "writing": wr})
     if DEP_BASE.get("commit"):
         v["base_commit"] = DEP_BASE["commit"]  # the default branch's latest commit that dependencies were checked against
     wj(sd / ("%s.json" % phase), v)
@@ -2735,7 +2890,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
     if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
-    calib_log(sid, phase, v, judged)
+    calib_log(sid, phase, v, judged, "narrow:" + DC.SCHEMA if dmode == "on" and dgot is not None else "broad")
     if not quiet:
         print_verdict(v)
     return 0 if passed(v, c, sd) else 1
@@ -2924,12 +3079,12 @@ def pitfalls_scan(shown, base):
     return dict(out, state="ran", hits=PF.scan_hits(doc.get("findings"), want))
 
 
-def calib_log(sid, phase, v, judged):
+def calib_log(sid, phase, v, judged, scoring="broad"):
     """Every verdict is logged so thresholds can be tuned against human labels (gate.py label)."""
     qset = hashlib.sha256(json.dumps([READY_Q, DONE_Q], sort_keys=True).encode()).hexdigest()[:10]
     row = {"at": v["at"], "story": sid, "phase": phase, "overall": v["overall"], "judge": v["judge"], "provider": judged.get("provider"),
            "model": judged.get("model"), "questions": qset, "gate_version": VERSION, "inputs_hash": v["inputs_hash"],
-           "scores": judged.get("scores"), "drift": v["drift"]}
+           "scores": judged.get("scores"), "drift": v["drift"], "scoring": scoring}  # broad and narrow scores calibrate apart
     with CALIB.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row) + "\n")
 
@@ -3073,6 +3228,8 @@ def print_verdict(v):
     for a in w.get("advice") or []:
         if "plain_writing" not in v["checks"]:
             print("  advice     " + a)
+    for line in DC.summary_lines(v):
+        print("  " + line)
 
 
 def append_decision(sid, rec):
@@ -3723,7 +3880,7 @@ def gate_check(event, payload, c):
 
 
 # ------------------------------------------------------------------ CI
-GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
+GATE_FILES = HOOK_FILES + (".story-gate/gate.py", ".story-gate/sg_judges.py", ".story-gate/sg_decompose.py", ".story-gate/sg_github.py", ".story-gate/sg_trust.py",
               ".story-gate/sg_guard.py", ".story-gate/sg_pin.py", ".story-gate/sg_dashboard.py", ".story-gate/sg_writing.py", ".story-gate/sg_validation.py", ".story-gate/sg_report.py", ".story-gate/sg_specpull.py", ".story-gate/sg_trackers.py", ".story-gate/sg_setup.py", ".story-gate/sg_reusable.py", ".story-gate/sg_settings.py", ".story-gate/sg_trackersetup.py", ".story-gate/sg_measure.py", ".story-gate/sg_isolate.py", ".story-gate/sg_areas.py", ".story-gate/sg_pitfalls.py", ".story-gate/sg_stories.py", ".story-gate/config.json", ".story-gate/budgets.json", ".story-gate/release.json", ".story-gate/release.json.sig",
               ".story-gate/judge-calibration.json",
               ".github/workflows/story-gate.yml", ".github/workflows/story-gate-audit.yml", ".github/workflows/story-gate-dashboard.yml",
@@ -5730,9 +5887,9 @@ def main(argv):
     if cmd == "label":
         return cmd_label(rest[0], rest[1], rest[2] if len(rest) > 2 else "", kv.get("note", "")) or 0
     if cmd == "judge-calibrate":
-        ok, details = J.calibrate(cfg())
+        ok, details, models = J.calibrate(cfg())
         print("\n".join(details))
-        wj(GATE / "judge-calibration.json", {"ok": ok, "identity": J.identity(cfg()), "at": now(), "details": details})
+        wj(GATE / "judge-calibration.json", {"ok": ok, "identity": J.identity(cfg()), "models": models, "at": now(), "details": details})
         print("story-gate judge calibration: %s" % ("PASSED - set judge.emulated_allow_pass to let this judge PASS stories" if ok else "FAILED - this judge stays capped at CONCERNS"))
         return 0 if ok else 1
     if cmd in ("setup-repo", "setup-agent", "agent-token", "agent-env"):
