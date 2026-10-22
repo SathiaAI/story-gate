@@ -13458,6 +13458,19 @@ class TestDecomposePure(unittest.TestCase):
         self.assertNotEqual(out["checks"]["impl_no_unplanned_scope"]["band"], "PASS")
         self.assertIn("big.dat", out["checks"]["impl_matches_acs"]["why"])
 
+    def test_an_unread_file_alone_is_not_reported_as_the_request_cap(self):
+        """An AC with nothing in the read diff, while a new file went unread: unknown, but not "request cap reached"."""
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": [], "plan": {}}, {"id": "AC-2", "text": "two", "refs": [], "plan": {}}]
+        out = D.run("done", dict(self.ev(diff, acs_), unread=["big.dat"]), self.fake_ask())
+        c = out["checks"]["impl_matches_acs"]
+        ac2 = [i for i in c["items"] if i["id"] == "AC-2"][0]
+        self.assertEqual((ac2["score"], ac2["truncated"]), (None, True))
+        self.assertNotEqual(c["band"], "PASS")
+        self.assertNotIn("request cap", c["why"])
+        self.assertIn("big.dat", c["why"])
+
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""
         D = self.D

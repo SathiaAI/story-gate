@@ -662,7 +662,7 @@ def _run_done(ev, ask):
         for a in acs:
             pk, rid = packs[a["id"]], "ac:" + a["id"]
             if not pk["pieces"] and (unassessed or unread):  # some files were never checked: "nothing relates" is not known
-                items.append(item(a["id"], None, [], True, pk["notes"], not_asked=True))
+                items.append(item(a["id"], None, [], True, pk["notes"], not_asked=bool(unassessed)))
             elif not pk["pieces"]:  # nothing in the diff relates to this AC: no request is needed to know it is missing
                 items.append(item(a["id"], 0.0, [], pk["truncated"], pk["notes"], detail="no changed file relates to it"))
             elif rid in gone:
