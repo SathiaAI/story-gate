@@ -11,7 +11,7 @@ about the evidence (which files, what was cut). It is never model text.
 Pure functions plus run(), which takes the judge as a function (ask(state, questions) -> the shape sg_judges.ask returns),
 so it can be tested with a fake judge. Decision record: docs/decisions/2026-10-22-judge-evidence-packs.md.
 """
-import concurrent.futures, hashlib, json, re
+import concurrent.futures, functools, hashlib, json, re
 
 SCHEMA = "decompose-1"
 MODES = ("off", "shadow", "on")
@@ -179,6 +179,7 @@ TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
 ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
 DECORATOR = re.compile(r"^\s*(?:@\w|#\[)")  # a decorator or attribute line (@pytest.mark.skip, @Disabled, #[ignore])
+CALL = re.compile(r"^\s*(?:await\s+)?[\w$][\w$.]*\s*\(")  # a call statement: beforeEach(...), jest.mock(...)
 RAW_BACKTICK_EXT = (".go",)  # files whose backtick strings are raw: a backslash there escapes nothing
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
@@ -197,12 +198,12 @@ def ends_test(text, depth):
 def test_end(rest, start, stop, depth, st):
     """The first line in rest[start:stop] that ends the test (see ends_test), or stop. Lines inside a multi-line string
     (a triple-quoted or backtick snapshot, often unindented; st is string_states(rest)) are the test's own, except a
-    line that starts a definition or an assignment: the string tracking is a guess, so it may end a test early but never
-    hide a helper. A string still open at stop means the guess was wrong, so the plain rule applies instead.
+    line that starts a definition, an assignment or a call (a beforeEach(...) fixture): the string tracking is a guess, so
+    it may end a test early but never hide a helper or fixture. A string still open at stop means the guess was wrong, so the plain rule applies instead.
     -> (that line or stop, True when the test ended inside a string that looked open: its block may be cut short)."""
     live = [j for j in range(start, stop) if rest[j][:1] in " +"]
     for j in live:
-        if ends_test(rest[j][1:].rstrip("\n"), depth) and (st[j] is None or DEFINES.match(rest[j][1:])):
+        if ends_test(rest[j][1:].rstrip("\n"), depth) and (st[j] is None or DEFINES.match(rest[j][1:]) or CALL.match(rest[j][1:])):
             return j, st[j] is not None
     if st[stop] is None:
         return stop, False
@@ -210,12 +211,17 @@ def test_end(rest, start, stop, depth, st):
 
 
 def string_state(line, open_q, hash_comments=True, raw_backtick=False):
-    """The multi-line string still open after `line`: one of STRING_QUOTES, a one-line string continued by a backslash
-    at the end of the line, or None. Reads the line left to right like a tokenizer: a backslash escapes the next
+    """The multi-line string still open after `line`: one of STRING_QUOTES, "/*" for a block comment (files without #
+    comments), a one-line string continued by a backslash at the end of the line, or None. Reads the line left to right like a tokenizer: a backslash escapes the next
     character (except inside a raw backtick string, raw_backtick: Go), so an escaped quote or the `\\/` of a regex
-    literal is not a delimiter; outside a string a comment (# or //) ends the line, so a quote inside it opens nothing."""
+    literal is not a delimiter; outside a string a comment (# or //) ends the line and a /* */ comment is skipped, so a
+    quote inside either opens nothing."""
     i, n = 0, len(line)
     while i < n:
+        if open_q == "/*":
+            end = line.find("*/", i)
+            i, open_q = (end + 2, None) if end >= 0 else (n, "/*")
+            continue
         if open_q:
             if line[i] == "\\" and not (raw_backtick and open_q == "`"):
                 i += 2
@@ -230,15 +236,18 @@ def string_state(line, open_q, hash_comments=True, raw_backtick=False):
             continue
         if (c == "#" if hash_comments else line.startswith("//", i)):
             return None
+        if not hash_comments and line.startswith("/*", i):
+            i, open_q = i + 2, "/*"
+            continue
         open_q = next((q for q in STRING_QUOTES if line.startswith(q, i)), c if c in "'\"" else None)
         i += len(open_q) if open_q else 1
-    return open_q if open_q in STRING_QUOTES or i > n else None  # i > n: the last backslash escaped the line end
+    return open_q if open_q in STRING_QUOTES + ("/*",) or i > n else None  # i > n: the last backslash escaped the line end
 
 
 def file_states(new_text, hash_comments=True, raw_backtick=False):
     """[None, then for each line n of the changed file the multi-line string open just before it] (see string_state)."""
     pre, q = [None], None
-    for ln in (new_text or "").splitlines():
+    for ln in (new_text or "").split("\n"):  # git counts lines by \n only (splitlines would also split at \f, \x1c...)
         pre.append(q)
         q = string_state(ln, q, hash_comments, raw_backtick)
     return pre
@@ -248,19 +257,19 @@ def header_names_text(header, ctx, new_text, pre):
     """True when the definition git names in a hunk header's function context is not a definition: it cannot be found
     above the hunk in the changed file, or it sits inside a string there (a fake test written into a string)."""
     m = re.match(r"@@ -\S+ \+(\d+)", header)
-    n, want, lines = int(m.group(1)) if m else 0, ctx.strip()[:60], new_text.splitlines()
+    n, want, lines = int(m.group(1)) if m else 0, ctx.strip()[:60], new_text.split("\n")
     for k in range(min(n - 1, len(lines)), 0, -1):  # line k of the file, nearest the hunk first
         if want and lines[k - 1].strip().startswith(want):
             return pre[k] is not None
     return True
 
 
-def string_states(rest, hash_comments=True, raw_backtick=False, new_text=None):
+def string_states(rest, hash_comments=True, raw_backtick=False, new_text=None, pre=None):
     """For each line of a diff body, the multi-line string open just before it (see string_state), plus one entry for
     the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing. A hunk header starts
     the next hunk in the state the whole changed file has at that line (new_text, read from the working tree), so a
     string opened above the hunk is still open in it; without new_text the hunk starts outside any string."""
-    pre = file_states(new_text, hash_comments, raw_backtick)
+    pre = pre if pre is not None else file_states(new_text, hash_comments, raw_backtick)
     out, open_q = [], None
     for ln in rest:
         out.append(open_q)
@@ -288,7 +297,8 @@ def linked_spans(f, refs, defined):
         n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
     rest = lines[n_head:]
     path = f.get("path", "").lower()
-    st = string_states(rest, path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT), f.get("new_text"))
+    pre = file_states(f.get("new_text"), path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT))  # once per file
+    st = string_states(rest, path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT), f.get("new_text"), pre)
     # a removed test definition ends the block above it (its lines are not that test's) but never starts a block
     bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or ln.startswith("-") and TEST_START.search(" " + ln[1:])
               or st[i] is None and TEST_START.search(ln)]
@@ -302,8 +312,7 @@ def linked_spans(f, refs, defined):
             # test opens with lines of that test, so it stays in the test's block instead of depending on relevance
             line = rest[i].split("@@", 2)[2] if rest[i].count("@@") >= 2 else ""
             depth = indent(line[1:])  # header context keeps one space after "@@"
-            if f.get("new_text") is not None and header_names_text(rest[i], line, f["new_text"], file_states(
-                    f["new_text"], path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT))):
+            if f.get("new_text") is not None and header_names_text(rest[i], line, f["new_text"], pre):
                 continue  # git's context regex does not know strings: the file decides
         else:
             while ANNOTATION.match(rest[k][1:]):
@@ -362,11 +371,23 @@ def residual_edits(f, refs, defined):
     return "".join(head) + "".join(left)
 
 
+@functools.lru_cache(maxsize=4096)
+def sent_len(text):
+    """The length of text as a request sends it: json.dumps escapes non-ASCII, up to 12 characters for one. Budgets
+    count this, not Python characters, because the judge's limit applies to the sent request."""
+    return len(json.dumps(text)) - 2
+
+
 def clip(text, n):
-    """(text cut to n characters with a visible marker, True when it was cut). Same marker the gate uses."""
-    if len(text) <= n:
+    """(text cut to at most n characters as a request sends it (sent_len) with a visible marker, True when it was cut).
+    Same marker the gate uses. For plain ASCII this is a cut at n characters."""
+    if sent_len(text) <= n:
         return text, False
-    return text[:n] + "\n[... cut: %d more characters not shown]" % (len(text) - n), True
+    lo, hi = 0, min(len(text), n)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if sent_len(text[:mid]) <= n else (lo, mid - 1)
+    return text[:lo] + "\n[... cut: %d more characters not shown]" % (len(text) - lo), True
 
 
 # ------------------------------------------------------------------ requests
@@ -397,28 +418,12 @@ def relevance_text_max(acs, per_file):
     return min(AC_TEXT_MAX, max(REL_AC_MIN, per_file // max(len(acs), 1)))
 
 
-def sent_len(text):
-    """The length of text as a request sends it: json.dumps escapes non-ASCII, up to 12 characters for one."""
-    return len(json.dumps(text)) - 2
-
-
-def clip_sent(text, n):
-    """clip() measured by sent_len: the longest start of text that is at most n characters once sent."""
-    if sent_len(text) <= n:
-        return text, False
-    lo, hi = 0, min(len(text), n)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        lo, hi = (mid, hi) if sent_len(text[:mid]) <= n else (lo, mid - 1)
-    return text[:lo] + "\n[... cut: %d more characters not shown]" % (len(text) - lo), True
-
-
 def relevance_request(f, acs, per_file):
     """One request: does this file's change serve each AC? One question per AC."""
     body, cut = clip(f["text"], per_file)
     lim = relevance_text_max(acs, per_file)
     state = {"file": f["path"], "status": f["status"], "diff": body, "truncated": cut,
-             "acceptance_criteria": [{"id": a["id"], "text": clip_sent(a["text"], lim)[0]} for a in acs]}
+             "acceptance_criteria": [{"id": a["id"], "text": clip(a["text"], lim)[0]} for a in acs]}
     qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports the acceptance criterion with id "
                                  "%s in `acceptance_criteria`." % a["id"]) for a in acs}
     return {"id": "rel:" + f["path"], "kind": "relevance", "state": state, "questions": qs}
@@ -462,7 +467,8 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed, unread=()):
     for f in files:
         if f["test"] and refs and any(defined(r, visible_text(f)) for r in refs):
             part, cut = test_blocks(f, refs, defined)
-            tests.append(dict(f, text=part) if part else f)  # just this AC's tests when they can be found, else the file
+            if part:  # no block found (a "test" inside a string, an unknown framework): residual_edits sends the edits
+                tests.append(dict(f, text=part))  # through relevance; the whole file is never shown as test evidence
             if cut:
                 cut_tests.append(f["path"])
     code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if (not f["test"] or f.get("unlinked")) and f["path"] in rel),
@@ -472,7 +478,7 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed, unread=()):
     if cut_tests:
         truncated = True
         notes.append("a test longer than %d lines was cut in %s" % (TEST_BLOCK_MAX, ", ".join(cut_tests)))
-    partial = [f["path"] for p, f in code if p < RELEVANT and len(f["text"]) > per_file]
+    partial = [f["path"] for p, f in code if p < RELEVANT and sent_len(f["text"]) > per_file]
     if partial:  # relevance saw only the first part, so the rest of the file may still serve this AC
         truncated = True
         notes.append("left out after relevance read only part of %s" % ", ".join(partial[:3]) + (" and %d more" % (len(partial) - 3) if len(partial) > 3 else ""))
@@ -482,13 +488,13 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed, unread=()):
         notes.append("left out binary change%s whose contents could not be read: %s" % ("" if len(blind) == 1 else "s", ", ".join(blind[:3])))
     for i, f in enumerate(chosen):
         room = budget - used
-        if len(f["text"]) <= room:
+        if sent_len(f["text"]) <= room:
             pieces.append({"path": f["path"], "text": f["text"], "cut": False})
-            used += len(f["text"])
+            used += sent_len(f["text"])
             if f.get("binary"):  # only the header can be shown
                 truncated = True
                 notes.append("%s is a binary change; its contents are not shown" % f["path"])
-            if (not f["test"] or f.get("unlinked")) and len(f["text"]) > per_file:  # relevance saw only the first part
+            if (not f["test"] or f.get("unlinked")) and sent_len(f["text"]) > per_file:  # relevance saw only the first part
                 truncated = True
                 notes.append("%s was read only in part when its relevance was judged" % f["path"])
             continue
@@ -527,15 +533,15 @@ def build_groups(files, budget):
             groups.append(cur)
         cur, used = [], 0
     for f in files:
-        if len(f["text"]) > budget:
+        if sent_len(f["text"]) > budget:
             close()
             part, _ = clip(f["text"], budget)
             groups.append([{"path": f["path"], "text": part, "cut": True}])
             continue
-        if used + len(f["text"]) > budget:
+        if used + sent_len(f["text"]) > budget:
             close()
         cur.append({"path": f["path"], "text": f["text"], "cut": False, "binary": bool(f.get("binary"))})
-        used += len(f["text"])
+        used += sent_len(f["text"])
     close()
     out = []
     for g in groups:

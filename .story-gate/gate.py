@@ -648,7 +648,8 @@ def inputs_hash(sd, phase, c=None):
     blob = "".join(rd(sd / n) for n in names)
     if phase == "done":  # only the facts of the test run, so CI's own run of the same code yields the same evidence
         tr = load_json(sd / "test_results.json")
-        blob += json.dumps({k: tr.get(k) for k in ("command", "exit_code", "fingerprint")}, sort_keys=True)
+        blob += json.dumps({**{k: tr.get(k) for k in ("command", "exit_code", "fingerprint")},  # per-test results decide
+                            "junit": tr.get("junit") or None}, sort_keys=True)  # whether tests_implemented may PASS
         blob += rd(sd / "validation.md") + rd(sd / "scenarios.json")
         import sg_validation as V
         sr = V.results_of(load_json(sd / "scenario_results.json"))
@@ -2759,7 +2760,7 @@ def worktree_text(path):
     p = ROOT / path
     try:
         if p.is_file() and not p.is_symlink() and p.stat().st_size < 2_000_000:
-            return p.read_text(encoding="utf-8", errors="replace")
+            return p.read_bytes().decode("utf-8", "replace")  # bytes: read_text would turn a lone \r into a line break
     except OSError:
         pass
     return None

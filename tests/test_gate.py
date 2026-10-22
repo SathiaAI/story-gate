@@ -6463,6 +6463,17 @@ class TestValidation(Base):
         (self.sd / "scenario_results.json").write_text(json.dumps(doc))
         self.assertEqual(g.inputs_hash(self.sd, "done"), local)  # decisions and waivers made locally still apply in CI
 
+    def test_done_evidence_changes_when_per_test_results_change(self):
+        """Per-test results decide whether tests_implemented may PASS, so removing them changes inputs_hash (Codex)."""
+        self.ready()
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        self.fill_validation()
+        tp = self.sd / "test_results.json"
+        tp.write_text(json.dumps({"command": "pytest", "exit_code": 0, "fingerprint": "f", "junit": {"tests": 3}}))
+        with_junit = g.inputs_hash(self.sd, "done")
+        tp.write_text(json.dumps({"command": "pytest", "exit_code": 0, "fingerprint": "f"}))
+        self.assertNotEqual(g.inputs_hash(self.sd, "done"), with_junit)
+
     def test_scenarios_cannot_overwrite_ci_test_results(self):
         """A scenario run during `ci-tests` can't forge results.json: the real test command's exit code still wins."""
         self.ready()
@@ -13127,6 +13138,22 @@ class TestDecomposePure(unittest.TestCase):
         self.assertFalse(pack["truncated"], pack["notes"]); self.assertEqual(pack["files"], ["test/big.test.mjs"])
         self.assertEqual(D.test_blocks(f, ["missing"], defined), ("", False))
 
+    def test_a_fixture_call_after_a_test_is_never_hidden_in_its_block(self):
+        """A backtick in a /* */ comment is not a string, and a call at the test's depth (beforeEach) ends the test even
+        when the string guess is wrong (a backtick regex), so the fixture reaches relevance as a residual edit (Codex)."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        defined = lambda r, t: ("test('%s'," % r) in t
+        for inner, guessed in (("  /* uses a ` here */\n", False), ("  expect(/`/.test(s)).toBe(true);\n", True)):
+            js = "test('one', () => {\n" + inner + "  expect(run()).toBe(1);\n});\nbeforeEach(() => { mock(run) });\n/* a ` closes the guess */\n" \
+                 "test('two', () => {\n  expect(run()).toBe(1);\n});\n"
+            f = {"path": "test/a.test.js", "test": True, "new_text": js, "text": "diff --git a/test/a.test.js b/test/a.test.js\n"
+                 "+++ b/test/a.test.js\n@@ -0,0 +1,%d @@\n" % js.count("\n") + "".join("+" + l for l in js.splitlines(True))}
+            part, cut = D.test_blocks(f, ["one", "two"], defined)
+            self.assertNotIn("beforeEach", part)
+            self.assertEqual(cut, guessed)
+            self.assertIn("beforeEach", D.residual_edits(f, ["one", "two"], defined))
+
     def test_a_test_longer_than_the_block_limit_is_marked_cut_and_caps_its_pack(self):
         """A linked test over TEST_BLOCK_MAX lines shows a cut marker, and the pack cannot claim complete evidence."""
         import importlib, sys
@@ -13321,9 +13348,9 @@ class TestDecomposePure(unittest.TestCase):
     def test_a_file_over_the_per_file_budget_marks_its_packs_truncated(self):
         """A file over the per file budget marks its packs truncated."""
         D = self.D
-        diff = self.file_diff("src/big.js", "// AC1_MARK\n" + "// pad\n" * 1200) + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
+        diff = self.file_diff("src/big.js", "// AC1_MARK\n" + "// pad\n" * 800) + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
         acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
-        out = D.run("done", self.ev(diff, acs_, max_chars=20000), self.fake_ask())  # per-file budget 5,000; the file is about 8,000
+        out = D.run("done", self.ev(diff, acs_, max_chars=20000), self.fake_ask())  # per-file budget 5,000; the file is about 7,000 as sent
         c = out["checks"]["impl_matches_acs"]
         self.assertEqual((c["score"], c["band"]), (0.9, "CONCERNS"))
         self.assertIn("read only in part", c["why"])
@@ -13643,12 +13670,13 @@ class TestDecomposePure(unittest.TestCase):
 
     def test_a_go_rust_or_kotlin_helper_ends_a_test_inside_a_wrong_string_guess(self):
         """Go func, Rust fn and Kotlin fun are definitions too, so a wrong string guess that closes later still cannot
-        hide a helper after the test (CodeRabbit)."""
+        hide a helper after the test (CodeRabbit). The backtick in a /* */ comment is now read as a comment, so no guess is
+        wrong here and the block is not cut; the wrong-guess path is covered by the JS backtick-regex case."""
         D = self.D
         go = "func TestX(t *testing.T) {\n\tcheck(1) /* see ` */\n}\nfunc allowAll() bool { return true }\n// note: `\n"
         f = {"path": "x_test.go", "test": True, "text": self.file_diff("x_test.go", go)}
         part, cut = D.test_blocks(f, ["TestX"], lambda r, t: "func " + r in t)
-        self.assertIn("check(1)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
+        self.assertIn("check(1)", part); self.assertNotIn("allowAll", part); self.assertFalse(cut)
         self.assertIn("allowAll", D.residual_edits(f, ["TestX"], lambda r, t: "func " + r in t))
         for line in ("pub fn allow_all() {}", "pub(crate) fn x() {}", "private fun allowAll() = true", "suspend fun x() {}"):
             self.assertTrue(D.DEFINES.match(line), line)
@@ -13680,6 +13708,19 @@ class TestDecomposePure(unittest.TestCase):
         hunk2 = hunk.replace("@@ -5,2 +5,3 @@", "@@ -4,2 +4,3 @@")
         part, _ = D.test_blocks(dict(f, text=hunk2), ["test_auth_case"], self.defined)
         self.assertIn("assert 1", part)
+
+    def test_file_lines_are_counted_like_git(self):
+        """git counts lines by \\n only: a form feed inside a line must not shift the string state of later lines
+        (CodeRabbit)."""
+        D = self.D
+        new = 'x = 1  # \x0c page break\npayload = """\ndef test_auth_case():\n    assert True\n"""\n'
+        pre = D.file_states(new)
+        self.assertEqual(len(pre), new.count("\n") + 2)  # [None] + one entry per line (the last one empty)
+        self.assertIsNone(pre[2]); self.assertEqual(pre[3], '"""')  # line 3 (def test_auth_case) is inside the string
+        hunk = ("diff --git a/tests/test_p.py b/tests/test_p.py\n--- a/tests/test_p.py\n+++ b/tests/test_p.py\n"
+                "@@ -3,1 +3,2 @@\n def test_auth_case():\n+    assert 1\n")
+        f = {"path": "tests/test_p.py", "test": True, "text": hunk, "new_text": new}
+        self.assertEqual(D.test_blocks(f, ["test_auth_case"], self.defined), ("", False))
 
     def test_regex_slashes_decorators_and_renamed_methods(self):
         """`\\/\\//` in a JS regex is not a comment; a skip decorator above a test is part of its block; an @Test whose
@@ -13728,13 +13769,32 @@ class TestDecomposePure(unittest.TestCase):
         """json.dumps escapes each emoji to 12 characters; the relevance budget counts that, not raw characters (Codex)."""
         D = self.D
         text = "\U0001F600" * 2000
-        cut, was = D.clip_sent(text, 2000)
+        cut, was = D.clip(text, 2000)
         self.assertTrue(was); self.assertLessEqual(D.sent_len(cut.split("\n[... cut")[0]), 2000)
-        self.assertEqual(D.clip_sent("plain", 2000), ("plain", False))
+        self.assertEqual(D.clip("plain", 2000), ("plain", False))
         acs = [{"id": "AC-%d" % i, "text": text, "refs": [], "plan": {}} for i in range(8)]
         f = {"path": "src/a.py", "status": "modified", "text": "diff --git a/src/a.py b/src/a.py\n+x\n"}
         req = D.relevance_request(f, acs, 45000)
         self.assertLess(len(json.dumps(req["state"])), 200000)
+
+    def test_a_linked_test_file_without_a_found_block_is_not_shown_whole(self):
+        """When no test block can be found (a "test" inside a string), the file is not sent whole as test evidence (Codex)."""
+        D = self.D
+        f = {"path": "tests/t.py", "test": True, "text": self.file_diff("tests/t.py", 'NOTE = "test_ac1 runs here"\n')}
+        a = {"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}
+        orig = D.test_blocks
+        D.test_blocks = lambda *_: ("", False); self.addCleanup(setattr, D, "test_blocks", orig)
+        pack = D.build_pack(a, [f], {}, lambda r, t: True, 10000, 5000, [])
+        self.assertEqual(pack["pieces"], [])
+
+    def test_code_evidence_is_budgeted_by_its_size_as_sent(self):
+        """A diff of emoji is about 12 times larger as sent: the pack budget counts that size, not raw characters (Codex)."""
+        D = self.D
+        f = {"path": "src/e.py", "test": False, "text": self.file_diff("src/e.py", "\U0001F600" * 1000)}
+        a = {"id": "AC-1", "text": "one", "refs": [], "plan": {}}
+        pack = D.build_pack(a, [f], {"src/e.py": {"AC-1": 1.0}}, lambda r, t: False, 5000, 5000, [])
+        self.assertTrue(pack["truncated"])
+        self.assertLessEqual(sum(D.sent_len(p["text"].split("\n[... cut")[0]) for p in pack["pieces"]), 5000)
 
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
