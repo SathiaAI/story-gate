@@ -197,10 +197,40 @@ def test_end(rest, start, stop, depth):
         line = rest[j][1:].rstrip("\n")
         if open_q is None and ends_test(line, depth):
             return j
-        for q in STRING_QUOTES:
-            if (open_q in (None, q)) and line.count(q) % 2:
-                open_q = None if open_q == q else q
+        open_q = string_state(line, open_q)
     return stop
+
+
+def string_state(line, open_q):
+    """The multi-line string still open after `line` (one of STRING_QUOTES, or None). Reads the line left to right:
+    one-line strings and comments (# or //) outside a string are skipped, so a quote inside them opens nothing."""
+    i, n, single = 0, len(line), None
+    while i < n:
+        if open_q:
+            k = line.find(open_q, i)
+            if k < 0:
+                return open_q
+            i, open_q = k + len(open_q), None
+            continue
+        c = line[i]
+        if single:
+            if c == "\\":
+                i += 2
+                continue
+            if c == single:
+                single = None
+            i += 1
+            continue
+        if c == "#" or line.startswith("//", i):
+            return None
+        q = next((q for q in STRING_QUOTES if line.startswith(q, i)), None)
+        if q:
+            open_q, i = q, i + len(q)
+        elif c in "'\"":
+            single, i = c, i + 1
+        else:
+            i += 1
+    return open_q
 
 
 def linked_spans(f, refs, defined):

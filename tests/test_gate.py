@@ -13553,6 +13553,19 @@ class TestDecomposePure(unittest.TestCase):
         part, _ = D.test_blocks(f, ["test_snap"], lambda r, t: r in t)
         self.assertIn("expect(view()).toBe(s);", part); self.assertNotIn("function helper", part)
 
+    def test_quotes_in_comments_or_one_line_strings_do_not_hide_a_helper(self):
+        """A triple quote inside a comment or a one-line string opens no multi-line string, so the helper after the
+        test still ends it and goes through relevance (CodeRabbit: a comment must not keep the test open)."""
+        D = self.D
+        for line in ('    # parser accepts """', "    s = \"'''\"", "    t = 'a `b'  // also `"):
+            body = "def test_x():\n%s\n    assert True\n\ndef allow_all(user):\n    return True\n" % line
+            f = {"path": "tests/test_x.py", "test": True, "text": self.file_diff("tests/test_x.py", body)}
+            part, _ = D.test_blocks(f, ["test_x"], self.defined)
+            self.assertNotIn("def allow_all", part, line)
+            self.assertIn("+def allow_all(user):", D.residual_edits(f, ["test_x"], self.defined), line)
+        self.assertEqual(D.string_state('x = """start', None), '"""')
+        self.assertIsNone(D.string_state('end""" + "#"', '"""'))
+
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
         relevance answer: each gets its own request."""
