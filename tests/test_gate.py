@@ -12769,6 +12769,41 @@ class TestDecompose(Base):
         self.assertIn("Score (Jev, binding)", r.stdout)
         self.assertEqual(v["decomposed"]["would_be_overall"], v["overall"])
 
+    def test_on_a_change_over_the_broad_limit_can_pass_when_every_pack_fits(self):
+        """The whole diff is over half of max_chars, but every pack and group fits: the broad cut does not cap the score."""
+        j = self.judge(base=0.95); self.configure(j, "on", max_chars=20000)  # broad cut at 10,000; per file 5,000
+        self.build(n=3, filler=300)
+        v, r = self.score("done")
+        d = v["decomposed"]
+        self.assertFalse(any(p["truncated"] for p in d["packs"].values()), d["packs"])
+        self.assertFalse(any(g["truncated"] for g in d["groups"]), d["groups"])
+        self.assertNotIn("evidence_complete", v["checks"], r.stdout)
+        self.assertEqual(v["checks"]["impl_matches_acs"]["status"], "PASS")
+        self.configure(j, "off", max_chars=20000)  # the same change through the broad judge is over its limit
+        v_off, _ = self.score("done")
+        self.assertEqual(v_off["checks"]["evidence_complete"]["status"], "CONCERNS")
+
+    def test_shadow_cost_is_part_of_the_score_cost(self):
+        """Shadow requests are paid too: the verdict's cost adds the narrow run's cost to the broad judge's."""
+        g = self.gate()
+        self.assertEqual(g.judge_cost({"cost": 0.01}, {"cost": 0.002}, "shadow"), 0.012)
+        self.assertEqual(g.judge_cost({"cost": 0.01}, {"cost": 0.002}, "on"), 0.01)  # on: the narrow run is the judge
+        self.assertEqual(g.judge_cost({"cost": None}, {"cost": 0.002}, "shadow"), 0.002)
+        self.assertIsNone(g.judge_cost({"cost": None}, {}, "shadow"))
+
+    def test_an_ac_without_an_id_keeps_its_plan(self):
+        """An AC with no id gets AC-<n> from acs(); its planned cases still reach the narrow questions."""
+        j = self.judge(); self.configure(j, "on")
+        self.build(n=1)
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        t = json.loads((sd / "tests.json").read_text()); t["acceptance_criteria"][0].pop("id")
+        t["acceptance_criteria"][0]["positive"] = ["the planned positive case"]
+        (sd / "tests.json").write_text(json.dumps(t))
+        self.score("ready")
+        reqs = j.with_questions("ac_testable:AC-1")
+        self.assertTrue(reqs)
+        self.assertEqual(reqs[0]["state"]["planned_cases"]["positive"], ["the planned positive case"])
+
     def test_on_fails_an_ac_that_is_missing_from_the_code(self):
         """On fails an ac that is missing from the code."""
         j = self.judge(); self.configure(j, "on")
@@ -12999,12 +13034,25 @@ class TestDecomposePure(unittest.TestCase):
         f = {"path": "test/big.test.mjs", "test": True, "text": "diff --git a/test/big.test.mjs b/test/big.test.mjs\n+++ b/test/big.test.mjs\n@@ -0,0 +1 @@\n" + body}
         self.assertGreater(len(f["text"]), 150000)
         defined = lambda r, t: ("test('%s'," % r) in t
-        part = D.test_blocks(f, ["case 7"], defined)
+        part, cut = D.test_blocks(f, ["case 7"], defined)
+        self.assertFalse(cut)
         self.assertIn("case 7'", part); self.assertNotIn("case 8'", part); self.assertNotIn("case 6'", part)
         self.assertLess(len(part), 6000)
         pack = D.build_pack({"id": "AC1", "refs": ["case 7"]}, [f], {}, defined, 45000, 30000, [])
         self.assertFalse(pack["truncated"], pack["notes"]); self.assertEqual(pack["files"], ["test/big.test.mjs"])
-        self.assertEqual(D.test_blocks(f, ["missing"], defined), "")
+        self.assertEqual(D.test_blocks(f, ["missing"], defined), ("", False))
+
+    def test_a_test_longer_than_the_block_limit_is_marked_cut_and_caps_its_pack(self):
+        """A linked test over TEST_BLOCK_MAX lines shows a cut marker, and the pack cannot claim complete evidence."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        body = "+test('long', () => {\n" + "+  assert.ok(true);\n" * (D.TEST_BLOCK_MAX + 50) + "+});\n"
+        f = {"path": "test/long.test.mjs", "test": True, "text": "diff --git a/test/long.test.mjs b/test/long.test.mjs\n@@ -0,0 +1 @@\n" + body}
+        defined = lambda r, t: ("test('%s'," % r) in t
+        part, cut = D.test_blocks(f, ["long"], defined)
+        self.assertTrue(cut); self.assertIn("[... cut:", part)
+        pack = D.build_pack({"id": "AC1", "refs": ["long"]}, [f], {}, defined, 45000, 30000, [])
+        self.assertTrue(pack["truncated"]); self.assertIn("a test longer than", " ".join(pack["notes"]))
 
     @classmethod
     def setUpClass(cls):
@@ -13191,6 +13239,57 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual((c["score"], c["band"]), (0.9, "CONCERNS"))
         self.assertIn("read only in part", c["why"])
         self.assertEqual(c["items"][0]["files"], ["tests/test_ac1.py", "src/big.js"])
+
+    def test_a_large_file_left_out_after_partial_relevance_caps_the_pack(self):
+        """Relevance saw only the first part of a big file and rated it low: the rest may still serve the AC, so its pack
+        cannot claim complete evidence."""
+        D = self.D
+        diff = self.file_diff("src/big.js", "// pad\n" * 1200 + "// AC1_MARK\n") + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        out = D.run("done", self.ev(diff, acs_, max_chars=20000), self.fake_ask())  # the marker is past the 5,000 read
+        c = out["checks"]["impl_matches_acs"]
+        self.assertNotEqual(c["band"], "PASS")
+        self.assertIn("left out after relevance read only part of src/big.js", c["why"])
+
+    def test_repeated_ac_ids_refuse_to_score(self):
+        """Two criteria with one id would share one answer, so a missing feature could borrow a passing score: refuse."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        twin = [dict(acs_[0]), dict(acs_[1], id=acs_[0]["id"])] + acs_[2:]
+        for phase in ("done", "ready"):
+            out = D.run(phase, self.ev(diff, twin, phase=phase), self.fake_ask())
+            self.assertIn("unique, non-empty ids (repeated: %s)" % acs_[0]["id"], out.get("error", ""))
+        out = D.run("done", self.ev(diff, [dict(acs_[0], id="")]), self.fake_ask())
+        self.assertIn("an empty id", out["error"])
+
+    def test_drift_is_unknown_when_no_group_was_asked(self):
+        """The request cap left out every group request: drift is architect_must_decide, not none."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        code = [f for f in D.split_diff(diff) if not self.is_test(f["path"])]
+        out = D.run("done", self.ev(diff, acs_, max_requests=1 + len(code) + len(acs_)), self.fake_ask())  # no room for groups
+        self.assertTrue(out["items"]["drift_trd_after"] and all(i["not_asked"] for i in out["items"]["drift_trd_after"]))
+        self.assertEqual((out["drift"], out["drift_conf"]), ("architect_must_decide", 0.0))
+
+    def test_handoff_and_learnings_are_also_checked_against_each_group(self):
+        """The handoff and learnings questions are asked per group too, and the lowest answer decides."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        out = D.run("done", self.ev(diff, acs_), self.fake_ask(overrides={"doc:handoff_out": 0.2}))
+        h = out["checks"]["handoff_out"]
+        self.assertEqual((h["score"], h["band"]), (0.2, "FAIL"))
+        self.assertIn("group 1 of", h["why"])
+        self.assertEqual(out["checks"]["learnings_specific"]["band"], "PASS")
+
+    def test_on_mode_summary_lists_the_non_pass_narrow_checks(self):
+        """The binding summary names the low narrow checks (the validation page shows only these lines)."""
+        D = self.D
+        v = {"judge": "jev", "decomposed": {"mode": "on", "requests": 9, "evidence_hash": "h", "checks": {
+            "impl_matches_acs": {"band": "FAIL", "score": 0.2, "why": "AC-2 0.20 (files: src/a.js)"},
+            "no_deferrals": {"band": "PASS", "score": 0.9, "why": ""}}}}
+        lines = D.summary_lines(v)
+        self.assertIn("  FAIL impl_matches_acs: AC-2 0.20 (files: src/a.js)", lines)
+        self.assertFalse([l for l in lines if "no_deferrals" in l])
 
     def test_a_deterministic_evidence_hash(self):
         """A deterministic evidence hash."""

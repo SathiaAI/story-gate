@@ -2713,6 +2713,15 @@ def writing_report(sd, sid, phase, c, files=()):
     return rep_
 
 
+def judge_cost(judged, drec, dmode):
+    """What the score cost: the binding judge, plus the shadow run's requests in shadow mode (both are paid)."""
+    cost = judged.get("cost")
+    extra = (drec or {}).get("cost") if dmode == "shadow" else None
+    if isinstance(extra, (int, float)):
+        cost = round((cost if isinstance(cost, (int, float)) else 0) + extra, 6)
+    return cost
+
+
 def decomposed_judge(phase, state, c, sd, skip, diff=""):
     """The narrow-question score (sg_decompose.py) for a phase. -> (judged or None, record). `judged` has the shape judge()
     returns, so verdict() can use it; `record` is what goes in the verdict file under "decomposed". Never raises: a failure
@@ -2722,7 +2731,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
         mx = int(c["judge"].get("max_chars", 90000))
         questions = {k: v for k, v in (READY_Q if phase == "ready" else DONE_Q).items() if k not in skip}
         t = load_json(sd / "tests.json")
-        plan = {str(a.get("id")): a for a in (t.get("acceptance_criteria") or []) if isinstance(a, dict)}
+        plan = {str(a.get("id") or "AC-%d" % (i + 1)): a for i, a in enumerate(t.get("acceptance_criteria") or []) if isinstance(a, dict)}
         ev = {"phase": phase, "state": state, "diff": diff, "questions": questions, "max_chars": mx, "th": c["thresholds"],
               "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
               "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
@@ -2737,7 +2746,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
     judged = {"judge": tier, "judge_note": note, "provider": out["provider"], "model": out["model"], "scores": out["scores"],
               "drift": out["drift"], "drift_conf": out["drift_conf"], "cost": out["cost"], "why": out["why"],
               "items": out["items"], "capped": out["capped"], "unscored": out["unscored"]}
-    rec = dict(base, model=out["model"], evidence_hash=out["evidence_hash"], requests=out["requests"],
+    rec = dict(base, model=out["model"], evidence_hash=out["evidence_hash"], requests=out["requests"], cost=out.get("cost"),
                max_requests=out["max_requests"], checks=out["checks"], packs=out["packs"], groups=out["groups"],
                drift=out["drift"], tier=tier)
     if out.get("not_asked"):
@@ -2799,16 +2808,19 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
             else:
                 dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
-    v = verdict(structural, judged, dec, wav, c)
+    # the broad judge's cut (the whole diff over half of max_chars) does not apply to the narrow questions: each pack and
+    # group carries its own truncation, which already caps its check
+    narrow_struct = {k: x for k, x in structural.items() if k != "evidence_complete"}
+    v = verdict(narrow_struct if dmode == "on" and dgot is not None else structural, judged, dec, wav, c)
     if drec is not None:
         if dgot is not None:
-            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(structural, dgot, dec, wav, c)["overall"]
+            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(narrow_struct, dgot, dec, wav, c)["overall"]
         v["decomposed"] = drec
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
               "inputs_hash_base": ready_hash_from(rd(sd / "story.md"), rd(sd / "context.md"), rd(sd / "tests.json"),
                                                   [(f, rd(ROOT / f)) for f in spec_files(c)], c) if phase == "ready" else None,
-              "drift_confidence": judged.get("drift_conf"), "cost": judged.get("cost"), "gate_version": VERSION, "writing": wr})
+              "drift_confidence": judged.get("drift_conf"), "cost": judge_cost(judged, drec, dmode), "gate_version": VERSION, "writing": wr})
     if DEP_BASE.get("commit"):
         v["base_commit"] = DEP_BASE["commit"]  # the default branch's latest commit that dependencies were checked against
     wj(sd / ("%s.json" % phase), v)

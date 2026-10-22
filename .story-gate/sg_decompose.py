@@ -32,6 +32,11 @@ PER_AC_DONE = ("impl_matches_acs", "tests_implemented")
 PER_GROUP_DONE = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
 REST_DONE = ("handoff_out", "learnings_specific")
 GROUP_NOTE = " Judge only the files shown here; they are one part of the change."
+# The handoff and learnings are also checked against each group's code, so a claim the code contradicts is caught.
+GROUP_DOCS = {"handoff_out": "handoff.md does not contradict the changes in these files, and names any interface, contract or "
+                             "command they add that the next story or agent would need.",
+              "learnings_specific": "The recorded learnings do not miss a workaround, failure or surprise that is visible in "
+                                    "these files (no learnings is fine when nothing here went wrong or was surprising)."}
 
 
 # ------------------------------------------------------------------ settings
@@ -168,7 +173,8 @@ TEST_BLOCK_MAX = 200  # lines kept from one test definition
 def test_blocks(f, refs, defined):
     """Only the parts of a test file's diff that define one of `refs`: from the defining line to the next test definition
     (at most TEST_BLOCK_MAX lines), with the file header. A whole test file can be larger than a pack, so an AC's pack
-    carries just its own tests. -> text, or "" when none of `refs` is defined in this diff."""
+    carries just its own tests. -> (text, cut): text is "" when none of `refs` is defined in this diff; cut is True when
+    a block was longer than TEST_BLOCK_MAX lines and its end is not shown."""
     lines = f["text"].splitlines(keepends=True)
     head = []
     for ln in lines:
@@ -177,12 +183,16 @@ def test_blocks(f, refs, defined):
         head.append(ln)
     body = [ln for ln in lines[len(head):] if not ln.startswith("-")]
     starts = [i for i, ln in enumerate(body) if TEST_START.search(ln)]
-    keep = []
+    keep, cut = [], False
     for k, i in enumerate(starts):
         if any(defined(r, body[i][1:]) for r in refs):
-            end = min(starts[k + 1] if k + 1 < len(starts) else len(body), i + TEST_BLOCK_MAX)
+            stop = starts[k + 1] if k + 1 < len(starts) else len(body)
+            end = min(stop, i + TEST_BLOCK_MAX)
             keep.append("".join(body[i:end]))
-    return "".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep) if keep else ""
+            if end < stop:
+                cut = True
+                keep.append("[... cut: %d more lines of this test not shown]\n" % (stop - end))
+    return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
 
 
 def clip(text, n):
@@ -243,15 +253,24 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
     relevance to this AC is at least RELEVANT, most relevant first, until `budget` characters. A file that does not fit
     marks the pack truncated. -> {"pieces": [{"path", "text", "cut"}], "truncated", "notes", "files"}."""
     refs = a["refs"]
-    tests = []
+    tests, cut_tests = [], []
     for f in files:
         if f["test"] and refs and any(defined(r, visible_text(f)) for r in refs):
-            part = test_blocks(f, refs, defined)
+            part, cut = test_blocks(f, refs, defined)
             tests.append(dict(f, text=part) if part else f)  # just this AC's tests when they can be found, else the file
+            if cut:
+                cut_tests.append(f["path"])
     code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if not f["test"] and f["path"] in rel),
                   key=lambda t: (-t[0], t[1]["path"]))
     chosen = tests + [f for p, f in code if p >= RELEVANT]
     pieces, used, notes, truncated = [], 0, [], False
+    if cut_tests:
+        truncated = True
+        notes.append("a test longer than %d lines was cut in %s" % (TEST_BLOCK_MAX, ", ".join(cut_tests)))
+    partial = [f["path"] for p, f in code if p < RELEVANT and len(f["text"]) > per_file]
+    if partial:  # relevance saw only the first part, so the rest of the file may still serve this AC
+        truncated = True
+        notes.append("left out after relevance read only part of %s" % ", ".join(partial[:3]) + (" and %d more" % (len(partial) - 3) if len(partial) > 3 else ""))
     for i, f in enumerate(chosen):
         room = budget - used
         if len(f["text"]) <= room:
@@ -310,8 +329,9 @@ def group_request(g, i, n, ev):
     st = ev["state"]
     state = {"story": st.get("story", ""), "context": st.get("context", ""), "changed_files": st.get("changed_files", []),
              "group": "%d of %d" % (i + 1, n), "group_files": g["files"], "diff": "\n".join(p["text"] for p in g["pieces"]),
-             "evidence_truncated": g["truncated"]}
+             "evidence_truncated": g["truncated"], "handoff": st.get("handoff", ""), "learnings": st.get("learnings", "")}
     questions = {k: noul(ev["questions"][k] + GROUP_NOTE) for k in PER_GROUP_DONE if k in ev["questions"]}
+    questions.update({"doc:" + k: noul(t + GROUP_NOTE) for k, t in GROUP_DOCS.items() if k in ev["questions"]})
     questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and the "
                                     "PRD/TRD point? " + GROUP_NOTE.strip(), "criteria": ev["choices"]}
     return {"id": "group:%d" % (i + 1), "kind": "group", "state": state, "questions": questions}
@@ -420,6 +440,10 @@ def run(phase, ev, ask):
     max_requests, th (thresholds), is_test(path), defined(ref, text), band(p, th).
     -> {"error": why} or {"scores", "why", "items", "capped", "unscored", "drift", "drift_conf", "tier", "provider", "model",
     "cost", "checks", "requests", "evidence_hash", "packs", "groups"}.  Never raises for a judge failure."""
+    ids = [str(a.get("id") or "").strip() for a in ev["acs"]]
+    dup = sorted({i for i in ids if ids.count(i) > 1}) if len(set(ids)) != len(ids) else []
+    if "" in ids or dup:  # packs and answers are keyed by id: two criteria with one id would share one score
+        return {"error": "acceptance criteria need unique, non-empty ids (repeated: %s)" % (", ".join(dup) or "an empty id")}
     return _run_done(ev, ask) if phase == "done" else _run_ready(ev, ask)
 
 
@@ -519,8 +543,14 @@ def _run_done(ev, ask):
     checks = {}
     for k in REST_DONE:
         if k in ev["questions"]:
-            p = p_of(by["rest"], k)
-            checks[k] = {"score": round(p, 3), "band": band(p, th), "items": [], "why": "", "capped": False}
+            items = [item("the story records", p_of(by["rest"], k), [], False, [])]
+            for i, g in enumerate(groups):
+                rid, name = "group:%d" % (i + 1), "group %d of %d" % (i + 1, len(groups))
+                if rid in gone:
+                    items.append(item(name, None, g["files"], g["truncated"], g["notes"], not_asked=True))
+                else:
+                    items.append(item(name, p_of(by[rid], "doc:" + k), g["files"], g["truncated"], g["notes"]))
+            checks[k] = combine(items, th, band)
     for key, qk in (("impl_matches_acs", "impl_ac:"), ("tests_implemented", "tests_ac:")):
         if key not in ev["questions"]:
             continue
@@ -554,6 +584,8 @@ def _run_done(ev, ask):
                 ch = by[rid]["answers"]["drift_direction"]
                 drift, conf = ch["choice"], ch["confidence"]
         checks[key] = combine(items, th, band)
+    if low_drift is None and groups:  # no group was asked about drift: unknown is not "none"
+        drift, conf = "architect_must_decide", 0.0
     asked = stage1 + stage2
     extra = {"packs": {a["id"]: {"files": packs[a["id"]]["files"], "truncated": packs[a["id"]]["truncated"]} for a in acs},
              "groups": [{"files": g["files"], "truncated": g["truncated"]} for g in groups],
@@ -573,12 +605,13 @@ def summary_lines(v):
         head = "Score (%s, binding): narrow questions over evidence packs" % who
         if d.get("error"):
             return [head + " did not run (%s), so the judge counts as unavailable." % d["error"]]
-        return [head + " (%d requests, evidence %s). The lowest items are named in the checks above." % (d.get("requests", 0), d.get("evidence_hash"))]
-    head = "Shadow (not binding): narrow questions over evidence packs"
-    if d.get("error"):
-        return [head + " did not run: %s" % d["error"]]
-    lines = ["Score (%s, binding): broad questions over the whole change, as shown above." % who,
-             head + " would give %s (%d requests, evidence %s)." % (d.get("would_be_overall", "?"), d.get("requests", 0), d.get("evidence_hash"))]
+        lines = [head + " (%d requests, evidence %s)." % (d.get("requests", 0), d.get("evidence_hash"))]
+    else:
+        head = "Shadow (not binding): narrow questions over evidence packs"
+        if d.get("error"):
+            return [head + " did not run: %s" % d["error"]]
+        lines = ["Score (%s, binding): broad questions over the whole change, as shown above." % who,
+                 head + " would give %s (%d requests, evidence %s)." % (d.get("would_be_overall", "?"), d.get("requests", 0), d.get("evidence_hash"))]
     for k, x in sorted((d.get("checks") or {}).items()):
         if x.get("band") != "PASS":
             lines.append("  %s %s: %s" % (x.get("band"), k, x.get("why") or ("score %.2f" % x["score"] if x.get("score") is not None else "no score")))
