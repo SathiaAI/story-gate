@@ -12697,6 +12697,7 @@ class TestDecompose(Base):
         g = self.gate()
         real_open = open
         def fake_open(f, *a, **k):
+            """open() that refuses locked.txt, as a file without read permission would."""
             if str(f).endswith("locked.txt"):
                 raise PermissionError(13, "denied")
             return real_open(f, *a, **k)
