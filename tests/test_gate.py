@@ -13027,6 +13027,8 @@ class TestDecomposePure(unittest.TestCase):
             self.assertFalse(D.story_record(p, ev), p)
         self.assertTrue(D.story_copy("docs/stories/VKG-5.md", ev))
         self.assertFalse(D.story_copy(".story-gate/stories/VKG-5/story.md", ev))
+        self.assertFalse(D.story_copy(".story-gate/stories/VKG-5/VKG-5.md", ev))  # inside the folder: ordinary evidence
+        self.assertFalse(D.story_record(".story-gate/stories/VKG-5/VKG-5.md", ev))
         self.assertFalse(D.story_copy("docs/stories/VKG-6.md", ev))
         self.assertFalse(D.story_record(".story-gate/stories/VKG-5/story.md", {}))
         # end to end: the copy is in a group (scope sees it) but in no pack; a stray file in the folder is in both checks

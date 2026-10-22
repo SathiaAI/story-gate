@@ -514,8 +514,9 @@ def story_record(path, ev):
 def story_copy(path, ev):
     """True for a file named <ID>.md outside the story folder (a project copy of the story). It stays out of the AC packs,
     which already carry the story, but stays in the file groups, so scope, deferral and drift still see it."""
-    sid = ev.get("story_id") or ""
-    return bool(sid and path.rsplit("/", 1)[-1] == sid + ".md" and not story_record(path, ev))
+    sid, d = ev.get("story_id") or "", (ev.get("story_dir") or "").rstrip("/")
+    inside = bool(d and path.startswith(d + "/"))  # a file in the story folder is a record or ordinary evidence, never a copy
+    return bool(sid and path.rsplit("/", 1)[-1] == sid + ".md" and not inside)
 
 
 def _run_done(ev, ask):
