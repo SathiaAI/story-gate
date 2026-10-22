@@ -12655,3 +12655,77 @@ class TestDependencies(Base):
         self.assertEqual(r.stdout, run(self.repo, "deps", "SAT-1").stdout)  # deterministic
         self.assertEqual(run(self.repo, "deps", "nope").returncode, 1)
         self.assertEqual(run(self.repo, "deps", "SAT-77").returncode, 1)
+
+
+class TestStoryFolderFiles(Base):
+    """Only the gate's own records in .story-gate/stories/<ID>/ are left out of the checks. Any other file there is work,
+    so code can't be hidden from the judges, guardrails and fingerprint by putting it in a story folder
+    (docs/decisions/2026-10-22-story-folder-files.md)."""
+    SD = ".story-gate/stories/SAT-1/"
+
+    def gate(self):
+        """The test repository's gate.py, loaded in this process."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        return g
+
+    def test_records_are_the_gate_names_only(self):
+        """is_record(): the gate's own names and copies are records; anything else in a story folder is not."""
+        g = self.gate()
+        for n in ("story.md", "tests.json", "handoff.md", "ready.json", "done.self.json", "drift.md", "issue-12.md",
+                  "issue-acme--web-12.md", "linear-ENG-4.md", "jira-OPS-77.md", "evidence/0123456789abcdef.png"):
+            self.assertTrue(g.is_record(self.SD + n), n)
+        for n in ("payload.py", "helper.js", "notes.md", "issue-x.md", "issue-payload1.md", "linear-payload-1.md",
+                  "jira-eng-1.md", "evidence/run.py", "evidence/payload.png", "evidence/0123456789abcdef.png.js",
+                  "sub/story.md", "story.md.py"):  # a name a writer would never produce is work, whatever it looks like
+            self.assertFalse(g.is_record(self.SD + n), n)
+        self.assertFalse(g.is_record(".story-gate/stories/loose.py"))  # a file beside the story folders is work too
+        self.assertTrue(g.is_record(".story-gate/learnings.jsonl"))
+
+    def test_the_diff_and_the_file_list_agree(self):
+        """diff_against(): a hidden module is in the diff the judges read, and records stay out of it. git's pathspec
+        excludes leave out exactly the files is_record() leaves out."""
+        g = self.gate()
+        names = ["story.md", "ready.json", "issue-3.md", "linear-ENG-4.md", "evidence/0123456789abcdef.png",
+                 "payload.py", "issue-x.md", "issue-payload1.md", "evidence/run.py", "evidence/payload.png", "sub/story.md"]
+        for n in names:
+            f = self.repo / self.SD / n; f.parent.mkdir(parents=True, exist_ok=True); f.write_text("MARK_%s\n" % n)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "story"], cwd=self.repo, check=True)
+        _, files, diff = g.diff_against("main")
+        for n in names:
+            self.assertIn(self.SD + n, files)
+            self.assertEqual("MARK_" + n in diff, not g.is_record(self.SD + n), n)
+        self.assertIn(self.SD + "payload.py", g.changed_paths("main"))  # budgets and guardrail areas see it too
+        self.assertNotIn(self.SD + "story.md", g.changed_paths("main"))
+
+    def test_an_untracked_module_counts_too(self):
+        """A new file not yet added to git is evidence in a story folder as anywhere else."""
+        g = self.gate()
+        (self.repo / self.SD).mkdir(parents=True); (self.repo / self.SD / "payload.py").write_text("SECRET = 1\n")
+        (self.repo / self.SD / "story.md").write_text("STORY_TEXT\n")
+        _, _, diff = g.diff_against("main")
+        self.assertIn("SECRET = 1", diff); self.assertNotIn("STORY_TEXT", diff)
+
+    def test_changing_a_hidden_module_makes_verdicts_stale(self):
+        """work_fingerprint(): editing a module in the story folder changes it; writing a verdict or the handoff doesn't."""
+        g = self.gate()
+        (self.repo / self.SD).mkdir(parents=True); (self.repo / self.SD / "payload.py").write_text("x = 1\n")
+        fp = g.work_fingerprint()
+        (self.repo / self.SD / "ready.json").write_text("{}"); (self.repo / self.SD / "handoff.md").write_text("h\n")
+        (self.repo / self.SD / "evidence").mkdir(); (self.repo / self.SD / "evidence/0123456789abcdef.png").write_bytes(b"\x89PNG")
+        self.assertEqual(g.work_fingerprint(), fp)
+        (self.repo / self.SD / "payload.py").write_text("x = 2\n")
+        self.assertNotEqual(g.work_fingerprint(), fp)
+
+    def test_every_file_the_gate_writes_is_a_record(self):
+        """The record list is complete for a normal run: start, READY, a scenario. A missing name would make writing a
+        record change the work fingerprint, so a verdict would go stale as soon as it was written."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "score", "SAT-1", "ready"); self.fill_validation()
+        run(self.repo, "checkpoint", "SAT-1"); run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        g = self.gate()
+        sd = self.repo / self.SD
+        written = sorted(p.relative_to(self.repo).as_posix() for p in sd.rglob("*") if p.is_file())
+        self.assertIn(self.SD + "ready.json", written)
+        self.assertEqual([f for f in written if not g.is_record(f)], [])
