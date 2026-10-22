@@ -146,6 +146,9 @@ def split_diff(diff):
             if ln.startswith("@@"):
                 break
             s = ln.rstrip("\r\n")
+            if s.startswith(("index ", "new file mode ", "deleted file mode ", "old mode ", "new mode ")) and \
+                    re.search(r"\b160000\b", s):  # a submodule: the diff shows two commit ids, not the code they hold
+                binary = True
             if s.startswith("new file"):  # 'new file mode ...' or the gate's 'new file (untracked)'
                 status = "added"
             elif s.startswith("deleted file mode"):
@@ -160,6 +163,7 @@ def split_diff(diff):
                 rename_to = _unquote(s[len("copy to "):])
             elif s.startswith("Binary files ") or s.startswith("GIT binary patch"):
                 binary = True
+
             elif s.startswith("+++ ") and not s.startswith("+++ /dev/null"):
                 plus = _unquote(s[4:].split("\t")[0])
         path = rename_to or (plus[2:] if plus and plus.startswith("b/") else plus) or new
@@ -195,7 +199,10 @@ def ends_test(text, depth):
     """A live line at or left of the test's own indentation that is not blank, a comment or only closing brackets ends
     the test: a helper, fixture, decorator or statement placed after it is not that test's body."""
     s = text.strip()
-    return bool(s) and not CLOSING.match(s) and not s.startswith(("#", "//")) and indent(text) <= depth
+    # a comment holding a line break git does not split at (a lone \r: Python and JavaScript; U+2028/U+2029: JavaScript) runs
+    # the code after it, so it is not a comment line
+    comment = s.startswith(("#", "//")) and not any(c in s for c in "\r\u2028\u2029")
+    return bool(s) and not CLOSING.match(s) and not comment and indent(text) <= depth
 
 
 def test_end(rest, start, stop, depth, st):
@@ -554,9 +561,15 @@ def build_groups(files, budget):
 
 def group_request(g, i, n, ev):
     st = ev["state"]
-    state = {"story": st.get("story", ""), "context": st.get("context", ""), "changed_files": st.get("changed_files", []),
+    # the diff has half the budget (build_groups); the story records copied into every group get the other half, as sent
+    records, cut = fit_state({k: st.get(k, "") for k in ("story", "context", "handoff", "learnings")} |
+                             {"changed_files": st.get("changed_files", [])}, ev["max_chars"] // 2)
+    if cut:
+        g["truncated"] = True
+        g["notes"].append(REST_CUT_NOTE % (ev["max_chars"] // 2))
+    state = {"story": records["story"], "context": records["context"], "changed_files": records["changed_files"],
              "group": "%d of %d" % (i + 1, n), "group_files": g["files"], "diff": "\n".join(p["text"] for p in g["pieces"]),
-             "evidence_truncated": g["truncated"], "handoff": st.get("handoff", ""), "learnings": st.get("learnings", "")}
+             "evidence_truncated": g["truncated"], "handoff": records["handoff"], "learnings": records["learnings"]}
     questions = {k: noul(ev["questions"][k] + GROUP_NOTE) for k in PER_GROUP_DONE if k in ev["questions"]}
     questions.update({"doc:" + k: noul(t + GROUP_NOTE) for k, t in GROUP_DOCS.items() if k in ev["questions"]})
     questions["drift_direction"] = {"type": "choice", "instructions": "Which way does any drift between the story/work and the "
@@ -576,7 +589,25 @@ def rest_request(ev):
     else:
         questions = {k: noul(q[k]) for k in REST_DONE if k in q}
         state = {k: v for k, v in ev["state"].items() if k not in ("diff", "diff_truncated")}
-    return {"id": "rest", "kind": "rest", "state": state, "questions": questions}
+    state, cut = fit_state(state, ev["max_chars"])
+    return {"id": "rest", "kind": "rest", "state": state, "questions": questions, "cut": cut}
+
+
+REST_CUT_NOTE = "the story records were cut to fit the %d-character request budget"
+
+
+def fit_state(state, budget):
+    """state with its longest text fields cut until the whole is at most `budget` characters as sent (the story and plan
+    were sliced by Python characters upstream; emoji grow up to 12 times when sent). -> (state, True when anything was cut)."""
+    state, cut = dict(state), False
+    while sent_len(json.dumps(state)) > budget:
+        texts = [(sent_len(v), k) for k, v in state.items() if isinstance(v, str) and sent_len(v) > MIN_PART]
+        if not texts:
+            return state, True  # what is left is not text: still over, so the answers rest on cut evidence
+        size, k = max(texts)
+        state[k], _ = clip(state[k], max(MIN_PART, size - (sent_len(json.dumps(state)) - budget)))
+        cut = True
+    return state, cut
 
 
 # ------------------------------------------------------------------ running requests
@@ -677,7 +708,7 @@ def run(phase, ev, ask):
     dup = sorted({i for i in ids if ids.count(i) > 1}) if len(set(ids)) != len(ids) else []
     if "" in ids or dup:  # packs and answers are keyed by id: two criteria with one id would share one score
         return {"error": "acceptance criteria need unique, non-empty ids (repeated: %s)" % (", ".join(dup) or "an empty id")}
-    bad = [i for i in ids if not AC_ID.match(i)]
+    bad = [str(a.get("id")) for i, a in zip(ids, ev["acs"]) if not AC_ID.match(i) or str(a.get("id")) != i]  # stored ids are sent as is
     if bad:  # an id is the only story text that reaches a question's wording
         return {"error": "acceptance-criterion ids must be short plain names (letters, digits, . _ : -): %r" % bad[0][:60]}
     # the cut flags come from clip itself, so a criterion is marked cut exactly when its sent text was cut
@@ -718,7 +749,8 @@ def _run_ready(ev, ask):
     for k, q in rest["questions"].items():
         if q["type"] == "noul":
             p = p_of(by["rest"], k)
-            checks[k] = {"score": p, "band": band(p, th), "items": [], "why": "", "capped": False}  # raw: rounding could lift 0.6996 to a PASS
+            checks[k] = combine([item("the story records", p, [], True, [REST_CUT_NOTE % ev["max_chars"]])], th, band) \
+                if rest["cut"] else {"score": p, "band": band(p, th), "items": [], "why": "", "capped": False}  # raw: rounding could lift 0.6996 to a PASS
     cd = by["rest"]["answers"]["drift_direction"]
     dropped_ids = {r["id"] for r in dropped}
     for key in PER_AC_READY:
@@ -827,7 +859,7 @@ def _run_done(ev, ask):
     checks = {}
     for k in REST_DONE:
         if k in ev["questions"]:
-            items = [item("the story records", p_of(by["rest"], k), [], False, [])]
+            items = [item("the story records", p_of(by["rest"], k), [], rest["cut"], [REST_CUT_NOTE % ev["max_chars"]] if rest["cut"] else [])]
             if unread and not groups:  # no group to carry the note: the unread files still cap the check
                 items.append(item("new files not read", None, unread, True, [unread_note(unread)]))
             for i, g in enumerate(groups):
@@ -874,7 +906,8 @@ def _run_done(ev, ask):
         if len(groups) > 1:  # no request saw every file: scope or drift built from parts in two groups is not seen whole
             items.append(item("all groups together", None, [], True, [SPLIT_NOTE % len(groups)]))
         checks[key] = combine(items, th, band)
-    if low_drift is None and groups:  # no group was asked about drift: unknown is not "none"
+    if groups and (low_drift is None or any("group:%d" % (i + 1) in gone for i in range(len(groups)))):  # a group not asked
+        # about drift may hold the drift: unknown is not "none"
         drift, conf = "architect_must_decide", 0.0
     asked = stage1 + stage2
     extra = {"packs": {a["id"]: {"files": packs[a["id"]]["files"], "truncated": packs[a["id"]]["truncated"]} for a in acs},

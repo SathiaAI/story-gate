@@ -679,6 +679,12 @@ def weaker(old, new):
         oc, nc = DC.max_requests(o), DC.max_requests(n)
         if nc < oc:
             out.append("fewer narrow judge requests allowed (judge.max_requests lowered from %d to %d)" % (oc, nc))
+        try:  # a smaller evidence budget hides more of each file: CONCERNS where the hidden part would have been a FAIL
+            om, nm = int((o.get("judge") or {}).get("max_chars", 90000)), int((n.get("judge") or {}).get("max_chars", 90000))
+            if nm < om:
+                out.append("smaller narrow judge evidence budget (judge.max_chars lowered from %d to %d)" % (om, nm))
+        except (TypeError, ValueError):
+            pass
     for k in ("emulated_allow_pass", "allow_self_judge_pass"):
         if not (o.get("judge") or {}).get(k) and (n.get("judge") or {}).get(k):
             out.append("judge setting %s turned on" % k)
