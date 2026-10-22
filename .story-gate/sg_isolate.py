@@ -81,6 +81,8 @@ def _timeout_diagnostics():
     code, out = _probe(["ps", "-eo", "pid,etime,stat,cmd"])
     if code is None:
         found.append("ps %s" % out)
+    elif code != 0:
+        found.append("ps failed (exit %d)" % code)  # not "none": no list says nothing about the processes
     else:
         procs = []
         for line in out.splitlines()[1:]:

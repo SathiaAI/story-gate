@@ -11617,6 +11617,9 @@ class TestCiIsolation(Base):
         with patch.object(I, "DIAG_CAP", 300):
             diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
         self.assertEqual(len(diag), 300); self.assertTrue(diag.endswith("..."))
+        answers["ps"] = (1, "")  # ps itself failed: say so, never "processes: none"
+        diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
+        self.assertIn("; ps failed (exit 1);", diag); self.assertNotIn("processes:", diag)
 
     @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
     def test_a_hanging_probe_is_cut_off_by_its_own_timeout(self):
