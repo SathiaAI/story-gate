@@ -13036,8 +13036,11 @@ class TestDecompose(Base):
         self.assertIsNone(g.worktree_text("/proc/self/environ"))
         text, whole = g.untracked_text(["evil\ndiff --git a/tests/../../x b/tests/../../x"])
         self.assertNotIn("diff --git a/tests/../../x", text); self.assertFalse(whole)
-        with patch.object(g, "zlist", lambda *a: ["ok.txt", "evil\nname"]), patch.object(g, "untracked_readable", lambda f: True):
-            self.assertEqual(g.untracked_skipped(), ["evil\nname"])  # counted as not read, so the evidence is capped
+        (self.repo / "src").mkdir(exist_ok=True); (self.repo / "src" / "x.py\talias").write_text("x = 1\n")
+        text, whole = g.untracked_text(["src/x.py\talias"])  # split_diff cuts a name at a tab: it would pose as src/x.py
+        self.assertNotIn("src/x.py", text); self.assertFalse(whole)
+        with patch.object(g, "zlist", lambda *a: ["ok.txt", "evil\nname", "src/x.py\talias"]), patch.object(g, "untracked_readable", lambda f: True):
+            self.assertEqual(g.untracked_skipped(), ["evil\nname", "src/x.py\talias"])  # counted as not read: the evidence is capped
 
     # ---- READY
     def test_ready_scores_each_ac_and_states_what_a_blocker_is(self):
@@ -13201,6 +13204,47 @@ class TestDecomposePure(unittest.TestCase):
             self.assertNotIn(fixture.strip(), part)
             self.assertEqual(cut, guessed)
             self.assertIn(fixture.strip(), D.residual_edits(f, ["one", "two"], defined))
+
+    def test_a_multi_line_python_signature_keeps_its_body(self):
+        """A flush-left "):" closes a Black-style signature, not the test: the body stays in the block (Bugbot)."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        py = "def test_one(\n    tmp_path,\n):\n    assert run(tmp_path) == 1\n\n\ndef helper():\n    return 2\n"
+        f = {"path": "tests/test_a.py", "test": True, "new_text": py, "text": "diff --git a/tests/test_a.py b/tests/test_a.py\n"
+             "+++ b/tests/test_a.py\n@@ -0,0 +1,%d @@\n" % py.count("\n") + "".join("+" + l for l in D.diff_lines(py))}
+        part, cut = D.test_blocks(f, ["test_one"], lambda r, t: ("def %s(" % r) in t)
+        self.assertIn("assert run(tmp_path) == 1", part)
+        self.assertNotIn("def helper", part)
+        self.assertFalse(cut)
+
+    def test_a_rust_raw_string_marks_its_test_blocks_cut(self):
+        """A test-shaped line inside a Rust raw string (r#".."#) looks like a real test to the string guess, so a Rust file
+        with a raw string never gives complete evidence that a test exists (Codex)."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        defined = lambda r, t: ("fn %s(" % r) in t
+        for raw, cut in (('    let s = r#"a "quote"\n#[test]\nfn test_auth() { assert!(true); }\n"#;\n', True), ("", False)):
+            rs = "#[test]\nfn test_one() {\n" + raw + "    assert_eq!(run(), 1);\n}\n"
+            f = {"path": "tests/a.rs", "test": True, "new_text": rs, "text": "diff --git a/tests/a.rs b/tests/a.rs\n"
+                 "+++ b/tests/a.rs\n@@ -0,0 +1,%d @@\n" % rs.count("\n") + "".join("+" + l for l in D.diff_lines(rs))}
+            part, got = D.test_blocks(f, ["test_one", "test_auth"], defined)
+            self.assertEqual(got, cut)  # with a raw string the fake test can end the real one early: so it counts as cut
+            if not cut:
+                self.assertIn("assert_eq!(run(), 1)", part)
+
+    def test_records_gate_already_sliced_count_as_cut(self):
+        """gate.py slices each story record before the narrow checks; a record past its slice makes the rest request and every
+        group's records count as cut, so a check cannot PASS on the part it saw (Codex)."""
+        import importlib, sys
+        sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
+        for phase in ("ready", "done"):
+            for rc in (True, False):
+                ev = {"phase": phase, "state": {"story": "s", "context": "c", "handoff": "h", "learnings": ""}, "max_chars": 90000,
+                      "questions": {"dor_no_blockers": "q", "handoff_complete": "q"}, "choices": ["none"], "records_cut": rc}
+                self.assertEqual(D.rest_request(ev)["cut"], rc)
+                g = {"pieces": [], "truncated": False, "files": [], "notes": []}
+                D.group_request(g, 0, 1, ev)
+                self.assertEqual(g["truncated"], rc)
 
     def test_a_test_longer_than_the_block_limit_is_marked_cut_and_caps_its_pack(self):
         """A linked test over TEST_BLOCK_MAX lines shows a cut marker, and the pack cannot claim complete evidence."""

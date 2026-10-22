@@ -188,6 +188,7 @@ TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe
 ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
 DECORATOR = re.compile(r"^\s*(?:@\w|#\[)")  # a decorator or attribute line (@pytest.mark.skip, @Disabled, #[ignore])
 RAW_BACKTICK_EXT = (".go",)  # files whose backtick strings are raw: a backslash there escapes nothing
+RUST_RAW = re.compile(r'(?<![A-Za-z0-9_])b?r#*"')  # a Rust raw string (r"..", r#".."#): the string guess does not follow it
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
 
@@ -222,7 +223,8 @@ def test_end(rest, start, stop, depth, st):
         t = rest[j][1:].rstrip("\n")
         if ends_test(t, depth, closed):
             return j, st[j] is not None
-        closed = closed or (bool(CLOSING.match(t.strip())) and indent(t) <= depth)  # "});" at the test's depth closes it
+        s = t.strip()  # "});" at the test's depth closes it; "):" ends a multi-line Python signature and opens the body
+        closed = closed or (bool(CLOSING.match(s)) and not s.endswith(":") and indent(t) <= depth)
     return stop, st[stop] is not None
 
 
@@ -378,6 +380,9 @@ def test_blocks(f, refs, defined):
             cut = True
             keep.append("[... this test may continue inside a string the gate could not follow; the rest is shown "
                         "elsewhere]\n")
+    if keep and f["path"].endswith(".rs") and RUST_RAW.search(f.get("new_text") or "".join(rest)):
+        cut = True  # a test-shaped line inside a raw string would look real: the block cannot prove a test exists
+        keep.append("[... this file has a Rust raw string the gate does not parse; these blocks may be string data]\n")
     return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
 
 
@@ -581,6 +586,7 @@ def group_request(g, i, n, ev):
     # the diff has half the budget (build_groups); the story records copied into every group get the other half, as sent
     records, cut = fit_state({k: st.get(k, "") for k in ("story", "context", "handoff", "learnings")} |
                              {"changed_files": st.get("changed_files", [])}, ev["max_chars"] // 2)
+    cut = cut or bool(ev.get("records_cut"))  # gate.py already sliced a record to fit: these copies are partial too
     if cut:
         g["truncated"] = g["records_cut"] = True
         g["notes"].append(REST_CUT_NOTE % (ev["max_chars"] // 2))
@@ -607,6 +613,7 @@ def rest_request(ev):
         questions = {k: noul(q[k]) for k in REST_DONE if k in q}
         state = {k: v for k, v in ev["state"].items() if k not in ("diff", "diff_truncated")}
     state, cut = fit_state(state, ev["max_chars"])
+    cut = cut or bool(ev.get("records_cut"))  # gate.py already sliced a record to fit: the judge sees part of it
     return {"id": "rest", "kind": "rest", "state": state, "questions": questions, "cut": cut}
 
 

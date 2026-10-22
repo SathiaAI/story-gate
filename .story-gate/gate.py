@@ -2681,7 +2681,7 @@ def untracked_skipped():
     names = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
     out = list(names[UNTRACKED_MAX:])
     for n in names[:UNTRACKED_MAX]:
-        if any(c in n for c in "\r\n"):  # untracked_text does not show a name with a line break (it would inject headers)
+        if any(c in n for c in "\r\n\t"):  # untracked_text does not show a name with a line break or a tab
             out.append(n)
             continue
         try:
@@ -2698,7 +2698,7 @@ def untracked_text(untracked):
     link, unreadable) makes the second value False, so a content pattern can't be ruled out for it."""
     out, whole = "", len(untracked) <= UNTRACKED_MAX
     for n in untracked[:UNTRACKED_MAX]:
-        if any(c in n for c in "\r\n"):  # a line break in a name would inject diff headers: not shown, so not whole
+        if any(c in n for c in "\r\n\t"):  # a line break would inject diff headers, a tab cuts the name: not shown, so not whole
             whole = False
             continue
         f = ROOT / n
@@ -2767,16 +2767,17 @@ def worktree_text(path):
     try:
         # like rd(): a path from the diff (which a crafted file name can inject) must resolve inside the repository, so
         # it can never reach /proc/self/environ or other runner secrets through "..", a link, or a linked folder
-        if not os.path.realpath(p).startswith(os.path.realpath(ROOT) + os.sep):
+        real, root = os.path.realpath(p), os.path.realpath(ROOT)
+        if real == root or os.path.commonpath([real, root]) != root:  # path-aware: also right when ROOT is "/"
             return None
         if p.is_file() and not p.is_symlink() and p.stat().st_size < 2_000_000:
             return p.read_bytes().decode("utf-8", "replace")  # bytes: read_text would turn a lone \r into a line break
-    except OSError:
+    except (OSError, ValueError):  # ValueError: commonpath across Windows drives (a link to another drive)
         pass
     return None
 
 
-def decomposed_judge(phase, state, c, sd, skip, diff="", executed=False):
+def decomposed_judge(phase, state, c, sd, skip, diff="", executed=False, records_cut=False):
     """The narrow-question score (sg_decompose.py) for a phase. -> (judged or None, record). `judged` has the shape judge()
     returns, so verdict() can use it; `record` is what goes in the verdict file under "decomposed". Never raises: a failure
     gives (None, a record that says why)."""
@@ -2791,7 +2792,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff="", executed=False):
               "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
               "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band,
               "unread": untracked_skipped() if phase == "done" else [], "read": worktree_text, "executed": executed,
-              "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
+              "records_cut": records_cut, "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
         out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
     except Exception as e:  # a bug here must never fail a score
         return None, dict(base, error="narrow questions failed (%s)" % e.__class__.__name__)
@@ -2828,8 +2829,9 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         wr = writing_report(sd, sid, "ready", c)
         pl = sections(rd(sd / "context.md")).get("## Prior learnings", "").strip().lower()
         skip = {"learnings_applied"} if pl.startswith("none") and "searched" in pl else set()  # skip only with search evidence
-        state = {"story": rd(sd / "story.md")[:mx // 3], "context": rd(sd / "context.md")[:mx // 3],
-                 "test_plan": rd(sd / "tests.json")[:mx // 3]}
+        full = {"story": rd(sd / "story.md"), "context": rd(sd / "context.md"), "test_plan": rd(sd / "tests.json")}
+        state = {k: v[:mx // 3] for k, v in full.items()}
+        records_cut = any(len(v) > mx // 3 for v in full.values())  # a record past its slice: the narrow checks saw part of it
     elif phase == "done":
         mb, files, diff = diff_against(base or c["base_branch"])
         budget = mx // 2
@@ -2839,9 +2841,11 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         wr = writing_report(sd, sid, "done", c, files)
         skip = set()
         learn = [l for l in rd(LEARNINGS).splitlines() if '"%s"' % sid in l]
-        state = {"story": rd(sd / "story.md")[:mx // 6], "context": rd(sd / "context.md")[:mx // 6],
-                 "test_plan": rd(sd / "tests.json")[:mx // 8], "handoff": rd(sd / "handoff.md")[:mx // 8],
-                 "learnings": "\n".join(learn)[:mx // 16], "changed_files": files[:300],
+        full = {"story": (rd(sd / "story.md"), mx // 6), "context": (rd(sd / "context.md"), mx // 6),
+                "test_plan": (rd(sd / "tests.json"), mx // 8), "handoff": (rd(sd / "handoff.md"), mx // 8),
+                "learnings": ("\n".join(learn), mx // 16), "changed_files": (files, 300)}
+        records_cut = any(len(v) > n for v, n in full.values())  # a record past its slice: the narrow checks saw part of it
+        state = {k: v[:n] for k, (v, n) in full.items()} | {
                  "validation": cut(rd(sd / "validation.md"), mx // 16), "scenarios": cut(rd(sd / "scenarios.json"), mx // 32),
                  "diff": diff[:budget], "diff_truncated": len(diff) > budget}
     else:
@@ -2853,7 +2857,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     ddiff = diff if phase == "done" else ""
     executed = phase == "done" and bool(results)  # CI's per-test results: a linked test really ran
     if dmode == "on":  # the narrow questions decide; if they cannot run, the judge counts as unavailable (fail closed)
-        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed)
+        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed, records_cut)
         judged = dgot or judge_fallback(phase, sd, [k for k in (READY_Q if phase == "ready" else DONE_Q) if k not in skip],
                                         DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, drec.get("error"))
         if dgot is None and judged["judge"] == "self":  # the agent's broad self-scores never stand in for the narrow ones
@@ -2864,7 +2868,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
             if "jev_error" in judged:  # the broad judge did not answer, so there is nothing to compare with
                 drec = {"schema": DC.SCHEMA, "mode": "shadow", "error": "not run: the judge did not answer (%s)" % (judged.get("jev_error") or "no key")}
             else:
-                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed)
+                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed, records_cut)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     # the broad judge's cut (the whole diff over half of max_chars) does not apply to the narrow questions: each pack and
     # group carries its own truncation, which already caps its check
