@@ -12585,15 +12585,18 @@ class MarkerJudge:
     `overrides` sets a question's answer; `fail_on` makes any request with a question starting like that return HTTP 500.
     Every request body is kept in `requests`."""
     def __init__(self, hi=0.9, lo=0.05, base=0.95, overrides=None, fail_on=(), model="typesafe/jev-1.13", delay=None):
+        """Init."""
         import http.server, threading
         me = self
         self.hi, self.lo, self.base, self.overrides, self.fail_on, self.model, self.delay = hi, lo, base, overrides or {}, tuple(fail_on), model, delay
         self.requests, self.lock = [], threading.Lock()
 
         class H(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *a): pass
+            def log_message(self, *a):
+                """Stay quiet."""
 
             def do_POST(self):
+                """Do post."""
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode())
                 with me.lock:
                     me.requests.append(body)
@@ -12611,6 +12614,7 @@ class MarkerJudge:
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def answer(self, k, q, state):
+        """Answer."""
         if q["type"] == "choice":
             return {"choice": "none", "confidence": 0.9}
         if k in self.overrides:
@@ -12621,25 +12625,30 @@ class MarkerJudge:
         return {"noul": self.base}
 
     def with_questions(self, prefix):
+        """With questions."""
         return [r for r in self.requests if any(k.startswith(prefix) for k in r["questions"])]
 
     def close(self):
+        """Close."""
         self.srv.shutdown(); self.srv.server_close()
 
 
 class TestDecompose(Base):
     """Narrow questions over evidence packs: off, shadow and on."""
     def setUp(self):
+        """Setup."""
         super().setUp()
         self.judges = []
         self.addCleanup(lambda: [j.close() for j in self.judges])
 
     def judge(self, **kw):
+        """Judge."""
         j = MarkerJudge(**kw)
         self.judges.append(j)
         return j
 
     def configure(self, j, decompose, **extra):
+        """Configure."""
         self.cfg(judge=dict({"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": j.url + "/decisions",
                              "decompose": decompose}, **extra))
 
@@ -12661,15 +12670,18 @@ class TestDecompose(Base):
                 (self.repo / "src" / ("feat%db.js" % i)).write_text("// %s\nexport const g%d = () => %d;\n" % (mark("AC-%d" % i), i, i))
 
     def score(self, phase="done"):
+        """Score."""
         r = run(self.repo, "score", "SAT-1", phase, env={"JUDGE_API_KEY": "k"})
         return json.loads((self.repo / ".story-gate/stories/SAT-1" / ("%s.json" % phase)).read_text()), r
 
     def gate(self):
+        """Gate."""
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
         return g
 
     # ---- Done when 1: off is today's behaviour
     def test_off_asks_the_same_broad_questions_and_writes_the_same_record(self):
+        """Off asks the same broad questions and writes the same record."""
         j = self.judge(); self.configure(j, "off")
         self.build()
         g = self.gate()
@@ -12688,6 +12700,7 @@ class TestDecompose(Base):
         self.assertNotIn("decomposed", vr)
 
     def test_the_fingerprint_changes_only_when_the_method_does(self):
+        """The fingerprint changes only when the method does."""
         j = self.judge(); self.configure(j, "off")
         g = self.gate()
         off = g.policy_fingerprint(g.cfg())
@@ -12700,6 +12713,7 @@ class TestDecompose(Base):
 
     # ---- Done when 2: shadow
     def test_shadow_keeps_the_broad_verdict_and_records_the_narrow_one(self):
+        """Shadow keeps the broad verdict and records the narrow one."""
         j = self.judge(); self.configure(j, "off")
         self.build(n=3, missing=(3,))
         off, _ = self.score("done")
@@ -12721,6 +12735,7 @@ class TestDecompose(Base):
         self.assertEqual(len(broad), 1)  # one broad request, exactly as in off mode
 
     def test_shadow_never_fails_the_score_when_the_narrow_questions_error(self):
+        """Shadow never fails the score when the narrow questions error."""
         j = self.judge(fail_on=("rel:", "impl_ac:", "group")); self.configure(j, "shadow")
         j.fail_on = ("rel:",)
         self.build()
@@ -12730,6 +12745,7 @@ class TestDecompose(Base):
         self.assertEqual(v["checks"]["impl_matches_acs"]["score"], 0.95)
 
     def test_shadow_with_no_judge_answer_is_recorded_not_raised(self):
+        """Shadow with no judge answer is recorded not raised."""
         self.cfg(judge={"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": "http://127.0.0.1:9/decisions", "decompose": "shadow"})
         self.build()
         v, r = self.score("done")
@@ -12737,6 +12753,7 @@ class TestDecompose(Base):
 
     # ---- Done when 3 and 5: on
     def test_on_composes_the_lowest_ac_and_names_it(self):
+        """On composes the lowest ac and names it."""
         j = self.judge(overrides={"impl_ac:AC-2": 0.2}); self.configure(j, "on")
         self.build(n=3)
         v, r = self.score("done")
@@ -12753,6 +12770,7 @@ class TestDecompose(Base):
         self.assertEqual(v["decomposed"]["would_be_overall"], v["overall"])
 
     def test_on_fails_an_ac_that_is_missing_from_the_code(self):
+        """On fails an ac that is missing from the code."""
         j = self.judge(); self.configure(j, "on")
         self.build(n=3, missing=(2,))
         v, r = self.score("done")
@@ -12764,10 +12782,12 @@ class TestDecompose(Base):
         self.assertFalse([q for q in j.requests if any(k.endswith(":AC-2") and not k.startswith("rel:") for k in q["questions"])])  # no pack, no request
 
     def test_on_takes_the_lowest_group_for_scope_deferrals_and_drift(self):
+        """On takes the lowest group for scope deferrals and drift."""
         j = self.judge(base=0.95); self.configure(j, "on", max_chars=2400)  # small groups: one file each
         self.build(n=3, filler=40)
         j.answer_base = j.answer
         def answer(k, q, state):
+            """Answer."""
             if q["type"] == "choice":
                 return {"choice": "spec_should_change" if "src/feat2.js" in state.get("group_files", []) else "none", "confidence": 0.8}
             if k == "no_deferrals" and "src/feat2.js" in state.get("group_files", []):
@@ -12785,6 +12805,7 @@ class TestDecompose(Base):
 
     # ---- Done when 4 and 6: packs
     def test_an_ac_built_in_two_files_is_judged_from_one_pack_that_holds_both(self):
+        """An ac built in two files is judged from one pack that holds both."""
         j = self.judge(); self.configure(j, "on")
         self.build(n=3, two_files=(2,))
         v, r = self.score("done")
@@ -12796,6 +12817,7 @@ class TestDecompose(Base):
         self.assertEqual({i["id"]: i["score"] for i in c["items"]}["AC-2"], 0.9)  # no per-chunk maximum anywhere
 
     def test_each_ac_request_holds_only_its_own_pack(self):
+        """Each ac request holds only its own pack."""
         j = self.judge(); self.configure(j, "on")
         self.build(n=3)
         self.score("done")
@@ -12814,6 +12836,7 @@ class TestDecompose(Base):
 
     # ---- Done when 5: fail closed
     def test_a_pack_over_its_budget_cannot_pass(self):
+        """A pack over its budget cannot pass."""
         j = self.judge(); self.configure(j, "on", max_chars=4000)  # pack budget 2000
         self.build(n=2, filler=400)  # feat1.js is about 4,000 characters of diff
         v, r = self.score("done")
@@ -12826,6 +12849,7 @@ class TestDecompose(Base):
         self.assertNotEqual(v["overall"], "PASS")
 
     def test_the_request_cap_stops_asking_and_the_check_cannot_pass(self):
+        """The request cap stops asking and the check cannot pass."""
         j = self.judge(); self.configure(j, "on", max_requests=4)  # rest + 3 relevance requests: nothing left for the ACs
         self.build(n=3)
         v, r = self.score("done")
@@ -12838,6 +12862,7 @@ class TestDecompose(Base):
         self.assertEqual(v["decomposed"]["requests"], 4)
 
     def test_a_file_never_checked_for_relevance_makes_every_ac_unprovable(self):
+        """A file never checked for relevance makes every ac unprovable."""
         j = self.judge(); self.configure(j, "on", max_requests=3)  # rest + 2 of 3 relevance requests
         self.build(n=3)
         v, r = self.score("done")
@@ -12846,6 +12871,7 @@ class TestDecompose(Base):
         self.assertIn("not checked for relevance (request cap)", c["why"])
 
     def test_a_request_error_in_on_mode_makes_the_judge_unavailable(self):
+        """A request error in on mode makes the judge unavailable."""
         j = self.judge(fail_on=("rel:",)); self.configure(j, "on")
         self.build()
         v, r = self.score("done")
@@ -12855,6 +12881,7 @@ class TestDecompose(Base):
 
     # ---- READY
     def test_ready_scores_each_ac_and_states_what_a_blocker_is(self):
+        """Ready scores each ac and states what a blocker is."""
         j = self.judge(overrides={"ac_testable:AC-2": 0.2}); self.configure(j, "on")
         self.build(n=3)
         v, r = self.score("ready")
@@ -12874,6 +12901,7 @@ class TestDecompose(Base):
         self.assertNotIn("AC-2", json.dumps(ac["state"]))  # a per-AC request holds only that AC
 
     def test_ready_in_shadow_keeps_the_old_wording_in_the_binding_request(self):
+        """Ready in shadow keeps the old wording in the binding request."""
         j = self.judge(); self.configure(j, "shadow")
         self.build(n=2)
         g = self.gate()
@@ -12885,6 +12913,7 @@ class TestDecompose(Base):
 
     # ---- Done when 7: stale
     def test_changing_the_mode_the_schema_or_the_model_makes_a_verdict_stale(self):
+        """Changing the mode the schema or the model makes a verdict stale."""
         j = self.judge(); self.configure(j, "shadow")
         self.build()
         v, r = self.score("done")
@@ -12904,6 +12933,7 @@ class TestDecompose(Base):
         self.assertTrue(g.stale(v, g.cfg(), sd))
 
     def test_a_passing_verdict_is_not_reusable_after_the_mode_changes(self):
+        """A passing verdict is not reusable after the mode changes."""
         j = self.judge(); self.configure(j, "shadow")
         self.build(n=1)
         vr, r = self.score("ready")
@@ -12915,6 +12945,7 @@ class TestDecompose(Base):
 
     # ---- settings
     def test_bad_decompose_settings_are_a_config_error(self):
+        """Bad decompose settings are a config error."""
         g = self.gate()
         c = g.cfg()
         for bad in ({"decompose": "maybe"}, {"decompose": True}, {"max_requests": 0}, {"max_requests": "60"}, {"max_requests": True}):
@@ -12925,6 +12956,7 @@ class TestDecompose(Base):
         self.assertEqual(c["judge"]["max_requests"], 60)
 
     def test_objective_mode_asks_nothing(self):
+        """Objective mode asks nothing."""
         j = self.judge(); self.configure(j, "on")
         self.cfg(judge_mode="objective")
         self.build()
@@ -12933,6 +12965,7 @@ class TestDecompose(Base):
         self.assertNotIn("decomposed", v)
 
     def test_the_validation_page_shows_the_narrow_scores(self):
+        """The validation page shows the narrow scores."""
         j = self.judge(); self.configure(j, "shadow")
         self.build()
         self.score("done")
@@ -12948,6 +12981,7 @@ class TestDecomposePure(unittest.TestCase):
     """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
     @classmethod
     def setUpClass(cls):
+        """Setupclass."""
         sys.path.insert(0, str(SRC))
         import importlib
         cls.D = importlib.import_module("sg_decompose")
@@ -12956,23 +12990,28 @@ class TestDecomposePure(unittest.TestCase):
 
     @staticmethod
     def is_test(path):
+        """Is test."""
         import fnmatch
         return any(fnmatch.fnmatch(path, g) or fnmatch.fnmatch("/" + path, g) for g in TestDecomposePure.GLOBS)
 
     @staticmethod
     def defined(ref, text):
+        """Defined."""
         import re
         return bool(re.search(r"\b(?:def|function)\s+" + re.escape(ref) + r"\s*\(", text))
 
     @staticmethod
     def file_diff(path, body, status="new file mode 100644"):
+        """File diff."""
         return "diff --git a/%s b/%s\n%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n%s" % (
             path, path, status, path, "".join("+" + l + "\n" for l in body.splitlines()))
 
     def fake_ask(self, overrides=None, delay=None, hi=0.9, lo=0.05, log=None):
+        """Fake ask."""
         overrides = overrides or {}
 
         def ask(state, questions):
+            """Ask."""
             if log is not None:
                 log.append((state, questions))
             if delay:
@@ -12995,6 +13034,7 @@ class TestDecomposePure(unittest.TestCase):
         return ask
 
     def ev(self, diff, acs, phase="done", max_chars=90000, max_requests=60, state=None):
+        """Ev."""
         qs = {k: "Q %s" % k for k in ("impl_matches_acs", "impl_no_unplanned_scope", "drift_trd_after", "tests_implemented", "no_deferrals",
                                       "handoff_out", "learnings_specific")}
         return {"phase": phase, "state": state or {"story": "S", "context": "C", "changed_files": []}, "diff": diff, "acs": acs,
@@ -13004,6 +13044,7 @@ class TestDecomposePure(unittest.TestCase):
 
     # ---- splitting
     def test_split_diff_keeps_paths_and_handles_renames_deletions_and_binaries(self):
+        """Split diff keeps paths and handles renames deletions and binaries."""
         D = self.D
         diff = ("diff --git a/src/a.js b/src/a.js\nindex 1..2 100644\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1,2 @@\n x\n+y\n"
                 "diff --git a/old name.txt b/new name.txt\nsimilarity index 90%\nrename from old name.txt\nrename to new name.txt\n"
@@ -13019,6 +13060,7 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(D.split_diff(""), [])
 
     def test_a_deleted_test_does_not_count_as_defining_a_test(self):
+        """A deleted does not count as defining a test."""
         D = self.D
         f = D.split_diff("diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1,2 +1,1 @@\n-def test_ac1():\n+pass\n")[0]
         self.assertFalse(self.defined("test_ac1", D.visible_text(f)))
@@ -13039,6 +13081,7 @@ class TestDecomposePure(unittest.TestCase):
         return diff, acs_
 
     def test_a_vkg_005_shaped_story_composes_and_is_not_marked_truncated_when_packs_fit(self):
+        """A vkg 005 shaped story composes and is not marked truncated when packs fit."""
         D = self.D
         diff, acs_ = self.vkg_shaped()
         self.assertGreater(len(diff), 60000)
@@ -13065,6 +13108,7 @@ class TestDecomposePure(unittest.TestCase):
                 self.assertLessEqual(len(st["diff"]), 45000)
 
     def test_results_do_not_depend_on_the_order_answers_arrive_in(self):
+        """Results do not depend on the order answers arrive in."""
         D = self.D
         diff, acs_ = self.vkg_shaped()
         import random
@@ -13078,11 +13122,13 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(slow_first, outs[0])
 
     def test_execute_runs_four_at_a_time_and_returns_results_in_request_order(self):
+        """Execute runs four at a time and returns results in request order."""
         D = self.D
         import threading
         live, peak, lock = [0], [0], threading.Lock()
 
         def ask(state, questions):
+            """Ask."""
             with lock:
                 live[0] += 1; peak[0] = max(peak[0], live[0])
             time.sleep(0.05)
@@ -13095,6 +13141,7 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(peak[0], 4)
 
     def test_relevance_below_the_line_keeps_a_file_out_of_the_pack(self):
+        """Relevance below the line keeps a file out of the pack."""
         D = self.D
         diff = self.file_diff("src/a.js", "// AC1_MARK\n") + self.file_diff("src/other.js", "// nothing\n") + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
         acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
@@ -13102,11 +13149,13 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(sorted(out["packs"]["AC-1"]["files"]), ["src/a.js", "tests/test_ac1.py"])
 
     def test_no_acceptance_criteria_is_a_failing_score_not_a_crash(self):
+        """No acceptance criteria is a failing score not a crash."""
         out = self.D.run("done", self.ev(self.file_diff("src/a.js", "x"), []), self.fake_ask())
         self.assertEqual(out["checks"]["impl_matches_acs"]["band"], "FAIL")
         self.assertIn("no acceptance criteria", out["checks"]["impl_matches_acs"]["why"])
 
     def test_a_file_over_the_per_file_budget_marks_its_packs_truncated(self):
+        """A file over the per file budget marks its packs truncated."""
         D = self.D
         diff = self.file_diff("src/big.js", "// AC1_MARK\n" + "// pad\n" * 1200) + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    pass\n")
         acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
@@ -13117,6 +13166,7 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(c["items"][0]["files"], ["tests/test_ac1.py", "src/big.js"])
 
     def test_a_deterministic_evidence_hash(self):
+        """A deterministic evidence hash."""
         D = self.D
         diff, acs_ = self.vkg_shaped()
         a = D.run("done", self.ev(diff, acs_), self.fake_ask())
