@@ -62,13 +62,12 @@ def _probe(argv):
     return r.returncode, (r.stdout or "")
 
 
-def _redact(cmd):
-    """A process's command line cut before its first secret-looking word (a token, key or password and what follows)."""
+def _program(cmd):
+    """The program a process runs (for sudo, also the program sudo runs), never its arguments: those can hold credentials."""
     words = cmd.split()
-    for i, w in enumerate(words):
-        if SECRET_NAME.search(w):
-            return " ".join(words[:i] + ["[hidden]"])
-    return " ".join(words)
+    name = posixpath.basename(words[0])
+    target = next((w for w in words[1:] if not w.startswith("-")), None) if name == "sudo" else None
+    return name + (" " + posixpath.basename(target) if target else "")
 
 
 def _timeout_diagnostics():
@@ -84,7 +83,7 @@ def _timeout_diagnostics():
         for line in out.splitlines()[1:]:
             f = line.split(None, 3)
             if len(f) == 4 and DIAG_PROGRAMS.fullmatch(posixpath.basename(f[3].split()[0])):
-                procs.append(_redact(line.strip())[:160])
+                procs.append(" ".join(f[:3] + [_program(f[3])])[:160])
         more = " | (%d more)" % (len(procs) - DIAG_PROCS) if len(procs) > DIAG_PROCS else ""
         found.append("processes: %s%s" % (" | ".join(procs[:DIAG_PROCS]) or "none", more))
     if shutil.which("sudo"):
