@@ -22,6 +22,7 @@ PARALLEL = 4  # requests in flight at once
 RELEVANT = 0.5  # a changed file with at least this relevance to an AC goes into that AC's pack
 MIN_PART = 1000  # a file that doesn't fit is shown cut only if at least this many characters are left
 AC_TEXT_MAX = 2000  # an AC's text in the evidence: enough to read, bounded; a longer AC is marked cut
+PLAN_MAX = 8000  # an AC's planned cases and test_refs, as JSON: bounded the same way
 AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")  # ids appear in question wording, so they must be plain names
 
 # Per-AC checks, per-group checks and the READY wording. The text of a question that only gets a criteria sentence is here.
@@ -176,26 +177,27 @@ def linked_spans(f, refs, defined):
     lines of one test definition that names one of `refs`, up to the next test definition or hunk header (a new hunk is
     another place in the file), at most TEST_BLOCK_MAX shown lines. A hunk whose header names a linked test in git's
     function context starts a span too. Removed lines inside a span stay in it, so a deleted
-    assertion is evidence too; only live lines can start a test."""
+    assertion is evidence too; only live lines can start a test, and a removed definition ends the span above it."""
     lines = f["text"].splitlines(keepends=True)
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
         n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
     rest = lines[n_head:]
-    vis = [i for i, ln in enumerate(rest) if not ln.startswith("-")]
-    bounds = [k for k, i in enumerate(vis) if rest[i].startswith("@@") or TEST_START.search(rest[i])]
+    # a removed test definition ends the block above it (its lines are not that test's) but never starts a block
+    bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or TEST_START.search(" " + ln[1:] if ln.startswith("-") else ln)]
     spans = []
-    for n, k in enumerate(bounds):
-        i = vis[k]
+    for n, i in enumerate(bounds):
+        if rest[i].startswith("-"):
+            continue
         # a hunk header carries git's function context ("@@ -20,2 +19,2 @@ def test_x():"): a later hunk of a linked test
         # opens with lines of that test, so it stays in the test's block instead of depending on relevance
         line = rest[i].split("@@", 2)[2] if rest[i].startswith("@@") and rest[i].count("@@") >= 2 else rest[i][1:]
         if not any(defined(r, line) for r in refs):
             continue
-        stop = bounds[n + 1] if n + 1 < len(bounds) else len(vis)
-        end = min(stop, k + TEST_BLOCK_MAX)
-        hi = (vis[stop] if stop < len(vis) else len(rest)) if end == stop else vis[end - 1] + 1
-        spans.append((i, hi, stop - end))
+        stop = bounds[n + 1] if n + 1 < len(bounds) else len(rest)
+        live = [j for j in range(i, stop) if not rest[j].startswith("-")]
+        more = max(len(live) - TEST_BLOCK_MAX, 0)
+        spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more))
     return lines[:n_head], rest, spans
 
 
@@ -243,7 +245,16 @@ def ac_text(a):
 
 
 def text_cut_note(a):
-    return ["the criterion's text is over %d characters and was cut" % AC_TEXT_MAX] if a.get("text_cut") else []
+    return (["the criterion's text is over %d characters and was cut" % AC_TEXT_MAX] if a.get("text_cut") else []) + \
+           (["the criterion's planned cases and test_refs are over %d characters and were cut" % PLAN_MAX] if a.get("plan_cut") else [])
+
+
+def ac_cut(a):
+    return bool(a.get("text_cut") or a.get("plan_cut"))
+
+
+def plan_json(a):
+    return json.dumps({"planned_cases": planned_cases(a), "test_refs": a["refs"]}, ensure_ascii=False)
 
 
 def relevance_request(f, acs, per_file):
@@ -264,6 +275,8 @@ def planned_cases(a):
 def ac_request(a, pack, phase):
     """One request per AC: DONE asks about the code and tests in its pack, READY about the AC and its plan."""
     state = {"acceptance_criterion": {"id": a["id"], "text": ac_text(a)}, "planned_cases": planned_cases(a), "test_refs": a["refs"]}
+    if a.get("plan_cut"):  # an oversized plan would push the request past the judge's size limit
+        state.pop("test_refs"); state["planned_cases"] = clip(plan_json(a), PLAN_MAX)[0]
     if phase == "done":
         state.update(files=[p["path"] for p in pack["pieces"]], diff="\n".join(p["text"] for p in pack["pieces"]),
                      evidence_truncated=pack["truncated"],
@@ -283,7 +296,7 @@ def ac_request(a, pack, phase):
     return {"id": "ac:" + a["id"], "kind": "ac", "state": state, "questions": qs}
 
 
-def build_pack(a, files, rel, defined, budget, per_file, unassessed):
+def build_pack(a, files, rel, defined, budget, per_file, unassessed, unread=()):
     """The evidence for one AC: the diff of the test files that define any of its test_refs, then the code files whose
     relevance to this AC is at least RELEVANT, most relevant first, until `budget` characters. A file that does not fit
     marks the pack truncated. -> {"pieces": [{"path", "text", "cut"}], "truncated", "notes", "files"}."""
@@ -298,7 +311,7 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
     code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if (not f["test"] or f.get("unlinked")) and f["path"] in rel),
                   key=lambda t: (-t[0], t[1]["path"]))
     chosen = tests + [f for p, f in code if p >= RELEVANT]
-    pieces, used, notes, truncated = [], 0, text_cut_note(a), bool(a.get("text_cut"))
+    pieces, used, notes, truncated = [], 0, text_cut_note(a), ac_cut(a)
     if cut_tests:
         truncated = True
         notes.append("a test longer than %d lines was cut in %s" % (TEST_BLOCK_MAX, ", ".join(cut_tests)))
@@ -306,6 +319,10 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
     if partial:  # relevance saw only the first part, so the rest of the file may still serve this AC
         truncated = True
         notes.append("left out after relevance read only part of %s" % ", ".join(partial[:3]) + (" and %d more" % (len(partial) - 3) if len(partial) > 3 else ""))
+    blind = [f["path"] for p, f in code if p < RELEVANT and f.get("binary")]
+    if blind:  # relevance saw only a binary's header, so "unrelated" is not known
+        truncated = True
+        notes.append("left out binary change%s whose contents could not be read: %s" % ("" if len(blind) == 1 else "s", ", ".join(blind[:3])))
     for i, f in enumerate(chosen):
         room = budget - used
         if len(f["text"]) <= room:
@@ -327,11 +344,19 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
             budget, ", ".join(left[:3]) + (" and %d more" % (len(left) - 3) if len(left) > 3 else ""),
             "cut or left out"))
         break
+    if unread:
+        truncated = True
+        notes.append(unread_note(unread))
     if unassessed:
         truncated = True
         notes.append("%d changed file%s not checked for relevance (request cap): %s" % (
             len(unassessed), "" if len(unassessed) == 1 else "s", ", ".join(unassessed[:3]) + (" ..." if len(unassessed) > 3 else "")))
     return {"pieces": pieces, "truncated": truncated, "notes": notes, "files": [p["path"] for p in pieces]}
+
+
+def unread_note(unread):
+    return "%d new file%s not read (too large, a link, or over the file limit): %s" % (
+        len(unread), "" if len(unread) == 1 else "s", ", ".join(unread[:3]) + (" ..." if len(unread) > 3 else ""))
 
 
 def build_groups(files, budget):
@@ -490,6 +515,7 @@ def run(phase, ev, ask):
     if bad:  # an id is the only story text that reaches a question's wording
         return {"error": "acceptance-criterion ids must be short plain names (letters, digits, . _ : -): %r" % bad[0][:60]}
     ev = dict(ev, acs=[dict(a, text_cut=len(a.get("text") or "") > AC_TEXT_MAX) for a in ev["acs"]])
+    ev["acs"] = [dict(a, plan_cut=len(plan_json(a)) > PLAN_MAX) for a in ev["acs"]]
     return _run_done(ev, ask) if phase == "done" else _run_ready(ev, ask)
 
 
@@ -537,7 +563,7 @@ def _run_ready(ev, ask):
             if rid in dropped_ids:
                 items.append(item(a["id"], None, not_asked=True))
             else:
-                items.append(item(a["id"], p_of(by[rid], key + ":" + a["id"]), (), a.get("text_cut"), text_cut_note(a)))
+                items.append(item(a["id"], p_of(by[rid], key + ":" + a["id"]), (), ac_cut(a), text_cut_note(a)))
         checks[key] = combine(items, th, band) if items else {
             "score": 0.0, "band": "FAIL", "items": [], "why": "no acceptance criteria in tests.json", "capped": False}
     return _finish(ev, checks, cd["choice"], cd["confidence"], results, reqs, {"packs": {}, "groups": []})
@@ -601,9 +627,13 @@ def _run_done(ev, ask):
             rel[f["path"]] = {a["id"]: p_of(res, "rel:" + a["id"]) for a in acs}
     unassessed = [r["state"]["file"] for r in dropped1]
     # evidence packs, one per AC
-    packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed) for a in acs}
+    unread = list(ev.get("unread") or [])  # new files the gate could not read: their contents are unknown evidence
+    packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed, unread) for a in acs}
     ac_reqs = [ac_request(a, packs[a["id"]], "done") for a in acs if packs[a["id"]]["pieces"]]
     groups = build_groups(files, budget)
+    for g in groups if unread else ():
+        g["truncated"] = True
+        g["notes"].append(unread_note(unread))
     grp_reqs = [group_request(g, i, len(groups), ev) for i, g in enumerate(groups)]
     stage2, dropped2 = take(ac_reqs + grp_reqs, cap - len(stage1))
     res2 = execute(stage2, ask)
@@ -616,6 +646,8 @@ def _run_done(ev, ask):
     for k in REST_DONE:
         if k in ev["questions"]:
             items = [item("the story records", p_of(by["rest"], k), [], False, [])]
+            if unread and not groups:  # no group to carry the note: the unread files still cap the check
+                items.append(item("new files not read", None, unread, True, [unread_note(unread)]))
             for i, g in enumerate(groups):
                 rid, name = "group:%d" % (i + 1), "group %d of %d" % (i + 1, len(groups))
                 if rid in gone:
@@ -629,7 +661,7 @@ def _run_done(ev, ask):
         items = []
         for a in acs:
             pk, rid = packs[a["id"]], "ac:" + a["id"]
-            if not pk["pieces"] and unassessed:  # some files were never checked, so "nothing relates" is not known
+            if not pk["pieces"] and (unassessed or unread):  # some files were never checked: "nothing relates" is not known
                 items.append(item(a["id"], None, [], True, pk["notes"], not_asked=True))
             elif not pk["pieces"]:  # nothing in the diff relates to this AC: no request is needed to know it is missing
                 items.append(item(a["id"], 0.0, [], pk["truncated"], pk["notes"], detail="no changed file relates to it"))

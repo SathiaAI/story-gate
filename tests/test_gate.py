@@ -13398,6 +13398,46 @@ class TestDecomposePure(unittest.TestCase):
         rest = D.residual_edits(f, ["test_ac1"], self.defined)
         self.assertIn("return True", rest); self.assertIn("test_other", rest); self.assertNotIn("assert helper()", rest)
 
+    def test_a_wholly_deleted_test_ends_the_block_above_it(self):
+        """A removed test definition is not a live test, but it ends the linked block above it and goes to the residual."""
+        D = self.D
+        text = ("diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n"
+                "@@ -1,6 +1,2 @@\n def test_ac1():\n     assert a == 1\n-def test_ac2():\n-    assert b == 2\n")
+        f = {"path": "tests/test_x.py", "test": True, "text": text}
+        part, _ = D.test_blocks(f, ["test_ac1", "test_ac2"], self.defined)
+        self.assertIn("assert a == 1", part); self.assertNotIn("test_ac2", part)
+        self.assertIn("-def test_ac2():", D.residual_edits(f, ["test_ac1", "test_ac2"], self.defined))
+
+    def test_an_oversized_plan_is_cut_and_caps_its_items(self):
+        """Planned cases over PLAN_MAX are cut in the request (so the judge accepts it) and the AC cannot PASS."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        big = [dict(acs_[0], plan={"positive": ["p" * (D.PLAN_MAX + 10)]})] + acs_[1:]
+        log = []
+        out = D.run("done", self.ev(diff, big), self.fake_ask(log=log))
+        st = [st for st, qs in log if "impl_ac:" + acs_[0]["id"] in qs][0]
+        self.assertLess(len(json.dumps(st["planned_cases"])), D.PLAN_MAX + 200)
+        it = [i for i in out["items"]["impl_matches_acs"] if i["id"] == acs_[0]["id"]][0]
+        self.assertTrue(it["truncated"]); self.assertIn("planned cases", out["checks"]["impl_matches_acs"]["why"])
+
+    def test_a_binary_left_out_by_relevance_still_caps_the_pack(self):
+        """Relevance sees only a binary's header, so leaving one out cannot let the pack claim complete evidence."""
+        D = self.D
+        f = {"path": "assets/x.bin", "test": False, "binary": True, "text": "diff --git a/assets/x.bin b/assets/x.bin\nBinary files differ\n"}
+        pack = D.build_pack({"id": "AC-1", "refs": []}, [f], {"assets/x.bin": {"AC-1": 0.0}}, self.defined, 45000, 30000, [])
+        self.assertTrue(pack["truncated"]); self.assertIn("binary", " ".join(pack["notes"]))
+
+    def test_new_files_the_gate_could_not_read_cap_packs_and_groups(self):
+        """A new file left out of the diff (too large, a link) makes every pack and group incomplete evidence."""
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": [], "plan": {}}]
+        out = D.run("done", dict(self.ev(diff, acs_), unread=["big.dat"]), self.fake_ask())
+        self.assertTrue(all(g["truncated"] for g in out["groups"]))
+        self.assertTrue(out["packs"]["AC-1"]["truncated"])
+        self.assertNotEqual(out["checks"]["impl_no_unplanned_scope"]["band"], "PASS")
+        self.assertIn("big.dat", out["checks"]["impl_matches_acs"]["why"])
+
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""
         D = self.D

@@ -2663,6 +2663,25 @@ def untracked_diff(untracked):
     return untracked_text(untracked)[0]
 
 
+def untracked_readable(f):
+    """True when untracked_text reads this new file: a regular file, not a link, under UNTRACKED_BYTES."""
+    return f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES
+
+
+def untracked_skipped():
+    """The new files (not records) that untracked_text leaves out of the diff: over the count limit, too large, a link."""
+    names = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
+    out = list(names[UNTRACKED_MAX:])
+    for n in names[:UNTRACKED_MAX]:
+        try:
+            ok = untracked_readable(ROOT / n)
+        except OSError:
+            ok = False
+        if not ok:
+            out.append(n)
+    return out
+
+
 def untracked_text(untracked):
     """(new files as diff text, True when every one of them was read). A file story-gate skips (too many, too large, a
     link, unreadable) makes the second value False, so a content pattern can't be ruled out for it."""
@@ -2670,7 +2689,7 @@ def untracked_text(untracked):
     for n in untracked[:UNTRACKED_MAX]:
         f = ROOT / n
         try:
-            ok = f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES
+            ok = untracked_readable(f)
             body = f.read_text(encoding="utf-8", errors="ignore") if ok else ""
         except OSError:
             ok = False
@@ -2736,6 +2755,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
               "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
               "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
               "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band,
+              "unread": untracked_skipped() if phase == "done" else [],
               "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
         out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
     except Exception as e:  # a bug here must never fail a score
