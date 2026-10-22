@@ -12688,6 +12688,25 @@ class TestDecompose(Base):
         g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
         return g
 
+    def test_untracked_files_the_gate_cannot_read_are_reported_as_unread(self):
+        """Too large, a link, or a file that will not open: each is left out of the diff and listed by untracked_skipped."""
+        self.build(n=1)
+        (self.repo / "big.dat").write_bytes(b"x" * 600_000)
+        (self.repo / "link.txt").symlink_to(self.repo / "src" / "feat1.js")
+        (self.repo / "locked.txt").write_text("secret plan")
+        g = self.gate()
+        real_open = open
+        def fake_open(f, *a, **k):
+            if str(f).endswith("locked.txt"):
+                raise PermissionError(13, "denied")
+            return real_open(f, *a, **k)
+        g.open = fake_open  # untracked_readable's open; root ignores chmod, so simulate the refusal
+        skipped = g.untracked_skipped()
+        self.assertIn("big.dat", skipped); self.assertIn("link.txt", skipped); self.assertIn("locked.txt", skipped)
+        self.assertNotIn("src/feat1.js", skipped)
+        text, whole = g.untracked_text(["locked.txt", "src/feat1.js"])
+        self.assertFalse(whole); self.assertNotIn("secret plan", text); self.assertIn("feat1", text)
+
     # ---- Done when 1: off is today's behaviour
     def test_off_asks_the_same_broad_questions_and_writes_the_same_record(self):
         """Off asks the same broad questions and writes the same record."""

@@ -2664,8 +2664,12 @@ def untracked_diff(untracked):
 
 
 def untracked_readable(f):
-    """True when untracked_text reads this new file: a regular file, not a link, under UNTRACKED_BYTES."""
-    return f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES
+    """True when untracked_text reads this new file: a regular file, not a link, under UNTRACKED_BYTES, that opens for
+    reading (a file the gate cannot open is left out of the diff too, so it must count as unread)."""
+    if not (f.is_file() and not f.is_symlink() and f.stat().st_size < UNTRACKED_BYTES):
+        return False
+    with open(f, "rb"):
+        return True
 
 
 def untracked_skipped():
