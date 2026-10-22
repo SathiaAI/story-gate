@@ -2681,6 +2681,9 @@ def untracked_skipped():
     names = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
     out = list(names[UNTRACKED_MAX:])
     for n in names[:UNTRACKED_MAX]:
+        if any(c in n for c in "\r\n"):  # untracked_text does not show a name with a line break (it would inject headers)
+            out.append(n)
+            continue
         try:
             ok = untracked_readable(ROOT / n)
         except OSError:
@@ -2695,6 +2698,9 @@ def untracked_text(untracked):
     link, unreadable) makes the second value False, so a content pattern can't be ruled out for it."""
     out, whole = "", len(untracked) <= UNTRACKED_MAX
     for n in untracked[:UNTRACKED_MAX]:
+        if any(c in n for c in "\r\n"):  # a line break in a name would inject diff headers: not shown, so not whole
+            whole = False
+            continue
         f = ROOT / n
         try:
             ok = untracked_readable(f)
@@ -2759,6 +2765,10 @@ def worktree_text(path):
     too large or unreadable."""
     p = ROOT / path
     try:
+        # like rd(): a path from the diff (which a crafted file name can inject) must resolve inside the repository, so
+        # it can never reach /proc/self/environ or other runner secrets through "..", a link, or a linked folder
+        if not os.path.realpath(p).startswith(os.path.realpath(ROOT) + os.sep):
+            return None
         if p.is_file() and not p.is_symlink() and p.stat().st_size < 2_000_000:
             return p.read_bytes().decode("utf-8", "replace")  # bytes: read_text would turn a lone \r into a line break
     except OSError:

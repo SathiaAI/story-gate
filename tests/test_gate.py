@@ -1810,6 +1810,25 @@ class TestJudgeIndependence(Base):
             v, r = self.score_emulated("claude-sonnet-4.5", "gpt-5.1", allow=True, models=models)
             self.assertEqual(v["judge"], "emulated", r.stdout); self.assertNotEqual(v["overall"], "PASS")
 
+    def test_calibration_lists_only_models_that_answered_every_fixture(self):
+        """A load-balanced alias can answer fixtures with several models: only a model that answered all of them counts
+        as calibrated, so one that answered a single fixture cannot later PASS stories (Codex)."""
+        import importlib
+        sys.path.insert(0, str(SRC)); J = importlib.import_module("sg_judges")
+        def fake(models):
+            """An ask() that answers every fixture right, taking the models in turn."""
+            calls = iter(range(len(J.CALIBRATION)))
+            def ask(c, state, qs):
+                """Ask."""
+                i = next(calls)
+                return {"tier": "emulated", "model": models[i % len(models)],
+                        "answers": {"q": {"noul": 0.9 if J.CALIBRATION[i][2] else 0.1}}}
+            return ask
+        with patch.object(J, "ask", fake(["a/one"])):
+            self.assertEqual(J.calibrate({})[0::2], (True, ["a/one"]))
+        with patch.object(J, "ask", fake(["a/one", "b/two"])):  # every fixture right, but split across two models
+            self.assertEqual(J.calibrate({})[0::2], (True, []))
+
     def test_unknown_coder_keeps_emulated_capped(self):
         v, r = self.score_emulated("", "gpt-5.1", allow=True)
         self.assertEqual(v["judge"], "emulated"); self.assertIn("coder model not recorded", v["judge_note"])
@@ -12999,6 +13018,27 @@ class TestDecompose(Base):
         self.assertIn("Binary files /dev/null and b/logo.png differ", text); self.assertNotIn("secretish", text)
         self.assertTrue(whole)
 
+    def test_evidence_reads_never_leave_the_repository(self):
+        """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
+        resolves outside the repository (.., a link, a linked folder), and a name with a line break is not shown, so it
+        cannot inject diff headers (Cursor security)."""
+        g = self.gate()
+        outside = Path(tempfile.mkdtemp()) / "secret.txt"
+        outside.write_text("RUNNER_SECRET=1")
+        (self.repo / "tests").mkdir(exist_ok=True)
+        (self.repo / "tests" / "ok_test.py").write_text("def test_ok():\n    pass\n")
+        self.assertIn("test_ok", g.worktree_text("tests/ok_test.py"))
+        rel = os.path.relpath(outside, self.repo)
+        self.assertIsNone(g.worktree_text(rel))  # through ".."
+        self.assertIsNone(g.worktree_text("tests/../" + rel))
+        os.symlink(outside.parent, self.repo / "tests" / "linked")  # a linked folder inside tests/
+        self.assertIsNone(g.worktree_text("tests/linked/secret.txt"))
+        self.assertIsNone(g.worktree_text("/proc/self/environ"))
+        text, whole = g.untracked_text(["evil\ndiff --git a/tests/../../x b/tests/../../x"])
+        self.assertNotIn("diff --git a/tests/../../x", text); self.assertFalse(whole)
+        with patch.object(g, "zlist", lambda *a: ["ok.txt", "evil\nname"]), patch.object(g, "untracked_readable", lambda f: True):
+            self.assertEqual(g.untracked_skipped(), ["evil\nname"])  # counted as not read, so the evidence is capped
+
     # ---- READY
     def test_ready_scores_each_ac_and_states_what_a_blocker_is(self):
         """Ready scores each ac and states what a blocker is."""
@@ -13150,7 +13190,8 @@ class TestDecomposePure(unittest.TestCase):
         sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
         defined = lambda r, t: ("test('%s'," % r) in t
         fixtures = ("beforeEach(() => { mock(run) });\n", 'globalThis["run"] = () => 1;\n',  # a call, a bracketed assignment
-                    '// harmless\u2028globalThis["run"] = () => 1;\n')  # JavaScript runs what follows U+2028 in a comment
+                    '// harmless\u2028globalThis["run"] = () => 1;\n',  # JavaScript runs what follows U+2028 in a comment
+                    '   globalThis["run"] = () => 1;\n')  # JavaScript ignores indentation: after "});" it is top level (Codex)
         for (inner, guessed), fixture in [(c, x) for c in (("  /* uses a ` here */\n", False), ("  expect(/`/.test(s)).toBe(true);\n", True)) for x in fixtures]:
             js = "test('one', () => {\n" + inner + "  expect(run()).toBe(1);\n});\n" + fixture + "/* a ` closes the guess */\n" \
                  "test('two', () => {\n  expect(run()).toBe(1);\n});\n"
@@ -13213,7 +13254,7 @@ class TestDecomposePure(unittest.TestCase):
             ans = {}
             for k, q in questions.items():
                 if q["type"] == "choice":
-                    ans[k] = {"choice": "none", "confidence": 0.9}
+                    ans[k] = {"choice": overrides.get(k, "none"), "confidence": 0.9}
                     continue
                 if k in overrides:
                     ans[k] = {"noul": overrides[k]}
@@ -13694,6 +13735,9 @@ class TestDecomposePure(unittest.TestCase):
         self.assertFalse(cut); self.assertIn("assert s", part)
         # in JS, '#' is not a comment and '//' is
         self.assertIsNone(D.string_state("x = 1 // `", None, hash_comments=False))
+        # U+2028 ends a JavaScript comment: a backtick after it opens a string (Codex)
+        self.assertEqual(D.string_state("x = 1 // note\u2028const s = `", None, hash_comments=False), "`")
+        self.assertEqual(D.string_state("x = 1 # note\rs = \"\"\"", None), '"""')
         self.assertEqual(D.string_state("x = 1 # `", None, hash_comments=False), "`")
 
     def test_escaped_quotes_and_unclosed_guesses_never_swallow_a_fixture(self):
@@ -13926,6 +13970,10 @@ class TestDecomposePure(unittest.TestCase):
         grp = [i for i in out["items"]["drift_trd_after"] if i["id"].startswith("group ")]
         self.assertEqual(sorted(i["not_asked"] for i in grp), [False, True])
         self.assertEqual((out["drift"], out["drift_conf"]), ("architect_must_decide", 0.0))
+        # a direction an asked group gave stands: an unasked group never softens work_should_change (Bugbot)
+        out = D.run("done", self.ev(diff, acs_, max_requests=1 + len(code) + 3 + len(acs_) + 1),
+                    self.fake_ask({"drift_direction": "work_should_change"}))
+        self.assertEqual(out["drift"], "work_should_change")
 
     def test_a_submodule_change_is_uninspectable(self):
         """A submodule diff shows two commit ids, not the code they hold: it counts like a binary change (Codex)."""
@@ -13949,10 +13997,22 @@ class TestDecomposePure(unittest.TestCase):
             out = D.run(phase, self.ev(diff, acs_, phase=phase, state=big), self.fake_ask(log=log))
             for st, _ in log:  # every request that carries the story fits the budget as sent (a group: half for the diff)
                 if "story" in st:
-                    self.assertLessEqual(D.sent_len(json.dumps(st)), 90000 + (1000 if "group" in st else 0))
+                    self.assertLessEqual(len(json.dumps(st)), 90000 + (1000 if "group" in st else 0))
             log.clear()
             cut = [k for k, c in out["checks"].items() if "cut to fit" in c["why"]]
             self.assertTrue(cut, phase); self.assertTrue(all(out["checks"][k]["band"] != "PASS" for k in cut))
+            self.assertEqual(out["drift"], "architect_must_decide", phase)  # the judge saw part of the story: not "none" (Bugbot)
+        # what is left over budget is not text (a long changed_files list): the fitting stops instead of looping (Bugbot)
+        st, was = D.fit_state({"story": "x" * 5000, "changed_files": ["f" * 100] * 2000}, 3000)
+        self.assertTrue(was); self.assertLess(D.sent_len(st["story"]), 5000)
+        self.assertLessEqual(len(json.dumps(st)), 3000)  # the list is shortened too, so the state really fits (Codex)
+        self.assertTrue(st["changed_files"][-1].endswith("more not shown"))
+        st, was = D.fit_state({"changed_files": ["a", "b"]}, 5)  # a list that cannot get short enough still ends
+        self.assertTrue(was); self.assertEqual(st["changed_files"], ["a", "... 1 more not shown"])
+        # plain text a little over budget: the cut leaves room for its marker, so it ends within budget (CodeRabbit)
+        for over in (1, 30, 300):
+            st, was = D.fit_state({"story": "a" * (5000 + over)}, len(json.dumps({"story": "a" * 5000})))
+            self.assertTrue(was); self.assertLessEqual(len(json.dumps(st)), len(json.dumps({"story": "a" * 5000})))
 
     def test_handoff_and_learnings_are_also_checked_against_each_group(self):
         """The handoff and learnings questions are asked per group too, and the lowest answer decides."""

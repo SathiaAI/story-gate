@@ -195,14 +195,18 @@ def indent(text):
     return len(text) - len(text.lstrip(" \t"))
 
 
-def ends_test(text, depth):
-    """A live line at or left of the test's own indentation that is not blank, a comment or only closing brackets ends
-    the test: a helper, fixture, decorator or statement placed after it is not that test's body."""
+def is_comment(s):
+    """A stripped line that is only a comment. One holding a line break git does not split at (a lone \r: Python and
+    JavaScript; U+2028/U+2029: JavaScript) runs the code after it, so it is not a comment line."""
+    return s.startswith(("#", "//")) and not any(c in s for c in "\r\u2028\u2029")
+
+
+def ends_test(text, depth, closed=False):
+    """A live line that is not blank, a comment or only closing brackets ends the test when it sits at or left of the
+    test's own indentation, or anywhere once the test's own closing line (closed) has passed: brace languages ignore
+    indentation, so a helper, fixture or statement placed after the test is not its body however it is indented."""
     s = text.strip()
-    # a comment holding a line break git does not split at (a lone \r: Python and JavaScript; U+2028/U+2029: JavaScript) runs
-    # the code after it, so it is not a comment line
-    comment = s.startswith(("#", "//")) and not any(c in s for c in "\r\u2028\u2029")
-    return bool(s) and not CLOSING.match(s) and not comment and indent(text) <= depth
+    return bool(s) and not CLOSING.match(s) and not is_comment(s) and (closed or indent(text) <= depth)
 
 
 def test_end(rest, start, stop, depth, st):
@@ -211,8 +215,15 @@ def test_end(rest, start, stop, depth, st):
     indentation ends it, even inside a string that looks open, so no fixture or helper can hide there whatever its form.
     -> (that line or stop, True when the test ended inside a string that looked open: a snapshot written flush left may
     have been cut short, so the block counts as cut)."""
-    j = next((j for j in range(start, stop) if rest[j][:1] in " +" and ends_test(rest[j][1:].rstrip("\n"), depth)), stop)
-    return j, st[j] is not None
+    closed = False
+    for j in range(start, stop):
+        if rest[j][:1] not in " +":
+            continue
+        t = rest[j][1:].rstrip("\n")
+        if ends_test(t, depth, closed):
+            return j, st[j] is not None
+        closed = closed or (bool(CLOSING.match(t.strip())) and indent(t) <= depth)  # "});" at the test's depth closes it
+    return stop, st[stop] is not None
 
 
 def string_state(line, open_q, hash_comments=True, raw_backtick=False):
@@ -240,7 +251,13 @@ def string_state(line, open_q, hash_comments=True, raw_backtick=False):
             i += 2
             continue
         if (c == "#" if hash_comments else line.startswith("//", i)):
-            return None
+            # the comment runs to the language's line end; one git does not split at (\r; U+2028/U+2029 in JavaScript)
+            # ends it early, and the code after it is read like any other
+            ends = [e for e in (line.find(t, i) for t in (("\r",) if hash_comments else ("\r", "\u2028", "\u2029"))) if e >= 0]
+            if not ends:
+                return None
+            i = min(ends) + 1
+            continue
         if not hash_comments and line.startswith("/*", i):
             i, open_q = i + 2, "/*"
             continue
@@ -565,7 +582,7 @@ def group_request(g, i, n, ev):
     records, cut = fit_state({k: st.get(k, "") for k in ("story", "context", "handoff", "learnings")} |
                              {"changed_files": st.get("changed_files", [])}, ev["max_chars"] // 2)
     if cut:
-        g["truncated"] = True
+        g["truncated"] = g["records_cut"] = True
         g["notes"].append(REST_CUT_NOTE % (ev["max_chars"] // 2))
     state = {"story": records["story"], "context": records["context"], "changed_files": records["changed_files"],
              "group": "%d of %d" % (i + 1, n), "group_files": g["files"], "diff": "\n".join(p["text"] for p in g["pieces"]),
@@ -593,20 +610,32 @@ def rest_request(ev):
     return {"id": "rest", "kind": "rest", "state": state, "questions": questions, "cut": cut}
 
 
+MORE = re.compile(r"^\.\.\. (\d+) more not shown$")  # the entry fit_state puts at the end of a shortened list
+CUT_MARKER_ROOM = 64  # clip appends "[... cut: N more characters not shown]" after the cut
 REST_CUT_NOTE = "the story records were cut to fit the %d-character request budget"
 
 
 def fit_state(state, budget):
-    """state with its longest text fields cut until the whole is at most `budget` characters as sent (the story and plan
-    were sliced by Python characters upstream; emoji grow up to 12 times when sent). -> (state, True when anything was cut)."""
+    """state with its longest text fields cut, then its lists (changed_files) halved with a "... N more not shown" entry,
+    until the whole is at most `budget` characters as sent (the story and plan were sliced by Python characters upstream;
+    emoji grow up to 12 times when sent). Every step makes it shorter, so it always ends. -> (state, True when cut)."""
     state, cut = dict(state), False
-    while sent_len(json.dumps(state)) > budget:
+    while len(json.dumps(state)) > budget:  # json.dumps escapes as a request does: its length is the size sent
         texts = [(sent_len(v), k) for k, v in state.items() if isinstance(v, str) and sent_len(v) > MIN_PART]
-        if not texts:
-            return state, True  # what is left is not text: still over, so the answers rest on cut evidence
-        size, k = max(texts)
-        state[k], _ = clip(state[k], max(MIN_PART, size - (sent_len(json.dumps(state)) - budget)))
-        cut = True
+        if texts:
+            size, k = max(texts)
+            new, _ = clip(state[k], max(MIN_PART, size - (len(json.dumps(state)) - budget) - CUT_MARKER_ROOM))
+            if sent_len(new) < size:  # the cut marker can leave a short text no shorter: then try the lists
+                state[k], cut = new, True
+                continue
+        real = {k: [x for x in v if not (isinstance(x, str) and MORE.match(x))] for k, v in state.items() if isinstance(v, list)}
+        lists = [(len(json.dumps(v)), k) for k, v in real.items() if len(v) > 1]
+        if not lists:
+            return state, True  # nothing left to shorten: still over, so the answers rest on cut evidence
+        k = max(lists)[1]
+        hidden = sum(int(MORE.match(x).group(1)) for x in state[k] if isinstance(x, str) and MORE.match(x))
+        keep = real[k][:len(real[k]) // 2]  # at least one item goes each time, so this always ends
+        state[k], cut = keep + ["... %d more not shown" % (hidden + len(real[k]) - len(keep))], True
     return state, cut
 
 
@@ -752,6 +781,8 @@ def _run_ready(ev, ask):
             checks[k] = combine([item("the story records", p, [], True, [REST_CUT_NOTE % ev["max_chars"]])], th, band) \
                 if rest["cut"] else {"score": p, "band": band(p, th), "items": [], "why": "", "capped": False}  # raw: rounding could lift 0.6996 to a PASS
     cd = by["rest"]["answers"]["drift_direction"]
+    if rest["cut"] and cd["choice"] == "none":  # the judge saw only part of the story: "no drift" is not known
+        cd = {"choice": "architect_must_decide", "confidence": 0.0}
     dropped_ids = {r["id"] for r in dropped}
     for key in PER_AC_READY:
         if key not in ev["questions"]:
@@ -906,9 +937,10 @@ def _run_done(ev, ask):
         if len(groups) > 1:  # no request saw every file: scope or drift built from parts in two groups is not seen whole
             items.append(item("all groups together", None, [], True, [SPLIT_NOTE % len(groups)]))
         checks[key] = combine(items, th, band)
-    if groups and (low_drift is None or any("group:%d" % (i + 1) in gone for i in range(len(groups)))):  # a group not asked
-        # about drift may hold the drift: unknown is not "none"
-        drift, conf = "architect_must_decide", 0.0
+    unknown = groups and (low_drift is None or any("group:%d" % (i + 1) in gone or g.get("records_cut")
+                                                   for i, g in enumerate(groups)))
+    if unknown and drift == "none":  # a group not asked, or one that saw only part of the story, may hold the drift: unknown
+        drift, conf = "architect_must_decide", 0.0  # is not "none"; a direction an asked group gave (work_should_change) stands
     asked = stage1 + stage2
     extra = {"packs": {a["id"]: {"files": packs[a["id"]]["files"], "truncated": packs[a["id"]]["truncated"]} for a in acs},
              "groups": [{"files": g["files"], "truncated": g["truncated"]} for g in groups],
