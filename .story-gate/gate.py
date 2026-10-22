@@ -2694,12 +2694,16 @@ def untracked_text(untracked):
         f = ROOT / n
         try:
             ok = untracked_readable(f)
-            body = f.read_text(encoding="utf-8", errors="ignore") if ok else ""
+            data = f.read_bytes() if ok else b""
         except OSError:
             ok = False
         if not ok:
             whole = False
             continue
+        if b"\0" in data[:8000]:  # binary, as git decides it: show only git's header, which marks the evidence cut
+            out += "\ndiff --git a/%s b/%s\nnew file (untracked)\nBinary files /dev/null and b/%s differ\n" % (n, n, n)
+            continue
+        body = data.decode("utf-8", errors="ignore")
         out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
     return out, whole
 
@@ -2825,6 +2829,8 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
         dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
         judged = dgot or judge_fallback(phase, sd, [k for k in (READY_Q if phase == "ready" else DONE_Q) if k not in skip],
                                         DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, drec.get("error"))
+        if dgot is None and judged["judge"] == "self":  # the agent's broad self-scores never stand in for the narrow ones
+            judged = dict(judged, judge="self-fallback")
     else:
         judged = judge(phase, state, c, sd, skip)
         if dmode == "shadow":  # never binding, never able to fail the score

@@ -633,12 +633,16 @@ def _run_done(ev, ask):
         # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
         f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
     # a linked test file's other edits (a helper or fixture the linked tests call) reach no pack as test blocks: judge them too
-    residual = []
+    residual, taken = [], {f["path"] for f in files}
     for f in files:
         if f["test"] and not f["unlinked"] and f["path"] not in copies:
             r = residual_edits(f, all_refs, ev["defined"])
             if r:
-                residual.append(dict(f, path=f["path"] + " (edits outside its linked tests)", text=r, test=False))
+                name = f["path"] + " (edits outside its linked tests)"
+                while name in taken:  # a changed file may carry this very name: answers are keyed by path
+                    name += "'"
+                taken.add(name)
+                residual.append(dict(f, path=name, text=r, test=False))
     code = [f for f in files if not f["test"] or f["unlinked"]] + residual
     rest = rest_request(ev)
     rel_reqs = [relevance_request(f, acs, per_file) for f in code if f["path"] not in copies] if acs else []

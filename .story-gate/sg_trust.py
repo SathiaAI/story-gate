@@ -674,6 +674,11 @@ def weaker(old, new):
     od, nd = (o.get("judge") or {}).get("decompose", "shadow"), (n.get("judge") or {}).get("decompose", "shadow")
     if od == "on" and nd != "on":  # the per-AC and per-file scores no longer decide
         out.append("narrow judge questions no longer decide (judge.decompose went from on to %s)" % nd)
+    elif od == "on":  # fewer requests leave more checks unasked: CONCERNS where a low answer would have been a FAIL
+        import sg_decompose as DC
+        oc, nc = DC.max_requests(o), DC.max_requests(n)
+        if nc < oc:
+            out.append("fewer narrow judge requests allowed (judge.max_requests lowered from %d to %d)" % (oc, nc))
     for k in ("emulated_allow_pass", "allow_self_judge_pass"):
         if not (o.get("judge") or {}).get(k) and (n.get("judge") or {}).get(k):
             out.append("judge setting %s turned on" % k)

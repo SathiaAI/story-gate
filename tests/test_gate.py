@@ -1204,6 +1204,10 @@ class TestGitHubLogic(unittest.TestCase):
             self.assertEqual(T.weaker(on, {"judge": {"decompose": to}}), ["narrow judge questions no longer decide (judge.decompose went from on to %s)" % to])
         self.assertEqual(T.weaker(on, {"judge": {}}), ["narrow judge questions no longer decide (judge.decompose went from on to shadow)"])
         self.assertEqual(T.weaker({"judge": {"decompose": "shadow"}}, on), [])
+        # still on, but fewer requests: more checks go unasked (CONCERNS instead of FAIL), so it is weaker too
+        self.assertEqual(T.weaker({"judge": {"decompose": "on", "max_requests": 60}}, {"judge": {"decompose": "on", "max_requests": 5}}),
+                         ["fewer narrow judge requests allowed (judge.max_requests lowered from 60 to 5)"])
+        self.assertEqual(T.weaker({"judge": {"decompose": "on", "max_requests": 5}}, {"judge": {"decompose": "on", "max_requests": 60}}), [])
 
     def test_weaker_detects_removed_test_globs(self):
         """Removing or replacing test patterns warns; additions and reordering do not."""
@@ -12942,7 +12946,27 @@ class TestDecompose(Base):
         v, r = self.score("done")
         self.assertIn("boom", v["decomposed"]["error"])
         self.assertNotEqual(v["overall"], "PASS")
-        self.assertIn(v["judge"], ("self", "none"))
+        self.assertIn(v["judge"], ("self-fallback", "none"))
+
+    def test_self_scores_never_stand_in_for_failed_narrow_questions(self):
+        """On mode, a narrow request fails: the agent's broad self-scores fill in, but cannot PASS even when
+        allow_self_judge_pass is on (that setting is for a same-family judge or broad mode, not for a failed narrow run)."""
+        j = self.judge(fail_on=("rel:",)); self.configure(j, "on", allow_self_judge_pass=True)
+        self.build()
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        (sd / "done.self.json").write_text(json.dumps({"scores": {k: 0.99 for k in self.gate().DONE_Q}, "drift": "none"}))
+        v, r = self.score("done")
+        self.assertEqual(v["judge"], "self-fallback")
+        self.assertFalse([k for k, c in v["checks"].items() if c.get("kind") == "self-fallback" and c["status"] == "PASS"])
+        self.assertNotEqual(v["overall"], "PASS")
+
+    def test_a_small_binary_new_file_is_marked_binary_not_read_as_text(self):
+        """An untracked binary under the size limit shows git's binary header, so its evidence counts as cut."""
+        g = self.gate()
+        (self.repo / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00secretish")
+        text, whole = g.untracked_text(["logo.png"])
+        self.assertIn("Binary files /dev/null and b/logo.png differ", text); self.assertNotIn("secretish", text)
+        self.assertTrue(whole)
 
     # ---- READY
     def test_ready_scores_each_ac_and_states_what_a_blocker_is(self):
@@ -13502,6 +13526,20 @@ class TestDecomposePure(unittest.TestCase):
         part, _ = D.test_blocks(f, ["test_login"], lambda r, t: r in t)
         self.assertIn("const user = make();", part); self.assertIn("+  });", part); self.assertNotIn("allowAll", part)
         self.assertIn("+  function allowAll()", D.residual_edits(f, ["test_login", "test_other"], lambda r, t: r in t))
+
+    def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
+        """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
+        relevance answer: each gets its own request."""
+        D = self.D
+        name = "tests/test_x.py (edits outside its linked tests)"
+        diff = (self.file_diff("tests/test_x.py", "def helper():  # AC1_MARK\n    return 1\n\ndef test_ac1():\n    assert helper()\n")
+                + self.file_diff(name, "// unrelated"))
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        log = []
+        D.run("done", self.ev(diff, acs_), self.fake_ask(log=log))
+        files = [st["file"] for st, q in log if any(k.startswith("rel:") for k in q)]
+        self.assertEqual(len(files), len(set(files)), files)
+        self.assertIn(name, files); self.assertIn(name + "'", files)
 
     def test_an_oversized_plan_is_cut_and_caps_its_items(self):
         """Planned cases over PLAN_MAX are cut in the request (so the judge accepts it) and the AC cannot PASS."""
