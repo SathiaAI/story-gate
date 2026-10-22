@@ -701,15 +701,18 @@ def jev(state, questions, c=None):
     return r if r.get("tier") != "none" else {"error": r.get("error")}
 
 
-def calibrated(c):
-    """An emulated judge may PASS only if the user opted in and its calibration run (same provider+model) passed."""
+def calibrated(c, model=""):
+    """An emulated judge may PASS only if the user opted in, its calibration run (same provider+model) passed, and every
+    model that answered (`model`, joined with '+' when a narrow run or a load-balanced alias used several) also answered
+    the calibration run. A record without that list predates the rule: run judge-calibrate again."""
     if not (c.get("judge") or {}).get("emulated_allow_pass"):
         return False
     try:
         rec = json.loads(policy_json("judge-calibration.json") or "{}")
     except ValueError:
         rec = {}
-    return rec.get("ok") is True and rec.get("identity") == J.identity(c)
+    seen = {m for m in (model or "").split("+") if m}
+    return rec.get("ok") is True and rec.get("identity") == J.identity(c) and bool(seen) and seen <= set(rec.get("models") or [])
 
 
 def judge(phase, state, c, sd, skip=()):
@@ -742,7 +745,7 @@ def judge_tier(r, c, sd):
             note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
         elif any(J.family(coder) == J.family(m) for m in (r.get("model") or "").split("+")):  # narrow runs join every model
             tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
-        elif calibrated(c):
+        elif calibrated(c, r.get("model")):
             tier = "emulated-calibrated"
     return tier, note
 
@@ -5869,9 +5872,9 @@ def main(argv):
     if cmd == "label":
         return cmd_label(rest[0], rest[1], rest[2] if len(rest) > 2 else "", kv.get("note", "")) or 0
     if cmd == "judge-calibrate":
-        ok, details = J.calibrate(cfg())
+        ok, details, models = J.calibrate(cfg())
         print("\n".join(details))
-        wj(GATE / "judge-calibration.json", {"ok": ok, "identity": J.identity(cfg()), "at": now(), "details": details})
+        wj(GATE / "judge-calibration.json", {"ok": ok, "identity": J.identity(cfg()), "models": models, "at": now(), "details": details})
         print("story-gate judge calibration: %s" % ("PASSED - set judge.emulated_allow_pass to let this judge PASS stories" if ok else "FAILED - this judge stays capped at CONCERNS"))
         return 0 if ok else 1
     if cmd in ("setup-repo", "setup-agent", "agent-token", "agent-env"):

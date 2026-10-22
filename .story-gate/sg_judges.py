@@ -333,14 +333,15 @@ CALIBRATION = [
 
 
 def calibrate(c):
-    """Run the fixtures through the configured judge. Returns (ok, details)."""
-    details, ok = [], True
+    """Run the fixtures through the configured judge. Returns (ok, details, the models that answered)."""
+    details, ok, models = [], True, set()
     for i, (state, text, truth) in enumerate(CALIBRATION):
         r = ask(c, state, {"q": {"type": "noul", "instructions": text}})
         if r.get("tier") == "none":
-            return False, ["judge unavailable: %s" % r.get("error")]
+            return False, ["judge unavailable: %s" % r.get("error")], []
         p = r["answers"]["q"]["noul"]
+        models.add(str(r.get("model") or ""))
         right = (p >= 0.7) if truth else (p < 0.4)
         ok &= right
         details.append("fixture %d: expected %s, got %.2f -> %s" % (i + 1, "yes" if truth else "no", p, "ok" if right else "WRONG"))
-    return ok, details
+    return ok, details, sorted(models - {""})

@@ -1763,7 +1763,7 @@ class TestRound6Fixes(Base):
 
 
 class TestJudgeIndependence(Base):
-    def score_emulated(self, coder_model, judge_model, allow=False):
+    def score_emulated(self, coder_model, judge_model, allow=False, models=None):
         m = MockJudge(model=judge_model)
         try:
             self.cfg(judge={"provider": "openai-compatible", "api_key_env": "JUDGE_API_KEY", "model": judge_model,
@@ -1774,7 +1774,8 @@ class TestJudgeIndependence(Base):
                 (self.repo / ".story-gate/stories/SAT-1" / f).unlink(missing_ok=True)
             if allow:  # pretend a calibration run passed for this judge
                 g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT")
-                (self.repo / ".story-gate/judge-calibration.json").write_text(json.dumps({"ok": True, "identity": g.J.identity(g.cfg())}))
+                rec = {"ok": True, "identity": g.J.identity(g.cfg()), "models": [judge_model] if models is None else models}
+                (self.repo / ".story-gate/judge-calibration.json").write_text(json.dumps(rec))
             r = run(self.repo, "score", "SAT-1", "ready", env={"JUDGE_API_KEY": "k"})
             return json.loads((self.repo / ".story-gate/stories/SAT-1/ready.json").read_text()), r
         finally:
@@ -1797,6 +1798,13 @@ class TestJudgeIndependence(Base):
     def test_other_family_calibrated_judge_can_pass(self):
         v, r = self.score_emulated("claude-sonnet-4.5", "gpt-5.1", allow=True)
         self.assertEqual((v["judge"], v["overall"]), ("emulated-calibrated", "PASS"), r.stdout)
+
+    def test_a_model_that_never_answered_calibration_cannot_pass(self):
+        """Every model that answers must have answered the calibration run: a record from before the rule (no models)
+        or one that lists only another model keeps the judge capped (Codex)."""
+        for models in ([], ["openai/gpt-4o"]):
+            v, r = self.score_emulated("claude-sonnet-4.5", "gpt-5.1", allow=True, models=models)
+            self.assertEqual(v["judge"], "emulated", r.stdout); self.assertNotEqual(v["overall"], "PASS")
 
     def test_unknown_coder_keeps_emulated_capped(self):
         v, r = self.score_emulated("", "gpt-5.1", allow=True)
