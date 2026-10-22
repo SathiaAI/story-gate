@@ -671,6 +671,9 @@ def weaker(old, new):
                 out.append("%s threshold lowered from %s to %s" % (k, a, b))
         except (TypeError, ValueError):
             pass
+    od, nd = (o.get("judge") or {}).get("decompose", "shadow"), (n.get("judge") or {}).get("decompose", "shadow")
+    if od == "on" and nd != "on":  # the per-AC and per-file scores no longer decide
+        out.append("narrow judge questions no longer decide (judge.decompose went from on to %s)" % nd)
     for k in ("emulated_allow_pass", "allow_self_judge_pass"):
         if not (o.get("judge") or {}).get(k) and (n.get("judge") or {}).get(k):
             out.append("judge setting %s turned on" % k)

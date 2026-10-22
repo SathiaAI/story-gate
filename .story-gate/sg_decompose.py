@@ -21,7 +21,8 @@ MAX_REQUESTS_LIMIT = 1000
 PARALLEL = 4  # requests in flight at once
 RELEVANT = 0.5  # a changed file with at least this relevance to an AC goes into that AC's pack
 MIN_PART = 1000  # a file that doesn't fit is shown cut only if at least this many characters are left
-AC_TEXT_MAX = 600  # an AC's text in a question: enough to read, bounded
+AC_TEXT_MAX = 2000  # an AC's text in the evidence: enough to read, bounded; a longer AC is marked cut
+AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")  # ids appear in question wording, so they must be plain names
 
 # Per-AC checks, per-group checks and the READY wording. The text of a question that only gets a criteria sentence is here.
 NO_BLOCKERS = ("There are no unresolved open questions that would force the developer to guess. True means no open question "
@@ -208,7 +209,11 @@ def noul(text):
 
 
 def ac_text(a):
-    return a["text"][:AC_TEXT_MAX]
+    return clip(a["text"], AC_TEXT_MAX)[0]
+
+
+def text_cut_note(a):
+    return ["the criterion's text is over %d characters and was cut" % AC_TEXT_MAX] if a.get("text_cut") else []
 
 
 def relevance_request(f, acs, per_file):
@@ -216,8 +221,8 @@ def relevance_request(f, acs, per_file):
     body, cut = clip(f["text"], per_file)
     state = {"file": f["path"], "status": f["status"], "diff": body, "truncated": cut,
              "acceptance_criteria": [{"id": a["id"], "text": ac_text(a)} for a in acs]}
-    qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports acceptance criterion %s: %s"
-                                 % (a["id"], ac_text(a))) for a in acs}
+    qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports the acceptance criterion with id "
+                                 "%s in `acceptance_criteria`." % a["id"]) for a in acs}
     return {"id": "rel:" + f["path"], "kind": "relevance", "state": state, "questions": qs}
 
 
@@ -233,18 +238,18 @@ def ac_request(a, pack, phase):
         state.update(files=[p["path"] for p in pack["pieces"]], diff="\n".join(p["text"] for p in pack["pieces"]),
                      evidence_truncated=pack["truncated"],
                      evidence_note="Only the files in this evidence pack are shown. Count only behaviour present in the diff.")
-        qs = {"impl_ac:" + a["id"]: noul("The code and tests in this evidence pack implement this acceptance criterion: %s. "
-                                         "Count only behaviour present in the diff." % ac_text(a)),
+        qs = {"impl_ac:" + a["id"]: noul("The code and tests in this evidence pack implement the acceptance criterion in "
+                                         "`acceptance_criterion`. Count only behaviour present in the diff."),
               "tests_ac:" + a["id"]: noul("The tests in this evidence pack cover the planned positive, negative and edge cases "
-                                          "(plus regression cases where the plan lists them) for this acceptance criterion: %s. "
-                                          "A category the plan marks not applicable, with a reason, needs no test." % ac_text(a))}
+                                          "(plus regression cases where the plan lists them) for the acceptance criterion in "
+                                          "`acceptance_criterion`. A category the plan marks not applicable, with a reason, needs no test.")}
     else:
         state["story"] = pack["story"]
-        qs = {"ac_testable:" + a["id"]: noul("This acceptance criterion is binary and verifiable (clearly pass or fail), "
-                                              "not vague: %s" % ac_text(a)),
-              "tests_plan_adequate:" + a["id"]: noul("The test plan for this acceptance criterion has meaningful positive, negative, "
-                                                      "edge and regression cases, or a valid reason a category does not apply: %s"
-                                                      % ac_text(a))}
+        qs = {"ac_testable:" + a["id"]: noul("The acceptance criterion in `acceptance_criterion` is binary and verifiable "
+                                              "(clearly pass or fail), not vague."),
+              "tests_plan_adequate:" + a["id"]: noul("The test plan in `planned_cases` for the acceptance criterion in "
+                                                      "`acceptance_criterion` has meaningful positive, negative, edge and "
+                                                      "regression cases, or a valid reason a category does not apply.")}
     return {"id": "ac:" + a["id"], "kind": "ac", "state": state, "questions": qs}
 
 
@@ -260,10 +265,10 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
             tests.append(dict(f, text=part) if part else f)  # just this AC's tests when they can be found, else the file
             if cut:
                 cut_tests.append(f["path"])
-    code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if not f["test"] and f["path"] in rel),
+    code = sorted(((rel[f["path"]].get(a["id"], 0.0), f) for f in files if (not f["test"] or f.get("unlinked")) and f["path"] in rel),
                   key=lambda t: (-t[0], t[1]["path"]))
     chosen = tests + [f for p, f in code if p >= RELEVANT]
-    pieces, used, notes, truncated = [], 0, [], False
+    pieces, used, notes, truncated = [], 0, text_cut_note(a), bool(a.get("text_cut"))
     if cut_tests:
         truncated = True
         notes.append("a test longer than %d lines was cut in %s" % (TEST_BLOCK_MAX, ", ".join(cut_tests)))
@@ -276,7 +281,10 @@ def build_pack(a, files, rel, defined, budget, per_file, unassessed):
         if len(f["text"]) <= room:
             pieces.append({"path": f["path"], "text": f["text"], "cut": False})
             used += len(f["text"])
-            if not f["test"] and len(f["text"]) > per_file:  # relevance saw only the first part of this file
+            if f.get("binary"):  # only the header can be shown
+                truncated = True
+                notes.append("%s is a binary change; its contents are not shown" % f["path"])
+            if (not f["test"] or f.get("unlinked")) and len(f["text"]) > per_file:  # relevance saw only the first part
                 truncated = True
                 notes.append("%s was read only in part when its relevance was judged" % f["path"])
             continue
@@ -314,14 +322,17 @@ def build_groups(files, budget):
             continue
         if used + len(f["text"]) > budget:
             close()
-        cur.append({"path": f["path"], "text": f["text"], "cut": False})
+        cur.append({"path": f["path"], "text": f["text"], "cut": False, "binary": bool(f.get("binary"))})
         used += len(f["text"])
     close()
     out = []
     for g in groups:
         cut = [p["path"] for p in g if p["cut"]]
-        out.append({"pieces": g, "truncated": bool(cut), "files": [p["path"] for p in g],
-                    "notes": ["%s is over the %d-character budget and was cut" % (cut[0], budget)] if cut else []})
+        binary = [p["path"] for p in g if p.get("binary")]
+        notes = ["%s is over the %d-character budget and was cut" % (cut[0], budget)] if cut else []
+        if binary:
+            notes.append("binary change, contents not shown: %s" % ", ".join(binary[:3]) + (" and %d more" % (len(binary) - 3) if len(binary) > 3 else ""))
+        out.append({"pieces": g, "truncated": bool(cut or binary), "files": [p["path"] for p in g], "notes": notes})
     return out or [{"pieces": [], "truncated": False, "files": [], "notes": []}]  # no files: still ask once, on an empty change
 
 
@@ -444,6 +455,10 @@ def run(phase, ev, ask):
     dup = sorted({i for i in ids if ids.count(i) > 1}) if len(set(ids)) != len(ids) else []
     if "" in ids or dup:  # packs and answers are keyed by id: two criteria with one id would share one score
         return {"error": "acceptance criteria need unique, non-empty ids (repeated: %s)" % (", ".join(dup) or "an empty id")}
+    bad = [i for i in ids if not AC_ID.match(i)]
+    if bad:  # an id is the only story text that reaches a question's wording
+        return {"error": "acceptance-criterion ids must be short plain names (letters, digits, . _ : -): %r" % bad[0][:60]}
+    ev = dict(ev, acs=[dict(a, text_cut=len(a.get("text") or "") > AC_TEXT_MAX) for a in ev["acs"]])
     return _run_done(ev, ask) if phase == "done" else _run_ready(ev, ask)
 
 
@@ -491,7 +506,7 @@ def _run_ready(ev, ask):
             if rid in dropped_ids:
                 items.append(item(a["id"], None, not_asked=True))
             else:
-                items.append(item(a["id"], p_of(by[rid], key + ":" + a["id"])))
+                items.append(item(a["id"], p_of(by[rid], key + ":" + a["id"]), (), a.get("text_cut"), text_cut_note(a)))
         checks[key] = combine(items, th, band) if items else {
             "score": 0.0, "band": "FAIL", "items": [], "why": "no acceptance criteria in tests.json", "capped": False}
     return _finish(ev, checks, cd["choice"], cd["confidence"], results, reqs, {"packs": {}, "groups": []})
@@ -527,9 +542,12 @@ def _run_done(ev, ask):
     excluded = sorted(f["path"] for f in files if story_record(f["path"], ev))
     files = [f for f in files if not story_record(f["path"], ev)]
     copies = {f["path"] for f in files if story_copy(f["path"], ev)}
+    all_refs = [r for a in acs for r in a["refs"]]
     for f in files:
         f["test"] = bool(ev["is_test"](f["path"]))
-    code = [f for f in files if not f["test"]]
+        # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
+        f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
+    code = [f for f in files if not f["test"] or f["unlinked"]]
     rest = rest_request(ev)
     rel_reqs = [relevance_request(f, acs, per_file) for f in code if f["path"] not in copies] if acs else []
     stage1, dropped1 = take([rest] + rel_reqs, cap)
