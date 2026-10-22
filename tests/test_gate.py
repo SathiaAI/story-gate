@@ -13582,6 +13582,71 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(D.string_state("this.#x = `a", None, hash_comments=False), "`")
         self.assertIsNone(D.string_state("x = 1  # `", None, hash_comments=True))
 
+    def test_a_test_cut_short_inside_a_string_is_marked_cut(self):
+        """A snapshot line that looks like a definition (here 'class="x">' in HTML) ends the test inside a string. The
+        rest of the test is then not in the block, so the block is marked cut and the rest goes through relevance
+        (Bugbot)."""
+        D = self.D
+        py = ('def test_snap():\n    s = """\n<div\nclass="x">\n"""\n    assert render() == s\n')
+        f = {"path": "tests/test_snap.py", "test": True, "text": self.file_diff("tests/test_snap.py", py)}
+        part, cut = D.test_blocks(f, ["test_snap"], self.defined)
+        self.assertTrue(cut); self.assertIn("could not follow", part); self.assertNotIn("assert render()", part)
+        self.assertIn("assert render() == s", D.residual_edits(f, ["test_snap"], self.defined))
+        # a helper after a string that never closes still ends the test, and the block says it may be short
+        py = 'def test_z():\n    s = """never closed\n    assert 1\ndef allow_all():\n    return True\n'
+        f = {"path": "tests/test_z.py", "test": True, "text": self.file_diff("tests/test_z.py", py)}
+        part, cut = D.test_blocks(f, ["test_z"], self.defined)
+        self.assertTrue(cut); self.assertNotIn("allow_all", part)
+        # a test that closes all its strings is not marked cut
+        py = 'def test_ok():\n    s = """a\nb"""\n    assert s\n'
+        f = {"path": "tests/test_ok.py", "test": True, "text": self.file_diff("tests/test_ok.py", py)}
+        part, cut = D.test_blocks(f, ["test_ok"], self.defined)
+        self.assertFalse(cut); self.assertIn("assert s", part)
+        # in JS, '#' is not a comment and '//' is
+        self.assertIsNone(D.string_state("x = 1 // `", None, hash_comments=False))
+        self.assertEqual(D.string_state("x = 1 # `", None, hash_comments=False), "`")
+
+    def test_escaped_quotes_and_unclosed_guesses_never_swallow_a_fixture(self):
+        """An escaped backtick does not close a template literal, so a call-based fixture after the test stays outside
+        it. A guessed string that never closes falls back to the plain rule and marks the block cut (Codex)."""
+        D = self.D
+        js = "it('test_a', () => {\n  const s = `a \\` b\n  c`;\n  expect(s).toBe(1);\n});\nbeforeEach(() => resetAuth());\n"
+        f = {"path": "tests/a.test.js", "test": True, "text": self.file_diff("tests/a.test.js", js)}
+        part, cut = D.test_blocks(f, ["test_a"], lambda r, t: r in t)
+        self.assertIn("expect(s).toBe(1);", part); self.assertNotIn("resetAuth", part); self.assertFalse(cut)
+        self.assertIn("resetAuth", D.residual_edits(f, ["test_a"], lambda r, t: r in t))
+        go = "func TestX(t *testing.T) {\n\ts := `C:\\`\n\tcheck(s)\n}\nfunc init() { allowAll() }\n"
+        f = {"path": "x_test.go", "test": True, "text": self.file_diff("x_test.go", go)}
+        part, cut = D.test_blocks(f, ["TestX"], lambda r, t: "func " + r in t)
+        self.assertIn("check(s)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
+        # a backslash at the end of a one-line string carries it to the next line, as Python and JS read it
+        self.assertEqual(D.string_state('x = "a\\', None), '"')
+        self.assertEqual(D.string_state('"; s = """', '"'), '"""')
+
+    def test_a_test_written_inside_a_string_is_not_a_test(self):
+        """A test definition inside a multi-line string never runs, so it never starts an evidence block; its lines go
+        through relevance like any other edit (Codex security)."""
+        D = self.D
+        py = 'payload = """\ndef test_auth_case():\n    assert True\n"""\n'
+        f = {"path": "tests/test_p.py", "test": True, "text": self.file_diff("tests/test_p.py", py)}
+        self.assertEqual(D.test_blocks(f, ["test_auth_case"], self.defined), ("", False))
+        self.assertIn("def test_auth_case", D.residual_edits(f, ["test_auth_case"], self.defined))
+
+    def test_an_annotation_starts_the_block_of_the_method_under_it(self):
+        """Java/Kotlin @Test and Rust #[test] sit on their own line above the declaration that names the test (Codex)."""
+        D = self.D
+        defined = (lambda r, t: bool(__import__("re").search(r"\b(?:void|fun|fn)\s+" + r + r"\s*\(", t)))
+        java = ("class CheckoutTest {\n  @Test\n  public void checkoutAppliesDiscount() {\n    assertEquals(1, 1);\n  }\n"
+                "  @Test\n  public void other() {\n    unrelated();\n  }\n}\n")
+        f = {"path": "src/test/CheckoutTest.java", "test": True, "text": self.file_diff("src/test/CheckoutTest.java", java)}
+        part, cut = D.test_blocks(f, ["checkoutAppliesDiscount"], defined)
+        self.assertIn("@Test\n+  public void checkoutAppliesDiscount", part); self.assertIn("assertEquals", part)
+        self.assertNotIn("unrelated", part); self.assertFalse(cut)
+        rs = "#[test]\nfn adds_two() {\n    assert_eq!(2, 1 + 1);\n}\n#[test]\nfn other() {\n    nope();\n}\n"
+        f = {"path": "tests/add.rs", "test": True, "text": self.file_diff("tests/add.rs", rs)}
+        part, _ = D.test_blocks(f, ["adds_two"], defined)
+        self.assertIn("#[test]", part); self.assertIn("assert_eq!", part); self.assertNotIn("nope", part)
+
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
         relevance answer: each gets its own request."""

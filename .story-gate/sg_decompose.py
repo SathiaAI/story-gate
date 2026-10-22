@@ -175,6 +175,7 @@ HASH_COMMENT_EXT = (".py", ".rb", ".sh", ".bash", ".pl", ".r", ".yml", ".yaml", 
 CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
+ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
 
@@ -189,51 +190,55 @@ def ends_test(text, depth):
     return bool(s) and not CLOSING.match(s) and not s.startswith(("#", "//")) and indent(text) <= depth
 
 
-def test_end(rest, start, stop, depth, hash_comments=True):
+def test_end(rest, start, stop, depth, st):
     """The first line in rest[start:stop] that ends the test (see ends_test), or stop. Lines inside a multi-line string
-    (a triple-quoted or backtick snapshot, often unindented) are the test's own, except a line that starts a definition
-    or an assignment: the string tracking is a guess, so it may end a test early but never hide a helper."""
-    open_q = None
-    for j in range(start, stop):
-        if rest[j][:1] not in " +":
-            continue
-        line = rest[j][1:].rstrip("\n")
-        if ends_test(line, depth) and (open_q is None or DEFINES.match(line)):
-            return j
-        open_q = string_state(line, open_q, hash_comments)
-    return stop
+    (a triple-quoted or backtick snapshot, often unindented; st is string_states(rest)) are the test's own, except a
+    line that starts a definition or an assignment: the string tracking is a guess, so it may end a test early but never
+    hide a helper. A string still open at stop means the guess was wrong, so the plain rule applies instead.
+    -> (that line or stop, True when the test ended inside a string that looked open: its block may be cut short)."""
+    live = [j for j in range(start, stop) if rest[j][:1] in " +"]
+    for j in live:
+        if ends_test(rest[j][1:].rstrip("\n"), depth) and (st[j] is None or DEFINES.match(rest[j][1:])):
+            return j, st[j] is not None
+    if st[stop] is None:
+        return stop, False
+    return next((j for j in live if ends_test(rest[j][1:].rstrip("\n"), depth)), stop), True
 
 
 def string_state(line, open_q, hash_comments=True):
-    """The multi-line string still open after `line` (one of STRING_QUOTES, or None). Reads the line left to right:
-    one-line strings and comments (# or //) outside a string are skipped, so a quote inside them opens nothing."""
-    i, n, single = 0, len(line), None
+    """The multi-line string still open after `line`: one of STRING_QUOTES, a one-line string continued by a backslash
+    at the end of the line, or None. Reads the line left to right like a tokenizer: inside a string a backslash escapes
+    the next character, and outside one a comment (# or //) ends the line, so a quote inside it opens nothing."""
+    i, n = 0, len(line)
     while i < n:
         if open_q:
-            k = line.find(open_q, i)
-            if k < 0:
-                return open_q
-            i, open_q = k + len(open_q), None
+            if line[i] == "\\":
+                i += 2
+            elif line.startswith(open_q, i):
+                i, open_q = i + len(open_q), None
+            else:
+                i += 1
             continue
         c = line[i]
-        if single:
-            if c == "\\":
-                i += 2
-                continue
-            if c == single:
-                single = None
-            i += 1
-            continue
         if (c == "#" if hash_comments else line.startswith("//", i)):
             return None
-        q = next((q for q in STRING_QUOTES if line.startswith(q, i)), None)
-        if q:
-            open_q, i = q, i + len(q)
-        elif c in "'\"":
-            single, i = c, i + 1
-        else:
-            i += 1
-    return open_q
+        open_q = next((q for q in STRING_QUOTES if line.startswith(q, i)), c if c in "'\"" else None)
+        i += len(open_q) if open_q else 1
+    return open_q if open_q in STRING_QUOTES or i > n else None  # i > n: the last backslash escaped the line end
+
+
+def string_states(rest, hash_comments=True):
+    """For each line of a diff body, the multi-line string open just before it (see string_state), plus one entry for
+    the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing, and a hunk header
+    starts the next hunk outside any string (the lines between hunks are not shown)."""
+    out, open_q = [], None
+    for ln in rest:
+        out.append(open_q)
+        if ln.startswith("@@"):
+            open_q = None
+        elif ln[:1] in " +":
+            open_q = string_state(ln[1:].rstrip("\n"), open_q, hash_comments)
+    return out + [open_q]
 
 
 def linked_spans(f, refs, defined):
@@ -242,43 +247,59 @@ def linked_spans(f, refs, defined):
     another place in the file) or line that ends the test (see ends_test), at most TEST_BLOCK_MAX shown lines. A hunk
     whose header names a linked test in git's function context starts a span too. Removed lines inside a span stay in
     it, so a deleted assertion is evidence too; only live lines can start a test, and a removed definition ends the
-    span above it."""
+    span above it. A test definition inside a multi-line string is text, not a test: it never starts or ends a span. An
+    annotation line (@Test, #[test]) starts the span of the declaration under it."""
     lines = f["text"].splitlines(keepends=True)
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
         n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
     rest = lines[n_head:]
+    st = string_states(rest, f.get("path", "").lower().endswith(HASH_COMMENT_EXT))
     # a removed test definition ends the block above it (its lines are not that test's) but never starts a block
-    bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or TEST_START.search(" " + ln[1:] if ln.startswith("-") else ln)]
-    spans = []
-    for n, i in enumerate(bounds):
-        if rest[i].startswith("-"):
+    bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or ln.startswith("-") and TEST_START.search(" " + ln[1:])
+              or st[i] is None and TEST_START.search(ln)]
+    spans, seen = [], -1
+    for i in bounds:
+        if rest[i].startswith("-") or i <= seen:
             continue
-        # a hunk header carries git's function context ("@@ -20,2 +19,2 @@ def test_x():"): a later hunk of a linked test
-        # opens with lines of that test, so it stays in the test's block instead of depending on relevance
-        line = rest[i].split("@@", 2)[2] if rest[i].startswith("@@") and rest[i].count("@@") >= 2 else rest[i][1:]
+        k = i
+        if rest[i].startswith("@@"):
+            # a hunk header carries git's function context ("@@ -20,2 +19,2 @@ def test_x():"): a later hunk of a linked
+            # test opens with lines of that test, so it stays in the test's block instead of depending on relevance
+            line = rest[i].split("@@", 2)[2] if rest[i].count("@@") >= 2 else ""
+            depth = indent(line[1:])  # header context keeps one space after "@@"
+        else:
+            while ANNOTATION.match(rest[k][1:]) and k + 1 < len(rest) and rest[k + 1][:1] in " +":
+                k += 1
+            line = "".join(ln[1:] for ln in rest[i:k + 1])
+            depth = indent(line)
         if not any(defined(r, line) for r in refs):
             continue
-        stop = bounds[n + 1] if n + 1 < len(bounds) else len(rest)
-        depth = indent(line[1:] if rest[i].startswith("@@") else line)  # header context keeps one space after "@@"
-        stop = test_end(rest, i + 1, stop, depth, f.get("path", "").lower().endswith(HASH_COMMENT_EXT))
+        seen = k
+        stop = next((b for b in bounds if b > k), len(rest))
+        stop, in_string = test_end(rest, k + 1, stop, depth, st)
         live = [j for j in range(i, stop) if not rest[j].startswith("-")]
         more = max(len(live) - TEST_BLOCK_MAX, 0)
-        spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more))
+        spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more, in_string))
     return lines[:n_head], rest, spans
 
 
 def test_blocks(f, refs, defined):
     """Only the parts of a test file's diff that define one of `refs` (see linked_spans), with the file header. A whole
     test file can be larger than a pack, so an AC's pack carries just its own tests. -> (text, cut): text is "" when none
-    of `refs` is defined in this diff; cut is True when a block was longer than TEST_BLOCK_MAX lines and its end is not shown."""
+    of `refs` is defined in this diff; cut is True when a block was longer than TEST_BLOCK_MAX lines and its end is not shown,
+    or ended inside a string that looked open (see test_end)."""
     head, rest, spans = linked_spans(f, refs, defined)
     keep, cut = [], False
-    for a, b, more in spans:
+    for a, b, more, in_string in spans:
         keep.append("".join(rest[a:b]))
         if more:
             cut = True
             keep.append("[... cut: %d more lines of this test not shown]\n" % more)
+        if in_string:
+            cut = True
+            keep.append("[... this test may continue inside a string the gate could not follow; the rest is shown "
+                        "elsewhere]\n")
     return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
 
 
@@ -288,7 +309,7 @@ def residual_edits(f, refs, defined):
     removed lines there can change what a linked test proves, so they go through relevance like code.
     -> the file header plus those lines, or "" when none changed."""
     head, rest, spans = linked_spans(f, refs, defined)
-    covered = {i for a, b, _ in spans for i in range(a, b)}
+    covered = {i for a, b, _, _ in spans for i in range(a, b)}
     left = [ln for i, ln in enumerate(rest) if i not in covered]
     if not any(ln[:1] in "+-" for ln in left):
         return ""
