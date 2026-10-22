@@ -49,6 +49,7 @@ DIAG_CAP = 2000           # characters of those probes' findings added to the er
 LOCK_FILES = ("/etc/passwd.lock", "/etc/shadow.lock", "/etc/group.lock", "/etc/gshadow.lock", "/etc/.pwd.lock")
 DIAG_PROCS = 8            # processes listed, so the probes after them always fit in DIAG_CAP
 DIAG_PROGRAMS = re.compile(r"useradd|passwd|nscd|sssd\w*|systemd-userdbd|sudo")
+SUDO_TARGETS = re.compile(r"userdel|pkill|pgrep|chown|chmod|mkdir|setpriv|true")  # story-gate's own sudo commands
 
 
 def _probe(argv):
@@ -63,11 +64,13 @@ def _probe(argv):
 
 
 def _program(cmd):
-    """The program a process runs (for sudo, also the program sudo runs), never its arguments: those can hold credentials."""
+    """The program a process runs, never its arguments (those can hold credentials). For sudo, also the program sudo
+    runs, but only when it is one of the commands story-gate runs or probes: nothing else from the line is shown."""
     words = cmd.split()
     name = posixpath.basename(words[0])
-    target = next((w for w in words[1:] if not w.startswith("-")), None) if name == "sudo" else None
-    return name + (" " + posixpath.basename(target) if target else "")
+    target = next((w for w in words[1:] if not w.startswith("-")), "") if name == "sudo" else ""
+    target = posixpath.basename(target)
+    return name + (" " + target if DIAG_PROGRAMS.fullmatch(target) or SUDO_TARGETS.fullmatch(target) else "")
 
 
 def _timeout_diagnostics():

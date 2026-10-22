@@ -11585,13 +11585,14 @@ class TestCiIsolation(Base):
     @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
     def test_a_timed_out_admin_command_says_what_may_have_stalled_it(self):
         """_run(): when the command times out, the error keeps its first words and adds a bounded diagnosis: lock files,
-        the account-database processes (program names only, never arguments), sudo's time, the host name lookup and the
+        the account-database processes (program names only, never arguments; after sudo, only a known command name), sudo's time, the host name lookup and the
         name-service caches. Each probe runs with its own short timeout, and the whole diagnosis stays under the cap."""
         I = self.I()
         ps = ("    PID     ELAPSED STAT CMD\n      1    01:00:00 Ss   /sbin/init\n"
               "    812       02:01 S    sudo -n useradd --create-home sgpr-x\n    813       02:01 D    useradd --create-home sgpr-x\n"
               "    900       10:00 Ssl  /usr/sbin/nscd\n    901       10:00 S    /usr/libexec/sssd/sssd_nss --uid 0\n"
               "    950       00:10 S    sudo curl -u alice:s3cr3t -H Authorization: Bearer s3cr3t https://example.com\n"
+              "    951       00:09 S    sudo -n API_TOKEN=s3cr3t useradd x\n"
               + "    999       00:01 S    passwd %s\n" % ("x" * 400) * 40)
         answers = {"ps": (0, ps), "sudo": (0, ""), "getent": (2, ""), "systemctl": (3, "inactive\nactive\n")}
 
@@ -11607,9 +11608,9 @@ class TestCiIsolation(Base):
         self.assertIn("lock files present: %s;" % (self.repo / "passwd.lock"), diag); self.assertNotIn("shadow.lock", diag)
         flat = " ".join(diag.split())
         for line in ("812 02:01 S sudo useradd |", "813 02:01 D useradd |", "900 10:00 Ssl nscd |", "901 10:00 S sssd_nss |",
-                     "950 00:10 S sudo curl |", "(37 more)"):  # 41 matches: the first 8 listed, then a count
+                     "950 00:10 S sudo |", "951 00:09 S sudo |", "(38 more)"):  # 42 matches: the first 8 listed, then a count
             self.assertIn(line, flat)
-        for absent in ("init", "s3cr3t", "alice", "--create-home", "PATH="):
+        for absent in ("init", "s3cr3t", "API_TOKEN", "alice", "curl", "--create-home", "PATH="):
             self.assertNotIn(absent, diag)
         self.assertRegex(diag, r"; sudo -n true: exit 0 in \d+\.\d\d s; getent hosts \S+: no answer \(exit 2\); "
                                r"systemctl is-active: nscd inactive, sssd active$")  # the long process list crowds out nothing
