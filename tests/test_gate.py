@@ -13352,6 +13352,36 @@ class TestDecomposePure(unittest.TestCase):
         only = self.file_diff("tests/test_ac1.py", "def test_ac1():\n    assert True")
         self.assertEqual(D.residual_edits(D.split_diff(only)[0], ["test_ac1"], defined), "")
 
+    def test_a_score_just_below_the_threshold_is_not_rounded_into_a_pass(self):
+        """Scores stay raw until the band: 0.6996 is CONCERNS with a 0.7 pass mark, not a rounded 0.700 PASS."""
+        D = self.D
+        band = self.ev("", [])["band"]
+        c = D.combine([D.item("AC-1", 0.6996)], {"pass": 0.7, "concerns": 0.4}, band)
+        self.assertEqual((c["score"], c["band"]), (0.6996, "CONCERNS"))
+
+    def test_every_model_of_a_narrow_run_is_checked_for_self_review(self):
+        """A narrow run joins its models with '+': one model of the coder's family makes the whole run self-review."""
+        import importlib
+        G = importlib.import_module("gate")
+        sd = Path(tempfile.mkdtemp())
+        (sd / "coder.json").write_text(json.dumps({"model": "anthropic/claude-opus-5"}))
+        mixed = {"tier": "emulated", "model": "anthropic/claude-sonnet-5+openai/gpt-6"}
+        self.assertEqual(G.judge_tier(mixed, {}, sd)[0], "self")
+        self.assertNotEqual(G.judge_tier(dict(mixed, model="google/gemini-3+openai/gpt-6"), {}, sd)[0], "self")
+
+    def test_a_linked_tests_removed_lines_and_later_hunks(self):
+        """A deleted assertion stays in its test's block; a later hunk (another test's edit) is not part of that block."""
+        D = self.D
+        text = ("diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n"
+                "@@ -1,4 +1,3 @@\n def test_ac1():\n     assert a == 1\n-    assert b == 2\n+    pass\n"
+                "@@ -20,2 +19,2 @@\n     x = 1\n-    assert x == 1\n+    assert True\n")
+        f = {"path": "tests/test_x.py", "test": True, "text": text}
+        part, _ = D.test_blocks(f, ["test_ac1"], self.defined)
+        self.assertIn("-    assert b == 2", part)
+        self.assertNotIn("assert x == 1", part)
+        rest = D.residual_edits(f, ["test_ac1"], self.defined)
+        self.assertIn("-    assert x == 1", rest); self.assertNotIn("assert b == 2", rest)
+
     def test_a_binary_change_counts_as_cut_evidence(self):
         """A binary file shows only a header: its group (and a pack holding it) cannot claim complete evidence."""
         D = self.D

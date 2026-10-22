@@ -171,50 +171,53 @@ TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
 
-def test_blocks(f, refs, defined):
-    """Only the parts of a test file's diff that define one of `refs`: from the defining line to the next test definition
-    (at most TEST_BLOCK_MAX lines), with the file header. A whole test file can be larger than a pack, so an AC's pack
-    carries just its own tests. -> (text, cut): text is "" when none of `refs` is defined in this diff; cut is True when
-    a block was longer than TEST_BLOCK_MAX lines and its end is not shown."""
+def linked_spans(f, refs, defined):
+    """(header lines, body lines, spans) for a test file's diff. A span is (first, past_last, lines_not_shown): the body
+    lines of one test definition that names one of `refs`, up to the next test definition or hunk header (a new hunk is
+    another place in the file), at most TEST_BLOCK_MAX shown lines. Removed lines inside a span stay in it, so a deleted
+    assertion is evidence too; only live lines can start a test."""
     lines = f["text"].splitlines(keepends=True)
-    head = []
-    for ln in lines:
-        if ln.startswith("@@"):
-            break
-        head.append(ln)
-    body = [ln for ln in lines[len(head):] if not ln.startswith("-")]
-    starts = [i for i, ln in enumerate(body) if TEST_START.search(ln)]
+    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
+    rest = lines[n_head:]
+    vis = [i for i, ln in enumerate(rest) if not ln.startswith("-")]
+    bounds = [k for k, i in enumerate(vis) if rest[i].startswith("@@") or TEST_START.search(rest[i])]
+    spans = []
+    for n, k in enumerate(bounds):
+        i = vis[k]
+        if rest[i].startswith("@@") or not any(defined(r, rest[i][1:]) for r in refs):
+            continue
+        stop = bounds[n + 1] if n + 1 < len(bounds) else len(vis)
+        end = min(stop, k + TEST_BLOCK_MAX)
+        hi = (vis[stop] if stop < len(vis) else len(rest)) if end == stop else vis[end - 1] + 1
+        spans.append((i, hi, stop - end))
+    return lines[:n_head], rest, spans
+
+
+def test_blocks(f, refs, defined):
+    """Only the parts of a test file's diff that define one of `refs` (see linked_spans), with the file header. A whole
+    test file can be larger than a pack, so an AC's pack carries just its own tests. -> (text, cut): text is "" when none
+    of `refs` is defined in this diff; cut is True when a block was longer than TEST_BLOCK_MAX lines and its end is not shown."""
+    head, rest, spans = linked_spans(f, refs, defined)
     keep, cut = [], False
-    for k, i in enumerate(starts):
-        if any(defined(r, body[i][1:]) for r in refs):
-            stop = starts[k + 1] if k + 1 < len(starts) else len(body)
-            end = min(stop, i + TEST_BLOCK_MAX)
-            keep.append("".join(body[i:end]))
-            if end < stop:
-                cut = True
-                keep.append("[... cut: %d more lines of this test not shown]\n" % (stop - end))
+    for a, b, more in spans:
+        keep.append("".join(rest[a:b]))
+        if more:
+            cut = True
+            keep.append("[... cut: %d more lines of this test not shown]\n" % more)
     return ("".join(head) + "@@ tests for this acceptance criterion @@\n" + "".join(keep), cut) if keep else ("", False)
 
 
 def residual_edits(f, refs, defined):
-    """The parts of a test file's diff that test_blocks shows to no AC: helpers, fixtures and imports above the first
-    linked test, unlinked tests, and the lines past a cut block. Added or removed lines there can change what a linked
-    test proves, so they go through relevance like code. -> the file header plus those lines, or "" when none changed."""
-    lines = f["text"].splitlines(keepends=True)
-    n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
-    rest = lines[n_head:]
-    vis = [i for i, ln in enumerate(rest) if not ln.startswith("-")]  # index in rest of each line test_blocks can show
-    starts = [k for k, i in enumerate(vis) if TEST_START.search(rest[i])]
-    covered = set()
-    for n, k in enumerate(starts):
-        if any(defined(r, rest[vis[k]][1:]) for r in refs):
-            stop = starts[n + 1] if n + 1 < len(starts) else len(vis)
-            end = min(stop, k + TEST_BLOCK_MAX)
-            covered.update(range(vis[k], vis[end - 1] + 1))  # a removed line inside a shown block belongs to that block
+    """The parts of a test file's diff that test_blocks shows to no AC: helpers, fixtures and imports outside the linked
+    tests, unlinked tests, edits in a hunk that holds no linked definition, and the lines past a cut block. Added or
+    removed lines there can change what a linked test proves, so they go through relevance like code.
+    -> the file header plus those lines, or "" when none changed."""
+    head, rest, spans = linked_spans(f, refs, defined)
+    covered = {i for a, b, _ in spans for i in range(a, b)}
     left = [ln for i, ln in enumerate(rest) if i not in covered]
     if not any(ln[:1] in "+-" for ln in left):
         return ""
-    return "".join(lines[:n_head]) + "".join(left)
+    return "".join(head) + "".join(left)
 
 
 def clip(text, n):
@@ -412,7 +415,8 @@ def p_of(res, key):
 
 # ------------------------------------------------------------------ combining
 def item(id_, score, files=(), truncated=False, notes=(), not_asked=False, detail=""):
-    return {"id": id_, "detail": detail, "score": None if score is None else round(float(score), 3), "files": list(files),
+    """One scored piece of a check. The score stays raw: rounding before the band could lift 0.6996 to a PASS."""
+    return {"id": id_, "detail": detail, "score": None if score is None else float(score), "files": list(files),
             "truncated": bool(truncated or not_asked), "not_asked": bool(not_asked), "notes": list(notes)}
 
 
@@ -542,7 +546,7 @@ STORY_RECORDS = {"story.md", "context.md", "tests.json", "handoff.md", "validati
 
 def story_record(path, ev):
     """True for a record the gate keeps in this story's folder (story.md, tests.json, verdicts...). The judge already gets
-    the story in its fields, so these never go into packs or groups. Other files in the folder are evidence like any file."""
+    the story in its fields, so these never go into packs or groups. (gate.py's diff already leaves out the whole stories tree; this guards raw diffs.)"""
     d = (ev.get("story_dir") or "").rstrip("/")
     return bool(d and path.startswith(d + "/") and path[len(d) + 1:] in STORY_RECORDS)
 

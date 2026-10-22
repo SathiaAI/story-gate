@@ -740,7 +740,7 @@ def judge_tier(r, c, sd):
         coder = load_json(sd / "coder.json").get("model") or ""
         if not coder:
             note = "coder model not recorded (run: start <ID> --model <coding model>), so this judge can't be shown to be independent"
-        elif J.family(coder) == J.family(r.get("model") or ""):
+        elif any(J.family(coder) == J.family(m) for m in (r.get("model") or "").split("+")):  # narrow runs join every model
             tier, note = "self", "judge %s is the same model family as the coder %s, so it counts as self-review" % (r.get("model"), coder)
         elif calibrated(c):
             tier = "emulated-calibrated"
