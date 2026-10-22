@@ -11,7 +11,7 @@ about the evidence (which files, what was cut). It is never model text.
 Pure functions plus run(), which takes the judge as a function (ask(state, questions) -> the shape sg_judges.ask returns),
 so it can be tested with a fake judge. Decision record: docs/decisions/2026-10-22-judge-evidence-packs.md.
 """
-import concurrent.futures, functools, hashlib, json, re
+import concurrent.futures, hashlib, json, re
 
 SCHEMA = "decompose-1"
 MODES = ("off", "shadow", "on")
@@ -122,12 +122,17 @@ def _header_paths(rest):
     return strip(a, "a/"), strip(b, "b/")
 
 
+def diff_lines(text):
+    """text split after each \n only, keeping it, as git counts lines (splitlines would also split at \f, \x1c, \u2028...)."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
 def split_diff(diff):
     """A unified diff as one entry per file, in the order given:
     {"path", "old_path", "status": modified|added|deleted|renamed|copied, "binary", "text"}.
     "text" is that file's part of the diff, header included. Text before the first file header is dropped."""
     chunks, cur = [], None
-    for line in diff.splitlines(keepends=True):
+    for line in diff_lines(diff):
         if line.startswith("diff --git "):
             cur = [line]
             chunks.append(cur)
@@ -167,19 +172,17 @@ def split_diff(diff):
 
 def visible_text(f):
     """A file's diff without the removed lines (a deleted test is not a definition)."""
-    return "".join(l for l in f["text"].splitlines(keepends=True) if not l.startswith("-"))
+    return "".join(l for l in diff_lines(f["text"]) if not l.startswith("-"))
 
 
 # A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
 STRING_QUOTES = ('"""', "'''", "`")  # multi-line string delimiters: Python triple quotes, JS/Go backticks
-DEFINES = re.compile(r"^\s*(?:@|(?:(?:export|async|pub(?:\([\w:]+\))?|public|private|internal|protected|static|suspend)\s+)*(?:def|class|function|const|let|var|import|from|func|fn|fun|sub|type|impl)\b|[\w.]+\s*(?::[^=]*)?=(?!=))")
 HASH_COMMENT_EXT = (".py", ".rb", ".sh", ".bash", ".pl", ".r", ".yml", ".yaml", ".toml", ".ex", ".exs", ".jl", ".nim", ".cr")
 CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
 ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
 DECORATOR = re.compile(r"^\s*(?:@\w|#\[)")  # a decorator or attribute line (@pytest.mark.skip, @Disabled, #[ignore])
-CALL = re.compile(r"^\s*(?:await\s+)?[\w$][\w$.]*\s*\(")  # a call statement: beforeEach(...), jest.mock(...)
 RAW_BACKTICK_EXT = (".go",)  # files whose backtick strings are raw: a backslash there escapes nothing
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
@@ -196,18 +199,13 @@ def ends_test(text, depth):
 
 
 def test_end(rest, start, stop, depth, st):
-    """The first line in rest[start:stop] that ends the test (see ends_test), or stop. Lines inside a multi-line string
-    (a triple-quoted or backtick snapshot, often unindented; st is string_states(rest)) are the test's own, except a
-    line that starts a definition, an assignment or a call (a beforeEach(...) fixture): the string tracking is a guess, so
-    it may end a test early but never hide a helper or fixture. A string still open at stop means the guess was wrong, so the plain rule applies instead.
-    -> (that line or stop, True when the test ended inside a string that looked open: its block may be cut short)."""
-    live = [j for j in range(start, stop) if rest[j][:1] in " +"]
-    for j in live:
-        if ends_test(rest[j][1:].rstrip("\n"), depth) and (st[j] is None or DEFINES.match(rest[j][1:]) or CALL.match(rest[j][1:])):
-            return j, st[j] is not None
-    if st[stop] is None:
-        return stop, False
-    return next((j for j in live if ends_test(rest[j][1:].rstrip("\n"), depth)), stop), True
+    """The first line in rest[start:stop] that ends the test (see ends_test), or stop. The string tracking (st is
+    string_states(rest)) is a guess, so it never keeps a line in the test: any statement at or left of the test's own
+    indentation ends it, even inside a string that looks open, so no fixture or helper can hide there whatever its form.
+    -> (that line or stop, True when the test ended inside a string that looked open: a snapshot written flush left may
+    have been cut short, so the block counts as cut)."""
+    j = next((j for j in range(start, stop) if rest[j][:1] in " +" and ends_test(rest[j][1:].rstrip("\n"), depth)), stop)
+    return j, st[j] is not None
 
 
 def string_state(line, open_q, hash_comments=True, raw_backtick=False):
@@ -291,7 +289,7 @@ def linked_spans(f, refs, defined):
     span above it. A test definition inside a multi-line string is text, not a test: it never starts or ends a span. An
     annotation line (@Test, #[test]) starts the span of the declaration under it (past removed lines, so a renamed method
     still joins), and decorators or attributes right above a test (@pytest.mark.skip, @Disabled, #[ignore]) are in it."""
-    lines = f["text"].splitlines(keepends=True)
+    lines = diff_lines(f["text"])
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
         n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
@@ -329,6 +327,7 @@ def linked_spans(f, refs, defined):
         seen = k
         stop = next((b for b in bounds if b > k), len(rest))
         stop, in_string = test_end(rest, k + 1, stop, depth, st)
+        in_string = in_string or bool(f.get("context_unknown"))  # a string opened above the hunk cannot be ruled out
         a = i  # a decorator above the test (a skip marker, say) changes what it proves, so it belongs to the block
         while not rest[i].startswith("@@") and a > 0 and rest[a - 1][:1] in " +-" and DECORATOR.match(rest[a - 1][1:]) \
                 and indent(rest[a - 1][1:]) == depth:
@@ -371,7 +370,6 @@ def residual_edits(f, refs, defined):
     return "".join(head) + "".join(left)
 
 
-@functools.lru_cache(maxsize=4096)
 def sent_len(text):
     """The length of text as a request sends it: json.dumps escapes non-ASCII, up to 12 characters for one. Budgets
     count this, not Python characters, because the judge's limit applies to the sent request."""
@@ -682,8 +680,9 @@ def run(phase, ev, ask):
     bad = [i for i in ids if not AC_ID.match(i)]
     if bad:  # an id is the only story text that reaches a question's wording
         return {"error": "acceptance-criterion ids must be short plain names (letters, digits, . _ : -): %r" % bad[0][:60]}
-    ev = dict(ev, acs=[dict(a, text_cut=len(a.get("text") or "") > AC_TEXT_MAX) for a in ev["acs"]])
-    ev["acs"] = [dict(a, plan_cut=len(plan_json(a)) > PLAN_MAX) for a in ev["acs"]]
+    # the cut flags come from clip itself, so a criterion is marked cut exactly when its sent text was cut
+    ev = dict(ev, acs=[dict(a, text_cut=clip(a.get("text") or "", AC_TEXT_MAX)[1]) for a in ev["acs"]])
+    ev["acs"] = [dict(a, plan_cut=clip(plan_json(a), PLAN_MAX)[1]) for a in ev["acs"]]
     return _run_done(ev, ask) if phase == "done" else _run_ready(ev, ask)
 
 
@@ -772,6 +771,8 @@ def _run_done(ev, ask):
         f["test"] = bool(ev["is_test"](f["path"]))
         # the changed test file as a whole tells which hunks start inside a string (see string_states)
         f["new_text"] = ev["read"](f["path"]) if f["test"] and ev.get("read") and f["status"] != "deleted" else None
+        # too large or unreadable: no hunk's starting state is known, so every linked block counts as cut
+        f["context_unknown"] = f["test"] and bool(ev.get("read")) and f["status"] != "deleted" and f["new_text"] is None
         # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
         f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
     # a linked test file's other edits (a helper or fixture the linked tests call) reach no pack as test blocks: judge them too

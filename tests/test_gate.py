@@ -13140,19 +13140,21 @@ class TestDecomposePure(unittest.TestCase):
 
     def test_a_fixture_call_after_a_test_is_never_hidden_in_its_block(self):
         """A backtick in a /* */ comment is not a string, and a call at the test's depth (beforeEach) ends the test even
-        when the string guess is wrong (a backtick regex), so the fixture reaches relevance as a residual edit (Codex)."""
+        when the string guess is wrong (a backtick regex), and so does any other statement there (a bracketed assignment), so
+        the fixture reaches relevance as a residual edit (Codex)."""
         import importlib, sys
         sys.path.insert(0, str(SRC)); D = importlib.import_module("sg_decompose")
         defined = lambda r, t: ("test('%s'," % r) in t
-        for inner, guessed in (("  /* uses a ` here */\n", False), ("  expect(/`/.test(s)).toBe(true);\n", True)):
-            js = "test('one', () => {\n" + inner + "  expect(run()).toBe(1);\n});\nbeforeEach(() => { mock(run) });\n/* a ` closes the guess */\n" \
+        fixtures = ("beforeEach(() => { mock(run) });\n", 'globalThis["run"] = () => 1;\n')  # a call, a bracketed assignment
+        for (inner, guessed), fixture in [(c, x) for c in (("  /* uses a ` here */\n", False), ("  expect(/`/.test(s)).toBe(true);\n", True)) for x in fixtures]:
+            js = "test('one', () => {\n" + inner + "  expect(run()).toBe(1);\n});\n" + fixture + "/* a ` closes the guess */\n" \
                  "test('two', () => {\n  expect(run()).toBe(1);\n});\n"
             f = {"path": "test/a.test.js", "test": True, "new_text": js, "text": "diff --git a/test/a.test.js b/test/a.test.js\n"
                  "+++ b/test/a.test.js\n@@ -0,0 +1,%d @@\n" % js.count("\n") + "".join("+" + l for l in js.splitlines(True))}
             part, cut = D.test_blocks(f, ["one", "two"], defined)
-            self.assertNotIn("beforeEach", part)
+            self.assertNotIn(fixture.strip(), part)
             self.assertEqual(cut, guessed)
-            self.assertIn("beforeEach", D.residual_edits(f, ["one", "two"], defined))
+            self.assertIn(fixture.strip(), D.residual_edits(f, ["one", "two"], defined))
 
     def test_a_test_longer_than_the_block_limit_is_marked_cut_and_caps_its_pack(self):
         """A linked test over TEST_BLOCK_MAX lines shows a cut marker, and the pack cannot claim complete evidence."""
@@ -13345,6 +13347,17 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(out["checks"]["impl_matches_acs"]["band"], "FAIL")
         self.assertIn("no acceptance criteria", out["checks"]["impl_matches_acs"]["why"])
 
+    def test_an_unreadable_test_file_caps_its_pack(self):
+        """When the gate cannot read a changed test file (over 2 MB, unreadable), no hunk's starting string state is known,
+        so its linked blocks count as cut and the pack cannot PASS (Codex)."""
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK\n") + self.file_diff("tests/test_ac1.py", "def test_ac1():\n    assert run()\n")
+        acs_ = [{"id": "AC-1", "text": "one", "refs": ["test_ac1"], "plan": {}}]
+        ok = D.run("done", dict(self.ev(diff, acs_), read=lambda p: "def test_ac1():\n    assert run()\n"), self.fake_ask())
+        self.assertFalse(ok["packs"]["AC-1"]["truncated"])
+        out = D.run("done", dict(self.ev(diff, acs_), read=lambda p: None), self.fake_ask())
+        self.assertTrue(out["packs"]["AC-1"]["truncated"])
+
     def test_a_file_over_the_per_file_budget_marks_its_packs_truncated(self):
         """A file over the per file budget marks its packs truncated."""
         D = self.D
@@ -13409,6 +13422,30 @@ class TestDecomposePure(unittest.TestCase):
         it = [i for i in done["items"]["impl_matches_acs"] if i["id"] == acs_[0]["id"]][0]
         self.assertTrue(it["truncated"]); self.assertIn("over %d characters" % D.AC_TEXT_MAX, " ".join(it["notes"]))
         e = self.ev(diff, long_, phase="ready"); e["questions"]["ac_testable"] = "Q ac_testable"
+        ready = D.run("ready", e, self.fake_ask())
+        self.assertTrue([i for i in ready["items"]["ac_testable"] if i["id"] == acs_[0]["id"]][0]["truncated"])
+
+    def test_a_form_feed_inside_a_diff_line_starts_no_test(self):
+        """Git splits a diff only at \\n: text after a form feed inside an added line is the same line, not a test start (CodeRabbit)."""
+        D = self.D
+        text = "diff --git a/tests/t.py b/tests/t.py\n+++ b/tests/t.py\n@@ -0,0 +1,2 @@\n+x = 1\f+def test_ac1():\n+y = 2\n"
+        f = {"path": "tests/t.py", "test": True, "text": text}
+        self.assertEqual(len(D.split_diff(text)), 1)
+        self.assertEqual(D.test_blocks(f, ["test_ac1"], lambda r, t: "def %s(" % r in t), ("", False))
+
+    def test_an_ac_cut_by_its_size_as_sent_is_marked_cut(self):
+        """Emoji are short in Python but long as sent: an AC or plan cut to its sent budget is marked cut, so it cannot
+        pass on text the judge never saw (Bugbot)."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        emoji = "\U0001F600" * 200  # 200 characters in Python, 2,400 as sent
+        self.assertLess(len(acs_[0]["text"] + emoji), D.AC_TEXT_MAX)
+        long_ = [dict(acs_[0], text=acs_[0]["text"] + emoji)] + acs_[1:]
+        done = D.run("done", self.ev(diff, long_), self.fake_ask())
+        it = [i for i in done["items"]["impl_matches_acs"] if i["id"] == acs_[0]["id"]][0]
+        self.assertTrue(it["truncated"]); self.assertIn("over %d characters" % D.AC_TEXT_MAX, " ".join(it["notes"]))
+        plan = [dict(acs_[0], plan={"positive": ["\U0001F600" * 800]})] + acs_[1:]  # 800 in Python, 9,600 as sent
+        e = self.ev(diff, plan, phase="ready"); e["questions"]["ac_testable"] = "Q ac_testable"
         ready = D.run("ready", e, self.fake_ask())
         self.assertTrue([i for i in ready["items"]["ac_testable"] if i["id"] == acs_[0]["id"]][0]["truncated"])
 
@@ -13582,19 +13619,21 @@ class TestDecomposePure(unittest.TestCase):
         self.assertNotIn("split into", out["checks"]["impl_no_unplanned_scope"]["why"])
         self.assertEqual(out["checks"]["impl_no_unplanned_scope"]["band"], "PASS")
 
-    def test_an_unindented_multiline_string_stays_in_its_test(self):
-        """A snapshot in triple quotes or backticks may start at column 0; its lines and the assertions after it stay
-        in the test (Bugbot), while a helper after the test still ends it."""
+    def test_an_unindented_multiline_string_ends_its_test_as_cut(self):
+        """A snapshot written flush left ends its test: the string tracking is a guess, so a line at the test's depth
+        never stays in the block (Codex). The block counts as cut, and the rest of the test reaches relevance."""
         D = self.D
         body = ('def test_snap():\n    expected = """\nline one\nline two\n"""\n    assert render() == expected\n\n'
                 "def helper():\n    return 1\n")
         f = {"path": "tests/test_x.py", "test": True, "text": self.file_diff("tests/test_x.py", body)}
-        part, _ = D.test_blocks(f, ["test_snap"], self.defined)
-        self.assertIn("+line two", part); self.assertIn("assert render() == expected", part); self.assertNotIn("def helper", part)
+        part, cut = D.test_blocks(f, ["test_snap"], self.defined)
+        self.assertTrue(cut); self.assertNotIn("+line two", part); self.assertNotIn("def helper", part)
+        self.assertIn("assert render() == expected", D.residual_edits(f, ["test_snap"], self.defined))
         js = "it('test_snap', () => {\n  const s = `\n<div>\n</div>\n`;\n  expect(view()).toBe(s);\n});\nfunction helper() {}\n"
         f = {"path": "tests/a.test.js", "test": True, "text": self.file_diff("tests/a.test.js", js)}
-        part, _ = D.test_blocks(f, ["test_snap"], lambda r, t: r in t)
-        self.assertIn("expect(view()).toBe(s);", part); self.assertNotIn("function helper", part)
+        part, cut = D.test_blocks(f, ["test_snap"], lambda r, t: r in t)
+        self.assertTrue(cut); self.assertNotIn("function helper", part)
+        self.assertIn("expect(view()).toBe(s);", D.residual_edits(f, ["test_snap"], lambda r, t: r in t))
 
     def test_quotes_in_comments_or_one_line_strings_do_not_hide_a_helper(self):
         """A triple quote inside a comment or a one-line string opens no multi-line string, so the helper after the
@@ -13641,7 +13680,7 @@ class TestDecomposePure(unittest.TestCase):
         part, cut = D.test_blocks(f, ["test_z"], self.defined)
         self.assertTrue(cut); self.assertNotIn("allow_all", part)
         # a test that closes all its strings is not marked cut
-        py = 'def test_ok():\n    s = """a\nb"""\n    assert s\n'
+        py = 'def test_ok():\n    s = """a\n    b"""\n    assert s\n'
         f = {"path": "tests/test_ok.py", "test": True, "text": self.file_diff("tests/test_ok.py", py)}
         part, cut = D.test_blocks(f, ["test_ok"], self.defined)
         self.assertFalse(cut); self.assertIn("assert s", part)
@@ -13679,7 +13718,7 @@ class TestDecomposePure(unittest.TestCase):
         self.assertIn("check(1)", part); self.assertNotIn("allowAll", part); self.assertFalse(cut)
         self.assertIn("allowAll", D.residual_edits(f, ["TestX"], lambda r, t: "func " + r in t))
         for line in ("pub fn allow_all() {}", "pub(crate) fn x() {}", "private fun allowAll() = true", "suspend fun x() {}"):
-            self.assertTrue(D.DEFINES.match(line), line)
+            self.assertTrue(D.ends_test(line, 0), line)  # any statement at the test's depth ends it
 
     def test_a_hunk_inside_a_string_opened_above_it_holds_no_test(self):
         """The changed file as a whole tells which hunks start inside a string: a test written into a string opened
@@ -13693,6 +13732,8 @@ class TestDecomposePure(unittest.TestCase):
         self.assertIn("def test_auth_case", D.residual_edits(f, ["test_auth_case"], self.defined))
         f.pop("new_text")  # without the file the hunk starts outside any string: the old guess, kept as a fallback
         self.assertIn("assert True", D.test_blocks(f, ["test_auth_case"], self.defined)[0])
+        f["context_unknown"] = True  # the gate tried to read the file and could not (over 2 MB, unreadable): counts as cut
+        self.assertTrue(D.test_blocks(f, ["test_auth_case"], self.defined)[1])
 
     def test_a_hunk_header_naming_a_test_inside_a_string_starts_no_block(self):
         """git's function context does not know strings: a header naming a "test" written inside a string opened above
@@ -13726,7 +13767,8 @@ class TestDecomposePure(unittest.TestCase):
         """`\\/\\//` in a JS regex is not a comment; a skip decorator above a test is part of its block; an @Test whose
         method was renamed still joins the new declaration (Codex, Bugbot)."""
         D = self.D
-        js = "it('test_r', () => {\n  expect(u).toMatch(/https:\\/\\//); const s = `\nunindented snapshot\n`;\n  expect(s).toBe(1);\n});\n"
+        js = "it('test_r', () => {\n  expect(u).toMatch(/https:\\/\\//); const s = `\n  indented snapshot\n  `;\n  expect(s).toBe(1);\n});\n"
+        self.assertEqual(D.string_state("  expect(u).toMatch(/https:\\/\\//); const s = `", None, hash_comments=False), "`")
         f = {"path": "tests/r.test.js", "test": True, "text": self.file_diff("tests/r.test.js", js)}
         part, cut = D.test_blocks(f, ["test_r"], lambda r, t: r in t)
         self.assertIn("expect(s).toBe(1);", part); self.assertFalse(cut)
