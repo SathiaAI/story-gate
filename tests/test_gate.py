@@ -13036,8 +13036,8 @@ class TestDecompose(Base):
         self.assertIsNone(g.worktree_text("/proc/self/environ"))
         text, whole = g.untracked_text(["evil\ndiff --git a/tests/../../x b/tests/../../x"])
         self.assertNotIn("diff --git a/tests/../../x", text); self.assertFalse(whole)
-        (self.repo / "src").mkdir(exist_ok=True); (self.repo / "src" / "x.py\talias").write_text("x = 1\n")
         text, whole = g.untracked_text(["src/x.py\talias"])  # split_diff cuts a name at a tab: it would pose as src/x.py
+        # (no file is written: Windows refuses a tab in a name, and the name is refused before any read)
         self.assertNotIn("src/x.py", text); self.assertFalse(whole)
         with patch.object(g, "zlist", lambda *a: ["ok.txt", "evil\nname", "src/x.py\talias"]), patch.object(g, "untracked_readable", lambda f: True):
             self.assertEqual(g.untracked_skipped(), ["evil\nname", "src/x.py\talias"])  # counted as not read: the evidence is capped
