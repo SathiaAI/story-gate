@@ -48,8 +48,8 @@ DIAG_TIMEOUT = 5          # seconds each probe may take when an administrative c
 DIAG_CAP = 2000           # characters of those probes' findings added to the error
 LOCK_FILES = ("/etc/passwd.lock", "/etc/shadow.lock", "/etc/group.lock", "/etc/gshadow.lock", "/etc/.pwd.lock")
 DIAG_PROCS = 8            # processes listed, so the probes after them always fit in DIAG_CAP
-DIAG_PROGRAMS = re.compile(r"useradd|passwd|nscd|sssd\w*|systemd-userdbd|sudo")
-SUDO_TARGETS = re.compile(r"userdel|pkill|pgrep|chown|chmod|mkdir|setpriv|true")  # story-gate's own sudo commands
+DIAG_PROGRAMS = re.compile(r"useradd|userdel|passwd|nscd|sssd\w*|systemd-userdbd|sudo")
+SUDO_TARGETS = re.compile(r"pkill|pgrep|chown|chmod|mkdir|setpriv|true")  # story-gate's own sudo commands
 
 
 def _probe(argv):

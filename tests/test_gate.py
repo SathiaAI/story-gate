@@ -11590,6 +11590,7 @@ class TestCiIsolation(Base):
         I = self.I()
         ps = ("    PID     ELAPSED STAT CMD\n      1    01:00:00 Ss   /sbin/init\n"
               "    812       02:01 S    sudo -n useradd --create-home sgpr-x\n    813       02:01 D    useradd --create-home sgpr-x\n"
+              "    814       05:00 D    userdel --remove sgpr-old\n"
               "    900       10:00 Ssl  /usr/sbin/nscd\n    901       10:00 S    /usr/libexec/sssd/sssd_nss --uid 0\n"
               "    950       00:10 S    sudo curl -u alice:s3cr3t -H Authorization: Bearer s3cr3t https://example.com\n"
               "    951       00:09 S    sudo -n API_TOKEN=s3cr3t useradd x\n"
@@ -11607,8 +11608,8 @@ class TestCiIsolation(Base):
         self.assertLessEqual(len(diag), I.DIAG_CAP)
         self.assertIn("lock files present: %s;" % (self.repo / "passwd.lock"), diag); self.assertNotIn("shadow.lock", diag)
         flat = " ".join(diag.split())
-        for line in ("812 02:01 S sudo useradd |", "813 02:01 D useradd |", "900 10:00 Ssl nscd |", "901 10:00 S sssd_nss |",
-                     "950 00:10 S sudo |", "951 00:09 S sudo |", "(38 more)"):  # 42 matches: the first 8 listed, then a count
+        for line in ("812 02:01 S sudo useradd |", "813 02:01 D useradd |", "814 05:00 D userdel |", "900 10:00 Ssl nscd |",
+                     "901 10:00 S sssd_nss |", "950 00:10 S sudo |", "951 00:09 S sudo |", "(39 more)"):  # 43: 8 listed, then a count
             self.assertIn(line, flat)
         for absent in ("init", "s3cr3t", "API_TOKEN", "alice", "curl", "--create-home", "PATH="):
             self.assertNotIn(absent, diag)
