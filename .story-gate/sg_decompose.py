@@ -22,6 +22,7 @@ PARALLEL = 4  # requests in flight at once
 RELEVANT = 0.5  # a changed file with at least this relevance to an AC goes into that AC's pack
 MIN_PART = 1000  # a file that doesn't fit is shown cut only if at least this many characters are left
 AC_TEXT_MAX = 2000  # an AC's text in the evidence: enough to read, bounded; a longer AC is marked cut
+REL_AC_MIN = 160  # the shortest an AC's text is cut to in a relevance request, however many ACs share it
 PLAN_MAX = 8000  # an AC's planned cases and test_refs, as JSON: bounded the same way
 AC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$")  # ids appear in question wording, so they must be plain names
 
@@ -257,11 +258,18 @@ def plan_json(a):
     return json.dumps({"planned_cases": planned_cases(a), "test_refs": a["refs"]}, ensure_ascii=False)
 
 
+def relevance_text_max(acs, per_file):
+    """Each AC's text length in a relevance request. Every relevance request carries every AC, so their total is held to
+    about `per_file` (a floor of REL_AC_MIN each) instead of growing with the number of ACs."""
+    return min(AC_TEXT_MAX, max(REL_AC_MIN, per_file // max(len(acs), 1)))
+
+
 def relevance_request(f, acs, per_file):
     """One request: does this file's change serve each AC? One question per AC."""
     body, cut = clip(f["text"], per_file)
+    lim = relevance_text_max(acs, per_file)
     state = {"file": f["path"], "status": f["status"], "diff": body, "truncated": cut,
-             "acceptance_criteria": [{"id": a["id"], "text": ac_text(a)} for a in acs]}
+             "acceptance_criteria": [{"id": a["id"], "text": clip(a["text"], lim)[0]} for a in acs]}
     qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports the acceptance criterion with id "
                                  "%s in `acceptance_criteria`." % a["id"]) for a in acs}
     return {"id": "rel:" + f["path"], "kind": "relevance", "state": state, "questions": qs}
@@ -433,6 +441,11 @@ def execute(reqs, ask, workers=PARALLEL):
         return list(ex.map(one, reqs))
 
 
+def paid(results):
+    """What the answered requests cost, so a run that stops on an error still reports what was already paid."""
+    return combine_meta([r for r in results if isinstance(r, dict) and r.get("tier") in ("jev", "emulated")] or [{"tier": "none"}])["cost"]
+
+
 def first_error(reqs, results):
     for r, res in zip(reqs, results):
         if not isinstance(res, dict) or res.get("tier") not in ("jev", "emulated") or not isinstance(res.get("answers"), dict):
@@ -545,13 +558,13 @@ def _run_ready(ev, ask):
     results = execute(reqs, ask)
     err = first_error(reqs, results)
     if err:
-        return {"error": err}
+        return {"error": err, "cost": paid(results)}
     by = {r["id"]: res for r, res in zip(reqs, results)}
     checks = {}
     for k, q in rest["questions"].items():
         if q["type"] == "noul":
             p = p_of(by["rest"], k)
-            checks[k] = {"score": round(p, 3), "band": band(p, th), "items": [], "why": "", "capped": False}
+            checks[k] = {"score": p, "band": band(p, th), "items": [], "why": "", "capped": False}  # raw: rounding could lift 0.6996 to a PASS
     cd = by["rest"]["answers"]["drift_direction"]
     dropped_ids = {r["id"] for r in dropped}
     for key in PER_AC_READY:
@@ -618,7 +631,7 @@ def _run_done(ev, ask):
     res1 = execute(stage1, ask)
     err = first_error(stage1, res1)
     if err:
-        return {"error": err}
+        return {"error": err, "cost": paid(res1)}
     by = {r["id"]: res for r, res in zip(stage1, res1)}
     rel = {}
     for f in code:
@@ -629,6 +642,13 @@ def _run_done(ev, ask):
     # evidence packs, one per AC
     unread = list(ev.get("unread") or [])  # new files the gate could not read: their contents are unknown evidence
     packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed, unread) for a in acs}
+    lim = relevance_text_max(acs, per_file)
+    for a in acs if rel_reqs else ():  # the relevance questions saw a shortened AC: which files serve it is less certain
+        if lim < AC_TEXT_MAX and len(a["text"]) > lim:
+            pk = packs[a["id"]]
+            pk["truncated"] = pk["rel_cut"] = True
+            pk["notes"].append("the criterion's text was cut to %d characters in the file-relevance questions (%d criteria share "
+                               "each one)" % (lim, len(acs)))
     ac_reqs = [ac_request(a, packs[a["id"]], "done") for a in acs if packs[a["id"]]["pieces"]]
     groups = build_groups(files, budget)
     for g in groups if unread else ():
@@ -639,7 +659,7 @@ def _run_done(ev, ask):
     res2 = execute(stage2, ask)
     err = first_error(stage2, res2)
     if err:
-        return {"error": err}
+        return {"error": err, "cost": paid(res1 + res2)}
     by.update({r["id"]: res for r, res in zip(stage2, res2)})
     gone = {r["id"] for r in dropped2}
     checks = {}
@@ -661,7 +681,7 @@ def _run_done(ev, ask):
         items = []
         for a in acs:
             pk, rid = packs[a["id"]], "ac:" + a["id"]
-            if not pk["pieces"] and (unassessed or unread):  # some files were never checked: "nothing relates" is not known
+            if not pk["pieces"] and (unassessed or unread or pk.get("rel_cut")):  # "nothing relates" is not known
                 items.append(item(a["id"], None, [], True, pk["notes"], not_asked=bool(unassessed)))
             elif not pk["pieces"]:  # nothing in the diff relates to this AC: no request is needed to know it is missing
                 items.append(item(a["id"], 0.0, [], pk["truncated"], pk["notes"], detail="no changed file relates to it"))

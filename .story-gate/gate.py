@@ -2737,9 +2737,10 @@ def writing_report(sd, sid, phase, c, files=()):
 
 
 def judge_cost(judged, drec, dmode):
-    """What the score cost: the binding judge, plus the shadow run's requests in shadow mode (both are paid)."""
+    """What the score cost: the binding judge, plus the narrow run's requests when they are not already in it (shadow mode,
+    or a binding run that stopped on an error before the fallback): both are paid."""
     cost = judged.get("cost")
-    extra = (drec or {}).get("cost") if dmode == "shadow" else None
+    extra = (drec or {}).get("cost") if dmode == "shadow" or (drec or {}).get("error") else None
     if isinstance(extra, (int, float)):
         cost = round((cost if isinstance(cost, (int, float)) else 0) + extra, 6)
     return cost
@@ -2765,7 +2766,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
     except Exception as e:  # a bug here must never fail a score
         return None, dict(base, error="narrow questions failed (%s)" % e.__class__.__name__)
     if out.get("error"):
-        return None, dict(base, error=out["error"])
+        return None, dict(base, error=out["error"], cost=out.get("cost"))
     tier, note = judge_tier(out, c, sd)
     judged = {"judge": tier, "judge_note": note, "provider": out["provider"], "model": out["model"], "scores": out["scores"],
               "drift": out["drift"], "drift_conf": out["drift_conf"], "cost": out["cost"], "why": out["why"],

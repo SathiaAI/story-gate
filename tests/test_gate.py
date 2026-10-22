@@ -12817,6 +12817,7 @@ class TestDecompose(Base):
         g = self.gate()
         self.assertEqual(g.judge_cost({"cost": 0.01}, {"cost": 0.002}, "shadow"), 0.012)
         self.assertEqual(g.judge_cost({"cost": 0.01}, {"cost": 0.002}, "on"), 0.01)  # on: the narrow run is the judge
+        self.assertEqual(g.judge_cost({"cost": 0.01}, {"cost": 0.002, "error": "x"}, "on"), 0.012)  # stopped: fallback + paid part
         self.assertEqual(g.judge_cost({"cost": None}, {"cost": 0.002}, "shadow"), 0.002)
         self.assertIsNone(g.judge_cost({"cost": None}, {}, "shadow"))
 
@@ -13378,6 +13379,53 @@ class TestDecomposePure(unittest.TestCase):
         band = self.ev("", [])["band"]
         c = D.combine([D.item("AC-1", 0.6996)], {"pass": 0.7, "concerns": 0.4}, band)
         self.assertEqual((c["score"], c["band"]), (0.6996, "CONCERNS"))
+
+    def test_a_ready_score_just_below_the_threshold_is_not_rounded_into_a_pass(self):
+        """READY's one-request questions keep the raw score too: 0.6996 must not reach the verdict as 0.700."""
+        D = self.D
+        acs_ = [{"id": "AC-1", "text": "one", "refs": [], "plan": {}}]
+        out = D.run("ready", self.ev("", acs_, phase="ready"), self.fake_ask(overrides={"no_deferrals": 0.6996}))
+        self.assertEqual(out["scores"]["no_deferrals"], 0.6996)
+        self.assertEqual(out["checks"]["no_deferrals"]["band"], "CONCERNS")
+
+    def test_a_run_that_stops_on_an_error_keeps_what_it_already_paid(self):
+        """Stage one answered (and was paid for); a stage-two request failed: the error still reports that cost."""
+        D = self.D
+        diff, acs_ = self.vkg_shaped()
+        good = self.fake_ask()
+        calls = []
+
+        def ask(state, questions):
+            """Answer every stage-one request; fail the first evidence-pack request."""
+            calls.append(1)
+            if any(k.startswith("impl_ac:") for k in questions):
+                return {"tier": "none", "error": "boom"}
+            return good(state, questions)
+        out = D.run("done", self.ev(diff, acs_), ask)
+        self.assertIn("boom", out["error"])
+        self.assertGreater(out["cost"], 0)
+        self.assertLess(out["cost"], 0.001 * len(calls))
+
+    def test_the_criteria_in_a_relevance_request_are_bounded_in_total(self):
+        """Every relevance request carries every AC: many long ACs are shortened to share one budget, and each shortened
+        AC's pack is marked incomplete, so a missed file cannot turn into a confident score."""
+        D = self.D
+        diff = self.file_diff("src/a.js", "// AC1_MARK")
+        n = 60
+        acs_ = [{"id": "AC-%d" % i, "text": ("criterion %d " % i) + "y" * 1900, "refs": [], "plan": {}} for i in range(1, n + 1)]
+        log = []
+        e = self.ev(diff, acs_)
+        out = D.run("done", e, self.fake_ask(log=log))
+        rel = [st for st, q in log if any(k.startswith("rel:") for k in q)]
+        self.assertTrue(rel)
+        total = sum(len(a["text"]) for a in rel[0]["acceptance_criteria"])
+        per_file = e["max_chars"] // 4
+        self.assertLessEqual(total, per_file + n * 60)  # the budget plus each cut marker
+        self.assertTrue(out["packs"]["AC-2"]["truncated"])
+        self.assertIn("file-relevance questions", out["checks"]["impl_matches_acs"]["why"])
+        self.assertNotEqual(out["checks"]["impl_matches_acs"]["band"], "PASS")
+        few = D.run("done", self.ev(diff, acs_[:2]), self.fake_ask())  # two ACs fit whole: nothing is marked
+        self.assertNotIn("file-relevance questions", few["checks"]["impl_matches_acs"]["why"])
 
     def test_every_model_of_a_narrow_run_is_checked_for_self_review(self):
         """A narrow run joins its models with '+': one model of the coder's family makes the whole run self-review."""
