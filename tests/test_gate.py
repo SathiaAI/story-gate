@@ -12588,7 +12588,9 @@ class TestStoryFolderFiles(Base):
         for n in ("story.md", "tests.json", "handoff.md", "ready.json", "done.self.json", "drift.md", "issue-12.md",
                   "issue-acme--web-12.md", "linear-ENG-4.md", "jira-OPS-77.md", "evidence/0123456789abcdef.png"):
             self.assertTrue(g.is_record(self.SD + n), n)
-        for n in ("payload.py", "helper.js", "notes.md", "issue-x.md", "evidence/run.py", "sub/story.md", "story.md.py"):
+        for n in ("payload.py", "helper.js", "notes.md", "issue-x.md", "issue-payload1.md", "linear-payload-1.md",
+                  "jira-eng-1.md", "evidence/run.py", "evidence/payload.png", "evidence/0123456789abcdef.png.js",
+                  "sub/story.md", "story.md.py"):  # a name a writer would never produce is work, whatever it looks like
             self.assertFalse(g.is_record(self.SD + n), n)
         self.assertFalse(g.is_record(".story-gate/stories/loose.py"))  # a file beside the story folders is work too
         self.assertTrue(g.is_record(".story-gate/learnings.jsonl"))
@@ -12597,8 +12599,8 @@ class TestStoryFolderFiles(Base):
         """diff_against(): a hidden module is in the diff the judges read, and records stay out of it. git's pathspec
         excludes leave out exactly the files is_record() leaves out."""
         g = self.gate()
-        names = ["story.md", "ready.json", "issue-3.md", "evidence/0123456789abcdef.png",
-                 "payload.py", "issue-x.md", "evidence/run.py", "sub/story.md"]
+        names = ["story.md", "ready.json", "issue-3.md", "linear-ENG-4.md", "evidence/0123456789abcdef.png",
+                 "payload.py", "issue-x.md", "issue-payload1.md", "evidence/run.py", "evidence/payload.png", "sub/story.md"]
         for n in names:
             f = self.repo / self.SD / n; f.parent.mkdir(parents=True, exist_ok=True); f.write_text("MARK_%s\n" % n)
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)

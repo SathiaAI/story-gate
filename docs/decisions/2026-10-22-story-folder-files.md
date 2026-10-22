@@ -36,11 +36,19 @@ because the rule is gate-wide and older than the PR.
 - `scenarios.json`, `scenario_results.json`, `test_results.json`, `budgets.json`, `budget_results.json`,
   `guardrail_results.json`, `checkpoints.jsonl`, `decisions.jsonl`, `coder.json`, `pitfalls.json`, `evidence.json`
 - `ready.json`, `done.json`, `ready.self.json`, `done.self.json`
-- copies pulled with `spec-pull` and the tracker commands: `issue-*[0-9].md`, `linear-*[0-9].md`, `jira-*[0-9].md`
-- screenshots: `evidence/*.png`, `evidence/*.jpg`
+- copies pulled with `spec-pull` and the tracker commands, by the exact names those commands write:
+  `issue-<N>.md` or `issue-<owner>--<repo>-<N>.md` (`snapshot_name`), `linear-<KEY>.md` or `jira-<KEY>.md` with a key
+  like `ENG-4` (`TRACKER_NAME`)
+- screenshots, by the name `gate.py evidence` writes: `evidence/<16 hex digits>.png` or `.jpg` (`EVIDENCE_NAME`)
 
-They are `STORY_RECORDS` in `gate.py`, in git's glob syntax (`*` never crosses a `/`). `is_record()` and the diff's pathspec
-excludes (`record_excludes()`) are both built from that one list, so the file list and the diff can't disagree.
+The fixed names are `STORY_RECORDS` in `gate.py`. `is_record()` checks a path against them and against the three exact
+name grammars. The diff's pathspec excludes (`record_excludes()`) come from the same rule: the fixed names go in as git
+globs, and each issue, tracker or screenshot copy in the change goes in by its literal path, because a glob can't check
+those grammars exactly. So the file list and the diff can't disagree.
+
+A first version used globs for the copies too (`issue-*[0-9].md`, `evidence/*.png`). Codex found that this still hid a
+file like `issue-payload1.md`, which no writer produces but Node would run. The exact grammars close that.
+
 Subfolders other than `evidence/`, and files beside the story folders in `.story-gate/stories/`, are work.
 
 **What stays as it was.** Markdown in a story folder still matches the default `exempt_globs`
@@ -55,7 +63,8 @@ the judges already get as the story.
 
 **Tests.** `TestStoryFolderFiles` in `tests/test_gate.py`:
 
-- the record names are records, and `payload.py`, `notes.md`, `issue-x.md`, `evidence/run.py`, `sub/story.md` are not;
+- the record names are records, and `payload.py`, `notes.md`, `issue-x.md`, `issue-payload1.md`, `linear-payload-1.md`,
+  `evidence/run.py`, `evidence/payload.png`, `sub/story.md` are not;
 - `diff_against()`: each file's content is in the diff exactly when `is_record()` says it isn't a record, so git's pathspec
   and the Python rule agree; budgets' changed paths list the module too;
 - an untracked module counts before `git add`;

@@ -194,15 +194,15 @@ CALIB = GATE / "calibration.jsonl"
 RECORD_PATHS = (".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
                 ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
 # The files the gate itself keeps in a story folder (.story-gate/stories/<ID>/...). Only these are records: any other file
-# there is ordinary work and counts as code evidence (docs/decisions/2026-10-22-story-folder-files.md). Git glob syntax:
-# '*' never matches '/'. is_record() and record_excludes() both read this list, so the diff and the file list agree.
+# there is ordinary work and counts as code evidence (docs/decisions/2026-10-22-story-folder-files.md). Besides these fixed
+# names, is_record() accepts only the exact names the gate writes for pulled issues, tracker tickets and screenshots
+# (snapshot_name, TRACKER_NAME, EVIDENCE_NAME). record_excludes() builds the diff's pathspecs from the same rule.
 STORY_RECORDS = ("story.md", "context.md", "tests.json", "handoff.md", "validation.md", "trace.md", "drift.md",
                  "scenarios.json", "scenario_results.json", "test_results.json", "budgets.json", "budget_results.json",
                  "guardrail_results.json", "checkpoints.jsonl", "decisions.jsonl", "coder.json", "pitfalls.json",
-                 "evidence.json", "ready.json", "done.json", "ready.self.json", "done.self.json",
-                 "issue-*[0-9].md", "linear-*[0-9].md", "jira-*[0-9].md", "evidence/*.png", "evidence/*.jpg")
-STORY_RECORD_GLOBS = tuple(".story-gate/stories/*/" + n for n in STORY_RECORDS)
-STORY_RECORD_RE = re.compile("|".join(re.escape(g).replace(r"\*", "[^/]*").replace(r"\[0\-9\]", "[0-9]") for g in STORY_RECORD_GLOBS))
+                 "evidence.json", "ready.json", "done.json", "ready.self.json", "done.self.json")
+STORY_RECORD_RE = re.compile(r"\.story-gate/stories/[^/]+/(?:%s)" % "|".join(re.escape(n) for n in STORY_RECORDS))
+EVIDENCE_NAME = re.compile(r"\.story-gate/stories/[^/]+/evidence/[0-9a-f]{16}\.(?:png|jpg)")  # sg_report's names only
 
 
 class ConfigError(Exception):
@@ -2080,12 +2080,17 @@ def locked_digest(f):
 
 
 def is_record(path):
-    return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS) or bool(STORY_RECORD_RE.fullmatch(path))
+    return (any(path == r or path.startswith(r + "/") for r in RECORD_PATHS) or bool(STORY_RECORD_RE.fullmatch(path))
+            or snapshot_name(path) is not None or bool(TRACKER_NAME.fullmatch(path)) or bool(EVIDENCE_NAME.fullmatch(path)))
 
 
-def record_excludes():
-    """git pathspecs that leave every record out of a diff: the same files is_record() leaves out of the file lists."""
-    return [":(exclude)%s" % r for r in RECORD_PATHS] + [":(exclude,glob)%s" % g for g in STORY_RECORD_GLOBS]
+def record_excludes(names):
+    """git pathspecs that leave every record out of a diff: the same files is_record() leaves out of the file lists. The
+    fixed names go in as globs; issue, tracker and screenshot copies, whose names a glob can't check exactly, go in one by
+    one from `names` (the paths the diff covers)."""
+    return ([":(exclude)%s" % r for r in RECORD_PATHS] + [":(exclude,glob).story-gate/stories/*/%s" % n for n in STORY_RECORDS]
+            + [":(exclude,literal)%s" % n for n in sorted(names) if is_record(n) and not STORY_RECORD_RE.fullmatch(n)
+               and not any(n == r or n.startswith(r + "/") for r in RECORD_PATHS)])
 
 
 def budgets_policy():
@@ -2153,9 +2158,9 @@ def areas_that_apply(c, base):
         must("rev-parse", "--verify", "--quiet", mb + "^{commit}")
         z = lambda *a: [x for x in must("-c", "core.quotepath=false", *a, "-z").split("\0") if x]
         untracked = [n for n in z("ls-files", "--others", "--exclude-standard") if not is_record(n)]
-        files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
-                       | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
-        excl = record_excludes()
+        tracked = set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
+        files = sorted(n for n in tracked | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
+        excl = record_excludes(tracked)
         new, read_all = untracked_text(untracked)
         diff = must("diff", mb, "--", ".", *excl) + new
         binary = any(l.startswith("-\t-\t") for l in must("diff", "--numstat", "--no-renames", mb, "--", ".", *excl).splitlines())
@@ -2634,7 +2639,7 @@ def diff_against(base):
     mb = resolve_base(base)
     untracked = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
     names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) | set(untracked)
-    diff = git("diff", mb, "--", ".", *record_excludes())  # records never count as code evidence; other files in a story folder do
+    diff = git("diff", mb, "--", ".", *record_excludes(names))  # records never count as code evidence; other files in a story folder do
     return mb, sorted(names), diff + untracked_diff(untracked)
 
 
