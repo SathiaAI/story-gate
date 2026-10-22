@@ -275,6 +275,9 @@ def to_html(f):
         esc(s.get("path"), 200), (("#%s" if str(s.get("issue")).isdigit() else "%s") % esc(s.get("issue"), 24)) if s.get("issue") else "—",
         D.pill({"verified": "PASS", "changed": "FAIL"}.get(s.get("state"))) + " " + esc(s.get("state"), 20), esc(s.get("detail"), 400),
         src_when(s)) for s in f.get("sources") or [])
+    import sg_decompose as DC
+    judge_html = "".join("<p><strong>%s</strong></p>%s" % (label, "".join("<p class=\"small\">%s</p>" % esc(l.strip(), 400) for l in lines))
+                         for label, lines in (("READY", DC.summary_lines(f.get("ready"))), ("DONE", DC.summary_lines(f.get("done")))) if lines)
     card = lambda title, body, note="": ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">%s</h3>%s</div>%s</div>'
                                          % (title, ('<div class="card-actions">%s</div>' % note) if note else "", body))
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -285,7 +288,7 @@ def to_html(f):
 <main class="container-xl">
 <p class="text-secondary">%s: CI ran it, or story-gate worked it out from its own records. %s: the AI wrote it, or ran it on its own computer. Read it as a claim.</p>
 <div class="row row-cards mb-3">%s</div>
-%s%s%s%s%s%s
+%s%s%s%s%s%s%s
 </main>
 <footer class="container-xl py-3"><span class="sg-brand text-secondary">story-gate · by <span aria-label="Viaknox">%s</span></span></footer>
 </body></html>""" % (
@@ -295,6 +298,7 @@ def to_html(f):
         card("Acceptance criteria", '<div class="table-responsive"><table class="table card-table"><thead><tr><th>AC</th><th>Criterion</th>'
              '<th>Scenarios</th><th>Automated tests</th><th>Shown working</th></tr></thead><tbody>%s</tbody></table></div>' % (
                  ac_rows or '<tr><td colspan="5" class="text-secondary">No acceptance criteria in tests.json.</td></tr>')),
+        card("How the judge scored it", '<div class="card-body">%s</div>' % judge_html, tag("reported")) if judge_html else "",
         card("Scenarios run", '<div class="table-responsive"><table class="table card-table"><thead><tr><th>Scenario</th><th>Covers</th>'
              '<th>Command</th><th>Expected</th><th>Result</th></tr></thead><tbody>%s</tbody></table></div>' % (
                  sc_rows or '<tr><td colspan="5" class="text-secondary">No scenarios recorded.</td></tr>')),
