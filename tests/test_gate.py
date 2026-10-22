@@ -13566,6 +13566,22 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(D.string_state('x = """start', None), '"""')
         self.assertIsNone(D.string_state('end""" + "#"', '"""'))
 
+    def test_a_wrong_string_guess_never_hides_a_definition(self):
+        """The multi-line string tracking is a guess. When it is wrong (here a JS private field '#x' before a backtick),
+        a definition at the test's own depth still ends the test, so a helper is never hidden (Bugbot)."""
+        D = self.D
+        js = ("it('test_x', () => {\n  this.#x = `start\n  `;\n  expect(1).toBe(1);\n});\n"
+              "function allowAll() { return true; }\nconst allow2 = () => true;\n")
+        f = {"path": "tests/a.test.js", "test": True, "text": self.file_diff("tests/a.test.js", js)}
+        part, _ = D.test_blocks(f, ["test_x"], lambda r, t: r in t)
+        self.assertIn("expect(1).toBe(1);", part); self.assertNotIn("allowAll", part)
+        py = 'def test_y():\n    s = """open\n# not a comment in the string\n"""\nallow = lambda u: True\n'
+        f = {"path": "tests/test_y.py", "test": True, "text": self.file_diff("tests/test_y.py", py)}
+        part, _ = D.test_blocks(f, ["test_y"], self.defined)
+        self.assertIn("# not a comment in the string", part); self.assertNotIn("allow = lambda", part)
+        self.assertEqual(D.string_state("this.#x = `a", None, hash_comments=False), "`")
+        self.assertIsNone(D.string_state("x = 1  # `", None, hash_comments=True))
+
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's
         relevance answer: each gets its own request."""

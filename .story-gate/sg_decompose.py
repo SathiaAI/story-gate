@@ -170,6 +170,8 @@ def visible_text(f):
 
 # A line that starts a test definition in the common test styles (pytest/unittest, node:test/jest/mocha, go, rust, gherkin).
 STRING_QUOTES = ('"""', "'''", "`")  # multi-line string delimiters: Python triple quotes, JS/Go backticks
+DEFINES = re.compile(r"^\s*(?:@|(?:export\s+)?(?:async\s+)?(?:def|class|function|const|let|var|import|from)\b|[\w.]+\s*(?::[^=]*)?=(?!=))")
+HASH_COMMENT_EXT = (".py", ".rb", ".sh", ".bash", ".pl", ".r", ".yml", ".yaml", ".toml", ".ex", ".exs", ".jl", ".nim", ".cr")
 CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a call, not the test
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
@@ -187,21 +189,22 @@ def ends_test(text, depth):
     return bool(s) and not CLOSING.match(s) and not s.startswith(("#", "//")) and indent(text) <= depth
 
 
-def test_end(rest, start, stop, depth):
+def test_end(rest, start, stop, depth, hash_comments=True):
     """The first line in rest[start:stop] that ends the test (see ends_test), or stop. Lines inside a multi-line string
-    (a triple-quoted or backtick snapshot, often unindented) are the test's own and never end it."""
+    (a triple-quoted or backtick snapshot, often unindented) are the test's own, except a line that starts a definition
+    or an assignment: the string tracking is a guess, so it may end a test early but never hide a helper."""
     open_q = None
     for j in range(start, stop):
         if rest[j][:1] not in " +":
             continue
         line = rest[j][1:].rstrip("\n")
-        if open_q is None and ends_test(line, depth):
+        if ends_test(line, depth) and (open_q is None or DEFINES.match(line)):
             return j
-        open_q = string_state(line, open_q)
+        open_q = string_state(line, open_q, hash_comments)
     return stop
 
 
-def string_state(line, open_q):
+def string_state(line, open_q, hash_comments=True):
     """The multi-line string still open after `line` (one of STRING_QUOTES, or None). Reads the line left to right:
     one-line strings and comments (# or //) outside a string are skipped, so a quote inside them opens nothing."""
     i, n, single = 0, len(line), None
@@ -221,7 +224,7 @@ def string_state(line, open_q):
                 single = None
             i += 1
             continue
-        if c == "#" or line.startswith("//", i):
+        if (c == "#" if hash_comments else line.startswith("//", i)):
             return None
         q = next((q for q in STRING_QUOTES if line.startswith(q, i)), None)
         if q:
@@ -258,7 +261,7 @@ def linked_spans(f, refs, defined):
             continue
         stop = bounds[n + 1] if n + 1 < len(bounds) else len(rest)
         depth = indent(line[1:] if rest[i].startswith("@@") else line)  # header context keeps one space after "@@"
-        stop = test_end(rest, i + 1, stop, depth)
+        stop = test_end(rest, i + 1, stop, depth, f.get("path", "").lower().endswith(HASH_COMMENT_EXT))
         live = [j for j in range(i, stop) if not rest[j].startswith("-")]
         more = max(len(live) - TEST_BLOCK_MAX, 0)
         spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more))
