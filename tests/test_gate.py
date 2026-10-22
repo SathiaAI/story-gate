@@ -13623,6 +13623,18 @@ class TestDecomposePure(unittest.TestCase):
         self.assertEqual(D.string_state('x = "a\\', None), '"')
         self.assertEqual(D.string_state('"; s = """', '"'), '"""')
 
+    def test_a_go_rust_or_kotlin_helper_ends_a_test_inside_a_wrong_string_guess(self):
+        """Go func, Rust fn and Kotlin fun are definitions too, so a wrong string guess that closes later still cannot
+        hide a helper after the test (CodeRabbit)."""
+        D = self.D
+        go = "func TestX(t *testing.T) {\n\ts := `C:\\`\n\tcheck(s)\n}\nfunc allowAll() bool { return true }\n// note: `\n"
+        f = {"path": "x_test.go", "test": True, "text": self.file_diff("x_test.go", go)}
+        part, cut = D.test_blocks(f, ["TestX"], lambda r, t: "func " + r in t)
+        self.assertIn("check(s)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
+        self.assertIn("allowAll", D.residual_edits(f, ["TestX"], lambda r, t: "func " + r in t))
+        for line in ("pub fn allow_all() {}", "pub(crate) fn x() {}", "private fun allowAll() = true", "suspend fun x() {}"):
+            self.assertTrue(D.DEFINES.match(line), line)
+
     def test_a_test_written_inside_a_string_is_not_a_test(self):
         """A test definition inside a multi-line string never runs, so it never starts an evidence block; its lines go
         through relevance like any other edit (Codex security)."""
