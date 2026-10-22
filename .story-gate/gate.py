@@ -191,8 +191,18 @@ LEARNINGS = GATE / "learnings.jsonl"
 OUTBOX = GATE / "outbox.jsonl"
 ACTIVE = GATE / ".active"
 CALIB = GATE / "calibration.jsonl"
-RECORD_PATHS = (".story-gate/stories", ".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
+RECORD_PATHS = (".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
                 ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
+# The files the gate itself keeps in a story folder (.story-gate/stories/<ID>/...). Only these are records: any other file
+# there is ordinary work and counts as code evidence (docs/decisions/2026-10-22-story-folder-files.md). Git glob syntax:
+# '*' never matches '/'. is_record() and record_excludes() both read this list, so the diff and the file list agree.
+STORY_RECORDS = ("story.md", "context.md", "tests.json", "handoff.md", "validation.md", "trace.md", "drift.md",
+                 "scenarios.json", "scenario_results.json", "test_results.json", "budgets.json", "budget_results.json",
+                 "guardrail_results.json", "checkpoints.jsonl", "decisions.jsonl", "coder.json", "pitfalls.json",
+                 "evidence.json", "ready.json", "done.json", "ready.self.json", "done.self.json",
+                 "issue-*[0-9].md", "linear-*[0-9].md", "jira-*[0-9].md", "evidence/*.png", "evidence/*.jpg")
+STORY_RECORD_GLOBS = tuple(".story-gate/stories/*/" + n for n in STORY_RECORDS)
+STORY_RECORD_RE = re.compile("|".join(re.escape(g).replace(r"\*", "[^/]*").replace(r"\[0\-9\]", "[0-9]") for g in STORY_RECORD_GLOBS))
 
 
 class ConfigError(Exception):
@@ -2003,7 +2013,7 @@ def cmd_source(sid):
 
 
 def work_fingerprint():
-    """Hash of the changed files' current content vs the base branch, ignoring .story-gate/.
+    """Hash of the changed files' current content vs the base branch, ignoring records (is_record).
     Content-based, so git add / commit do not invalidate a green test run; any edit does."""
     h = hashlib.sha256()
     for n, body in sorted(work_state().items()):
@@ -2070,7 +2080,12 @@ def locked_digest(f):
 
 
 def is_record(path):
-    return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS)
+    return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS) or bool(STORY_RECORD_RE.fullmatch(path))
+
+
+def record_excludes():
+    """git pathspecs that leave every record out of a diff: the same files is_record() leaves out of the file lists."""
+    return [":(exclude)%s" % r for r in RECORD_PATHS] + [":(exclude,glob)%s" % g for g in STORY_RECORD_GLOBS]
 
 
 def budgets_policy():
@@ -2140,7 +2155,7 @@ def areas_that_apply(c, base):
         untracked = [n for n in z("ls-files", "--others", "--exclude-standard") if not is_record(n)]
         files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
                        | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
-        excl = [":(exclude)%s" % r for r in RECORD_PATHS]
+        excl = record_excludes()
         new, read_all = untracked_text(untracked)
         diff = must("diff", mb, "--", ".", *excl) + new
         binary = any(l.startswith("-\t-\t") for l in must("diff", "--numstat", "--no-renames", mb, "--", ".", *excl).splitlines())
@@ -2619,8 +2634,7 @@ def diff_against(base):
     mb = resolve_base(base)
     untracked = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
     names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) | set(untracked)
-    excl = [":(exclude)%s" % r for r in RECORD_PATHS]
-    diff = git("diff", mb, "--", ".", *excl)  # story records never count as code evidence; the gate's own code does
+    diff = git("diff", mb, "--", ".", *record_excludes())  # records never count as code evidence; other files in a story folder do
     return mb, sorted(names), diff + untracked_diff(untracked)
 
 
