@@ -108,6 +108,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 1. `gate.py record-tests <ID>` runs the pinned `test_command`.
    - Set `junit_path` too, so each test's own result is recorded.
+   - With `judge.decompose: on`, `tests_implemented` cannot PASS without these per-test results; it shows CONCERNS at best.
    - The tests must be green on the current code.
    - CI repeats this run itself and ignores the local record. The local run is an early warning; CI's run is the proof.
 

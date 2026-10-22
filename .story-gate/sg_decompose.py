@@ -33,6 +33,8 @@ NO_BLOCKERS = ("There are no unresolved open questions that would force the deve
 PER_AC_READY = ("ac_testable", "tests_plan_adequate")
 PER_AC_DONE = ("impl_matches_acs", "tests_implemented")
 PER_GROUP_DONE = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
+UNRUN_NOTE = ("no per-test results (junit_path): a test shown here may never run (one written inside a string, say), so "
+              "tests_implemented cannot PASS on what the gate can see alone")
 SPLIT_NOTE = "the change was split into %d groups, so effects across files in different groups were not judged together"
 REST_DONE = ("handoff_out", "learnings_specific")
 GROUP_NOTE = " Judge only the files shown here; they are one part of the change."
@@ -176,6 +178,8 @@ CLOSING = re.compile(r"^[)}\]:;,]+$")  # a line of only closing brackets ends a 
 TEST_START = re.compile(r"^[+ ]\s*(?:(?:async\s+)?def\s+test|(?:test|it|describe|context|scenario|specify)(?:\.\w+)?\s*\(|"
                         r"func\s+Test|fn\s+test|#\[test\]|@Test\b|Scenario:)")
 ANNOTATION = re.compile(r"^\s*(?:@\w[\w.]*(?:\([^)]*\))?|#\[[^\]]*\])\s*$")  # a line that is only @Test, #[test], ...
+DECORATOR = re.compile(r"^\s*(?:@\w|#\[)")  # a decorator or attribute line (@pytest.mark.skip, @Disabled, #[ignore])
+RAW_BACKTICK_EXT = (".go",)  # files whose backtick strings are raw: a backslash there escapes nothing
 TEST_BLOCK_MAX = 200  # lines kept from one test definition
 
 
@@ -205,14 +209,15 @@ def test_end(rest, start, stop, depth, st):
     return next((j for j in live if ends_test(rest[j][1:].rstrip("\n"), depth)), stop), True
 
 
-def string_state(line, open_q, hash_comments=True):
+def string_state(line, open_q, hash_comments=True, raw_backtick=False):
     """The multi-line string still open after `line`: one of STRING_QUOTES, a one-line string continued by a backslash
-    at the end of the line, or None. Reads the line left to right like a tokenizer: inside a string a backslash escapes
-    the next character, and outside one a comment (# or //) ends the line, so a quote inside it opens nothing."""
+    at the end of the line, or None. Reads the line left to right like a tokenizer: a backslash escapes the next
+    character (except inside a raw backtick string, raw_backtick: Go), so an escaped quote or the `\\/` of a regex
+    literal is not a delimiter; outside a string a comment (# or //) ends the line, so a quote inside it opens nothing."""
     i, n = 0, len(line)
     while i < n:
         if open_q:
-            if line[i] == "\\":
+            if line[i] == "\\" and not (raw_backtick and open_q == "`"):
                 i += 2
             elif line.startswith(open_q, i):
                 i, open_q = i + len(open_q), None
@@ -220,6 +225,9 @@ def string_state(line, open_q, hash_comments=True):
                 i += 1
             continue
         c = line[i]
+        if c == "\\":
+            i += 2
+            continue
         if (c == "#" if hash_comments else line.startswith("//", i)):
             return None
         open_q = next((q for q in STRING_QUOTES if line.startswith(q, i)), c if c in "'\"" else None)
@@ -227,17 +235,24 @@ def string_state(line, open_q, hash_comments=True):
     return open_q if open_q in STRING_QUOTES or i > n else None  # i > n: the last backslash escaped the line end
 
 
-def string_states(rest, hash_comments=True):
+def string_states(rest, hash_comments=True, raw_backtick=False, new_text=None):
     """For each line of a diff body, the multi-line string open just before it (see string_state), plus one entry for
-    the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing, and a hunk header
-    starts the next hunk outside any string (the lines between hunks are not shown)."""
+    the end. Lines of the new file (" " and "+") are read in order; a removed line changes nothing. A hunk header starts
+    the next hunk in the state the whole changed file has at that line (new_text, read from the working tree), so a
+    string opened above the hunk is still open in it; without new_text the hunk starts outside any string."""
+    pre, q = [None], None  # pre[n]: the string open before line n of the changed file
+    for ln in (new_text or "").splitlines():
+        pre.append(q)
+        q = string_state(ln, q, hash_comments, raw_backtick)
     out, open_q = [], None
     for ln in rest:
         out.append(open_q)
         if ln.startswith("@@"):
-            open_q = None
+            m = re.match(r"@@ -\S+ \+(\d+)", ln)
+            n = int(m.group(1)) if m else 0
+            open_q = pre[n] if 0 < n < len(pre) else None
         elif ln[:1] in " +":
-            open_q = string_state(ln[1:].rstrip("\n"), open_q, hash_comments)
+            open_q = string_state(ln[1:].rstrip("\n"), open_q, hash_comments, raw_backtick)
     return out + [open_q]
 
 
@@ -248,13 +263,15 @@ def linked_spans(f, refs, defined):
     whose header names a linked test in git's function context starts a span too. Removed lines inside a span stay in
     it, so a deleted assertion is evidence too; only live lines can start a test, and a removed definition ends the
     span above it. A test definition inside a multi-line string is text, not a test: it never starts or ends a span. An
-    annotation line (@Test, #[test]) starts the span of the declaration under it."""
+    annotation line (@Test, #[test]) starts the span of the declaration under it (past removed lines, so a renamed method
+    still joins), and decorators or attributes right above a test (@pytest.mark.skip, @Disabled, #[ignore]) are in it."""
     lines = f["text"].splitlines(keepends=True)
     n_head = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if n_head is None:  # a new untracked file has no hunk header: everything after "+++ b/<path>" is one hunk
         n_head = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("+++ ")), len(lines))
     rest = lines[n_head:]
-    st = string_states(rest, f.get("path", "").lower().endswith(HASH_COMMENT_EXT))
+    path = f.get("path", "").lower()
+    st = string_states(rest, path.endswith(HASH_COMMENT_EXT), path.endswith(RAW_BACKTICK_EXT), f.get("new_text"))
     # a removed test definition ends the block above it (its lines are not that test's) but never starts a block
     bounds = [i for i, ln in enumerate(rest) if ln.startswith("@@") or ln.startswith("-") and TEST_START.search(" " + ln[1:])
               or st[i] is None and TEST_START.search(ln)]
@@ -269,18 +286,27 @@ def linked_spans(f, refs, defined):
             line = rest[i].split("@@", 2)[2] if rest[i].count("@@") >= 2 else ""
             depth = indent(line[1:])  # header context keeps one space after "@@"
         else:
-            while ANNOTATION.match(rest[k][1:]) and k + 1 < len(rest) and rest[k + 1][:1] in " +":
-                k += 1
-            line = "".join(ln[1:] for ln in rest[i:k + 1])
-            depth = indent(line)
+            while ANNOTATION.match(rest[k][1:]):
+                j = k + 1
+                while j < len(rest) and rest[j].startswith("-"):  # the old declaration of a renamed method
+                    j += 1
+                if j >= len(rest) or rest[j][:1] not in " +":
+                    break
+                k = j
+            line = "".join(ln[1:] for ln in rest[i:k + 1] if not ln.startswith("-"))
+            depth = indent(rest[i][1:])
         if not any(defined(r, line) for r in refs):
             continue
         seen = k
         stop = next((b for b in bounds if b > k), len(rest))
         stop, in_string = test_end(rest, k + 1, stop, depth, st)
-        live = [j for j in range(i, stop) if not rest[j].startswith("-")]
+        a = i  # a decorator above the test (a skip marker, say) changes what it proves, so it belongs to the block
+        while not rest[i].startswith("@@") and a > 0 and rest[a - 1][:1] in " +-" and DECORATOR.match(rest[a - 1][1:]) \
+                and indent(rest[a - 1][1:]) == depth:
+            a -= 1
+        live = [j for j in range(a, stop) if not rest[j].startswith("-")]
         more = max(len(live) - TEST_BLOCK_MAX, 0)
-        spans.append((i, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more, in_string))
+        spans.append((a, live[TEST_BLOCK_MAX - 1] + 1 if more else stop, more, in_string))
     return lines[:n_head], rest, spans
 
 
@@ -351,12 +377,28 @@ def relevance_text_max(acs, per_file):
     return min(AC_TEXT_MAX, max(REL_AC_MIN, per_file // max(len(acs), 1)))
 
 
+def sent_len(text):
+    """The length of text as a request sends it: json.dumps escapes non-ASCII, up to 12 characters for one."""
+    return len(json.dumps(text)) - 2
+
+
+def clip_sent(text, n):
+    """clip() measured by sent_len: the longest start of text that is at most n characters once sent."""
+    if sent_len(text) <= n:
+        return text, False
+    lo, hi = 0, min(len(text), n)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if sent_len(text[:mid]) <= n else (lo, mid - 1)
+    return text[:lo] + "\n[... cut: %d more characters not shown]" % (len(text) - lo), True
+
+
 def relevance_request(f, acs, per_file):
     """One request: does this file's change serve each AC? One question per AC."""
     body, cut = clip(f["text"], per_file)
     lim = relevance_text_max(acs, per_file)
     state = {"file": f["path"], "status": f["status"], "diff": body, "truncated": cut,
-             "acceptance_criteria": [{"id": a["id"], "text": clip(a["text"], lim)[0]} for a in acs]}
+             "acceptance_criteria": [{"id": a["id"], "text": clip_sent(a["text"], lim)[0]} for a in acs]}
     qs = {"rel:" + a["id"]: noul("The change to this file implements or directly supports the acceptance criterion with id "
                                  "%s in `acceptance_criteria`." % a["id"]) for a in acs}
     return {"id": "rel:" + f["path"], "kind": "relevance", "state": state, "questions": qs}
@@ -702,6 +744,8 @@ def _run_done(ev, ask):
     all_refs = [r for a in acs for r in a["refs"]]
     for f in files:
         f["test"] = bool(ev["is_test"](f["path"]))
+        # the changed test file as a whole tells which hunks start inside a string (see string_states)
+        f["new_text"] = ev["read"](f["path"]) if f["test"] and ev.get("read") and f["status"] != "deleted" else None
         # an edit below a test's definition (a changed assertion or fixture) does not name the test: judge its relevance
         f["unlinked"] = f["test"] and not any(ev["defined"](r, visible_text(f)) for r in all_refs)
     # a linked test file's other edits (a helper or fixture the linked tests call) reach no pack as test blocks: judge them too
@@ -735,7 +779,7 @@ def _run_done(ev, ask):
     packs = {a["id"]: build_pack(a, files + residual, rel, ev["defined"], budget, per_file, unassessed, unread) for a in acs}
     lim = relevance_text_max(acs, per_file)
     for a in acs if rel_reqs else ():  # the relevance questions saw a shortened AC: which files serve it is less certain
-        if lim < AC_TEXT_MAX and len(a["text"]) > lim:
+        if sent_len(a["text"]) > lim:
             pk = packs[a["id"]]
             pk["truncated"] = pk["rel_cut"] = True
             pk["notes"].append("the criterion's text was cut to %d characters in the file-relevance questions (%d criteria share "
@@ -780,6 +824,8 @@ def _run_done(ev, ask):
                 items.append(item(a["id"], None, pk["files"], pk["truncated"], pk["notes"], not_asked=True))
             else:
                 items.append(item(a["id"], p_of(by[rid], qk + a["id"]), pk["files"], pk["truncated"], pk["notes"]))
+        if key == "tests_implemented" and items and not ev.get("executed"):  # seeing a test is not proof that it runs
+            items.append(item("per-test results", None, [], True, [UNRUN_NOTE]))
         checks[key] = combine(items, th, band) if items else {
             "score": 0.0, "band": "FAIL", "items": [], "why": "no acceptance criteria in tests.json", "capped": False}
     drift, conf, low_drift = "none", 0.0, None

@@ -12789,6 +12789,8 @@ class TestDecompose(Base):
         """On composes the lowest ac and names it."""
         j = self.judge(overrides={"impl_ac:AC-2": 0.2}); self.configure(j, "on")
         self.build(n=3)
+        tr = self.repo / ".story-gate/stories/SAT-1/test_results.json"
+        tr.write_text(json.dumps({"exit_code": 0, "command": "pytest", "junit": {"test_ac%d" % i: "passed" for i in range(1, 4)}}))
         v, r = self.score("done")
         c = v["checks"]["impl_matches_acs"]
         self.assertEqual(c["score"], 0.2)  # the lowest AC, not an average or a maximum
@@ -12796,8 +12798,14 @@ class TestDecompose(Base):
         self.assertIn("AC-2 0.20 (files: tests/test_ac2.py, src/feat2.js)", c["why"])
         self.assertNotIn("AC-1", c["why"])
         self.assertEqual({i["id"]: i["score"] for i in c["items"]}, {"AC-1": 0.9, "AC-2": 0.2, "AC-3": 0.9})
-        self.assertEqual(v["checks"]["tests_implemented"]["status"], "PASS")
+        self.assertEqual(v["checks"]["tests_implemented"]["status"], "PASS")  # per-test results show the tests ran
         self.assertEqual(v["decomposed"]["mode"], "on")
+        row = json.loads((self.repo / ".story-gate/calibration.jsonl").read_text().splitlines()[-1])
+        self.assertTrue(row["scoring"].startswith("narrow:"), row)  # narrow scores calibrate apart from broad ones
+        tr.write_text(json.dumps({"exit_code": 0, "command": "pytest"}))  # no per-test results: seen is not run
+        v, r = self.score("done")
+        self.assertEqual(v["checks"]["tests_implemented"]["status"], "CONCERNS")
+        self.assertIn("no per-test results", v["checks"]["tests_implemented"]["why"])
         self.assertIn("AC-2 0.20", r.stdout)  # the report names the item
         self.assertIn("Score (Jev, binding)", r.stdout)
         self.assertEqual(v["decomposed"]["would_be_overall"], v["overall"])
@@ -13231,7 +13239,7 @@ class TestDecomposePure(unittest.TestCase):
         self.assertGreater(len(diff), 60000)
         self.assertLess(len(diff), 70000)
         log = []
-        out = D.run("done", self.ev(diff, acs_), self.fake_ask(overrides={"impl_ac:AC-5": 0.35}, log=log))
+        out = D.run("done", dict(self.ev(diff, acs_), executed=True), self.fake_ask(overrides={"impl_ac:AC-5": 0.35}, log=log))
         self.assertNotIn("error", out)
         impl = out["checks"]["impl_matches_acs"]
         self.assertEqual(impl["score"], 0.35)
@@ -13608,7 +13616,7 @@ class TestDecomposePure(unittest.TestCase):
 
     def test_escaped_quotes_and_unclosed_guesses_never_swallow_a_fixture(self):
         """An escaped backtick does not close a template literal, so a call-based fixture after the test stays outside
-        it. A guessed string that never closes falls back to the plain rule and marks the block cut (Codex)."""
+        it. In Go a backtick string is raw: a backslash before its closing backtick escapes nothing (Codex)."""
         D = self.D
         js = "it('test_a', () => {\n  const s = `a \\` b\n  c`;\n  expect(s).toBe(1);\n});\nbeforeEach(() => resetAuth());\n"
         f = {"path": "tests/a.test.js", "test": True, "text": self.file_diff("tests/a.test.js", js)}
@@ -13618,7 +13626,9 @@ class TestDecomposePure(unittest.TestCase):
         go = "func TestX(t *testing.T) {\n\ts := `C:\\`\n\tcheck(s)\n}\nfunc init() { allowAll() }\n"
         f = {"path": "x_test.go", "test": True, "text": self.file_diff("x_test.go", go)}
         part, cut = D.test_blocks(f, ["TestX"], lambda r, t: "func " + r in t)
-        self.assertIn("check(s)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
+        self.assertIn("check(s)", part); self.assertNotIn("allowAll", part); self.assertFalse(cut)
+        self.assertIsNone(D.string_state("s := `C:\\`", None, False, raw_backtick=True))
+        self.assertEqual(D.string_state("s := `C:\\`", None, False), "`")  # JS reads the same text as still open
         # a backslash at the end of a one-line string carries it to the next line, as Python and JS read it
         self.assertEqual(D.string_state('x = "a\\', None), '"')
         self.assertEqual(D.string_state('"; s = """', '"'), '"""')
@@ -13627,13 +13637,45 @@ class TestDecomposePure(unittest.TestCase):
         """Go func, Rust fn and Kotlin fun are definitions too, so a wrong string guess that closes later still cannot
         hide a helper after the test (CodeRabbit)."""
         D = self.D
-        go = "func TestX(t *testing.T) {\n\ts := `C:\\`\n\tcheck(s)\n}\nfunc allowAll() bool { return true }\n// note: `\n"
+        go = "func TestX(t *testing.T) {\n\tcheck(1) /* see ` */\n}\nfunc allowAll() bool { return true }\n// note: `\n"
         f = {"path": "x_test.go", "test": True, "text": self.file_diff("x_test.go", go)}
         part, cut = D.test_blocks(f, ["TestX"], lambda r, t: "func " + r in t)
-        self.assertIn("check(s)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
+        self.assertIn("check(1)", part); self.assertNotIn("allowAll", part); self.assertTrue(cut)
         self.assertIn("allowAll", D.residual_edits(f, ["TestX"], lambda r, t: "func " + r in t))
         for line in ("pub fn allow_all() {}", "pub(crate) fn x() {}", "private fun allowAll() = true", "suspend fun x() {}"):
             self.assertTrue(D.DEFINES.match(line), line)
+
+    def test_a_hunk_inside_a_string_opened_above_it_holds_no_test(self):
+        """The changed file as a whole tells which hunks start inside a string: a test written into a string opened
+        above the hunk is text, not a test (Codex security)."""
+        D = self.D
+        new = 'import x\n\npayload = """\nheader\nbody\ndef test_auth_case():\n    assert True\nfooter\n"""\n\ndef test_real():\n    assert 1\n'
+        hunk = ("diff --git a/tests/test_p.py b/tests/test_p.py\n--- a/tests/test_p.py\n+++ b/tests/test_p.py\n"
+                "@@ -4,2 +4,4 @@\n header\n body\n+def test_auth_case():\n+    assert True\n")
+        f = {"path": "tests/test_p.py", "test": True, "text": hunk, "new_text": new}
+        self.assertEqual(D.test_blocks(f, ["test_auth_case"], self.defined), ("", False))
+        self.assertIn("def test_auth_case", D.residual_edits(f, ["test_auth_case"], self.defined))
+        f.pop("new_text")  # without the file the hunk starts outside any string: the old guess, kept as a fallback
+        self.assertIn("assert True", D.test_blocks(f, ["test_auth_case"], self.defined)[0])
+
+    def test_regex_slashes_decorators_and_renamed_methods(self):
+        """`\\/\\//` in a JS regex is not a comment; a skip decorator above a test is part of its block; an @Test whose
+        method was renamed still joins the new declaration (Codex, Bugbot)."""
+        D = self.D
+        js = "it('test_r', () => {\n  expect(u).toMatch(/https:\\/\\//); const s = `\nunindented snapshot\n`;\n  expect(s).toBe(1);\n});\n"
+        f = {"path": "tests/r.test.js", "test": True, "text": self.file_diff("tests/r.test.js", js)}
+        part, cut = D.test_blocks(f, ["test_r"], lambda r, t: r in t)
+        self.assertIn("expect(s).toBe(1);", part); self.assertFalse(cut)
+        py = "def test_a():\n    assert 0\n@pytest.mark.skip(reason='later')\ndef test_d():\n    assert 1\n"
+        f = {"path": "tests/test_d.py", "test": True, "text": self.file_diff("tests/test_d.py", py)}
+        part, _ = D.test_blocks(f, ["test_d"], self.defined)
+        self.assertIn("@pytest.mark.skip", part); self.assertNotIn("assert 0", part)
+        self.assertNotIn("pytest.mark.skip", D.residual_edits(f, ["test_d"], self.defined))
+        java = ("diff --git a/T.java b/T.java\n--- a/T.java\n+++ b/T.java\n@@ -1,4 +1,4 @@\n class T {\n   @Test\n"
+                "-  public void oldName() {\n+  public void checkoutAppliesDiscount() {\n     assertEquals(1, 1);\n")
+        f = {"path": "T.java", "test": True, "text": java}
+        part, _ = D.test_blocks(f, ["checkoutAppliesDiscount"], lambda r, t: ("void " + r) in t)
+        self.assertIn("@Test", part); self.assertIn("assertEquals", part); self.assertIn("-  public void oldName", part)
 
     def test_a_test_written_inside_a_string_is_not_a_test(self):
         """A test definition inside a multi-line string never runs, so it never starts an evidence block; its lines go
@@ -13658,6 +13700,18 @@ class TestDecomposePure(unittest.TestCase):
         f = {"path": "tests/add.rs", "test": True, "text": self.file_diff("tests/add.rs", rs)}
         part, _ = D.test_blocks(f, ["adds_two"], defined)
         self.assertIn("#[test]", part); self.assertIn("assert_eq!", part); self.assertNotIn("nope", part)
+
+    def test_criteria_are_budgeted_by_their_size_as_sent(self):
+        """json.dumps escapes each emoji to 12 characters; the relevance budget counts that, not raw characters (Codex)."""
+        D = self.D
+        text = "\U0001F600" * 2000
+        cut, was = D.clip_sent(text, 2000)
+        self.assertTrue(was); self.assertLessEqual(D.sent_len(cut.split("\n[... cut")[0]), 2000)
+        self.assertEqual(D.clip_sent("plain", 2000), ("plain", False))
+        acs = [{"id": "AC-%d" % i, "text": text, "refs": [], "plan": {}} for i in range(8)]
+        f = {"path": "src/a.py", "status": "modified", "text": "diff --git a/src/a.py b/src/a.py\n+x\n"}
+        req = D.relevance_request(f, acs, 45000)
+        self.assertLess(len(json.dumps(req["state"])), 200000)
 
     def test_a_file_named_like_a_residual_piece_keeps_its_own_relevance(self):
         """A changed file literally named "<test> (edits outside its linked tests)" does not share the residual piece's

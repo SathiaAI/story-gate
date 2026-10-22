@@ -2750,7 +2750,19 @@ def judge_cost(judged, drec, dmode):
     return cost
 
 
-def decomposed_judge(phase, state, c, sd, skip, diff=""):
+def worktree_text(path):
+    """A changed file's text in the working tree, the "after" side of the DONE diff; None when it is missing, a link,
+    too large or unreadable."""
+    p = ROOT / path
+    try:
+        if p.is_file() and not p.is_symlink() and p.stat().st_size < 2_000_000:
+            return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    return None
+
+
+def decomposed_judge(phase, state, c, sd, skip, diff="", executed=False):
     """The narrow-question score (sg_decompose.py) for a phase. -> (judged or None, record). `judged` has the shape judge()
     returns, so verdict() can use it; `record` is what goes in the verdict file under "decomposed". Never raises: a failure
     gives (None, a record that says why)."""
@@ -2764,7 +2776,7 @@ def decomposed_judge(phase, state, c, sd, skip, diff=""):
               "choices": DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, "max_requests": DC.max_requests(c),
               "acs": [{"id": i, "text": x, "refs": r, "plan": plan.get(i) or {}} for i, x, r in acs(sd)],
               "is_test": lambda f: is_test_path(f, c), "defined": defined, "band": band,
-              "unread": untracked_skipped() if phase == "done" else [],
+              "unread": untracked_skipped() if phase == "done" else [], "read": worktree_text, "executed": executed,
               "story_id": sd.name, "story_dir": sd.resolve().relative_to(ROOT.resolve()).as_posix() if sd.resolve().is_relative_to(ROOT.resolve()) else ""}
         out = DC.run(phase, ev, lambda st, q: J.ask(c, st, q))
     except Exception as e:  # a bug here must never fail a score
@@ -2825,8 +2837,9 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     dmode = "off" if objective(c) else DC.mode(c)  # no judge in objective mode, so nothing to decompose
     dgot, drec = None, None
     ddiff = diff if phase == "done" else ""
+    executed = phase == "done" and bool(results)  # CI's per-test results: a linked test really ran
     if dmode == "on":  # the narrow questions decide; if they cannot run, the judge counts as unavailable (fail closed)
-        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
+        dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed)
         judged = dgot or judge_fallback(phase, sd, [k for k in (READY_Q if phase == "ready" else DONE_Q) if k not in skip],
                                         DRIFT_CHOICE if phase == "ready" else DRIFT_CHOICE_DONE, drec.get("error"))
         if dgot is None and judged["judge"] == "self":  # the agent's broad self-scores never stand in for the narrow ones
@@ -2837,7 +2850,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
             if "jev_error" in judged:  # the broad judge did not answer, so there is nothing to compare with
                 drec = {"schema": DC.SCHEMA, "mode": "shadow", "error": "not run: the judge did not answer (%s)" % (judged.get("jev_error") or "no key")}
             else:
-                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff)
+                dgot, drec = decomposed_judge(phase, state, c, sd, skip, ddiff, executed)
     dec, wav = ([], {}) if ci_trust is False else records(sd, phase, c, trusted=bool(ci_trust))
     # the broad judge's cut (the whole diff over half of max_chars) does not apply to the narrow questions: each pack and
     # group carries its own truncation, which already caps its check
@@ -2859,7 +2872,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
     if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
-    calib_log(sid, phase, v, judged)
+    calib_log(sid, phase, v, judged, "narrow:" + DC.SCHEMA if dmode == "on" and dgot is not None else "broad")
     if not quiet:
         print_verdict(v)
     return 0 if passed(v, c, sd) else 1
@@ -3048,12 +3061,12 @@ def pitfalls_scan(shown, base):
     return dict(out, state="ran", hits=PF.scan_hits(doc.get("findings"), want))
 
 
-def calib_log(sid, phase, v, judged):
+def calib_log(sid, phase, v, judged, scoring="broad"):
     """Every verdict is logged so thresholds can be tuned against human labels (gate.py label)."""
     qset = hashlib.sha256(json.dumps([READY_Q, DONE_Q], sort_keys=True).encode()).hexdigest()[:10]
     row = {"at": v["at"], "story": sid, "phase": phase, "overall": v["overall"], "judge": v["judge"], "provider": judged.get("provider"),
            "model": judged.get("model"), "questions": qset, "gate_version": VERSION, "inputs_hash": v["inputs_hash"],
-           "scores": judged.get("scores"), "drift": v["drift"]}
+           "scores": judged.get("scores"), "drift": v["drift"], "scoring": scoring}  # broad and narrow scores calibrate apart
     with CALIB.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row) + "\n")
 
