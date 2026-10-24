@@ -14533,6 +14533,13 @@ class TestReviewRecord(Base):
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "Agent"}, "t", policy)
         self.assertFalse(live["ok"]); self.assertIn("agent (the pull request's author)", live["why"])
 
+    def test_codex_never_reviews_a_pull_request_it_opened(self):
+        """A clean Codex summary lifts nothing when Codex is the pull request's author."""
+        self.codex_pr(self.clean())
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD,
+                                           "author": "chatgpt-codex-connector[bot]"}, "t", self.CODEX_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("(the pull request's author)", live["why"])
+
     def test_a_part_on_a_native_reviewer_is_refused(self):
         """Only a codex-summary reviewer has parts: two parts on one native login would let one review count twice."""
         policy = {"reviewers": [{"login": "sec-bot[bot]", "part": "a", "security": True}, {"login": "sec-bot[bot]", "part": "b"}]}

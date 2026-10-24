@@ -236,6 +236,9 @@ def review_record_check(ctx, token, policy):
         reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
         missing = []
         for r in good:
+            if r["login"].lower() == (ctx.get("author") or "").lower():  # the PR's author never reviews it, whatever the source
+                missing.append("%s (the pull request's author)" % r["login"])
+                continue
             if r.get("source") == "codex-summary":
                 # one Codex login runs both a code and a security review; each is a "part" of its summary state
                 found = codex_states(ctx, token, r["login"])
@@ -247,9 +250,6 @@ def review_record_check(ctx, token, policy):
                     missing.append("%s (%s)" % (r["login"], r.get("part")))
                 continue
             want, bot = r["login"].lower(), r["login"].lower().endswith("[bot]")
-            if want == (ctx.get("author") or "").lower():  # the PR's author never counts as an independent reviewer
-                missing.append("%s (the pull request's author)" % r["login"])
-                continue
 
             def same(u):  # exact login, and a bot login must be that App: a user named like it is someone else
                 return (u.get("login") or "").lower() == want and (u.get("type") == "Bot") == bot
