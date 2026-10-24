@@ -441,6 +441,7 @@ def check_config(c):
                                              and isinstance(r.get("security", False), bool)
                                              and r.get("source", "review") in ("review", "codex-summary")
                                              and (r.get("source") != "codex-summary" or r.get("part") in ("code_review", "security_review"))
+                                             and ("part" not in r or r.get("source") == "codex-summary")  # one login, one review
                                              for r in revs):
         raise ConfigError('.story-gate/config.json: "review_record" must look like {"reviewers": [{"login": "name", "security": true}]}; '
                           'a Codex reviewer may add "source": "codex-summary" and "part": "code_review" or "security_review" '
@@ -1806,8 +1807,8 @@ def review_blocked(review):
     rec = (review or {}).get("rec")
     if not rec:
         return "the review record was made on different evidence (the code, story, tests, handoff or policy changed): record it again"
-    if rec.get("_where") == "local":
-        return "a review record made on this computer is a proposal: it counts in CI after a code owner approves the head commit"
+    if rec.get("_where") == "local":  # applied as a proposal, like a waiver: CI scores again and decides (see verdict)
+        return ""
     if rec.get("_where") != "ci":
         return "no code owner has approved the head commit"
     live = review.get("live") or {}
@@ -1879,12 +1880,16 @@ def verdict(structural, judged, decisions, waivers, c, review=None):
             if block or gap:
                 x["why"] = (x["why"] + "; " if x.get("why") else "") + "independent review record not applied: " + (block or gap)
             else:
-                live = review["live"]
+                live = review.get("live") or {}
                 x["status"] = "REVIEWED"
-                x["why"] = "%s (reviews %s on %s; recorded by %s: %s)" % (REVIEW_NOTE, ", ".join(live.get("review_ids") or []),
-                                                                         (live.get("head") or "")[:12], rec.get("by"), rec.get("why_not_split"))
+                x["why"] = ("%s (recorded by %s: %s; proposal: it counts in CI only after a code owner approves the head commit "
+                            "and the live check on GitHub passes)" % (REVIEW_NOTE, rec.get("by"), rec.get("why_not_split"))
+                            if rec.get("_where") == "local" else
+                            "%s (reviews %s on %s; recorded by %s: %s)" % (REVIEW_NOTE, ", ".join(live.get("review_ids") or []),
+                                                                          (live.get("head") or "")[:12], rec.get("by"), rec.get("why_not_split")))
                 lifted.append(k)
         rv = {"by": rec.get("by"), "why_not_split": rec.get("why_not_split"), "lifted": lifted, "blocked": block,
+              "proposal": rec.get("_where") == "local",
               "head": (review.get("live") or {}).get("head"), "review_ids": (review.get("live") or {}).get("review_ids") or []}
     for k, w in waivers.items():
         if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED", "WARN", "REVIEWED") and checks[k]["kind"] != "structural":
@@ -4192,6 +4197,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
     import sg_github as G
     problems, notes, code, enforce, c = [], [], [], True, {}
     sid, pitfall_warn = None, ""
+    scored_done = False  # True only once this run scored DONE: done.json is then CI's own, not the PR's copy
     try:
         c = cfg()
         enforce = c["mode"] == "enforce" or "ci" in c.get("enforce_points", [])
@@ -4437,6 +4443,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
             else:
                 for ph in ("ready", "done"):
                     cmd_score(sid, ph, base, ci_trust=accepted["accepted"], results=results if ph == "done" else None, quiet=True)
+                    scored_done = scored_done or ph == "done"
                     v = load_v(sid, ph)
                     pa = ((v or {}).get("checks") or {}).get("pitfalls_acknowledged") or {}
                     if pa.get("status") == "WARN":  # warn mode never blocks, but the approver must still see it
@@ -4483,7 +4490,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         lines += ["- [x] READY and DONE gates passed, CI tests passed, and a code owner approved this commit."]
     else:
         lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
-    rr = (load_v(sid, "done") or {}).get("review_record") if sid else None
+    rr = (load_v(sid, "done") or {}).get("review_record") if sid and scored_done else None  # never the PR's own copy
     if isinstance(rr, dict) and rr.get("lifted"):  # the approver must see this was not a judge PASS
         lines += ["", "### %s" % REVIEW_NOTE.capitalize(), "",
                   "- Checks: %s" % ", ".join(rr["lifted"]), "- Review IDs: %s" % (", ".join(map(str, rr.get("review_ids") or [])) or "none"),

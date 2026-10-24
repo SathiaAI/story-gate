@@ -30,7 +30,7 @@ story-gate had no way to record that review.
 ```mermaid
 flowchart LR
   A[Agent: gate.py review-record ID --why-not-split ...] --> R[decisions.jsonl: kind review, bound to the evidence hash]
-  R --> L[Local score: proposal, shown, never PASS]
+  R --> L[Local score: applied as a proposal, like a waiver]
   R --> C[CI after a code owner approves the commit]
   C --> G[gate reads the PR on GitHub: listed reviewers finished on this head, zero open threads]
   G --> V{every capped item scored at or above PASS?}
@@ -41,11 +41,18 @@ flowchart LR
 - **Record.** `gate.py review-record <ID> --by <who> --why-not-split "<reason>"` appends one line to `decisions.jsonl`:
   `kind: "review"`, the phase (`done`), the reason, and the evidence hash. Like waivers and drift decisions it is bound
   to that hash. Any change to the code, story, tests, handoff, spec files or policy makes it stale.
-- **Trust.** Locally it is a proposal. The verdict shows it, but it can't lift anything. In CI it counts only when a code
-  owner has approved the head commit (the same rule as waivers), and only after the live check below passes.
+- **Trust.** Locally it is applied as a proposal, like a waiver: the check shows `REVIEWED` with "proposal" in its
+  reason, so the `done.json` committed with the work is right after the merge (dependants read it from the default
+  branch). CI always scores again. There it counts only when a code owner has approved the head commit (the same rule as
+  waivers), and only after the live check below passes. The CI summary shows the review section only when that run
+  scored DONE itself, never from the pull request's own copy.
 - **Live check (CI only).** The gate reads the pull request through the GitHub API with the workflow token:
   - Every reviewer listed in `config.json` → `review_record.reviewers` has a finished review on the current head.
     At least two are required, and at least one must be marked `security: true`.
+  - A reviewer is matched by its exact login; a `[bot]` login must also be a Bot account, so a person with a similar
+    name never counts. Each reviewer's latest review of the head decides: `CHANGES_REQUESTED` or `DISMISSED` lifts
+    nothing, even after an earlier pass. The pull request's author never counts as a reviewer.
+  - Only a `codex-summary` reviewer may have a `part`, so one native login is always one reviewer.
   - The pull request has zero unresolved review threads.
   - The record lists the review IDs and the head it saw. If any part fails, the record lifts nothing, and the report
     says which part failed.
@@ -65,13 +72,14 @@ flowchart LR
 - **Codex.** Codex runs a code review and a security review under one login. When a round finds nothing, it posts no
   formal review: it only updates the machine-readable state in its summary comment. A reviewer entry with
   `"source": "codex-summary"` and `"part": "code_review"` or `"security_review"` reads that state. The state counts
-  only from a comment written by that login as a Bot, for the current head, with status `completed` and
+  only from Codex's summary comment (it starts with `<!-- codex-pull-request-review-summary -->`), written by that login
+  as a Bot, for the current head, with status `completed` and
   `has_unresolved_findings: false`. Two parts of one login count as two reviewers.
 
 ## Done when
 
 1. Without a `review` record, every verdict is the same as before (existing tests pass unchanged).
-2. A record made locally is a proposal: it is shown but lifts nothing.
+2. A record made locally is applied as a proposal (marked "proposal"); CI scores again and decides.
 3. In CI with a code owner's approval and a passing live check, `evidence_complete` and qualifying group caps become
    `REVIEWED`, and the overall verdict is `REVIEWED`.
 4. It lifts nothing when any of these holds: a capped item scored below PASS; an item was not asked (request cap); a
@@ -81,6 +89,13 @@ flowchart LR
 6. Reports, the validation page and the CI summary say "passed on independent review" and list the review IDs.
 7. Offline tests cover each case in point 4 with a fake GitHub API and a fake judge.
 8. PROTOCOL.md and the guide explain when to use it: only after splitting was considered, and the reason is recorded.
+
+## Known limit
+- The check runs on pushes, pull request edits and labels, and on review submitted, edited or dismissed. New review
+  threads arrive with a review, so they re-run it. Two changes do not re-run it: a person unresolving a thread, and a
+  Codex re-review started on the same commit (its summary says "running" until it posts). GitHub Actions has no trigger
+  for either, and an `issue_comment` trigger would run the gate, with its secrets, on every comment. The owner's merge
+  rule (every review bot finished, every thread resolved) covers this gap until GitHub offers a trigger.
 
 ## Out of scope
 - A cross-group judge question (Release 1.1). It stays on the roadmap. This record is the compensating control until it

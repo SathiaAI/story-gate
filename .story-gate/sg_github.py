@@ -185,13 +185,15 @@ def unresolved_threads(ctx, token, reviewers):
     return n
 
 
+CODEX_SUMMARY = "<!-- codex-pull-request-review-summary -->"
 CODEX_STATE = re.compile(r"codex-review-state:v1\s*(\{.*?\})\s*-->", re.S)
 
 
 def codex_states(ctx, token, login):
     """The latest machine-readable review state Codex keeps in its summary comment, or None. Codex reports a clean
     round only there (no formal review), so a reviewer with source "codex-summary" is read from it. Only a comment
-    written by that login as a Bot counts: anyone can paste the same text into a comment of their own."""
+    written by that login as a Bot, and starting with Codex's summary marker, counts: anyone can paste the same text into a
+    comment of their own, and Codex may quote it in another reply."""
     import html
     want = login.lower().replace("[bot]", "")
     best = None
@@ -199,7 +201,10 @@ def codex_states(ctx, token, login):
         u = cm.get("user") or {}
         if (u.get("login") or "").lower().replace("[bot]", "") != want or u.get("type") != "Bot":
             continue
-        m = CODEX_STATE.search(html.unescape(cm.get("body") or ""))
+        body = html.unescape(cm.get("body") or "")
+        if not body.lstrip().startswith(CODEX_SUMMARY):  # only Codex's own summary comment, never another reply that quotes it
+            continue
+        m = CODEX_STATE.search(body)
         if not m:
             continue
         try:
@@ -221,7 +226,9 @@ def review_record_check(ctx, token, policy):
     good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
     if not head or not revs or len(good) != len(revs):
         out["why"] = "config.json review_record.reviewers is missing or malformed"
-    elif len({(r["login"].lower().replace("[bot]", ""), r.get("part", "")) for r in good}) < 2:
+    elif any("part" in r and r.get("source") != "codex-summary" for r in good):
+        out["why"] = "review_record.reviewers: only a codex-summary reviewer has a part"
+    elif len({(r["login"].lower(), r.get("part", "")) for r in good}) < 2:  # a native reviewer is one login, one person
         out["why"] = "review_record.reviewers lists fewer than two reviewers"
     elif not any(r.get("security") is True for r in good):
         out["why"] = "no reviewer in review_record.reviewers is marked security"
@@ -239,14 +246,20 @@ def review_record_check(ctx, token, policy):
                 else:
                     missing.append("%s (%s)" % (r["login"], r.get("part")))
                 continue
-            want = r["login"].lower().replace("[bot]", "")
-            ids = [str(x.get("id")) for x in reviews  # a finished review of the current head: not pending, not dismissed
-                   if x.get("commit_id") == head and x.get("state") not in ("PENDING", "DISMISSED")
-                   and ((x.get("user") or {}).get("login") or "").lower().replace("[bot]", "") == want]
-            if ids:
-                out["review_ids"] += ids
+            want, bot = r["login"].lower(), r["login"].lower().endswith("[bot]")
+            if want == (ctx.get("author") or "").lower():  # the PR's author never counts as an independent reviewer
+                missing.append("%s (the pull request's author)" % r["login"])
+                continue
+
+            def same(u):  # exact login, and a bot login must be that App: a user named like it is someone else
+                return (u.get("login") or "").lower() == want and (u.get("type") == "Bot") == bot
+            mine = sorted((x for x in reviews if x.get("commit_id") == head and x.get("state") != "PENDING"
+                           and same(x.get("user") or {})), key=lambda x: (x.get("submitted_at") or "", x.get("id") or 0))
+            # the reviewer's latest review of the current head decides: a later rejection or dismissal undoes an earlier pass
+            if mine and mine[-1].get("state") in ("APPROVED", "COMMENTED"):
+                out["review_ids"].append(str(mine[-1].get("id")))
             else:
-                missing.append(r["login"])
+                missing.append(r["login"] + (" (latest review: %s)" % mine[-1].get("state") if mine else ""))
         open_threads = unresolved_threads(ctx, token, None)
         if missing:
             out["why"] = "no finished review on %s from: %s" % (head[:7], ", ".join(missing))

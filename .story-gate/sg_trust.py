@@ -749,9 +749,14 @@ def weaker(old, new):
     revs = sorted(norm(n.get("reviewers")) - norm(o.get("reviewers")))
     if revs:
         out.append("more reviewers count as independent review: %s" % ", ".join(revs[:5]))
-    def rr(v):  # review_record.reviewers as {login: security}, logins normalised like reviewed_by
+    def rr(v):  # review_record.reviewers as {"login/part": security}: one Codex login has two parts, each a reviewer
         r = (v.get("review_record") or {}).get("reviewers") if isinstance(v.get("review_record"), dict) else None
-        return {str(x.get("login", "")).lower().replace("[bot]", ""): x.get("security") is True for x in r if isinstance(x, dict)} if isinstance(r, list) else {}
+        got = {}
+        for x in (r if isinstance(r, list) else []):
+            if isinstance(x, dict):
+                k = str(x.get("login", "")).lower() + ("/%s" % x["part"] if x.get("part") else "")
+                got[k] = got.get(k, False) or x.get("security") is True  # a duplicate entry never hides a security mark
+        return got
     orr, nrr = rr(o), rr(n)
     if orr and not nrr:
         out.append("review_record.reviewers was emptied (the independent review rule changed)")

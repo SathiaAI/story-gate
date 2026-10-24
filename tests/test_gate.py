@@ -3914,6 +3914,11 @@ class TestDashboardDependencies(Base):
     def setUp(self):
         """Give each test a bare remote with main pushed, and import sg_stories."""
         super().setUp()
+        # in-process checks read the base branch from the environment: never the CI runner's own (stacked) pull request
+        from unittest import mock
+        env = mock.patch.dict(os.environ); env.start(); self.addCleanup(env.stop)
+        for k in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF"):
+            os.environ.pop(k, None)
         self.remote = Path(tempfile.mkdtemp()) / "r.git"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
         self.g("checkout", "-q", "main")
@@ -12219,6 +12224,11 @@ class TestDependencies(Base):
     def setUp(self):
         """Give each test a bare remote with main pushed, and import sg_stories."""
         super().setUp()
+        # in-process checks read the base branch from the environment: never the CI runner's own (stacked) pull request
+        from unittest import mock
+        env = mock.patch.dict(os.environ); env.start(); self.addCleanup(env.stop)
+        for k in ("GITHUB_BASE_REF", "GITHUB_HEAD_REF", "SG_BASE_REF", "SG_HEAD_REF"):
+            os.environ.pop(k, None)
         sys.path.insert(0, str(SRC)); import importlib; self.S = importlib.import_module("sg_stories")
         self.remote = Path(tempfile.mkdtemp()) / "r.git"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
@@ -14133,7 +14143,8 @@ def fake_pr(test, G, reviews=None, threads=0, fail=False):
 
 def head_reviews(*logins, commit=HEAD, state="COMMENTED"):
     """Head reviews."""
-    return [{"id": 100 + i, "user": {"login": l}, "commit_id": commit, "state": state} for i, l in enumerate(logins)]
+    return [{"id": 100 + i, "user": {"login": l, "type": "Bot" if l.endswith("[bot]") else "User"}, "commit_id": commit, "state": state}
+            for i, l in enumerate(logins)]
 
 
 class TestReviewRecord(Base):
@@ -14216,15 +14227,17 @@ class TestReviewRecord(Base):
         self.assertFalse((self.repo / ".story-gate/stories/SAT-1/decisions.jsonl").exists())
 
     # ---- Done when 2
-    def test_a_record_made_locally_is_shown_and_lifts_nothing(self):
-        """A record made locally is shown and lifts nothing."""
-        v = self.verdict(review=self.review(where="local", ok=False))
-        self.assertEqual(v["overall"], "CONCERNS")
+    def test_a_record_made_locally_is_applied_as_a_proposal(self):
+        """Locally a record is applied as a proposal, like a waiver, so the committed done.json is right after the merge
+        (dependents read it); CI scores again and only its own live check decides. Low scores still lift nothing."""
+        v = self.verdict(review={"rec": dict(self.review()["rec"], _where="local")})  # no live check on this computer
+        self.assertEqual(v["overall"], "REVIEWED")
         for k in ("evidence_complete",) + GROUP_CHECKS:
-            self.assertEqual(v["checks"][k]["status"], "CONCERNS", k)
-            self.assertIn("a proposal", v["checks"][k]["why"])
-        self.assertEqual(v["review_record"]["lifted"], [])
-        self.assertEqual(v["review_record"]["by"], "Paul")
+            self.assertEqual(v["checks"][k]["status"], "REVIEWED", k)
+            self.assertIn("proposal: it counts in CI only after a code owner approves the head commit", v["checks"][k]["why"])
+        self.assertTrue(v["review_record"]["proposal"]); self.assertEqual(v["review_record"]["by"], "Paul")
+        low = self.verdict(judged=self.judged(groups=(0.9, 0.3)), review={"rec": dict(self.review()["rec"], _where="local")})
+        self.assertNotEqual(low["overall"], "REVIEWED")
 
     # ---- Done when 3
     def test_in_ci_with_approval_and_a_passing_live_check_the_caps_become_reviewed(self):
@@ -14315,7 +14328,7 @@ class TestReviewRecord(Base):
         two = [{"login": "a"}, {"login": "b"}]
         cases = [({"reviewers": two}, "no reviewer in review_record.reviewers is marked security"),
                  ({"reviewers": [{"login": "sec-bot[bot]", "security": True}]}, "fewer than two reviewers"),
-                 ({"reviewers": [{"login": "sec-bot[bot]", "security": True}, {"login": "SEC-BOT", "security": True}]}, "fewer than two reviewers"),
+                 ({"reviewers": [{"login": "sec-bot[bot]", "security": True}, {"login": "SEC-BOT[bot]", "security": True}]}, "fewer than two reviewers"),
                  ({"reviewers": []}, "missing or malformed"), ({}, "missing or malformed"), (None, "missing or malformed"),
                  ({"reviewers": ["sec-bot[bot]", "coderabbitai[bot]"]}, "missing or malformed")]
         for policy, why in cases:
@@ -14324,7 +14337,7 @@ class TestReviewRecord(Base):
 
     def test_the_live_check_passes_with_every_listed_reviewer_on_the_head_and_no_open_thread(self):
         """The live check passes with every listed reviewer on the head and no open thread."""
-        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "SEC-BOT") + [
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]") + [
             {"id": 7, "user": {"login": "other"}, "commit_id": "0" * 40, "state": "COMMENTED"}])
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
         self.assertTrue(live["ok"], live); self.assertEqual(live["review_ids"], ["100", "101"]); self.assertEqual(live["head"], HEAD)
@@ -14486,9 +14499,69 @@ class TestReviewRecord(Base):
         self.assertIn("no finished review on a1b2c3d from: sec-bot[bot]", done()["checks"]["no_deferrals"]["why"])
 
         fake_pr(self, G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
-        g.cmd_score("SAT-1", "done", "main", ci_trust=None, quiet=True)  # on this computer: a proposal
-        self.assertEqual(done()["checks"]["no_deferrals"]["status"], "CONCERNS")
-        self.assertIn("a proposal", done()["checks"]["no_deferrals"]["why"])
+        g.cmd_score("SAT-1", "done", "main", ci_trust=None, quiet=True)  # on this computer: applied as a proposal
+        for k in GROUP_CHECKS:  # so the committed done.json is right after the merge
+            self.assertEqual(done()["checks"][k]["status"], "REVIEWED", k)
+        self.assertIn("proposal: it counts in CI only", done()["checks"]["no_deferrals"]["why"])
+        self.assertTrue(done()["review_record"]["proposal"])
+
+    # ---- review round 2 (CodeRabbit and Codex on 08882ac)
+    def test_a_user_named_like_a_bot_reviewer_does_not_count(self):
+        """A bot reviewer is matched by its exact login and the Bot type: a person called sec-bot is someone else."""
+        for fake in ({"login": "sec-bot", "type": "User"}, {"login": "sec-bot[bot]", "type": "User"}, {"login": "sec-bot-2[bot]", "type": "Bot"}):
+            fake_pr(self, self.G, head_reviews("coderabbitai[bot]") + [{"id": 9, "user": fake, "commit_id": HEAD, "state": "COMMENTED"}])
+            live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
+            self.assertFalse(live["ok"], fake); self.assertIn("sec-bot[bot]", live["why"])
+
+    def test_the_latest_review_of_the_head_decides_and_a_rejection_lifts_nothing(self):
+        """CHANGES_REQUESTED or DISMISSED as a reviewer's latest review on the head lifts nothing, even after an earlier pass."""
+        for later in ("CHANGES_REQUESTED", "DISMISSED"):
+            revs = head_reviews("coderabbitai[bot]", "sec-bot[bot]")
+            revs[1]["submitted_at"] = "2026-10-24T10:00:00Z"
+            revs.append({"id": 200, "user": {"login": "sec-bot[bot]", "type": "Bot"}, "commit_id": HEAD, "state": later,
+                         "submitted_at": "2026-10-24T11:00:00Z"})
+            fake_pr(self, self.G, revs)
+            live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
+            self.assertFalse(live["ok"], later); self.assertIn("latest review: %s" % later, live["why"])
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]", state="CHANGES_REQUESTED"))
+        self.assertFalse(self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)["ok"])
+
+    def test_the_pull_requests_author_never_counts_as_a_reviewer(self):
+        """A listed reviewer who opened the pull request is not independent of it."""
+        policy = {"reviewers": [{"login": "agent"}, {"login": "sec-bot[bot]", "security": True}]}
+        fake_pr(self, self.G, head_reviews("agent", "sec-bot[bot]"))
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "Agent"}, "t", policy)
+        self.assertFalse(live["ok"]); self.assertIn("agent (the pull request's author)", live["why"])
+
+    def test_a_part_on_a_native_reviewer_is_refused(self):
+        """Only a codex-summary reviewer has parts: two parts on one native login would let one review count twice."""
+        policy = {"reviewers": [{"login": "sec-bot[bot]", "part": "a", "security": True}, {"login": "sec-bot[bot]", "part": "b"}]}
+        fake_pr(self, self.G, head_reviews("sec-bot[bot]"))
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", policy)
+        self.assertFalse(live["ok"]); self.assertIn("only a codex-summary reviewer has a part", live["why"])
+        self.cfg(review_record=policy)
+        with self.assertRaises(self.g.ConfigError):
+            self.g.cfg()
+
+    def test_codex_state_counts_only_from_its_summary_comment(self):
+        """The same state in another Codex reply (one that quotes it, say) is not the summary."""
+        self.codex_pr(self.clean())
+        comments = self.G.paged("/repos/o/r/issues/1/comments", "t")
+        comments[0]["body"] = "Replying to your question:\n" + comments[0]["body"]
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("no finished review", live["why"])
+
+    def test_removing_one_codex_part_or_its_security_mark_is_reported_as_weaker(self):
+        """Codex's two parts are two reviewers: dropping either, or its security mark, is a weaker rule."""
+        T = self.g.T
+        third = {"login": "coderabbitai[bot]"}
+        old = dict(self.c, review_record={"reviewers": self.CODEX_POLICY["reviewers"] + [third]})
+        code, sec = self.CODEX_POLICY["reviewers"]
+        self.assertTrue([w for w in T.weaker(old, dict(self.c, review_record={"reviewers": [sec, third]})) if "code_review removed" in w])
+        unmarked = dict(sec); unmarked.pop("security")
+        self.assertTrue([w for w in T.weaker(old, dict(self.c, review_record={"reviewers": [code, unmarked, third]})) if "security" in w])
+        swapped = dict(self.c, review_record={"reviewers": [sec, code, third]})  # order alone changes nothing
+        self.assertEqual(T.weaker(old, swapped), [])
 
     # ---- the policy
     def test_removing_a_reviewer_dropping_the_security_one_or_emptying_the_list_is_reported_as_weaker(self):
@@ -14497,7 +14570,7 @@ class TestReviewRecord(Base):
         full = lambda revs: dict(self.c, review_record={"reviewers": revs})
         old = full(RR_POLICY["reviewers"])
         self.assertEqual(T.weaker(old, old), [])
-        self.assertTrue([w for w in T.weaker(old, full([{"login": "sec-bot[bot]", "security": True}])) if "coderabbitai removed" in w])
+        self.assertTrue([w for w in T.weaker(old, full([{"login": "sec-bot[bot]", "security": True}])) if "coderabbitai[bot] removed" in w])
         self.assertTrue([w for w in T.weaker(old, full([{"login": "coderabbitai[bot]"}, {"login": "sec-bot[bot]"}])) if "marked security" in w or "no longer marked security" in w])
         self.assertTrue([w for w in T.weaker(old, full([])) if "emptied" in w])
         self.assertEqual(T.weaker(full([]), old), [])

@@ -752,7 +752,7 @@ If you tried and could not split it, independent reviewers can read the whole ch
 2. Record it: `gate.py review-record <ID> --by <who> --why-not-split "<why one story>"`. The reason is required. The record is tied to the exact evidence, so any later change makes it stale.
 3. A code owner approves the commit. In CI, story-gate then asks GitHub whether every listed reviewer finished a review of this commit and no thread is open.
 
-If all of that holds, only the size caps lift, and only where the judge's own score already passes. The check shows **REVIEWED** (passed on independent review: too large for one judge pass), never PASS. A low score, a group the judge never asked about, a cut file or a FAIL stays as it was. On your own computer a record is a proposal and lifts nothing. The report lists the review IDs and the head commit, and the dashboard counts these stories apart. Treat a high count as a sign to split stories more.
+If all of that holds, only the size caps lift, and only where the judge's own score already passes. The check shows **REVIEWED** (passed on independent review: too large for one judge pass), never PASS. A low score, a group the judge never asked about, a cut file or a FAIL stays as it was. On your own computer a record is applied as a proposal, like a waiver, so the `done.json` you commit is right once the pull request merges; CI scores again and only its own check decides. The report lists the review IDs and the head commit, and the dashboard counts these stories apart. Treat a high count as a sign to split stories more.
 
 ## Fallbacks
 
