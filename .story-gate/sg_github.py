@@ -170,19 +170,55 @@ def unresolved_threads(ctx, token, reviewers):
     owner, name = ctx["repo"].split("/", 1)
     q = """query($o:String!,$n:String!,$p:Int!,$a:String){repository(owner:$o,name:$n){pullRequest(number:$p){
       reviewThreads(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}"""
-    want = {r.lower().replace("[bot]", "") for r in reviewers}
+    want = None if reviewers is None else {r.lower().replace("[bot]", "") for r in reviewers}  # None: every thread counts
     n, after = 0, None
     for _ in range(50):  # 5000 threads is far beyond any real PR
         d = graphql(q, {"o": owner, "n": name, "p": int(ctx["number"]), "a": after}, token)
         rt = d["repository"]["pullRequest"]["reviewThreads"]
         for t in rt["nodes"]:
             a = (((t.get("comments") or {}).get("nodes") or [{}])[0].get("author") or {}).get("login", "")
-            if not t.get("isResolved") and a.lower().replace("[bot]", "") in want:
+            if not t.get("isResolved") and (want is None or a.lower().replace("[bot]", "") in want):
                 n += 1
         if not rt["pageInfo"]["hasNextPage"]:
             break
         after = rt["pageInfo"]["endCursor"]
     return n
+
+
+def review_record_check(ctx, token, policy):
+    """The live check behind an independent review record (docs/decisions/2026-10-24-independent-review-record.md).
+    policy = config.json -> review_record. -> {"ok": bool, "why": str, "head": sha, "review_ids": [...]}. It reads only GitHub's
+    own review records for the current head. Any problem, or an API error (the caller catches it), means ok False."""
+    head = ctx.get("head_sha") or ""
+    out = {"ok": False, "why": "", "head": head, "review_ids": []}
+    revs = (policy or {}).get("reviewers") if isinstance(policy, dict) else None
+    good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
+    if not head or not revs or len(good) != len(revs):
+        out["why"] = "config.json review_record.reviewers is missing or malformed"
+    elif len({r["login"].lower().replace("[bot]", "") for r in good}) < 2:
+        out["why"] = "review_record.reviewers lists fewer than two reviewers"
+    elif not any(r.get("security") is True for r in good):
+        out["why"] = "no reviewer in review_record.reviewers is marked security"
+    else:
+        reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
+        missing = []
+        for r in good:
+            want = r["login"].lower().replace("[bot]", "")
+            ids = [str(x.get("id")) for x in reviews  # a finished review of the current head: not pending, not dismissed
+                   if x.get("commit_id") == head and x.get("state") not in ("PENDING", "DISMISSED")
+                   and ((x.get("user") or {}).get("login") or "").lower().replace("[bot]", "") == want]
+            if ids:
+                out["review_ids"] += ids
+            else:
+                missing.append(r["login"])
+        open_threads = unresolved_threads(ctx, token, None)
+        if missing:
+            out["why"] = "no finished review on %s from: %s" % (head[:7], ", ".join(missing))
+        elif open_threads:
+            out["why"] = "%d unresolved review thread(s) on the pull request" % open_threads
+        else:
+            out["ok"] = True
+    return out
 
 
 def label_added_by(ctx, token, label):

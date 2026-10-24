@@ -3844,6 +3844,14 @@ class TestDashboard(Base):
         M = {m["key"]: m for m in self.D.metrics(self.data["stories"], [], [], [], "2026-10-02T00:00:00Z")}
         self.assertEqual(M["waived"]["value"], 1); self.assertEqual(M["ac_verified"]["value"], 50)  # only SAT-5's 1/2 counts
 
+    def test_reviewed_stories_are_counted_apart_and_are_not_waivers(self):
+        """Reviewed stories are counted apart and are not waivers."""
+        s = self.st("SAT-1"); s["done"]["overall"] = "REVIEWED"
+        M = {m["key"]: m for m in self.D.metrics(self.data["stories"], [], [], [], "2026-10-02T00:00:00Z")}
+        self.assertEqual(M["reviewed"]["value"], 1); self.assertEqual(M["waived"]["value"], 0)
+        self.assertEqual(self.D.verdict({"overall": "REVIEWED"})["overall"], "REVIEWED")
+        self.assertEqual(self.D.status_of({"done": {"overall": "REVIEWED"}}, True), "done")
+
     def test_truncation_keeps_priorities_and_falls_back_from_the_chart(self):
         body = self.D.to_markdown(self.data, limit=1800)
         self.assertIn("## Features", body); self.assertLessEqual(len(body), 1800)
@@ -12448,6 +12456,15 @@ class TestDependencies(Base):
         self.assertEqual(checks["dependencies"]["status"], "WARN"); self.assertIn("SAT-9 is done (waived)", checks["dependencies"]["why"])
         self.assertEqual(v["overall"], "PASS", v)
 
+    def test_reviewed_dependency_counts_as_done_with_warning(self):
+        """A dependency that passed on independent review counts as done, shown apart from PASS."""
+        self.publish("main", "SAT-9", done="REVIEWED")
+        self.story("SAT-9", self.dep_section(("SAT-9", "before-start")))
+        v, checks, _ = self.ready()
+        self.assertEqual(checks["dependencies"]["status"], "WARN")
+        self.assertIn("SAT-9 is done (passed on independent review: too large for one judge pass)", checks["dependencies"]["why"])
+        self.assertEqual(v["overall"], "PASS", v)
+
     def test_branch_that_changes_the_dependency_voids_its_done_verdict(self):
         """Branch that changes the dependency voids its done verdict."""
         self.publish("main", "SAT-9", done="PASS")
@@ -14087,3 +14104,357 @@ class TestDecomposePure(unittest.TestCase):
         c = D.run("done", self.ev(diff.replace("padding", "paddinx", 1), acs_), self.fake_ask())
         self.assertEqual(a["evidence_hash"], b["evidence_hash"])
         self.assertNotEqual(a["evidence_hash"], c["evidence_hash"])
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# An independent review record lifts the size caps (docs/decisions/2026-10-24-independent-review-record.md)
+HEAD = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
+RR_POLICY = {"reviewers": [{"login": "coderabbitai[bot]", "security": False}, {"login": "sec-bot[bot]", "security": True}]}
+GROUP_CHECKS = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
+
+
+def fake_pr(test, G, reviews=None, threads=0, fail=False):
+    """A pull request on a fake GitHub: reviews (REST list), `threads` unresolved review threads, or an API that fails."""
+    keep_github_fakes_local(test, G)
+    def paged(path, token):
+        """Paged."""
+        if fail:
+            raise RuntimeError("GitHub API %s -> HTTP 502" % path)
+        return list(reviews if reviews is not None else [])
+    G.paged = paged
+    def graphql(q, v, token):
+        """Graphql."""
+        if fail:
+            raise RuntimeError("GitHub GraphQL failed (HTTP 502)")
+        nodes = [{"isResolved": False, "comments": {"nodes": [{"author": {"login": "someone"}}]}} for _ in range(threads)]
+        return {"repository": {"pullRequest": {"reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
+    G.graphql = graphql
+
+
+def head_reviews(*logins, commit=HEAD, state="COMMENTED"):
+    """Head reviews."""
+    return [{"id": 100 + i, "user": {"login": l}, "commit_id": commit, "state": state} for i, l in enumerate(logins)]
+
+
+class TestReviewRecord(Base):
+    """The record, the lift in verdict(), and the live GitHub check, each with a fake judge result and a fake GitHub."""
+    def setUp(self):
+        """SetUp."""
+        super().setUp()
+        self.cfg(review_record=RR_POLICY)
+        self.g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
+        self.c = self.g.cfg()
+        import sg_github
+        self.G = sg_github
+
+    def judged(self, groups=(0.9, 0.9), cut=(), unasked=(), scores=None):
+        """What decomposed_judge returns for a change split into groups: each per-group check carries the split cap."""
+        n = len(groups)
+        def items():
+            """Items."""
+            out = []
+            for i, p in enumerate(groups):
+                gone = (i + 1) in unasked
+                out.append({"id": "group %d of %d" % (i + 1, n), "score": None if gone else p, "files": ["f%d.py" % i],
+                            "truncated": gone or (i + 1) in cut, "not_asked": gone})
+            out.append({"id": self.g.DC.SPLIT_ID, "score": None, "files": [], "truncated": True, "not_asked": False})
+            return out
+        sc = {k: min([p for i, p in enumerate(groups) if (i + 1) not in unasked] or [0.0]) for k in GROUP_CHECKS}
+        sc.update(scores or {})
+        return {"judge": "jev", "scores": dict(sc, impl_matches_acs=0.9), "capped": sorted(GROUP_CHECKS),
+                "items": {k: items() for k in GROUP_CHECKS}, "why": {}, "unscored": {}, "drift": "none"}
+
+    def verdict(self, judged=None, review=None, structural=None):
+        """Verdict."""
+        st = {"evidence_complete": ("CONCERNS", "the change is too large for one judge pass; split the story")} if structural is None else structural
+        return self.g.verdict(st, judged or self.judged(), [], {}, self.c, review)
+
+    def review(self, where="ci", ok=True, why="", **rec):
+        """Review."""
+        return {"rec": dict({"by": "Paul", "why_not_split": "one schema change", "_where": where}, **rec),
+                "live": {"ok": ok, "why": why, "head": HEAD, "review_ids": ["101", "102"]}}
+
+    # ---- Done when 1
+    def test_without_a_review_record_every_verdict_is_the_same(self):
+        """No record: the same statuses, the same overall, no new key, and the old records() ignores a review line."""
+        v = self.verdict()
+        self.assertEqual(v["overall"], "CONCERNS")
+        self.assertEqual({k: x["status"] for k, x in v["checks"].items()},
+                         dict({k: "CONCERNS" for k in GROUP_CHECKS}, evidence_complete="CONCERNS", impl_matches_acs="PASS"))
+        self.assertNotIn("review_record", v)
+        self.assertEqual(v, self.verdict(review=None))
+        run(self.repo, "start", "SAT-1")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        run(self.repo, "review-record", "SAT-1", "--by", "Paul", "--why-not-split", "one schema change")
+        self.assertEqual(self.g.records(sd, "done", self.c, trusted=True), ([], {}))  # a review is neither a decision nor a waiver
+
+    def test_policy_changes_nothing_while_no_reviewers_are_listed(self):
+        """An empty review_record leaves every stored evidence hash as it was; listing reviewers re-scores."""
+        self.cfg(review_record={"reviewers": []})
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
+        self.assertNotIn('"rr"', g.policy_fingerprint(g.cfg()))
+        self.assertIn('"rr"', self.g.policy_fingerprint(self.c))
+
+    # ---- the record
+    def test_the_command_writes_a_record_bound_to_the_evidence(self):
+        """The command writes a record bound to the evidence."""
+        run(self.repo, "start", "SAT-1")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        r = run(self.repo, "review-record", "SAT-1", "--by", "Paul", "--why-not-split", "  one schema change  ")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = json.loads((sd / "decisions.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((rec["kind"], rec["phase"], rec["by"], rec["why_not_split"]), ("review", "done", "Paul", "one schema change"))
+        self.assertEqual(rec["evidence"], self.g.inputs_hash(sd, "done", self.c))
+        self.assertTrue(rec["at"])
+
+    def test_why_not_split_is_required_and_not_empty(self):
+        """Why not split is required and not empty."""
+        run(self.repo, "start", "SAT-1")
+        for args in (["--by", "Paul"], ["--by", "Paul", "--why-not-split", "   "], ["--why-not-split", "big"]):
+            r = run(self.repo, "review-record", "SAT-1", *args)
+            self.assertNotEqual(r.returncode, 0, args)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-1/decisions.jsonl").exists())
+
+    # ---- Done when 2
+    def test_a_record_made_locally_is_shown_and_lifts_nothing(self):
+        """A record made locally is shown and lifts nothing."""
+        v = self.verdict(review=self.review(where="local", ok=False))
+        self.assertEqual(v["overall"], "CONCERNS")
+        for k in ("evidence_complete",) + GROUP_CHECKS:
+            self.assertEqual(v["checks"][k]["status"], "CONCERNS", k)
+            self.assertIn("a proposal", v["checks"][k]["why"])
+        self.assertEqual(v["review_record"]["lifted"], [])
+        self.assertEqual(v["review_record"]["by"], "Paul")
+
+    # ---- Done when 3
+    def test_in_ci_with_approval_and_a_passing_live_check_the_caps_become_reviewed(self):
+        """In ci with approval and a passing live check the caps become reviewed."""
+        v = self.verdict(review=self.review())
+        for k in ("evidence_complete",) + GROUP_CHECKS:
+            x = v["checks"][k]
+            self.assertEqual(x["status"], "REVIEWED", k)
+            self.assertIn("passed on independent review: too large for one judge pass", x["why"])
+            self.assertIn("101, 102", x["why"]); self.assertIn(HEAD[:12], x["why"]); self.assertIn("one schema change", x["why"])
+        self.assertEqual(v["checks"]["impl_matches_acs"]["status"], "PASS")
+        self.assertEqual(v["overall"], "REVIEWED")
+        self.assertCountEqual(v["review_record"]["lifted"], ("evidence_complete",) + GROUP_CHECKS)
+        self.assertEqual((v["review_record"]["head"], v["review_record"]["review_ids"]), (HEAD, ["101", "102"]))
+        self.assertTrue(self.g.passed(dict(v, judge="jev"), self.c))
+
+    def test_a_waiver_outranks_a_review_in_the_overall_verdict(self):
+        """A waiver outranks a review in the overall verdict."""
+        j = self.judged(); j["scores"]["impl_matches_acs"] = 0.5
+        v = self.g.verdict({}, j, [], {"impl_matches_acs": {"by": "Paul", "reason": "r", "_trusted": True}}, self.c, self.review())
+        self.assertEqual(v["checks"]["impl_matches_acs"]["status"], "WAIVED")
+        self.assertEqual(v["overall"], "WAIVED")
+
+    # ---- Done when 4: it lifts nothing when ...
+    def no_lift(self, v, why=None, which=GROUP_CHECKS):
+        """No lift."""
+        self.assertNotEqual(v["overall"], "REVIEWED")
+        for k in which:
+            self.assertEqual(v["checks"][k]["status"], "CONCERNS", k)
+            if why:
+                self.assertIn(why, v["checks"][k]["why"], k)
+
+    def test_nothing_is_lifted_when_a_capped_item_scored_below_pass(self):
+        """Nothing is lifted when a capped item scored below pass."""
+        v = self.verdict(self.judged(groups=(0.9, 0.5)), self.review())
+        self.no_lift(v)
+        self.assertNotEqual(v["overall"], "REVIEWED")
+        v = self.verdict(self.judged(groups=(0.9, 0.9), scores={"no_deferrals": 0.5}), self.review())  # the check's own score is low
+        self.assertEqual(v["checks"]["no_deferrals"]["status"], "CONCERNS")
+
+    def test_a_low_item_blocks_even_when_the_check_score_is_a_pass(self):
+        """The item list is read item by item, not only the check's minimum."""
+        j = self.judged(groups=(0.9, 0.5), scores={k: 0.9 for k in GROUP_CHECKS})
+        self.no_lift(self.verdict(j, self.review()), "scored below PASS: group 2 of 2 0.50")
+
+    def test_nothing_is_lifted_when_an_item_was_not_asked(self):
+        """Nothing is lifted when an item was not asked."""
+        v = self.verdict(self.judged(groups=(0.9, 0.9, 0.9), unasked=(3,)), self.review())
+        self.no_lift(v, "not asked: group 3 of 3")
+
+    def test_nothing_is_lifted_when_a_file_was_cut(self):
+        """Nothing is lifted when a file was cut."""
+        v = self.verdict(self.judged(cut=(1,)), self.review())
+        self.no_lift(v, "evidence was cut: group 1 of 2")
+
+    def test_nothing_is_lifted_when_the_judge_cannot_pass(self):
+        """Nothing is lifted when the judge cannot pass."""
+        j = self.judged(); j["judge"] = "emulated"
+        self.no_lift(self.verdict(j, self.review()))
+
+    def test_a_listed_reviewer_with_no_review_on_the_head_lifts_nothing(self):
+        """A listed reviewer with no review on the head lifts nothing."""
+        fake_pr(self, self.G, head_reviews("sec-bot[bot]"))
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertEqual(live["why"], "no finished review on a1b2c3d from: coderabbitai[bot]")
+        v = self.verdict(review=dict(self.review(ok=False, why=live["why"])))
+        self.no_lift(v, "no finished review on a1b2c3d from: coderabbitai[bot]", ("evidence_complete",) + GROUP_CHECKS)
+
+    def test_a_review_of_an_older_commit_or_a_dismissed_or_pending_one_does_not_count(self):
+        """A review of an older commit or a dismissed or pending one does not count."""
+        for rv in (head_reviews("coderabbitai[bot]", "sec-bot[bot]", commit="0" * 40),
+                   head_reviews("coderabbitai[bot]", "sec-bot[bot]", state="DISMISSED"),
+                   head_reviews("coderabbitai[bot]", "sec-bot[bot]", state="PENDING")):
+            fake_pr(self, self.G, rv)
+            self.assertFalse(self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)["ok"])
+
+    def test_an_open_thread_lifts_nothing(self):
+        """An open thread lifts nothing."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"), threads=1)
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertEqual(live["why"], "1 unresolved review thread(s) on the pull request")
+        self.no_lift(self.verdict(review=self.review(ok=False, why=live["why"])), "1 unresolved review thread(s)")
+
+    def test_no_security_reviewer_one_reviewer_or_no_reviewers_lifts_nothing(self):
+        """No security reviewer one reviewer or no reviewers lifts nothing."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
+        ctx = {"repo": "o/r", "number": 1, "head_sha": HEAD}
+        two = [{"login": "a"}, {"login": "b"}]
+        cases = [({"reviewers": two}, "no reviewer in review_record.reviewers is marked security"),
+                 ({"reviewers": [{"login": "sec-bot[bot]", "security": True}]}, "fewer than two reviewers"),
+                 ({"reviewers": [{"login": "sec-bot[bot]", "security": True}, {"login": "SEC-BOT", "security": True}]}, "fewer than two reviewers"),
+                 ({"reviewers": []}, "missing or malformed"), ({}, "missing or malformed"), (None, "missing or malformed"),
+                 ({"reviewers": ["sec-bot[bot]", "coderabbitai[bot]"]}, "missing or malformed")]
+        for policy, why in cases:
+            live = self.G.review_record_check(ctx, "t", policy)
+            self.assertFalse(live["ok"], policy); self.assertIn(why, live["why"])
+
+    def test_the_live_check_passes_with_every_listed_reviewer_on_the_head_and_no_open_thread(self):
+        """The live check passes with every listed reviewer on the head and no open thread."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "SEC-BOT") + [
+            {"id": 7, "user": {"login": "other"}, "commit_id": "0" * 40, "state": "COMMENTED"}])
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
+        self.assertTrue(live["ok"], live); self.assertEqual(live["review_ids"], ["100", "101"]); self.assertEqual(live["head"], HEAD)
+
+    def test_an_api_error_fails_closed(self):
+        """An api error fails closed."""
+        os.environ.update(GITHUB_TOKEN="t", GITHUB_REPOSITORY="o/r")
+        ev = self.repo / "event.json"
+        ev.write_text(json.dumps({"pull_request": {"number": 1, "head": {"sha": HEAD, "repo": {"full_name": "o/r"}}, "user": {"login": "x"}, "base": {"ref": "main"}}}))
+        os.environ["GITHUB_EVENT_PATH"] = str(ev)
+        fake_pr(self, self.G, fail=True)
+        live = self.g.review_live(self.c)
+        self.assertFalse(live["ok"]); self.assertIn("could not read the pull request", live["why"])
+        del os.environ["GITHUB_TOKEN"]
+        self.assertFalse(self.g.review_live(self.c)["ok"])  # no token, no live check
+
+    def test_a_record_made_on_other_evidence_lifts_nothing(self):
+        """A record made on other evidence lifts nothing."""
+        run(self.repo, "start", "SAT-1")
+        sd = self.repo / ".story-gate/stories/SAT-1"
+        run(self.repo, "review-record", "SAT-1", "--by", "Paul", "--why-not-split", "one schema change")
+        self.assertIsNotNone(self.g.review_record_of(sd, self.c, True)["rec"])
+        (sd / "handoff.md").write_text("changed after the review was recorded\n")
+        got = self.g.review_record_of(sd, self.c, True)
+        self.assertIsNone(got["rec"]); self.assertTrue(got["stale"])
+        self.no_lift(self.verdict(review=got), "made on different evidence", ("evidence_complete",) + GROUP_CHECKS)
+
+    def test_a_head_commit_without_a_code_owner_approval_lifts_nothing(self):
+        """A head commit without a code owner approval lifts nothing."""
+        v = self.verdict(review=self.review(where="unapproved"))
+        self.no_lift(v, "no code owner has approved the head commit", ("evidence_complete",) + GROUP_CHECKS)
+
+    def test_a_failed_live_check_lifts_nothing_and_says_why(self):
+        """A failed live check lifts nothing and says why."""
+        v = self.verdict(review=self.review(ok=False, why="no finished review on a1b2c3d from: sec-bot[bot]"))
+        self.no_lift(v, "the live check on GitHub did not pass: no finished review on a1b2c3d from: sec-bot[bot]", ("evidence_complete",) + GROUP_CHECKS)
+
+    def test_a_structural_failure_is_never_lifted(self):
+        """A structural failure is never lifted."""
+        v = self.verdict(review=self.review(), structural={"tests_ran_green": (False, "red"), "evidence_complete": ("CONCERNS", "big")})
+        self.assertEqual(v["checks"]["tests_ran_green"]["status"], "FAIL")
+        self.assertEqual(v["overall"], "FAIL")
+
+    # ---- Done when 5
+    def test_passed_accepts_reviewed_like_waived(self):
+        """Passed accepts reviewed like waived."""
+        for o in ("PASS", "WAIVED", "REVIEWED"):
+            self.assertTrue(self.g.passed({"overall": o, "judge": "jev"}, self.c), o)
+        self.assertFalse(self.g.passed({"overall": "CONCERNS", "judge": "jev"}, self.c))
+        self.assertFalse(self.g.passed({"overall": "REVIEWED", "judge": "emulated"}, self.c))
+
+    # ---- Done when 6
+    def test_the_verdict_line_the_summary_and_the_page_say_passed_on_independent_review(self):
+        """The verdict line the summary and the page say passed on independent review."""
+        import contextlib, io
+        v = dict(self.verdict(review=self.review()), story="SAT-1", phase="done", judge="jev", drift="none")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.g.print_verdict(v)
+        text = out.getvalue()
+        self.assertIn("REVIEWED", text); self.assertIn("passed on independent review: too large for one judge pass", text)
+        self.assertIn("101, 102", text); self.assertIn(HEAD[:12], text)
+        import sg_report
+        f = {"id": "SAT-1", "title": "T", "acs": [], "coverage": {}, "scenarios": [], "results": {}, "spec_hash": lambda s: "", "fingerprint": "x",
+             "ready": None, "done": dict(v, fresh=True), "tests": {}, "generated_at": "now", "branch": "b", "commit": "c" * 40,
+             "validation_md": "", "images": [], "images_skipped": [], "sources": [], "summary": ""}
+        page = sg_report.to_html(f)
+        self.assertIn("Passed on independent review: too large for one judge pass", page)
+        self.assertIn("101, 102", page); self.assertIn(HEAD[:12], page); self.assertIn("one schema change", page)
+
+    # ---- Done when 7: the whole path, a fake judge and a fake GitHub
+    def test_scoring_in_ci_lifts_the_group_caps_only_with_approval_and_a_passing_live_check(self):
+        """Scoring in ci lifts the group caps only with approval and a passing live check."""
+        j = MarkerJudge(base=0.95); self.addCleanup(j.close)
+        self.cfg(judge={"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": j.url + "/decisions",
+                        "decompose": "on", "max_chars": 20000}, review_record=RR_POLICY)
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        (self.repo / "src").mkdir(); (self.repo / "tests").mkdir()
+        for i in (1, 2, 3):
+            (self.repo / "src" / ("feat%d.js" % i)).write_text("// %s\nexport const f%d = () => %d;\n" % (mark("AC-1"), i, i) + "// filler\n" * 300)
+        run(self.repo, "review-record", "SAT-1", "--by", "Paul", "--why-not-split", "one schema change")
+        os.environ.update(JUDGE_API_KEY="k", GITHUB_TOKEN="t", GITHUB_REPOSITORY="o/r")
+        ev = self.repo.parent / (self.repo.name + "-event.json")
+        ev.write_text(json.dumps({"pull_request": {"number": 7, "head": {"sha": HEAD, "repo": {"full_name": "o/r"}}, "user": {"login": "agent"}, "base": {"ref": "main"}}}))
+        self.addCleanup(lambda: ev.exists() and ev.unlink())
+        os.environ["GITHUB_EVENT_PATH"] = str(ev)
+        g = load_gate(self.repo); os.environ.pop("STORY_GATE_ROOT", None)
+        import sg_github as G
+        done = lambda: json.loads((self.repo / ".story-gate/stories/SAT-1/done.json").read_text())
+
+        fake_pr(self, G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
+        g.cmd_score("SAT-1", "done", "main", ci_trust=True, quiet=True)
+        d = done()
+        self.assertGreater(len(d["decomposed"]["groups"]), 1, d["decomposed"])
+        for k in GROUP_CHECKS:
+            self.assertEqual(d["checks"][k]["status"], "REVIEWED", d["checks"][k])
+        self.assertCountEqual(d["review_record"]["lifted"], GROUP_CHECKS)
+        self.assertEqual(d["review_record"]["review_ids"], ["100", "101"])
+        self.assertNotIn("evidence_complete", d["checks"])  # the narrow questions decide in "on" mode: nothing structural to lift
+
+        g.cmd_score("SAT-1", "done", "main", ci_trust=False, quiet=True)  # no code owner approval
+        for k in GROUP_CHECKS:
+            self.assertEqual(done()["checks"][k]["status"], "CONCERNS")
+        self.assertIn("no code owner has approved the head commit", done()["checks"]["no_deferrals"]["why"])
+
+        fake_pr(self, G, head_reviews("coderabbitai[bot]"))  # the security reviewer has not reviewed this head
+        g.cmd_score("SAT-1", "done", "main", ci_trust=True, quiet=True)
+        self.assertEqual(done()["checks"]["no_deferrals"]["status"], "CONCERNS")
+        self.assertIn("no finished review on a1b2c3d from: sec-bot[bot]", done()["checks"]["no_deferrals"]["why"])
+
+        fake_pr(self, G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
+        g.cmd_score("SAT-1", "done", "main", ci_trust=None, quiet=True)  # on this computer: a proposal
+        self.assertEqual(done()["checks"]["no_deferrals"]["status"], "CONCERNS")
+        self.assertIn("a proposal", done()["checks"]["no_deferrals"]["why"])
+
+    # ---- the policy
+    def test_removing_a_reviewer_dropping_the_security_one_or_emptying_the_list_is_reported_as_weaker(self):
+        """Removing a reviewer dropping the security one or emptying the list is reported as weaker."""
+        T = self.g.T
+        full = lambda revs: dict(self.c, review_record={"reviewers": revs})
+        old = full(RR_POLICY["reviewers"])
+        self.assertEqual(T.weaker(old, old), [])
+        self.assertTrue([w for w in T.weaker(old, full([{"login": "sec-bot[bot]", "security": True}])) if "coderabbitai removed" in w])
+        self.assertTrue([w for w in T.weaker(old, full([{"login": "coderabbitai[bot]"}, {"login": "sec-bot[bot]"}])) if "marked security" in w or "no longer marked security" in w])
+        self.assertTrue([w for w in T.weaker(old, full([])) if "emptied" in w])
+        self.assertEqual(T.weaker(full([]), old), [])
+
+    def test_a_malformed_review_record_setting_stops_the_gate(self):
+        """A malformed review record setting stops the gate."""
+        for bad in ({"reviewers": "x"}, {"reviewers": [{"login": ""}]}, {"reviewers": [{"login": "a", "security": "yes"}]}, [], {"reviewers": ["a"]}):
+            self.cfg(review_record=bad)
+            with self.assertRaises(self.g.ConfigError):
+                self.g.cfg()

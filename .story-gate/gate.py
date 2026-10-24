@@ -58,6 +58,7 @@ Commands (run from the repo root):
   score <ID> ready|done [--base REF] compute checks + verdict -> stories/<ID>/<phase>.json
   decide <ID> --drift story|spec|none --by WHO --note TEXT [--phase ready|build|done]  record the drift decision
   waive <ID> <check> --by WHO --reason TEXT                     record a waiver
+  review-record <ID> --by WHO --why-not-split TEXT              record that independent reviewers read a change too large for one judge pass
   learn <ID> --type error|learning|pattern|none --summary .. [--root-cause ..] [--rule ..] [--tags a,b]
   checkpoint <ID>                    mid-story Jev check: % complete (estimate), on course?, drift, TODOs, tests keeping pace
   learnings [words...]               search past learnings (read these before planning)
@@ -259,6 +260,11 @@ DEFAULT_CONFIG = {
     # READY when a story's stack and domain match. "off" (default), "warn" (shown, never blocks) or "enforce" (READY fails
     # until each critical one shown is acknowledged). "source": a file path or an https:// URL of patterns-public.json.
     "pitfalls": {"mode": "off", "source": ""},
+    # Independent review record (docs/decisions/2026-10-24-independent-review-record.md): the reviewers whose finished review
+    # of the head commit, with no open thread, lets a recorded review lift the "too large for one judge pass" caps. Needs at
+    # least two, one with "security": true, e.g. [{"login": "coderabbitai[bot]", "security": true}, {"login": "other[bot]"}].
+    # Empty means a review record lifts nothing. Removing a reviewer, or the security one, is a weaker rule.
+    "review_record": {"reviewers": []},
 }
 
 # ------------------------------------------------------------------ checks
@@ -429,6 +435,12 @@ def check_config(c):
     why = PF.settings_problem(c.get("pitfalls"))
     if why:
         raise ConfigError('.story-gate/config.json: "pitfalls" %s - the gate fails closed until fixed' % why)
+    rr = c.get("review_record")
+    revs = rr.get("reviewers") if isinstance(rr, dict) else None
+    if not isinstance(revs, list) or not all(isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()
+                                             and isinstance(r.get("security", False), bool) for r in revs):
+        raise ConfigError('.story-gate/config.json: "review_record" must look like {"reviewers": [{"login": "name", "security": true}]} '
+                          '- the gate fails closed until fixed')
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:
         raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)
@@ -621,7 +633,8 @@ def policy_fingerprint(c):
     j = c.get("judge") or {}
     import sg_pitfalls as PF
     pf = {"pf": [PF.mode(c), c["pitfalls"].get("source")]} if PF.mode(c) != "off" else {}  # off: every stored verdict keeps its hash
-    return json.dumps({**pf, **DC.fingerprint(c), "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
+    rr = {"rr": c["review_record"]["reviewers"]} if c.get("review_record", {}).get("reviewers") else {}  # none listed: stored hashes stay
+    return json.dumps({**pf, **rr, **DC.fingerprint(c), "v": VERSION, "th": c.get("thresholds"), "ac": c.get("accept_concerns"),  # policy: stricter rules re-score
                        "j": [J.identity(c), j.get("emulated_allow_pass"), j.get("allow_self_judge_pass"), j.get("max_chars")],
                        "jm": c.get("judge_mode", "full"), "rsl": c.get("require_spec_link", False),  # switching mode re-scores: an objective verdict never counts in full mode
                        "w": c.get("writing"), "val": c.get("validation")}, sort_keys=True)  # turning on the writing check re-scores stored verdicts
@@ -884,7 +897,7 @@ class DepWorld:
             return self._seen[sid]
         tree, base = self.tree(sid), self.base(sid)
         st = {"found": bool(tree or base), "where": "this branch" if tree else self.ref, "unverified": False, "done": False,
-              "waived": False, "note": "", "text": tree or base}
+              "waived": False, "reviewed": False, "note": "", "text": tree or base}
         if not st["found"]:
             for r in self.remote_branches():
                 text = git("show", "%s:%s" % (r, STORY_FILE % (sid, "story.md")))
@@ -896,7 +909,7 @@ class DepWorld:
         except ValueError:
             d = {}
         overall = d.get("overall") if isinstance(d, dict) else None
-        if overall in ("PASS", "WAIVED"):
+        if overall in PASS_LIKE:
             if tree and self.changed_here(sid, tree, base):
                 st["note"] = "this branch changes %s, so its finished verdict on %s is for the old version" % (sid, self.ref)
             elif not tree and (gone := self.deleted_here(sid)) is not False:  # None (can't tell) fails closed, like changed_here
@@ -904,7 +917,7 @@ class DepWorld:
                               if gone else "can't find where this branch was cut from %s, so story-gate can't tell "
                               "whether it deletes %s; fetch more history (git fetch --unshallow origin)" % (self.ref, sid))
             else:
-                st.update(done=True, waived=overall == "WAIVED", where=self.ref)
+                st.update(done=True, waived=overall == "WAIVED", reviewed=overall == "REVIEWED", where=self.ref)
         self._seen[sid] = st
         return st
 
@@ -981,6 +994,8 @@ def dependency_check(sid, fm, story, c):
                 elif st["done"]:
                     if st["waived"]:
                         warn.append("%s is done (waived)" % d)
+                    elif st["reviewed"]:
+                        warn.append("%s is done (%s)" % (d, REVIEW_NOTE))
                 elif when == "before-start":
                     fail.append("%s must be finished and merged first (when: before-start)%s. If the work can run in parallel, change it to "
                                 "before-merge and agree the contract in context.md" % (d, " - " + st["note"] if st["note"] else ""))
@@ -1008,7 +1023,7 @@ def story_link_checks(sd, fm, story):
         weak = ["%s '%s' has high impact and no mitigation: add 'mitigation:'" % (r["id"], r["title"][:60]) for r in rk if r["impact"] == "high" and not r["mitigation"]]
         out["risks_handled"] = (False, "; ".join(errs)) if errs else ("CONCERNS", "; ".join(weak)) if weak else (True, "")
     declared = set(SS.depends_on_ids({"depends_on": fm.get("consumers")}))
-    if declared and load_json(sd / "done.json").get("overall") not in ("PASS", "WAIVED"):
+    if declared and load_json(sd / "done.json").get("overall") not in PASS_LIKE:
         w = DepWorld(c)
         if not w.err:
             texts = w.stories()
@@ -1774,11 +1789,43 @@ def struct_done(sd, sid, diff_files, c, diff_text="", results=None, truncated=Fa
 
 
 # ------------------------------------------------------------------ verdict (pure, unit-tested)
+PASS_LIKE = ("PASS", "WAIVED", "REVIEWED")  # overall verdicts that pass; REVIEWED = passed on independent review, WAIVED = a human waived
+REVIEW_NOTE = "passed on independent review: too large for one judge pass"
+
+
 def band(p, th):
     return "PASS" if p >= th["pass"] else ("CONCERNS" if p >= th["concerns"] else "FAIL")
 
 
-def verdict(structural, judged, decisions, waivers, c):
+def review_blocked(review):
+    """'' when a recorded independent review may lift the size caps; otherwise the plain reason it may not."""
+    rec = (review or {}).get("rec")
+    if not rec:
+        return "the review record was made on different evidence (the code, story, tests, handoff or policy changed): record it again"
+    if rec.get("_where") == "local":
+        return "a review record made on this computer is a proposal: it counts in CI after a code owner approves the head commit"
+    if rec.get("_where") != "ci":
+        return "no code owner has approved the head commit"
+    live = review.get("live") or {}
+    return "" if live.get("ok") else "the live check on GitHub did not pass: %s" % (live.get("why") or "it did not run")
+
+
+def review_item_gap(items, th):
+    """'' when every group's own score for a check passes and none was cut or left unasked (the split cap is the one thing a
+    review lifts); otherwise the plain reason it may not."""
+    groups = [i for i in items or [] if isinstance(i, dict) and i.get("id") != DC.SPLIT_ID]
+    unasked = [str(i.get("id")) for i in groups if i.get("score") is None or i.get("not_asked")]
+    cut = [str(i.get("id")) for i in groups if i.get("truncated") and i.get("score") is not None and not i.get("not_asked")]
+    low = ["%s %.2f" % (i.get("id"), i["score"]) for i in groups if i.get("score") is not None and i["score"] < th["pass"]]
+    if not groups:
+        return "no group was scored"
+    return "; ".join(x for x in (
+        "scored below PASS: " + ", ".join(low) if low else "", "not asked: " + ", ".join(unasked) if unasked else "",
+        "evidence was cut: " + ", ".join(cut) if cut else "") if x)
+
+
+def verdict(structural, judged, decisions, waivers, c, review=None):
+    """review (optional) = {"rec": the review record or None, "stale": bool, "live": the GitHub check or None}: see review_blocked."""
     th = c["thresholds"]
     checks = {}
     for k, (ok, why) in structural.items():
@@ -1812,13 +1859,37 @@ def verdict(structural, judged, decisions, waivers, c):
             checks["drift_decision"] = {"status": "PASS", "why": "decided: %s by %s%s" % (decided["drift"], decided["by"], "" if decided.get("_trusted") else " (proposal: needs a code owner's approval in CI)"), "kind": "decision"}
         else:
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
+    rv = None
+    if review and (review.get("rec") or review.get("stale")):  # a record exists: say what it did, or why it lifted nothing
+        rec, block, lifted = review.get("rec") or {}, review_blocked(review), []
+        for k, x in checks.items():
+            if x["status"] != "CONCERNS":
+                continue
+            if k == "evidence_complete" and x["kind"] == "structural":
+                gap = ""
+            elif (k in DC.PER_GROUP_DONE and k in judged.get("capped", ()) and k in judged.get("scores", {})
+                  and band(judged["scores"][k], th) == "PASS" and can_pass(judged["judge"], c)):  # capped, not low, not unjudged
+                gap = review_item_gap(judged.get("items", {}).get(k), th)
+            else:
+                continue
+            if block or gap:
+                x["why"] = (x["why"] + "; " if x.get("why") else "") + "independent review record not applied: " + (block or gap)
+            else:
+                live = review["live"]
+                x["status"] = "REVIEWED"
+                x["why"] = "%s (reviews %s on %s; recorded by %s: %s)" % (REVIEW_NOTE, ", ".join(live.get("review_ids") or []),
+                                                                         (live.get("head") or "")[:12], rec.get("by"), rec.get("why_not_split"))
+                lifted.append(k)
+        rv = {"by": rec.get("by"), "why_not_split": rec.get("why_not_split"), "lifted": lifted, "blocked": block,
+              "head": (review.get("live") or {}).get("head"), "review_ids": (review.get("live") or {}).get("review_ids") or []}
     for k, w in waivers.items():
-        if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED", "WARN") and checks[k]["kind"] != "structural":
+        if k in checks and checks[k]["status"] not in ("PASS", "NOT_JUDGED", "WARN", "REVIEWED") and checks[k]["kind"] != "structural":
             checks[k]["status"], checks[k]["why"] = "WAIVED", "waived by %s: %s%s" % (w["by"], w["reason"], "" if w.get("_trusted") else " (proposal: needs a code owner's approval in CI)")
     sts = [v["status"] for v in checks.values()]  # WARN (a warn-mode guardrail) is shown and never changes the overall verdict
     overall = ("FAIL" if "FAIL" in sts else "ESCALATED" if "ESCALATED" in sts else
-               "CONCERNS" if "CONCERNS" in sts else "WAIVED" if "WAIVED" in sts else "PASS")
-    return {"overall": overall, "drift": drift, "checks": checks}
+               "CONCERNS" if "CONCERNS" in sts else "WAIVED" if "WAIVED" in sts else  # a human waiver outranks a review: the weaker signal shows
+               "REVIEWED" if "REVIEWED" in sts else "PASS")
+    return {"overall": overall, "drift": drift, "checks": checks, **({"review_record": rv} if rv else {})}
 
 
 def passed(v, c, sd=None):
@@ -1828,7 +1899,7 @@ def passed(v, c, sd=None):
         return False  # without a trusted judge nothing passes
     if sd is not None and v.get("inputs_hash") != inputs_hash(sd, v.get("phase", "ready"), c):
         return False  # story/tests/handoff/code/spec changed since this verdict: re-score
-    return o in ("PASS", "WAIVED") or (o == "CONCERNS" and bool(c.get("accept_concerns")))
+    return o in PASS_LIKE or (o == "CONCERNS" and bool(c.get("accept_concerns")))
 
 
 def stale(v, c, sd):
@@ -1849,6 +1920,33 @@ def records(sd, phase, c=None, trusted=False):
         elif r.get("kind") == "waiver" and r.get("check") in READY_Q.keys() | DONE_Q.keys():
             wav[r["check"]] = r  # only semantic checks can be waived; structural facts cannot
     return dec, wav
+
+
+def review_record_of(sd, c=None, trusted=None):
+    """-> {"rec": the newest independent review record made on the current DONE evidence (or None), "stale": whether
+    a record exists but was made on other evidence}. trusted: None = this computer, False = CI without a code owner's
+    approval of the head, True = CI with it. The record only counts in CI (see review_blocked)."""
+    cur, rec, stale = inputs_hash(sd, "done", c), None, False
+    for r in jsonl(sd / "decisions.jsonl"):
+        if r.get("kind") != "review" or r.get("phase", "done") != "done":
+            continue
+        if r.get("evidence") == cur:
+            rec, stale = dict(r, _where="local" if trusted is None else "ci" if trusted else "unapproved"), False
+        elif rec is None:
+            stale = True
+    return {"rec": rec, "stale": stale}
+
+
+def review_live(c):
+    """The live GitHub check for a review record, CI only: {"ok", "why", "head", "review_ids"}. Any error fails closed."""
+    import sg_github as G
+    ctx, token = G.pr_context(), os.environ.get("GITHUB_TOKEN")
+    if not ctx or not token:
+        return {"ok": False, "why": "not running on a pull request with a GitHub token", "head": "", "review_ids": []}
+    try:
+        return G.review_record_check(ctx, token, c.get("review_record"))
+    except Exception as e:  # network, rate limit, odd reply: lift nothing
+        return {"ok": False, "why": "could not read the pull request (%s)" % e.__class__.__name__, "head": ctx.get("head_sha") or "", "review_ids": []}
 
 
 # ------------------------------------------------------------------ commands
@@ -2873,10 +2971,17 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     # the broad judge's cut (the whole diff over half of max_chars) does not apply to the narrow questions: each pack and
     # group carries its own truncation, which already caps its check
     narrow_struct = {k: x for k, x in structural.items() if k != "evidence_complete"}
-    v = verdict(narrow_struct if dmode == "on" and dgot is not None else structural, judged, dec, wav, c)
+    review = None
+    if phase == "done":  # a review record (kind "review") is looked up here; without one nothing below changes
+        review = review_record_of(sd, c, ci_trust)
+        if not (review["rec"] or review["stale"]):
+            review = None
+        elif review["rec"] and ci_trust:  # only a code owner's approval of the head makes the live check worth asking
+            review["live"] = review_live(c)
+    v = verdict(narrow_struct if dmode == "on" and dgot is not None else structural, judged, dec, wav, c, review)
     if drec is not None:
         if dgot is not None:
-            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(narrow_struct, dgot, dec, wav, c)["overall"]
+            drec["would_be_overall"] = v["overall"] if dmode == "on" else verdict(narrow_struct, dgot, dec, wav, c, review)["overall"]
         v["decomposed"] = drec
     v.update({"story": sid, "phase": phase, "at": now(), "judge": judged["judge"], "judge_provider": judged.get("provider"),
               "judge_model": judged.get("model"), "judge_note": judged.get("judge_note"), "jev_error": judged.get("jev_error"), "inputs_hash": inputs_hash(sd, phase, c),
@@ -2886,7 +2991,7 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     if DEP_BASE.get("commit"):
         v["base_commit"] = DEP_BASE["commit"]  # the default branch's latest commit that dependencies were checked against
     wj(sd / ("%s.json" % phase), v)
-    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
+    failed = [k for k, x in v["checks"].items() if x["status"] not in ("PASS", "WAIVED", "REVIEWED", "NOT_JUDGED", "WARN")]
     emit(phase + "_scored", sid, {"overall": v["overall"], "drift": v["drift"], "judge": v["judge"], "failed": failed})
     if (v["checks"].get("drift_decision") or {}).get("status") == "ESCALATED":  # even when another check FAILs
         emit("drift_escalated", sid, {"direction": v["drift"], "phase": phase})
@@ -2985,7 +3090,7 @@ def cmd_deps(sid):
     print("Depends on:" + ("" if ids else " nothing"))
     for d in ids:
         st = w.state(d)
-        state = ("done (waived)" if st["waived"] else "done") if st["done"] else \
+        state = ("done (waived)" if st["waived"] else "done (%s)" % REVIEW_NOTE if st["reviewed"] else "done") if st["done"] else \
             "not done (found on %s)%s" % (where_text(st), " - " + st["note"] if st["note"] else "") if st["found"] else "not found anywhere"
         r = recs.get(d) or {}
         print("  %s  %s  %s%s" % (d, r.get("when", "before-start"), state, "  - " + r["why"] if r.get("why") else ""))
@@ -3215,6 +3320,11 @@ def print_verdict(v):
     for k, x in sorted(v["checks"].items(), key=lambda kv: (kv[1].get("group", ""), kv[0])):
         if x["status"] not in ("PASS", "NOT_JUDGED"):
             print("  %-10s %-24s %s" % (x["status"], k, x.get("why") or "score=%s" % x.get("score")))
+    rr = v.get("review_record")
+    if rr:
+        print("  review     %s" % (("%s: %s. Reviews %s on %s. Recorded by %s: %s" % (
+            REVIEW_NOTE, ", ".join(rr["lifted"]), ", ".join(rr.get("review_ids") or []) or "none", (rr.get("head") or "")[:12], rr.get("by"),
+            rr.get("why_not_split"))) if rr.get("lifted") else "a review record by %s lifted nothing: %s" % (rr.get("by"), rr.get("blocked") or "see the checks above")))
     nj = [k for k, x in v["checks"].items() if x["status"] == "NOT_JUDGED"]
     if nj:
         print("  NOT JUDGED (objective mode, no AI judge): %s" % ", ".join(sorted(nj)))
@@ -3373,7 +3483,7 @@ def next_step(sid, c):
             done.append(label)
     rv = load_v(sid, "ready")
     if not passed(rv, c, sd):
-        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
+        bad = [k for k, x in ((rv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "REVIEWED", "NOT_JUDGED", "WARN")]
         if rv and not stale(rv, c, sd) and bad:
             return done, "READY is %s on: %s. Fix those (see `%s`), then run `%s`." % (
                 rv.get("overall"), ", ".join(bad), gate_cmd("status " + sid), gate_cmd("score %s ready" % sid))
@@ -3409,7 +3519,7 @@ def next_step(sid, c):
         done.append(label)
     dv = load_v(sid, "done")
     if not passed(dv, c, sd):
-        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
+        bad = [k for k, x in ((dv or {}).get("checks") or {}).items() if x.get("status") not in ("PASS", "WAIVED", "REVIEWED", "NOT_JUDGED", "WARN")]
         if dv and not stale(dv, c, sd) and bad:
             return done, "DONE is %s on: %s. Fix the cause (don't skip the check), then run `%s`." % (
                 dv.get("overall"), ", ".join(bad), gate_cmd("score %s done" % sid))
@@ -4329,7 +4439,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                         pitfall_warn = pa.get("why") or "known pitfalls could not be checked"
                         print("::warning title=story-gate: known pitfalls::%s" % gh_msg(pitfall_warn.replace("\n", " ")[:900]))
                     if not passed(v, c):
-                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "NOT_JUDGED", "WARN")]
+                        bad = ["%s (%s)" % (k, x.get("why") or x.get("score")) for k, x in (v or {}).get("checks", {}).items() if x["status"] not in ("PASS", "WAIVED", "REVIEWED", "NOT_JUDGED", "WARN")]
                         problems.append("%s %s gate is %s: %s" % (sid, ph.upper(), (v or {}).get("overall", "missing"), "; ".join(bad)[:900]))
             if ctx and token and c.get("require_independent_review"):
                 try:
@@ -4369,6 +4479,11 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         lines += ["- [x] READY and DONE gates passed, CI tests passed, and a code owner approved this commit."]
     else:
         lines += ["- [x] No code files changed, so the story gates were skipped. Normal code owner review still applies."]
+    rr = (load_v(sid, "done") or {}).get("review_record") if sid else None
+    if isinstance(rr, dict) and rr.get("lifted"):  # the approver must see this was not a judge PASS
+        lines += ["", "### %s" % REVIEW_NOTE.capitalize(), "",
+                  "- Checks: %s" % ", ".join(rr["lifted"]), "- Review IDs: %s" % (", ".join(map(str, rr.get("review_ids") or [])) or "none"),
+                  "- Head commit: %s" % (rr.get("head") or "")[:12], "- Recorded by %s. Why it was not split: %s" % (rr.get("by"), rr.get("why_not_split"))]
     if sid and (STORIES / sid / "trace.md").exists():
         lines += ["", rd(STORIES / sid / "trace.md")]
     if sid and code and (STORIES / sid / "validation.md").exists():
@@ -4413,7 +4528,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         recs = jsonl(STORIES / sid / "decisions.jsonl")
         if recs:
             lines += ["", "### Waivers and drift decisions in this story (count only after a code owner approves this commit)"]
-            lines += ["- %s %s: %s by %s - %s" % (r.get("phase"), r.get("kind"), r.get("check") or r.get("drift"), r.get("by"), r.get("reason") or r.get("note", "")) for r in recs]
+            lines += ["- %s %s: %s by %s - %s" % (r.get("phase"), r.get("kind"), r.get("check") or r.get("drift") or "too large for one judge pass", r.get("by"), r.get("reason") or r.get("note") or r.get("why_not_split", "")) for r in recs]
     summary(lines)
     print("story-gate CI: %s (%s mode, %d code files)" % ("OK" if not problems else "%d problem(s)" % len(problems), "enforce" if enforce else "warn", len(code)))
     return 1 if (problems and enforce) else 0
@@ -5855,6 +5970,10 @@ def main(argv):
             sys.exit("only semantic checks can be waived (%s); structural facts must be fixed" % ", ".join(sorted(READY_Q.keys() | DONE_Q.keys())))
         ph = kv.get("phase") or ("ready" if rest[1] in READY_Q else "done")
         return append_decision(rest[0], {"kind": "waiver", "phase": ph, "check": rest[1], "by": kv["by"], "reason": kv["reason"]}) or 0
+    if cmd == "review-record":
+        if not rest or not kv.get("by") or not (kv.get("why-not-split") or "").strip():
+            sys.exit("review-record <ID> --by WHO --why-not-split TEXT   (say why the story could not be split smaller)")
+        return append_decision(rest[0], {"kind": "review", "phase": "done", "by": kv["by"], "why_not_split": kv["why-not-split"].strip()}) or 0
     if cmd == "checkpoint":
         r = cmd_checkpoint(rest[0])
         return 0 if r.get("status") == "ON_TRACK" else 1

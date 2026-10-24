@@ -153,7 +153,7 @@ def front(text):
 
 
 def verdict(v):
-    if not isinstance(v, dict) or v.get("overall") not in ("PASS", "CONCERNS", "FAIL", "ESCALATED", "WAIVED"):
+    if not isinstance(v, dict) or v.get("overall") not in ("PASS", "CONCERNS", "FAIL", "ESCALATED", "WAIVED", "REVIEWED"):
         return None
     checks = v.get("checks") if isinstance(v.get("checks"), dict) else {}
     return {"overall": v["overall"], "drift": clean(v.get("drift"), 40), "judge": clean(v.get("judge"), 30), "inputs_hash": clean(v.get("inputs_hash"), 20),
@@ -306,11 +306,11 @@ def status_of(s, merged):
     # Precedence: done > blocked > in_review > waiting > in_progress > queued > draft. "waiting" needs the other stories, so
     # link_stories() applies it once every story is chosen; nothing here changes for a story with no dependencies or blockers.
     r, d, cp = s.get("ready") or {}, s.get("done") or {}, s.get("checkpoint") or {}
-    if merged and d.get("overall") in ("PASS", "WAIVED"):
-        return "done"  # finished; WAIVED ones are flagged and never count as proven
+    if merged and d.get("overall") in ("PASS", "WAIVED", "REVIEWED"):
+        return "done"  # finished; WAIVED ones are flagged and never count as proven; REVIEWED ones are counted apart
     if r.get("overall") == "ESCALATED" or d.get("overall") == "ESCALATED" or cp.get("status") == "OFF_COURSE":
         return "blocked"
-    if d.get("overall") in ("PASS", "WAIVED"):
+    if d.get("overall") in ("PASS", "WAIVED", "REVIEWED"):
         return "in_review"
     if s.get("coder"):
         return "in_progress"
@@ -491,6 +491,7 @@ def metrics(rows, calib, learn, conflicts, now):
     add("dor_met", "Meet Definition of Ready", len(dor), "stories whose READY verdict is PASS and still matches the story, tests and specs it was scored on (waivers don't count)")
     add("ready_stale", "READY out of date", sum(1 for s in rows if s.get("ready_fresh") is False), "READY verdicts recorded on a story, test plan, spec or policy that has since changed", good="low")
     add("waived", "Finished with waivers", sum(1 for s in finished if (s.get("done") or {}).get("overall") == "WAIVED" or (s.get("done") or {}).get("waived")), "finished stories whose DONE relied on a human waiver", good="low")
+    add("reviewed", "Passed on independent review", sum(1 for s in finished if (s.get("done") or {}).get("overall") == "REVIEWED"), "finished stories whose DONE passed on a recorded independent review because the change was too large for one judge pass; a signal to split stories more, not a goal", good="low")
     add("dor_pct", "Ready rate", pct(len(dor), total), "Meet Definition of Ready / Stories", "%")
     add("queued", "Queued to start", len(by["queued"]), "READY passed and nobody has claimed it")
     add("in_progress", "In progress", len(by["in_progress"]), "claimed by an agent, DONE not passed")
@@ -744,7 +745,7 @@ def pill(v, verdict=None):
     if not v:
         return '<span class="sg-pill">—</span>'
     cls = "pass" if v in ("PASS",) else ("fail" if v in ("FAIL", "ESCALATED") else "")
-    icon = {"PASS": "✓ ", "FAIL": "✕ ", "ESCALATED": "! ", "CONCERNS": "~ ", "WAIVED": "w "}.get(v, "")
+    icon = {"PASS": "✓ ", "FAIL": "✕ ", "ESCALATED": "! ", "CONCERNS": "~ ", "WAIVED": "w ", "REVIEWED": "r "}.get(v, "")
     return '<span class="sg-pill %s">%s%s</span>%s' % (cls, icon, h(v, 12), '<span class="sg-est">%s</span>' % no_judge(verdict) if no_judge(verdict) else "")
 
 

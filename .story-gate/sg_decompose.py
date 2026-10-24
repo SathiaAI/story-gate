@@ -35,6 +35,7 @@ PER_AC_DONE = ("impl_matches_acs", "tests_implemented")
 PER_GROUP_DONE = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
 UNRUN_NOTE = ("no per-test results (junit_path): a test shown here may never run (one written inside a string, say), so "
               "tests_implemented cannot PASS on what the gate can see alone")
+SPLIT_ID = "all groups together"  # the item that caps a per-group check when the change spans several groups (an independent review record may lift it)
 SPLIT_NOTE = "the change was split into %d groups, so effects across files in different groups were not judged together"
 REST_DONE = ("handoff_out", "learnings_specific")
 GROUP_NOTE = " Judge only the files shown here; they are one part of the change."
@@ -942,7 +943,7 @@ def _run_done(ev, ask):
                 ch = by[rid]["answers"]["drift_direction"]
                 drift, conf = ch["choice"], ch["confidence"]
         if len(groups) > 1:  # no request saw every file: scope or drift built from parts in two groups is not seen whole
-            items.append(item("all groups together", None, [], True, [SPLIT_NOTE % len(groups)]))
+            items.append(item(SPLIT_ID, None, [], True, [SPLIT_NOTE % len(groups)]))
         checks[key] = combine(items, th, band)
     unknown = groups and (low_drift is None or any("group:%d" % (i + 1) in gone or g.get("records_cut")
                                                    for i, g in enumerate(groups)))

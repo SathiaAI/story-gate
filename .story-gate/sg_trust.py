@@ -749,6 +749,20 @@ def weaker(old, new):
     revs = sorted(norm(n.get("reviewers")) - norm(o.get("reviewers")))
     if revs:
         out.append("more reviewers count as independent review: %s" % ", ".join(revs[:5]))
+    def rr(v):  # review_record.reviewers as {login: security}, logins normalised like reviewed_by
+        r = (v.get("review_record") or {}).get("reviewers") if isinstance(v.get("review_record"), dict) else None
+        return {str(x.get("login", "")).lower().replace("[bot]", ""): x.get("security") is True for x in r if isinstance(x, dict)} if isinstance(r, list) else {}
+    orr, nrr = rr(o), rr(n)
+    if orr and not nrr:
+        out.append("review_record.reviewers was emptied (the independent review rule changed)")
+    elif orr:
+        gone = sorted(set(orr) - set(nrr))
+        if gone:
+            out.append("fewer reviewers must finish before a review record lifts the size caps (review_record: %s removed)" % ", ".join(gone[:5]))
+        if any(orr.values()) and not any(nrr.values()):
+            out.append("no reviewer in review_record is marked security any more")
+        elif sorted(k for k, v in orr.items() if v and not nrr.get(k, False)) and any(nrr.values()):
+            out.append("a security reviewer in review_record is no longer marked security")
     try:
         a = int((o.get("checkpoint") or {}).get("every_edits", 10) or 0)
         b = int((n.get("checkpoint") or {}).get("every_edits", 10) or 0)
