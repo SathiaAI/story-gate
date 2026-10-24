@@ -438,8 +438,12 @@ def check_config(c):
     rr = c.get("review_record")
     revs = rr.get("reviewers") if isinstance(rr, dict) else None
     if not isinstance(revs, list) or not all(isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()
-                                             and isinstance(r.get("security", False), bool) for r in revs):
-        raise ConfigError('.story-gate/config.json: "review_record" must look like {"reviewers": [{"login": "name", "security": true}]} '
+                                             and isinstance(r.get("security", False), bool)
+                                             and r.get("source", "review") in ("review", "codex-summary")
+                                             and (r.get("source") != "codex-summary" or r.get("part") in ("code_review", "security_review"))
+                                             for r in revs):
+        raise ConfigError('.story-gate/config.json: "review_record" must look like {"reviewers": [{"login": "name", "security": true}]}; '
+                          'a Codex reviewer may add "source": "codex-summary" and "part": "code_review" or "security_review" '
                           '- the gate fails closed until fixed')
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:

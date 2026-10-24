@@ -60,8 +60,13 @@ flowchart LR
   check summary, the validation page and the dashboard.
 - **Visibility.** The report lists the review IDs, the head SHA, the `why_not_split` reason, and a per-repo count of
   stories that passed on review. The count is a signal to split stories more, not a goal.
-- **Weaker policy.** Adding a reviewer, dropping the security reviewer, or emptying `review_record.reviewers` is
-  reported as a policy change, like other loosened settings.
+- **Weaker policy.** Removing a reviewer, dropping the security reviewer, or emptying `review_record.reviewers` is
+  reported as a weaker policy, like other loosened settings. Adding a reviewer makes the rule stricter.
+- **Codex.** Codex runs a code review and a security review under one login. When a round finds nothing, it posts no
+  formal review: it only updates the machine-readable state in its summary comment. A reviewer entry with
+  `"source": "codex-summary"` and `"part": "code_review"` or `"security_review"` reads that state. The state counts
+  only from a comment written by that login as a Bot, for the current head, with status `completed` and
+  `has_unresolved_findings: false`. Two parts of one login count as two reviewers.
 
 ## Done when
 

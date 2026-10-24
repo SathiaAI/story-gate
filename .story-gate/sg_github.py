@@ -185,6 +185,32 @@ def unresolved_threads(ctx, token, reviewers):
     return n
 
 
+CODEX_STATE = re.compile(r"codex-review-state:v1\s*(\{.*?\})\s*-->", re.S)
+
+
+def codex_states(ctx, token, login):
+    """The latest machine-readable review state Codex keeps in its summary comment, or None. Codex reports a clean
+    round only there (no formal review), so a reviewer with source "codex-summary" is read from it. Only a comment
+    written by that login as a Bot counts: anyone can paste the same text into a comment of their own."""
+    import html
+    want = login.lower().replace("[bot]", "")
+    best = None
+    for cm in paged("/repos/%s/issues/%s/comments" % (ctx["repo"], ctx["number"]), token):
+        u = cm.get("user") or {}
+        if (u.get("login") or "").lower().replace("[bot]", "") != want or u.get("type") != "Bot":
+            continue
+        m = CODEX_STATE.search(html.unescape(cm.get("body") or ""))
+        if not m:
+            continue
+        try:
+            state = json.loads(m.group(1))
+        except ValueError:
+            continue
+        if best is None or (cm.get("updated_at") or "") > best[0]:
+            best = (cm.get("updated_at") or "", cm.get("id"), state)
+    return best
+
+
 def review_record_check(ctx, token, policy):
     """The live check behind an independent review record (docs/decisions/2026-10-24-independent-review-record.md).
     policy = config.json -> review_record. -> {"ok": bool, "why": str, "head": sha, "review_ids": [...]}. It reads only GitHub's
@@ -195,7 +221,7 @@ def review_record_check(ctx, token, policy):
     good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
     if not head or not revs or len(good) != len(revs):
         out["why"] = "config.json review_record.reviewers is missing or malformed"
-    elif len({r["login"].lower().replace("[bot]", "") for r in good}) < 2:
+    elif len({(r["login"].lower().replace("[bot]", ""), r.get("part", "")) for r in good}) < 2:
         out["why"] = "review_record.reviewers lists fewer than two reviewers"
     elif not any(r.get("security") is True for r in good):
         out["why"] = "no reviewer in review_record.reviewers is marked security"
@@ -203,6 +229,16 @@ def review_record_check(ctx, token, policy):
         reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
         missing = []
         for r in good:
+            if r.get("source") == "codex-summary":
+                # one Codex login runs both a code and a security review; each is a "part" of its summary state
+                found = codex_states(ctx, token, r["login"])
+                part = (found[2].get(r.get("part")) if found and isinstance(found[2], dict) else None) or {}
+                if (part.get("commit_sha") == head and part.get("status") == "completed"
+                        and part.get("has_unresolved_findings") is False):
+                    out["review_ids"].append("comment:%s:%s" % (found[1], r["part"]))
+                else:
+                    missing.append("%s (%s)" % (r["login"], r.get("part")))
+                continue
             want = r["login"].lower().replace("[bot]", "")
             ids = [str(x.get("id")) for x in reviews  # a finished review of the current head: not pending, not dismissed
                    if x.get("commit_id") == head and x.get("state") not in ("PENDING", "DISMISSED")

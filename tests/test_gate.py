@@ -14329,6 +14329,56 @@ class TestReviewRecord(Base):
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
         self.assertTrue(live["ok"], live); self.assertEqual(live["review_ids"], ["100", "101"]); self.assertEqual(live["head"], HEAD)
 
+    def codex_pr(self, state, author="chatgpt-codex-connector[bot]", kind="Bot", threads=0):
+        """A fake PR whose only review evidence is a Codex summary comment holding `state`."""
+        fake_pr(self, self.G, [], threads=threads)
+        body = "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 %s -->\n## Codex Review Summary" % (
+            json.dumps(state).replace("{", "&#123;").replace("}", "&#125;"))
+        comments = [{"id": 55, "user": {"login": author, "type": kind}, "body": body, "updated_at": "2026-10-24T22:00:00Z"}]
+        self.G.paged = lambda path, token: comments if "/issues/" in path else []
+
+    CODEX_POLICY = {"reviewers": [
+        {"login": "chatgpt-codex-connector[bot]", "source": "codex-summary", "part": "code_review"},
+        {"login": "chatgpt-codex-connector[bot]", "source": "codex-summary", "part": "security_review", "security": True}]}
+
+    def clean(self, commit=HEAD, open_findings=False, status="completed"):
+        """Clean."""
+        part = {"commit_sha": commit, "status": status, "has_any_findings": False, "has_unresolved_findings": open_findings}
+        return {"code_review": dict(part), "security_review": dict(part)}
+
+    def test_codex_summary_state_counts_both_its_reviews_on_the_head(self):
+        """One Codex login runs a code and a security review; its summary state on the head counts as both."""
+        self.codex_pr(self.clean())
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)
+        self.assertTrue(live["ok"], live)
+        self.assertEqual(live["review_ids"], ["comment:55:code_review", "comment:55:security_review"])
+
+    def test_codex_summary_state_on_another_commit_open_findings_or_running_lifts_nothing(self):
+        """A Codex state for an older commit, with unresolved findings, or still running, lifts nothing."""
+        for state in (self.clean(commit="0" * 40), self.clean(open_findings=True), self.clean(open_findings=None), self.clean(status="running")):
+            self.codex_pr(state)
+            live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)
+            self.assertFalse(live["ok"], state); self.assertIn("no finished review", live["why"])
+
+    def test_codex_summary_text_pasted_by_someone_else_lifts_nothing(self):
+        """The same summary text in a comment by a person, or by another account, is not Codex's state."""
+        for author, kind in (("pjpoulose", "User"), ("chatgpt-codex-connector[bot]", "User"), ("other-bot[bot]", "Bot")):
+            self.codex_pr(self.clean(), author=author, kind=kind)
+            self.assertFalse(self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)["ok"], author)
+
+    def test_codex_summary_with_an_open_thread_lifts_nothing(self):
+        """A clean Codex state still needs zero unresolved review threads."""
+        self.codex_pr(self.clean(), threads=1)
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("unresolved review thread", live["why"])
+
+    def test_a_codex_reviewer_needs_a_known_part(self):
+        """Config refuses a codex-summary reviewer without code_review or security_review as its part."""
+        c = dict(self.g.load_cfg() if hasattr(self.g, "load_cfg") else self.c)
+        c["review_record"] = {"reviewers": [{"login": "x", "source": "codex-summary", "part": "other"}]}
+        with self.assertRaises(self.g.ConfigError):
+            self.g.check_config(c)
+
     def test_an_api_error_fails_closed(self):
         """An api error fails closed."""
         os.environ.update(GITHUB_TOKEN="t", GITHUB_REPOSITORY="o/r")
