@@ -1802,13 +1802,14 @@ def band(p, th):
     return "PASS" if p >= th["pass"] else ("CONCERNS" if p >= th["concerns"] else "FAIL")
 
 
-def review_blocked(review):
+def review_blocked(review, c=None):
     """'' when a recorded independent review may lift the size caps; otherwise the plain reason it may not."""
+    import sg_github as G
     rec = (review or {}).get("rec")
     if not rec:
         return "the review record was made on different evidence (the code, story, tests, handoff or policy changed): record it again"
     if rec.get("_where") == "local":  # applied as a proposal, like a waiver: CI scores again and decides (see verdict)
-        return ""
+        return G.review_policy_problem((c or {}).get("review_record"))  # but never under a policy CI could not accept
     if rec.get("_where") != "ci":
         return "no code owner has approved the head commit"
     live = review.get("live") or {}
@@ -1866,7 +1867,7 @@ def verdict(structural, judged, decisions, waivers, c, review=None):
             checks["drift_decision"] = {"status": "ESCALATED", "why": "drift points to '%s' — needs a recorded decision from the architect/orchestrator" % drift, "kind": "decision"}
     rv = None
     if review and (review.get("rec") or review.get("stale")):  # a record exists: say what it did, or why it lifted nothing
-        rec, block, lifted = review.get("rec") or {}, review_blocked(review), []
+        rec, block, lifted = review.get("rec") or {}, review_blocked(review, c), []
         for k, x in checks.items():
             if x["status"] != "CONCERNS":
                 continue

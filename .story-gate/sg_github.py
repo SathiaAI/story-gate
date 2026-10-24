@@ -195,11 +195,11 @@ def codex_states(ctx, token, login):
     written by that login as a Bot, and starting with Codex's summary marker, counts: anyone can paste the same text into a
     comment of their own, and Codex may quote it in another reply."""
     import html
-    want = login.lower().replace("[bot]", "")
+    want = login.lower()  # the exact App login, like a native reviewer: "codex" and "codex[bot]" are not one account
     best = None
     for cm in paged("/repos/%s/issues/%s/comments" % (ctx["repo"], ctx["number"]), token):
         u = cm.get("user") or {}
-        if (u.get("login") or "").lower().replace("[bot]", "") != want or u.get("type") != "Bot":
+        if (u.get("login") or "").lower() != want or u.get("type") != "Bot":
             continue
         body = html.unescape(cm.get("body") or "")
         if not body.lstrip().startswith(CODEX_SUMMARY):  # only Codex's own summary comment, never another reply that quotes it
@@ -216,23 +216,35 @@ def codex_states(ctx, token, login):
     return best
 
 
+def review_policy_problem(policy):
+    """'' when config.json -> review_record can ever lift a cap; otherwise why not. Checked locally too, so a record is
+    never even proposed under a policy that CI could not accept (no reviewers, one reviewer, no security reviewer)."""
+    revs = (policy or {}).get("reviewers") if isinstance(policy, dict) else None
+    good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
+    if not revs or len(good) != len(revs):
+        return "config.json review_record.reviewers is missing or malformed"
+    if any("part" in r and r.get("source") != "codex-summary" for r in good):
+        return "review_record.reviewers: only a codex-summary reviewer has a part"
+    if len({(r["login"].lower(), r.get("part", "")) for r in good}) < 2:  # a native reviewer is one login, one person
+        return "review_record.reviewers lists fewer than two reviewers"
+    if not any(r.get("security") is True for r in good):
+        return "no reviewer in review_record.reviewers is marked security"
+    return ""
+
+
 def review_record_check(ctx, token, policy):
     """The live check behind an independent review record (docs/decisions/2026-10-24-independent-review-record.md).
     policy = config.json -> review_record. -> {"ok": bool, "why": str, "head": sha, "review_ids": [...]}. It reads only GitHub's
     own review records for the current head. Any problem, or an API error (the caller catches it), means ok False."""
     head = ctx.get("head_sha") or ""
     out = {"ok": False, "why": "", "head": head, "review_ids": []}
-    revs = (policy or {}).get("reviewers") if isinstance(policy, dict) else None
-    good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
-    if not head or not revs or len(good) != len(revs):
-        out["why"] = "config.json review_record.reviewers is missing or malformed"
-    elif any("part" in r and r.get("source") != "codex-summary" for r in good):
-        out["why"] = "review_record.reviewers: only a codex-summary reviewer has a part"
-    elif len({(r["login"].lower(), r.get("part", "")) for r in good}) < 2:  # a native reviewer is one login, one person
-        out["why"] = "review_record.reviewers lists fewer than two reviewers"
-    elif not any(r.get("security") is True for r in good):
-        out["why"] = "no reviewer in review_record.reviewers is marked security"
+    problem = review_policy_problem(policy)
+    if not head:
+        out["why"] = "the pull request's head commit is unknown"
+    elif problem:
+        out["why"] = problem
     else:
+        good = policy["reviewers"]
         reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
         missing = []
         for r in good:

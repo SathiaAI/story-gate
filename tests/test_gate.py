@@ -14540,6 +14540,42 @@ class TestReviewRecord(Base):
                                            "author": "chatgpt-codex-connector[bot]"}, "t", self.CODEX_POLICY)
         self.assertFalse(live["ok"]); self.assertIn("(the pull request's author)", live["why"])
 
+    def test_codex_aliases_are_not_two_reviewers(self):
+        """"codex" and "codex[bot]" with one part are not two reviewers: the Codex login is matched exactly, like a native one."""
+        policy = {"reviewers": [
+            {"login": "chatgpt-codex-connector", "source": "codex-summary", "part": "security_review", "security": True},
+            {"login": "chatgpt-codex-connector[bot]", "source": "codex-summary", "part": "security_review", "security": True}]}
+        self.codex_pr(self.clean())
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", policy)
+        self.assertFalse(live["ok"]); self.assertIn("chatgpt-codex-connector (security_review)", live["why"])
+
+    def test_a_local_proposal_needs_a_policy_ci_could_accept(self):
+        """No reviewers, one reviewer, or no security reviewer: even a local proposal lifts nothing."""
+        local = {"rec": dict(self.review()["rec"], _where="local")}
+        for policy in ({"reviewers": []}, {"reviewers": [{"login": "sec-bot[bot]", "security": True}]},
+                       {"reviewers": [{"login": "a[bot]"}, {"login": "b[bot]"}]}):
+            self.c["review_record"] = policy
+            v = self.verdict(review=local)
+            self.assertNotEqual(v["overall"], "REVIEWED", policy)
+            self.assertEqual(v["review_record"]["lifted"], [], policy)
+        self.c["review_record"] = RR_POLICY
+        self.assertEqual(self.verdict(review=local)["overall"], "REVIEWED")
+
+    def test_the_page_says_a_local_record_is_a_proposal(self):
+        """The validation page labels a local record as a proposal, not a finished independent review."""
+        import sg_report
+        v = dict(self.verdict(review={"rec": dict(self.review()["rec"], _where="local")}), story="SAT-1", phase="done", judge="jev", drift="none")
+        f = {"id": "SAT-1", "title": "T", "acs": [], "coverage": {}, "scenarios": [], "results": {}, "spec_hash": lambda s: "", "fingerprint": "x",
+             "ready": None, "done": dict(v, fresh=True), "tests": {}, "generated_at": "now", "branch": "b", "commit": "c" * 40,
+             "validation_md": "", "images": [], "images_skipped": [], "sources": [], "summary": ""}
+        self.assertIn("Proposal, not yet checked in CI", sg_report.to_html(f))
+
+    def test_the_dashboard_counts_a_review_that_ends_waived(self):
+        """A story that passed on review and also has a waiver (overall WAIVED) still counts as passed on review."""
+        import sg_dashboard as D
+        v = {"overall": "WAIVED", "checks": {"no_deferrals": {"status": "REVIEWED"}, "impl_matches_acs": {"status": "WAIVED"}}}
+        self.assertEqual(D.verdict(v)["reviewed"], 1); self.assertEqual(D.verdict(v)["waived"], 1)
+
     def test_a_part_on_a_native_reviewer_is_refused(self):
         """Only a codex-summary reviewer has parts: two parts on one native login would let one review count twice."""
         policy = {"reviewers": [{"login": "sec-bot[bot]", "part": "a", "security": True}, {"login": "sec-bot[bot]", "part": "b"}]}

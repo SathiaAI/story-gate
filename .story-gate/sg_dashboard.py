@@ -159,7 +159,8 @@ def verdict(v):
     return {"overall": v["overall"], "drift": clean(v.get("drift"), 40), "judge": clean(v.get("judge"), 30), "inputs_hash": clean(v.get("inputs_hash"), 20),
             "inputs_hash_base": clean(v.get("inputs_hash_base"), 20),
             "at": clean(v.get("at"), 30), "cost": v.get("cost") if isinstance(v.get("cost"), (int, float)) and not isinstance(v.get("cost"), bool) else None,
-            "waived": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("status") == "WAIVED")}
+            "waived": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("status") == "WAIVED"),
+            "reviewed": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("status") == "REVIEWED")}
 
 
 def no_judge(v):
@@ -491,7 +492,7 @@ def metrics(rows, calib, learn, conflicts, now):
     add("dor_met", "Meet Definition of Ready", len(dor), "stories whose READY verdict is PASS and still matches the story, tests and specs it was scored on (waivers don't count)")
     add("ready_stale", "READY out of date", sum(1 for s in rows if s.get("ready_fresh") is False), "READY verdicts recorded on a story, test plan, spec or policy that has since changed", good="low")
     add("waived", "Finished with waivers", sum(1 for s in finished if (s.get("done") or {}).get("overall") == "WAIVED" or (s.get("done") or {}).get("waived")), "finished stories whose DONE relied on a human waiver", good="low")
-    add("reviewed", "Passed on independent review", sum(1 for s in finished if (s.get("done") or {}).get("overall") == "REVIEWED"), "finished stories whose DONE passed on a recorded independent review because the change was too large for one judge pass; a signal to split stories more, not a goal", good="low")
+    add("reviewed", "Passed on independent review", sum(1 for s in finished if (s.get("done") or {}).get("overall") == "REVIEWED" or (s.get("done") or {}).get("reviewed")), "finished stories whose DONE passed on a recorded independent review (alone, or with a waiver) because the change was too large for one judge pass; a signal to split stories more, not a goal", good="low")
     add("dor_pct", "Ready rate", pct(len(dor), total), "Meet Definition of Ready / Stories", "%")
     add("queued", "Queued to start", len(by["queued"]), "READY passed and nobody has claimed it")
     add("in_progress", "In progress", len(by["in_progress"]), "claimed by an agent, DONE not passed")

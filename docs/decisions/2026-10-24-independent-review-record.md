@@ -43,7 +43,8 @@ flowchart LR
   to that hash. Any change to the code, story, tests, handoff, spec files or policy makes it stale.
 - **Trust.** Locally it is applied as a proposal, like a waiver: the check shows `REVIEWED` with "proposal" in its
   reason, so the `done.json` committed with the work is right after the merge (dependants read it from the default
-  branch). CI always scores again. There it counts only when a code owner has approved the head commit (the same rule as
+  branch). Even locally it lifts nothing under a policy CI could never accept (no reviewers, one reviewer, or no
+  security reviewer), and the validation page labels it a proposal. CI always scores again. There it counts only when a code owner has approved the head commit (the same rule as
   waivers), and only after the live check below passes. The CI summary shows the review section only when that run
   scored DONE itself, never from the pull request's own copy.
 - **Live check (CI only).** The gate reads the pull request through the GitHub API with the workflow token:
@@ -74,7 +75,8 @@ flowchart LR
   `"source": "codex-summary"` and `"part": "code_review"` or `"security_review"` reads that state. The state counts
   only from Codex's summary comment (it starts with `<!-- codex-pull-request-review-summary -->`), written by that login
   as a Bot, for the current head, with status `completed` and
-  `has_unresolved_findings: false`. Two parts of one login count as two reviewers.
+  `has_unresolved_findings: false`. Two parts of one login count as two reviewers. The Codex login is matched exactly, so `codex` and `codex[bot]`
+  are never two reviewers.
 
 ## Done when
 
