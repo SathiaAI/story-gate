@@ -14619,6 +14619,18 @@ class TestReviewRecord(Base):
         with self.assertRaises(self.g.ConfigError):
             self.g.cfg()
 
+    def test_one_login_with_two_sources_is_refused(self):
+        """A bot's own review plus its Codex summary part is still one reviewer, not two."""
+        login = "chatgpt-codex-connector[bot]"
+        policy = {"reviewers": [{"login": login, "security": True}, {"login": login, "source": "codex-summary", "part": "code_review"}]}
+        self.codex_pr(self.clean())
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", policy)
+        self.assertFalse(live["ok"]); self.assertIn("one login is listed with two sources", live["why"])
+        self.cfg(review_record=policy)
+        with self.assertRaises(self.g.ConfigError):
+            self.g.cfg()
+        self.assertEqual(self.G.review_policy_problem(self.CODEX_POLICY), "", "Codex's two summary parts are still allowed")
+
     def test_codex_state_counts_only_from_its_summary_comment(self):
         """The same state in another Codex reply (one that quotes it, say) is not the summary."""
         self.codex_pr(self.clean())

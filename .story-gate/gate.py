@@ -446,6 +446,12 @@ def check_config(c):
         raise ConfigError('.story-gate/config.json: "review_record" must look like {"reviewers": [{"login": "name", "security": true}]}; '
                           'a Codex reviewer may add "source": "codex-summary" and "part": "code_review" or "security_review" '
                           '- the gate fails closed until fixed')
+    srcs = {}
+    for r in revs:  # one account is one reviewer: its own review and its Codex summary are not two
+        srcs.setdefault(r["login"].lower(), set()).add(r.get("source") or "review")
+    if any(len(v) > 1 for v in srcs.values()):
+        raise ConfigError('.story-gate/config.json: "review_record" lists one login with two sources (use one: its review, '
+                          'or for Codex its two summary parts) - the gate fails closed until fixed')
     bad = [x for x in c.get("enforce_points") or [] if x not in ("ci", "pre_edit", "checkpoint", "stop")]
     if bad:
         raise ConfigError('.story-gate/config.json: unknown enforce_points %s (use ci, pre_edit, checkpoint, stop)' % bad)

@@ -251,6 +251,11 @@ def review_policy_problem(policy):
         return "config.json review_record.reviewers is missing or malformed"
     if any("part" in r and r.get("source") != "codex-summary" for r in good):
         return "review_record.reviewers: only a codex-summary reviewer has a part"
+    sources = {}
+    for r in good:
+        sources.setdefault(r["login"].lower(), set()).add(r.get("source") or "review")
+    if any(len(v) > 1 for v in sources.values()):  # one account is one reviewer: its review and its summary are not two
+        return "review_record.reviewers: one login is listed with two sources"
     if len({(r["login"].lower(), r.get("part", "")) for r in good}) < 2:  # a native reviewer is one login, one person
         return "review_record.reviewers lists fewer than two reviewers"
     if not any(r.get("security") is True for r in good):
