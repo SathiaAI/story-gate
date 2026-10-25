@@ -54,7 +54,9 @@ flowchart LR
     name never counts. Each reviewer's latest review of the head decides: `CHANGES_REQUESTED` or `DISMISSED` lifts
     nothing, even after an earlier pass. The pull request's author never counts as a reviewer.
   - Only a `codex-summary` reviewer may have a `part`, so one native login is always one reviewer.
-  - The pull request has zero unresolved review threads.
+  - The pull request has zero open review threads. GitHub lets the PR's author resolve any thread, so a thread on the
+    current head counts as cleared only when the reviewer who opened it resolved it. A thread on an older commit is
+    cleared by that reviewer's clean review of the head, which this check already requires.
   - The record lists the review IDs and the head it saw. If any part fails, the record lifts nothing, and the report
     says which part failed.
 - **What it lifts.**

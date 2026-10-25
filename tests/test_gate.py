@@ -14318,8 +14318,8 @@ class TestReviewRecord(Base):
         """An open thread lifts nothing."""
         fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"), threads=1)
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
-        self.assertFalse(live["ok"]); self.assertEqual(live["why"], "1 unresolved review thread(s) on the pull request")
-        self.no_lift(self.verdict(review=self.review(ok=False, why=live["why"])), "1 unresolved review thread(s)")
+        self.assertFalse(live["ok"]); self.assertIn("1 review thread(s) still open on the pull request", live["why"])
+        self.no_lift(self.verdict(review=self.review(ok=False, why=live["why"])), "1 review thread(s) still open")
 
     def test_no_security_reviewer_one_reviewer_or_no_reviewers_lifts_nothing(self):
         """No security reviewer one reviewer or no reviewers lifts nothing."""
@@ -14383,7 +14383,7 @@ class TestReviewRecord(Base):
         """A clean Codex state still needs zero unresolved review threads."""
         self.codex_pr(self.clean(), threads=1)
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)
-        self.assertFalse(live["ok"]); self.assertIn("unresolved review thread", live["why"])
+        self.assertFalse(live["ok"]); self.assertIn("review thread(s) still open", live["why"])
 
     def test_a_codex_reviewer_needs_a_known_part(self):
         """Config refuses a codex-summary reviewer without code_review or security_review as its part."""
@@ -14575,6 +14575,24 @@ class TestReviewRecord(Base):
         import sg_dashboard as D
         v = {"overall": "WAIVED", "checks": {"no_deferrals": {"status": "REVIEWED"}, "impl_matches_acs": {"status": "WAIVED"}}}
         self.assertEqual(D.verdict(v)["reviewed"], 1); self.assertEqual(D.verdict(v)["waived"], 1)
+
+    def test_only_the_reviewer_clears_its_finding_on_the_head(self):
+        """A thread on the head resolved by the PR's author still blocks; resolved by its reviewer, or on an older commit
+        that the reviewer has since reviewed cleanly, it does not."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
+        def threads(*rows):
+            nodes = [{"isResolved": True, "resolvedBy": {"login": by},
+                      "comments": {"nodes": [{"author": {"login": "sec-bot[bot]"}, "originalCommit": {"oid": oid}}]}} for by, oid in rows]
+            self.G.graphql = lambda q, v, token: {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
+        ctx = {"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "agent"}
+        threads(("agent", HEAD))
+        live = self.G.review_record_check(ctx, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("resolved on this commit by someone other than the reviewer", live["why"])
+        threads(("sec-bot[bot]", HEAD))
+        self.assertTrue(self.G.review_record_check(ctx, "t", RR_POLICY)["ok"])
+        threads(("agent", "0" * 40))  # an older commit: the reviewer's clean review of the head counts
+        self.assertTrue(self.G.review_record_check(ctx, "t", RR_POLICY)["ok"])
 
     def test_a_part_on_a_native_reviewer_is_refused(self):
         """Only a codex-summary reviewer has parts: two parts on one native login would let one review count twice."""

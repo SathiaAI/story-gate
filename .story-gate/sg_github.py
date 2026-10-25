@@ -185,6 +185,32 @@ def unresolved_threads(ctx, token, reviewers):
     return n
 
 
+def open_review_threads(ctx, token, head):
+    """Review threads that still block a review record: unresolved ones, and ones resolved by someone other than the
+    reviewer who opened them while they sit on the current head. GitHub lets the PR's author resolve any thread, so a
+    finding is cleared only by its reviewer, or by a later commit that the reviewer then reviewed cleanly (the live
+    check already requires that clean review of the head)."""
+    owner, name = ctx["repo"].split("/", 1)
+    q = """query($o:String!,$n:String!,$p:Int!,$a:String){repository(owner:$o,name:$n){pullRequest(number:$p){
+      reviewThreads(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{isResolved resolvedBy{login}
+      comments(first:1){nodes{author{login} originalCommit{oid}}}}}}}}"""
+    n, after = 0, None
+    for _ in range(50):  # 5000 threads is far beyond any real PR
+        d = graphql(q, {"o": owner, "n": name, "p": int(ctx["number"]), "a": after}, token)
+        rt = d["repository"]["pullRequest"]["reviewThreads"]
+        for t in rt["nodes"]:
+            first = ((t.get("comments") or {}).get("nodes") or [{}])[0]
+            opener = ((first.get("author") or {}).get("login") or "").lower()
+            closer = ((t.get("resolvedBy") or {}).get("login") or "").lower()
+            on_head = ((first.get("originalCommit") or {}).get("oid") or "") == head
+            if not t.get("isResolved") or (on_head and closer != opener):
+                n += 1
+        if not rt["pageInfo"]["hasNextPage"]:
+            break
+        after = rt["pageInfo"]["endCursor"]
+    return n
+
+
 CODEX_SUMMARY = "<!-- codex-pull-request-review-summary -->"
 CODEX_STATE = re.compile(r"codex-review-state:v1\s*(\{.*?\})\s*-->", re.S)
 
@@ -272,11 +298,12 @@ def review_record_check(ctx, token, policy):
                 out["review_ids"].append(str(mine[-1].get("id")))
             else:
                 missing.append(r["login"] + (" (latest review: %s)" % mine[-1].get("state") if mine else ""))
-        open_threads = unresolved_threads(ctx, token, None)
+        open_threads = open_review_threads(ctx, token, head)
         if missing:
             out["why"] = "no finished review on %s from: %s" % (head[:7], ", ".join(missing))
         elif open_threads:
-            out["why"] = "%d unresolved review thread(s) on the pull request" % open_threads
+            out["why"] = ("%d review thread(s) still open on the pull request (unresolved, or resolved on this commit by "
+                          "someone other than the reviewer who opened it)" % open_threads)
         else:
             out["ok"] = True
     return out
