@@ -75,6 +75,8 @@ ELSEWHERE = {
     "writing.standard": "the plain-writing standard; edit config.json in a pull request of its own",
     "guardrails": "guardrail areas (security, performance, ...) and their checks: `story-gate settings area` "
                   "(always opens a pull request)",
+    "review_record": "the reviewers (at least two, one marked security) whose finished review lets a recorded independent review lift the "
+                     "'too large for one judge pass' caps; edit config.json in a pull request of its own (docs/guide.md)",
     "pitfalls": "known pitfalls from a learner's feed, shown at READY (mode off, warn or enforce, and the feed's source); "
                 "edit config.json in a pull request of its own (docs/pitfalls.md)",
 }

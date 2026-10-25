@@ -494,6 +494,7 @@ Lists are comma-separated (`settings set enforce_points ci,stop`); `""` empties 
 | `judge.jev_fallback` | `true` | `false` asks only the provider you named. A `judge.base_url` also pins one endpoint |
 | `judge.decompose` | `"shadow"` | How the judge reads the work. `"off"`: broad questions over the whole diff. `"shadow"`: that, plus narrow questions over evidence packs (one per acceptance criterion and per group of files), recorded next to the verdict as `decomposed` and never binding. `"on"`: the narrow questions decide, the lowest item wins, and the report names it (for example `AC3 0.21 (files: ...)`). Changing it re-scores stored verdicts |
 | `judge.max_requests` | `60` | Most narrow judge requests per score. Past it, a check cannot PASS (CONCERNS at best) and its reason says what was not asked. Evidence that was cut has the same effect |
+| `review_record.reviewers` | `[]` | The reviewers who must each finish a review of the head commit before a recorded independent review (`gate.py review-record`) can lift the "too large for one judge pass" caps. A list of `{"login": "name", "security": true}`. At least two, one with `security: true`, and the pull request must have no open review thread. Empty means a record lifts nothing. Read only from the default branch. For Codex, which runs a code and a security review under one login and reports a clean round only in its summary comment, use `{"login": "chatgpt-codex-connector[bot]", "source": "codex-summary", "part": "code_review"}` and the same with `"part": "security_review", "security": true`. Removing a reviewer, or the security one, is reported as a weaker rule. See [Large changes](#large-changes-and-independent-review) |
 | `judge.emulated_allow_pass` | `false` | Lets a non-Jev judge award PASS, but only after `gate.py judge-calibrate` passes |
 | `judge.temperature` | not sent | Sent to an `openai-compatible` judge only if you set it. Some reasoning models reject it |
 | `project_hooks_allowed` | none | Exact commands of your own project-level AI-tool hooks that may run. Read only from the default branch; any other project hook is blocked in enforce mode |
@@ -742,6 +743,16 @@ Every number in the issue and the report says how it's calculated, and estimates
 
 - **Honest numbers:** verdicts are recorded by the agents, and the `story-gate` check in CI re-checks them. Branch records are read as data, never run.
 - **GitHub Projects board:** optional and organisation-owned only (a GitHub App can't write to personal boards). Not built yet.
+
+## Large changes and independent review
+Some changes are too big for the judge to read whole. The judge splits them into file groups and caps scope, deferrals and drift at CONCERNS, because no question saw every file together. Split the story first. That is almost always the right fix.
+
+If you tried and could not split it, independent reviewers can read the whole change instead:
+1. Get the review done: each reviewer in `review_record.reviewers` reviews the latest commit, and every review thread is resolved.
+2. Record it: `gate.py review-record <ID> --by <who> --why-not-split "<why one story>"`. The reason is required. The record is tied to the exact evidence, so any later change makes it stale.
+3. A code owner approves the commit. In CI, story-gate then asks GitHub whether every listed reviewer finished a review of this commit and no thread is open.
+
+If all of that holds, only the size caps lift, and only where the judge's own score already passes. The check shows **REVIEWED** (passed on independent review: too large for one judge pass), never PASS. A low score, a group the judge never asked about, a cut file or a FAIL stays as it was. On your own computer a record is applied as a proposal, like a waiver, so the `done.json` you commit is right once the pull request merges; CI scores again and only its own check decides. The report lists the review IDs and the head commit, and the dashboard counts these stories apart. Treat a high count as a sign to split stories more.
 
 ## Fallbacks
 

@@ -170,19 +170,168 @@ def unresolved_threads(ctx, token, reviewers):
     owner, name = ctx["repo"].split("/", 1)
     q = """query($o:String!,$n:String!,$p:Int!,$a:String){repository(owner:$o,name:$n){pullRequest(number:$p){
       reviewThreads(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}"""
-    want = {r.lower().replace("[bot]", "") for r in reviewers}
+    want = None if reviewers is None else {r.lower().replace("[bot]", "") for r in reviewers}  # None: every thread counts
     n, after = 0, None
     for _ in range(50):  # 5000 threads is far beyond any real PR
         d = graphql(q, {"o": owner, "n": name, "p": int(ctx["number"]), "a": after}, token)
         rt = d["repository"]["pullRequest"]["reviewThreads"]
         for t in rt["nodes"]:
             a = (((t.get("comments") or {}).get("nodes") or [{}])[0].get("author") or {}).get("login", "")
-            if not t.get("isResolved") and a.lower().replace("[bot]", "") in want:
+            if not t.get("isResolved") and (want is None or a.lower().replace("[bot]", "") in want):
                 n += 1
         if not rt["pageInfo"]["hasNextPage"]:
             break
         after = rt["pageInfo"]["endCursor"]
     return n
+
+
+def open_review_threads(ctx, token, head):
+    """Review threads that still block a review record: unresolved ones, and ones resolved by someone other than the
+    reviewer who opened them while they sit on the current head. GitHub lets the PR's author resolve any thread, so a
+    finding is cleared only by its reviewer, or by a later commit that the reviewer then reviewed cleanly (the live
+    check already requires that clean review of the head)."""
+    owner, name = ctx["repo"].split("/", 1)
+    q = """query($o:String!,$n:String!,$p:Int!,$a:String){repository(owner:$o,name:$n){pullRequest(number:$p){
+      reviewThreads(first:100,after:$a){pageInfo{hasNextPage endCursor} nodes{isResolved resolvedBy{login}
+      comments(first:1){nodes{author{login} originalCommit{oid}}}}}}}}"""
+    n, after = 0, None
+    for _ in range(50):  # 5000 threads is far beyond any real PR
+        d = graphql(q, {"o": owner, "n": name, "p": int(ctx["number"]), "a": after}, token)
+        rt = d["repository"]["pullRequest"]["reviewThreads"]
+        for t in rt["nodes"]:
+            first = ((t.get("comments") or {}).get("nodes") or [{}])[0]
+            opener = ((first.get("author") or {}).get("login") or "").lower()
+            closer = ((t.get("resolvedBy") or {}).get("login") or "").lower()
+            on_head = ((first.get("originalCommit") or {}).get("oid") or "") == head
+            if not t.get("isResolved") or (on_head and closer != opener):
+                n += 1
+        if not rt["pageInfo"]["hasNextPage"]:
+            break
+        after = rt["pageInfo"]["endCursor"]
+    return n
+
+
+CODEX_SUMMARY = "<!-- codex-pull-request-review-summary -->"
+CODEX_STATE = re.compile(r"codex-review-state:v1\s*(\{.*?\})\s*-->", re.S)
+
+
+def codex_states(ctx, token, login):
+    """The latest machine-readable review state Codex keeps in its summary comment, or None. Codex reports a clean
+    round only there (no formal review), so a reviewer with source "codex-summary" is read from it. Only a comment
+    written by that login as a Bot, and starting with Codex's summary marker, counts: anyone can paste the same text into a
+    comment of their own, and Codex may quote it in another reply."""
+    import html
+    want = login.lower()  # the exact App login, like a native reviewer: "codex" and "codex[bot]" are not one account
+    best = None
+    for cm in paged("/repos/%s/issues/%s/comments" % (ctx["repo"], ctx["number"]), token):
+        u = cm.get("user") or {}
+        if (u.get("login") or "").lower() != want or u.get("type") != "Bot":
+            continue
+        body = html.unescape(cm.get("body") or "")
+        if not body.lstrip().startswith(CODEX_SUMMARY):  # only Codex's own summary comment, never another reply that quotes it
+            continue
+        key = (cm.get("updated_at") or "", cm.get("id") or 0)  # a later id breaks a same-second tie: it is the newer comment
+        if best is None or key > (best[0], best[1] or 0):
+            best = (key[0], cm.get("id"), body)
+    if best is None:
+        return None
+    # the newest summary decides: if its state is missing or unreadable (being rewritten, say), there is no state at all
+    m = CODEX_STATE.search(best[2])
+    try:
+        state = json.loads(m.group(1)) if m else None
+    except ValueError:
+        state = None
+    return (best[0], best[1], state) if isinstance(state, dict) else None
+
+
+def head_people(ctx, token):
+    """The GitHub logins that authored and committed the head commit, or None when GitHub can't say (fail closed)."""
+    st, commit, _ = call("GET", "/repos/%s/commits/%s" % (ctx["repo"], ctx["head_sha"]), token)
+    if st != 200 or not isinstance(commit, dict):
+        return None
+    return {((commit.get(k) or {}).get("login") or "").lower() for k in ("author", "committer")} - {""}
+
+
+def review_policy_problem(policy):
+    """'' when config.json -> review_record can ever lift a cap; otherwise why not. Checked locally too, so a record is
+    never even proposed under a policy that CI could not accept (no reviewers, one reviewer, no security reviewer)."""
+    revs = (policy or {}).get("reviewers") if isinstance(policy, dict) else None
+    good = [r for r in revs if isinstance(r, dict) and isinstance(r.get("login"), str) and r["login"].strip()] if isinstance(revs, list) else []
+    if not revs or len(good) != len(revs):
+        return "config.json review_record.reviewers is missing or malformed"
+    if any("part" in r and r.get("source") != "codex-summary" for r in good):
+        return "review_record.reviewers: only a codex-summary reviewer has a part"
+    sources = {}
+    for r in good:
+        sources.setdefault(r["login"].lower(), set()).add(r.get("source") or "review")
+    if any(len(v) > 1 for v in sources.values()):  # one account is one reviewer: its review and its summary are not two
+        return "review_record.reviewers: one login is listed with two sources"
+    if len({(r["login"].lower(), r.get("part", "")) for r in good}) < 2:  # a native reviewer is one login, one person
+        return "review_record.reviewers lists fewer than two reviewers"
+    if not any(r.get("security") is True for r in good):
+        return "no reviewer in review_record.reviewers is marked security"
+    return ""
+
+
+def review_record_check(ctx, token, policy):
+    """The live check behind an independent review record (docs/decisions/2026-10-24-independent-review-record.md).
+    policy = config.json -> review_record. -> {"ok": bool, "why": str, "head": sha, "review_ids": [...]}. It reads only GitHub's
+    own review records for the current head. Any problem, or an API error (the caller catches it), means ok False."""
+    head = ctx.get("head_sha") or ""
+    out = {"ok": False, "why": "", "head": head, "review_ids": []}
+    problem = review_policy_problem(policy)
+    if not head:
+        out["why"] = "the pull request's head commit is unknown"
+    elif problem:
+        out["why"] = problem
+    else:
+        good = policy["reviewers"]
+        people = head_people(ctx, token)  # whoever wrote the head commit built it, so never reviews it
+        if people is None:
+            out["why"] = "could not read the pull request's head commit %s" % head[:7]
+            return out
+        reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
+        missing, snapshots = [], {}  # one Codex summary read per login: both parts are judged from the same snapshot
+        for r in good:
+            if r["login"].lower() == (ctx.get("author") or "").lower():  # the PR's author never reviews it, whatever the source
+                missing.append("%s (the pull request's author)" % r["login"])
+                continue
+            if r["login"].lower() in people:
+                missing.append("%s (wrote the latest commit)" % r["login"])
+                continue
+            if r.get("source") == "codex-summary":
+                # one Codex login runs both a code and a security review; each is a "part" of its summary state
+                if r["login"].lower() not in snapshots:
+                    snapshots[r["login"].lower()] = codex_states(ctx, token, r["login"])
+                found = snapshots[r["login"].lower()]
+                part = (found[2].get(r.get("part")) if found and isinstance(found[2], dict) else None) or {}
+                if (part.get("commit_sha") == head and part.get("status") == "completed"
+                        and part.get("has_unresolved_findings") is False):
+                    out["review_ids"].append("comment:%s:%s" % (found[1], r["part"]))
+                else:
+                    missing.append("%s (%s)" % (r["login"], r.get("part")))
+                continue
+            want, bot = r["login"].lower(), r["login"].lower().endswith("[bot]")
+
+            def same(u):  # exact login, and a bot login must be that App: a user named like it is someone else
+                return (u.get("login") or "").lower() == want and (u.get("type") == "Bot") == bot
+            mine = sorted((x for x in reviews if x.get("commit_id") == head and x.get("state") != "PENDING"
+                           and same(x.get("user") or {})), key=lambda x: (x.get("submitted_at") or "", x.get("id") or 0))
+            # the reviewer's latest review of the current head decides: a later rejection or dismissal undoes an earlier pass
+            # only an approval is a clean review: a COMMENTED review may carry findings in its body alone
+            if mine and mine[-1].get("state") == "APPROVED":
+                out["review_ids"].append(str(mine[-1].get("id")))
+            else:
+                missing.append(r["login"] + (" (latest review: %s)" % mine[-1].get("state") if mine else ""))
+        open_threads = open_review_threads(ctx, token, head)
+        if missing:
+            out["why"] = "no finished review on %s from: %s" % (head[:7], ", ".join(missing))
+        elif open_threads:
+            out["why"] = ("%d review thread(s) still open on the pull request (unresolved, or resolved on this commit by "
+                          "someone other than the reviewer who opened it)" % open_threads)
+        else:
+            out["ok"] = True
+    return out
 
 
 def label_added_by(ctx, token, label):

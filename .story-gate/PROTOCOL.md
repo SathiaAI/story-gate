@@ -210,6 +210,12 @@ It is advice. It blocks only when the owner sets `writing.enforce` to `true`, af
 - **What CI does with them:** CI ignores them until a code owner approves the commit that contains them. The check summary lists them, so the approver sees exactly what they are accepting.
 - **What can't be waived:** structural facts.
 
+## Large changes: independent review record
+- **First, split the story.** A change too big for one judge pass (the judge reads at most `judge.max_chars / 2` of diff, or splits it into groups) cannot reach DONE by itself. Splitting is the fix. Use a record only after you tried, and say why you could not.
+- **Recording it:** `gate.py review-record <ID> --by <who> --why-not-split "…"`. The reason is required. Like a waiver, it is tied to the exact evidence and goes stale when anything changes. Never record a review that did not happen.
+- **What CI does with it:** it counts only after a code owner approves the head commit, and only when GitHub shows a finished review of that commit from every reviewer in `config.json` → `review_record.reviewers` (at least two, one marked `security`, never the pull request's author, and each one's latest review of that commit an approval) and no open review thread. Any doubt lifts nothing. On this computer the record is applied as a proposal; CI decides.
+- **What it lifts:** the "too large for one judge pass" caps, and only where the judge's own score for that item already passes. A low score, a group never asked, a cut file and any FAIL stay as they were. The result is **REVIEWED**, never PASS. It is not a waiver.
+
 ## Tuning
 - `gate.py label <ID> ready|done correct|wrong --note "…"` records whether a verdict was right.
 - Thresholds are tuned from `calibration.jsonl`.
