@@ -217,7 +217,8 @@ def to_html(f):
                     esc(label), D.pill(st if not stale else None) if st else D.pill(None),
                     "out of date: the work changed since" if stale else ("not run yet" if not st else "on this exact code" + (
                         ", checked without a judge" if v.get("judge") == "objective" else "") + (
-                        ". Passed on independent review: too large for one judge pass" if st == "REVIEWED" else ""))))
+                        (". Proposal, not yet checked in CI: independent review" if (v.get("review_record") or {}).get("proposal")
+                         else ". Passed on independent review: too large for one judge pass") if st == "REVIEWED" else ""))))
     tr = f.get("tests") or {}
     tests_line = ("no recorded test run" if not tr else "%s · exit %s%s" % (
         "CI's own run" if tr.get("source") == "ci" else "the agent's run", esc(tr.get("exit_code"), 10),

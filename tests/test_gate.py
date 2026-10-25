@@ -14618,7 +14618,11 @@ class TestReviewRecord(Base):
         f = {"id": "SAT-1", "title": "T", "acs": [], "coverage": {}, "scenarios": [], "results": {}, "spec_hash": lambda s: "", "fingerprint": "x",
              "ready": None, "done": dict(v, fresh=True), "tests": {}, "generated_at": "now", "branch": "b", "commit": "c" * 40,
              "validation_md": "", "images": [], "images_skipped": [], "sources": [], "summary": ""}
-        self.assertIn("Proposal, not yet checked in CI", sg_report.to_html(f))
+        page = sg_report.to_html(f)
+        self.assertIn("Proposal, not yet checked in CI", page)
+        # the DONE card at the top says so too, never a bare "Passed on independent review"
+        self.assertIn("on this exact code. Proposal, not yet checked in CI: independent review", page)
+        self.assertNotIn("on this exact code. Passed on independent review", page)
 
     def test_the_dashboard_counts_a_review_that_ends_waived(self):
         """A story that passed on review and also has a waiver (overall WAIVED) still counts as passed on review."""
