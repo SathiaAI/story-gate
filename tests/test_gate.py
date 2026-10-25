@@ -14595,6 +14595,20 @@ class TestReviewRecord(Base):
         threads(("agent", "0" * 40))  # an older commit: the reviewer's clean review of the head counts
         self.assertTrue(self.G.review_record_check(ctx, "t", RR_POLICY)["ok"])
 
+    def test_both_codex_parts_come_from_one_summary_read(self):
+        """The summary is read once per login, so a code re-review starting between two reads can't mix states."""
+        self.codex_pr(self.clean())
+        reads = []
+        first = self.G.codex_states
+        def counting(ctx, token, login):
+            """Count each summary read."""
+            reads.append(login)
+            return first(ctx, token, login)
+        self.G.codex_states = counting
+        self.addCleanup(setattr, self.G, "codex_states", first)
+        self.assertTrue(self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", self.CODEX_POLICY)["ok"])
+        self.assertEqual(reads, ["chatgpt-codex-connector[bot]"])
+
     def test_a_part_on_a_native_reviewer_is_refused(self):
         """Only a codex-summary reviewer has parts: two parts on one native login would let one review count twice."""
         policy = {"reviewers": [{"login": "sec-bot[bot]", "part": "a", "security": True}, {"login": "sec-bot[bot]", "part": "b"}]}

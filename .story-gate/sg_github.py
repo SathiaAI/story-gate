@@ -272,14 +272,16 @@ def review_record_check(ctx, token, policy):
     else:
         good = policy["reviewers"]
         reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
-        missing = []
+        missing, snapshots = [], {}  # one Codex summary read per login: both parts are judged from the same snapshot
         for r in good:
             if r["login"].lower() == (ctx.get("author") or "").lower():  # the PR's author never reviews it, whatever the source
                 missing.append("%s (the pull request's author)" % r["login"])
                 continue
             if r.get("source") == "codex-summary":
                 # one Codex login runs both a code and a security review; each is a "part" of its summary state
-                found = codex_states(ctx, token, r["login"])
+                if r["login"].lower() not in snapshots:
+                    snapshots[r["login"].lower()] = codex_states(ctx, token, r["login"])
+                found = snapshots[r["login"].lower()]
                 part = (found[2].get(r.get("part")) if found and isinstance(found[2], dict) else None) or {}
                 if (part.get("commit_sha") == head and part.get("status") == "completed"
                         and part.get("has_unresolved_findings") is False):
