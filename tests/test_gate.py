@@ -14123,9 +14123,16 @@ RR_POLICY = {"reviewers": [{"login": "coderabbitai[bot]", "security": False}, {"
 GROUP_CHECKS = ("impl_no_unplanned_scope", "no_deferrals", "drift_trd_after")
 
 
-def fake_pr(test, G, reviews=None, threads=0, fail=False):
-    """A pull request on a fake GitHub: reviews (REST list), `threads` unresolved review threads, or an API that fails."""
+def fake_pr(test, G, reviews=None, threads=0, fail=False, head_by="builder"):
+    """A pull request on a fake GitHub: reviews (REST list), `threads` unresolved review threads, or an API that fails.
+    `head_by` authored and committed the head commit."""
     keep_github_fakes_local(test, G)
+    def call(method, path, token=None, body=None, accept=None):
+        """Call: only the head commit is served."""
+        if fail or "/commits/" not in path:
+            return 502, {}, {}
+        return 200, {"author": {"login": head_by}, "committer": {"login": head_by}}, {}
+    G.call = call
     def paged(path, token):
         """Paged."""
         if fail:
@@ -14342,9 +14349,9 @@ class TestReviewRecord(Base):
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD}, "t", RR_POLICY)
         self.assertTrue(live["ok"], live); self.assertEqual(live["review_ids"], ["100", "101"]); self.assertEqual(live["head"], HEAD)
 
-    def codex_pr(self, state, author="chatgpt-codex-connector[bot]", kind="Bot", threads=0):
+    def codex_pr(self, state, author="chatgpt-codex-connector[bot]", kind="Bot", threads=0, head_by="builder"):
         """A fake PR whose only review evidence is a Codex summary comment holding `state`."""
-        fake_pr(self, self.G, [], threads=threads)
+        fake_pr(self, self.G, [], threads=threads, head_by=head_by)
         body = "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 %s -->\n## Codex Review Summary" % (
             json.dumps(state).replace("{", "&#123;").replace("}", "&#125;"))
         comments = [{"id": 55, "user": {"login": author, "type": kind}, "body": body, "updated_at": "2026-10-24T22:00:00Z"}]
@@ -14533,6 +14540,22 @@ class TestReviewRecord(Base):
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "Agent"}, "t", policy)
         self.assertFalse(live["ok"]); self.assertIn("agent (the pull request's author)", live["why"])
 
+    def test_whoever_wrote_the_head_commit_never_counts_as_a_reviewer(self):
+        """A listed reviewer who authored or committed the head built it, even on another account's pull request."""
+        self.codex_pr(self.clean(), head_by="chatgpt-codex-connector[bot]")
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "other-app[bot]"}, "t", self.CODEX_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("(wrote the latest commit)", live["why"])
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"), head_by="sec-bot[bot]")
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("sec-bot[bot] (wrote the latest commit)", live["why"])
+
+    def test_an_unreadable_head_commit_lifts_nothing(self):
+        """When GitHub can't say who wrote the head, no review counts (fail closed)."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
+        self.G.call = lambda *a, **k: (502, {}, {})
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("head commit", live["why"])
+
     def test_codex_never_reviews_a_pull_request_it_opened(self):
         """A clean Codex summary lifts nothing when Codex is the pull request's author."""
         self.codex_pr(self.clean())
@@ -14618,6 +14641,13 @@ class TestReviewRecord(Base):
         self.cfg(review_record=policy)
         with self.assertRaises(self.g.ConfigError):
             self.g.cfg()
+
+    def test_agent_text_in_the_ci_summary_is_one_line_of_inline_code(self):
+        """A reviewer name or split reason with line breaks cannot add headings, ticked boxes or links to the summary."""
+        out = self.g.code_span("x\n### Approved\n- [x] all good ![i](https://e/x) `y`", 40)
+        self.assertTrue(out.startswith("`") and out.endswith("`")); self.assertNotIn("\n", out)
+        self.assertEqual(out.count("`"), 2); self.assertLessEqual(len(out), 42)
+        self.assertEqual(self.g.code_span(None), "``")
 
     def test_one_login_with_two_sources_is_refused(self):
         """A bot's own review plus its Codex summary part is still one reviewer, not two."""

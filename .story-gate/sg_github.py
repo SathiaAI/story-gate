@@ -242,6 +242,14 @@ def codex_states(ctx, token, login):
     return best
 
 
+def head_people(ctx, token):
+    """The GitHub logins that authored and committed the head commit, or None when GitHub can't say (fail closed)."""
+    st, commit, _ = call("GET", "/repos/%s/commits/%s" % (ctx["repo"], ctx["head_sha"]), token)
+    if st != 200 or not isinstance(commit, dict):
+        return None
+    return {((commit.get(k) or {}).get("login") or "").lower() for k in ("author", "committer")} - {""}
+
+
 def review_policy_problem(policy):
     """'' when config.json -> review_record can ever lift a cap; otherwise why not. Checked locally too, so a record is
     never even proposed under a policy that CI could not accept (no reviewers, one reviewer, no security reviewer)."""
@@ -276,11 +284,18 @@ def review_record_check(ctx, token, policy):
         out["why"] = problem
     else:
         good = policy["reviewers"]
+        people = head_people(ctx, token)  # whoever wrote the head commit built it, so never reviews it
+        if people is None:
+            out["why"] = "could not read the pull request's head commit %s" % head[:7]
+            return out
         reviews = paged("/repos/%s/pulls/%s/reviews" % (ctx["repo"], ctx["number"]), token)
         missing, snapshots = [], {}  # one Codex summary read per login: both parts are judged from the same snapshot
         for r in good:
             if r["login"].lower() == (ctx.get("author") or "").lower():  # the PR's author never reviews it, whatever the source
                 missing.append("%s (the pull request's author)" % r["login"])
+                continue
+            if r["login"].lower() in people:
+                missing.append("%s (wrote the latest commit)" % r["login"])
                 continue
             if r.get("source") == "codex-summary":
                 # one Codex login runs both a code and a security review; each is a "part" of its summary state

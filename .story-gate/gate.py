@@ -1804,6 +1804,13 @@ PASS_LIKE = ("PASS", "WAIVED", "REVIEWED")  # overall verdicts that pass; REVIEW
 REVIEW_NOTE = "passed on independent review: too large for one judge pass"
 
 
+def code_span(v, n=300):
+    """Agent-written text for the CI summary: one line, at most n characters, as inline code, so it cannot add
+    headings, ticked boxes, links, images or mentions to what the approver reads."""
+    s = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(v if v is not None else "")).split()).replace("`", "'")
+    return "`%s`" % (s if len(s) <= n else s[:n - 1] + "…")
+
+
 def band(p, th):
     return "PASS" if p >= th["pass"] else ("CONCERNS" if p >= th["concerns"] else "FAIL")
 
@@ -4501,7 +4508,7 @@ def cmd_ci(tests_dir=None, measures_dir=None):
     if isinstance(rr, dict) and rr.get("lifted"):  # the approver must see this was not a judge PASS
         lines += ["", "### %s" % REVIEW_NOTE.capitalize(), "",
                   "- Checks: %s" % ", ".join(rr["lifted"]), "- Review IDs: %s" % (", ".join(map(str, rr.get("review_ids") or [])) or "none"),
-                  "- Head commit: %s" % (rr.get("head") or "")[:12], "- Recorded by %s. Why it was not split: %s" % (rr.get("by"), rr.get("why_not_split"))]
+                  "- Head commit: %s" % (rr.get("head") or "")[:12], "- Recorded by %s. Why it was not split: %s" % (code_span(rr.get("by"), 60), code_span(rr.get("why_not_split")))]
     if sid and (STORIES / sid / "trace.md").exists():
         lines += ["", rd(STORIES / sid / "trace.md")]
     if sid and code and (STORIES / sid / "validation.md").exists():
@@ -4546,7 +4553,10 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         recs = jsonl(STORIES / sid / "decisions.jsonl")
         if recs:
             lines += ["", "### Waivers and drift decisions in this story (count only after a code owner approves this commit)"]
-            lines += ["- %s %s: %s by %s - %s" % (r.get("phase"), r.get("kind"), r.get("check") or r.get("drift") or "too large for one judge pass", r.get("by"), r.get("reason") or r.get("note") or r.get("why_not_split", "")) for r in recs]
+            lines += ["- %s %s: %s by %s - %s" % (code_span(r.get("phase"), 20), code_span(r.get("kind"), 30),
+                                                   code_span(r.get("check") or r.get("drift") or "too large for one judge pass", 80),
+                                                   code_span(r.get("by"), 60), code_span(r.get("reason") or r.get("note") or r.get("why_not_split", "")))
+                      for r in recs]
     summary(lines)
     print("story-gate CI: %s (%s mode, %d code files)" % ("OK" if not problems else "%d problem(s)" % len(problems), "enforce" if enforce else "warn", len(code)))
     return 1 if (problems and enforce) else 0
