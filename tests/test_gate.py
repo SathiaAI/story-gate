@@ -14557,6 +14557,16 @@ class TestReviewRecord(Base):
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", self.CODEX_POLICY)
         self.assertFalse(live["ok"])
 
+    def test_a_same_second_codex_summary_tie_goes_to_the_newer_comment(self):
+        """GitHub times have one-second precision: of two summaries edited in the same second, the higher id decides."""
+        self.codex_pr(self.clean())
+        good = self.G.paged("/repos/o/r/issues/1/comments", "t")[0]
+        newer = dict(good, id=good["id"] + 1, body=good["body"].replace('"completed"', '"running"'))
+        for order in ([good, newer], [newer, good]):
+            self.G.paged = lambda path, token, o=order: o if "/issues/" in path else []
+            live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", self.CODEX_POLICY)
+            self.assertFalse(live["ok"], order[0]["id"])
+
     def test_whoever_wrote_the_head_commit_never_counts_as_a_reviewer(self):
         """A listed reviewer who authored or committed the head built it, even on another account's pull request."""
         self.codex_pr(self.clean(), head_by="chatgpt-codex-connector[bot]")

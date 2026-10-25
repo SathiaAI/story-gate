@@ -230,8 +230,9 @@ def codex_states(ctx, token, login):
         body = html.unescape(cm.get("body") or "")
         if not body.lstrip().startswith(CODEX_SUMMARY):  # only Codex's own summary comment, never another reply that quotes it
             continue
-        if best is None or (cm.get("updated_at") or "") > best[0]:
-            best = (cm.get("updated_at") or "", cm.get("id"), body)
+        key = (cm.get("updated_at") or "", cm.get("id") or 0)  # a later id breaks a same-second tie: it is the newer comment
+        if best is None or key > (best[0], best[1] or 0):
+            best = (key[0], cm.get("id"), body)
     if best is None:
         return None
     # the newest summary decides: if its state is missing or unreadable (being rewritten, say), there is no state at all
