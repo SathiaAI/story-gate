@@ -14581,6 +14581,7 @@ class TestReviewRecord(Base):
         that the reviewer has since reviewed cleanly, it does not."""
         fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]"))
         def threads(*rows):
+            """Fake review threads opened by sec-bot[bot]: (resolved by, commit) per thread."""
             nodes = [{"isResolved": True, "resolvedBy": {"login": by},
                       "comments": {"nodes": [{"author": {"login": "sec-bot[bot]"}, "originalCommit": {"oid": oid}}]}} for by, oid in rows]
             self.G.graphql = lambda q, v, token: {"repository": {"pullRequest": {"reviewThreads": {
