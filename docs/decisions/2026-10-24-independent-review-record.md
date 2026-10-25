@@ -51,8 +51,10 @@ flowchart LR
   - Every reviewer listed in `config.json` → `review_record.reviewers` has a finished review on the current head.
     At least two are required, and at least one must be marked `security: true`.
   - A reviewer is matched by its exact login; a `[bot]` login must also be a Bot account, so a person with a similar
-    name never counts. Each reviewer's latest review of the head decides: `CHANGES_REQUESTED` or `DISMISSED` lifts
-    nothing, even after an earlier pass. The pull request's author never counts as a reviewer, and nor does whoever authored or committed the head commit.
+    name never counts. Each reviewer's latest review of the head decides, and only `APPROVED` counts: a `COMMENTED` review can
+    carry findings in its body alone, and `CHANGES_REQUESTED` or `DISMISSED` lifts nothing, even after an earlier pass.
+    So a bot reviewer must be set to approve a clean head (CodeRabbit: `request_changes_workflow: true`). For Codex, its
+    newest summary decides; if that summary's state is unreadable, nothing lifts. The pull request's author never counts as a reviewer, and nor does whoever authored or committed the head commit.
   - Only a `codex-summary` reviewer may have a `part`, so one native login is always one reviewer.
   - The pull request has zero open review threads. GitHub lets the PR's author resolve any thread, so a thread on the
     current head counts as cleared only when the reviewer who opened it resolved it. A thread on an older commit is
@@ -100,6 +102,10 @@ flowchart LR
   Codex re-review started on the same commit (its summary says "running" until it posts). GitHub Actions has no trigger
   for either, and an `issue_comment` trigger would run the gate, with its secrets, on every comment. The owner's merge
   rule (every review bot finished, every thread resolved) covers this gap until GitHub offers a trigger.
+- Who wrote the head commit is read from the commit's author and committer, which come from the commit's email. Anyone
+  who can push can set that email. So a listed reviewer that also pushes to the branch could hide behind another
+  account's email. A code owner's approval of the head and a second listed reviewer are still required. Requiring
+  verified commit signatures, and excluding the signer, would close this; that is the owner's decision.
 
 ## Out of scope
 - A cross-group judge question (Release 1.1). It stays on the roadmap. This record is the compensating control until it

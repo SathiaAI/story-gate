@@ -230,16 +230,17 @@ def codex_states(ctx, token, login):
         body = html.unescape(cm.get("body") or "")
         if not body.lstrip().startswith(CODEX_SUMMARY):  # only Codex's own summary comment, never another reply that quotes it
             continue
-        m = CODEX_STATE.search(body)
-        if not m:
-            continue
-        try:
-            state = json.loads(m.group(1))
-        except ValueError:
-            continue
         if best is None or (cm.get("updated_at") or "") > best[0]:
-            best = (cm.get("updated_at") or "", cm.get("id"), state)
-    return best
+            best = (cm.get("updated_at") or "", cm.get("id"), body)
+    if best is None:
+        return None
+    # the newest summary decides: if its state is missing or unreadable (being rewritten, say), there is no state at all
+    m = CODEX_STATE.search(best[2])
+    try:
+        state = json.loads(m.group(1)) if m else None
+    except ValueError:
+        state = None
+    return (best[0], best[1], state) if isinstance(state, dict) else None
 
 
 def head_people(ctx, token):
@@ -316,7 +317,8 @@ def review_record_check(ctx, token, policy):
             mine = sorted((x for x in reviews if x.get("commit_id") == head and x.get("state") != "PENDING"
                            and same(x.get("user") or {})), key=lambda x: (x.get("submitted_at") or "", x.get("id") or 0))
             # the reviewer's latest review of the current head decides: a later rejection or dismissal undoes an earlier pass
-            if mine and mine[-1].get("state") in ("APPROVED", "COMMENTED"):
+            # only an approval is a clean review: a COMMENTED review may carry findings in its body alone
+            if mine and mine[-1].get("state") == "APPROVED":
                 out["review_ids"].append(str(mine[-1].get("id")))
             else:
                 missing.append(r["login"] + (" (latest review: %s)" % mine[-1].get("state") if mine else ""))

@@ -14148,7 +14148,7 @@ def fake_pr(test, G, reviews=None, threads=0, fail=False, head_by="builder"):
     G.graphql = graphql
 
 
-def head_reviews(*logins, commit=HEAD, state="COMMENTED"):
+def head_reviews(*logins, commit=HEAD, state="APPROVED"):
     """Head reviews."""
     return [{"id": 100 + i, "user": {"login": l, "type": "Bot" if l.endswith("[bot]") else "User"}, "commit_id": commit, "state": state}
             for i, l in enumerate(logins)]
@@ -14539,6 +14539,23 @@ class TestReviewRecord(Base):
         fake_pr(self, self.G, head_reviews("agent", "sec-bot[bot]"))
         live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "Agent"}, "t", policy)
         self.assertFalse(live["ok"]); self.assertIn("agent (the pull request's author)", live["why"])
+
+    def test_a_commented_review_is_not_a_clean_review(self):
+        """A COMMENTED review may carry findings in its body alone (CodeRabbit's "outside the diff" notes): only APPROVED counts."""
+        fake_pr(self, self.G, head_reviews("coderabbitai[bot]", "sec-bot[bot]", state="COMMENTED"))
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", RR_POLICY)
+        self.assertFalse(live["ok"]); self.assertIn("(latest review: COMMENTED)", live["why"])
+
+    def test_the_newest_codex_summary_decides_even_when_unreadable(self):
+        """An older clean summary never stands in for a newer one whose state is missing or being rewritten."""
+        self.codex_pr(self.clean())
+        good = self.G.paged("/repos/o/r/issues/1/comments", "t")[0]
+        newer = dict(good, id=56, updated_at="2026-10-24T23:00:00Z",
+                     body="<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {not json -->\n## Codex Review Summary")
+        self.G.paged = lambda path, token: [good, newer] if "/issues/" in path else []
+        self.assertIsNone(self.G.codex_states({"repo": "o/r", "number": 1}, "t", "chatgpt-codex-connector[bot]"))
+        live = self.G.review_record_check({"repo": "o/r", "number": 1, "head_sha": HEAD, "author": "x"}, "t", self.CODEX_POLICY)
+        self.assertFalse(live["ok"])
 
     def test_whoever_wrote_the_head_commit_never_counts_as_a_reviewer(self):
         """A listed reviewer who authored or committed the head built it, even on another account's pull request."""
