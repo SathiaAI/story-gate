@@ -102,10 +102,14 @@ flowchart LR
   Codex re-review started on the same commit (its summary says "running" until it posts). GitHub Actions has no trigger
   for either, and an `issue_comment` trigger would run the gate, with its secrets, on every comment. The owner's merge
   rule (every review bot finished, every thread resolved) covers this gap until GitHub offers a trigger.
+  The owner accepted this limit on 2026-10-25 (option A): no comment trigger.
 - Who wrote the head commit is read from the commit's author and committer, which come from the commit's email. Anyone
   who can push can set that email. So a listed reviewer that also pushes to the branch could hide behind another
   account's email. A code owner's approval of the head and a second listed reviewer are still required. Requiring
-  verified commit signatures, and excluding the signer, would close this; that is the owner's decision.
+  verified commit signatures, and excluding the signer, would close this. The owner accepted the limit on 2026-10-25
+  (option A): signatures are not required.
+- Decompose `on` mode (owner decision 6, 2026-10-25): no repository switches `judge.decompose` to `on` when this and
+  the evidence-pack change ship. `on` waits for the hardening story; until then `shadow` stays the default.
 
 ## Out of scope
 - A cross-group judge question (Release 1.1). It stays on the roadmap. This record is the compensating control until it
