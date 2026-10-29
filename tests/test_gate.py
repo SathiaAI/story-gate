@@ -11567,6 +11567,96 @@ class TestCiIsolation(Base):
         self.assertEqual([c[0] for c in calls], ["chown", "chmod", "chmod", "userdel"])
         self.assertIn("1 process(es) left", str(cm.exception)); self.assertIn("remove them by hand", str(cm.exception))
 
+    def timed_out_useradd(self, I, probe):
+        """The message of the IsolationError _run raises when useradd times out; probe(argv, **kw) answers the
+        diagnostic commands."""
+        def fake(argv, **kw):
+            """useradd times out as on the stalled runner; every other command is a diagnostic probe."""
+            if "useradd" in argv:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return probe(argv, **kw)
+        held = self.repo / "passwd.lock"; held.write_text("")
+        with patch.object(I.subprocess, "run", fake), patch.object(I, "LOCK_FILES", (str(held), str(self.repo / "shadow.lock"))), \
+                patch.object(I.shutil, "which", lambda tool: "/usr/bin/" + tool):
+            with self.assertRaises(I.IsolationError) as cm:
+                I._run(I._priv() + ["useradd", "--create-home", "sgpr-x"])
+        return str(cm.exception)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_a_timed_out_admin_command_says_what_may_have_stalled_it(self):
+        """_run(): when the command times out, the error keeps its first words and adds a bounded diagnosis: lock files,
+        the account-database processes (program names only, never arguments; after sudo, only a known command name), sudo's time, the host name lookup and the
+        name-service caches. Each probe runs with its own short timeout, and the whole diagnosis stays under the cap."""
+        I = self.I()
+        ps = ("    PID     ELAPSED STAT CMD\n      1    01:00:00 Ss   /sbin/init\n"
+              "    812       02:01 S    sudo -n useradd --create-home sgpr-x\n    813       02:01 D    useradd --create-home sgpr-x\n"
+              "    814       05:00 D    userdel --remove sgpr-old\n"
+              "    900       10:00 Ssl  /usr/sbin/nscd\n    901       10:00 S    /usr/libexec/sssd/sssd_nss --uid 0\n"
+              "    950       00:10 S    sudo curl -u alice:s3cr3t -H Authorization: Bearer s3cr3t https://example.com\n"
+              "    951       00:09 S    sudo -n API_TOKEN=s3cr3t useradd x\n"
+              + "    999       00:01 S    passwd %s\n" % ("x" * 400) * 40)
+        answers = {"ps": (0, ps), "sudo": (0, ""), "getent": (2, ""), "systemctl": (3, "inactive\nactive\n")}
+
+        def probe(argv, **kw):
+            """Canned answers for the probes; each must carry the short probe timeout."""
+            self.assertEqual(kw.get("timeout"), I.DIAG_TIMEOUT, argv)
+            code, out = answers[argv[0]]
+            return subprocess.CompletedProcess(argv, code, out, "")
+        msg = self.timed_out_useradd(I, probe)
+        self.assertTrue(msg.startswith("useradd couldn't run (Command "), msg); self.assertIn("timed out after", msg)
+        head, diag = msg.split("; diagnostics: ", 1)
+        self.assertLessEqual(len(diag), I.DIAG_CAP)
+        self.assertIn("lock files present: %s;" % (self.repo / "passwd.lock"), diag); self.assertNotIn("shadow.lock", diag)
+        flat = " ".join(diag.split())
+        for line in ("812 02:01 S sudo useradd |", "813 02:01 D useradd |", "814 05:00 D userdel |", "900 10:00 Ssl nscd |",
+                     "901 10:00 S sssd_nss |", "950 00:10 S sudo |", "951 00:09 S sudo |", "(39 more)"):  # 43: 8 listed, then a count
+            self.assertIn(line, flat)
+        for absent in ("init", "s3cr3t", "API_TOKEN", "alice", "curl", "--create-home", "PATH="):
+            self.assertNotIn(absent, diag)
+        self.assertRegex(diag, r"; sudo -n true: exit 0 in \d+\.\d\d s; getent hosts \S+: no answer \(exit 2\); "
+                               r"systemctl is-active: nscd inactive, sssd active$")  # the long process list crowds out nothing
+        with patch.object(I, "DIAG_CAP", 300):
+            diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
+        self.assertEqual(len(diag), 300); self.assertTrue(diag.endswith("..."))
+        answers["ps"] = (1, "")  # ps itself failed: say so, never "processes: none"
+        diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
+        self.assertIn("; ps failed (exit 1);", diag); self.assertNotIn("processes:", diag)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_a_hanging_probe_is_cut_off_by_its_own_timeout(self):
+        """A probe that hangs (here a real process that sleeps) is stopped after DIAG_TIMEOUT; the other probes still
+        report and the error comes back long before the hung probe would have ended."""
+        I = self.I()
+        real = subprocess.run
+
+        def probe(argv, **kw):
+            """ps hangs for real; the rest answer at once."""
+            if argv[0] == "ps":
+                return real([sys.executable, "-c", "import time; time.sleep(60)"], **kw)
+            return subprocess.CompletedProcess(argv, 0, "active\nactive\n" if argv[0] == "systemctl" else "", "")
+        start = time.monotonic()
+        with patch.object(I, "DIAG_TIMEOUT", 0.5):
+            msg = self.timed_out_useradd(I, probe)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn("ps timed out after 0.5 s", msg); self.assertIn("sudo -n true: exit 0", msg)
+        self.assertIn("systemctl is-active: nscd active, sssd active", msg)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_the_timeout_is_still_reported_when_a_probe_misbehaves(self):
+        """A probe printing bytes that aren't text is read with replacements, and any other failure while diagnosing
+        still raises IsolationError with the timeout, so callers that catch only IsolationError keep cleaning up."""
+        I = self.I()
+        with patch.object(I.subprocess, "run", wraps=subprocess.run) as run:  # real process, real decoding
+            code, out = I._probe([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\xff\\n')"])
+        self.assertEqual(code, 0); self.assertTrue(out.startswith("ok ")); self.assertEqual(run.call_count, 1)
+
+        def probe(argv, **kw):
+            """Something unexpected goes wrong while diagnosing."""
+            raise ValueError("boom")
+        msg = self.timed_out_useradd(I, probe)
+        self.assertTrue(msg.startswith("useradd couldn't run (Command "), msg); self.assertIn("timed out after", msg)
+        self.assertTrue(msg.endswith("; diagnostics failed (ValueError)"), msg)
+
     def test_file_evidence_covers_the_whole_file(self):
         """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
         still changes the digest; a folder or a missing file has none."""
