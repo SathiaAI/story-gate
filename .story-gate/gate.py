@@ -3953,7 +3953,9 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
                          or (f.startswith(".story-gate/") and (f.lower().endswith(IMPORTABLE) or f.startswith(".story-gate/vendor/")
-                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
+                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA
+                                                                # a link has no importable suffix, but may stand in for a module
+                                                                or (not f.startswith(".story-gate/stories/") and (ROOT / f).is_symlink()))))
         if touched:
             bad_copy, good_copy = runtime_copy_check(files, base)
             if bad_copy:
@@ -4784,7 +4786,9 @@ def _ver(v):
 
 def runtime_copy_check(files, base):
     """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
-    branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
+    branch's, with no compiled files, no importable files it doesn't list, and no links it doesn't list (whatever their name:
+    a link called json to a folder holding __init__.py would load instead of json). -> (problem, note): one of them, or
+    both '' when the copy isn't changed.
     Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
     if ".story-gate" in files or (ROOT / ".story-gate").is_symlink():
         return ("This PR turns the .story-gate folder into a link. The checks would then run code from wherever it points, "
@@ -4821,6 +4825,14 @@ def runtime_copy_check(files, base):
     if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
         return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
                 "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
+    try:  # walks the folder itself: a folder it can't list is a problem, never a pass
+        links = [r for r in T.stray_links(ROOT / ".story-gate") if r not in listed]
+    except T.TrustError as ex:
+        return ("story-gate couldn't check this PR's story-gate copy for links (%s), so it can't confirm the copy holds only "
+                "signed code. Re-run the check." % ex), ""
+    if links:  # a link has no importable suffix, but a link called json to a folder holding __init__.py would load instead of json
+        return ("This PR's story-gate copy has links the signed release doesn't list (%s). A link can stand in for a Python "
+                "module whatever its name, and load instead of the signed code. Remove them." % ", ".join(links[:5])), ""
     now = man.get("version") or ""
     if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
         return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "
