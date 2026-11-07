@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 SRC = Path(__file__).resolve().parents[1] / ".story-gate"
+CUR_VERSION = __import__("re").search(r'^VERSION = "([^"]+)"', (SRC / "gate.py").read_text(encoding="utf-8"), __import__("re").M).group(1)  # signed-release fixtures use the current release
 PY = sys.executable
 
 
@@ -472,7 +473,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.10.1")
+        self.assertEqual(g.VERSION, "0.11.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -891,7 +892,7 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1", links=None, keep_config=False):
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed=CUR_VERSION, links=None, keep_config=False):
         """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked. `links` maps
         a path to the target of a link the branch adds there; `keep_config` leaves config.json alone, so the branch holds
         only what `extra`, `touch` and `links` add."""
@@ -984,7 +985,7 @@ class TestStoryGateOnlyPullRequests(Base):
     def test_gate_code_from_a_signed_release_is_named(self):
         rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
         self.assertEqual(rc, 0, out)
-        self.assertIn("is the signed story-gate 0.10.1 release", out)
+        self.assertIn("is the signed story-gate %s release" % CUR_VERSION, out)
 
     def test_protocol_changes_also_need_a_signed_release(self):
         """PROTOCOL.md and SKILL.md are part of the signed release too."""
@@ -1037,7 +1038,7 @@ class TestStoryGateOnlyPullRequests(Base):
         self.addCleanup(shutil.rmtree, pkg, True)
         saved = T.verify_release
         self.addCleanup(setattr, T, "verify_release", saved)
-        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
         for name, dest in (("json", pkg), ("plain", pkg / "__init__.py"), ("dangling", pkg / "missing")):
             with self.subTest(name=name):
                 link = self.repo / ".story-gate" / name
@@ -1067,7 +1068,7 @@ class TestStoryGateOnlyPullRequests(Base):
         T = g.T
         saved = T.verify_release
         self.addCleanup(setattr, T, "verify_release", saved)
-        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
         sub = self.repo / ".story-gate" / "hidden"; sub.mkdir()
         self.addCleanup(shutil.rmtree, str(sub), True)
         real = os.scandir
@@ -1092,7 +1093,7 @@ class TestStoryGateOnlyPullRequests(Base):
         T = g.T
         saved = T.verify_release
         self.addCleanup(setattr, T, "verify_release", saved)
-        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
         sub = self.repo / ".story-gate" / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
         self.addCleanup(shutil.rmtree, str(sub), True)
         self.addCleanup(os.chmod, str(sub), 0o700)
@@ -5261,6 +5262,10 @@ class TestGuidedSetup(unittest.TestCase):
 
     def test_upgrade_repo_refuses_an_unsigned_story_gate(self):
         """Only a signed release is ever copied into repositories."""
+        from unittest import mock
+        import sg_trust as T
+        p = mock.patch.object(T, "verify_release", side_effect=T.TrustError("no signature"))  # this checkout may be signed
+        p.start(); self.addCleanup(p.stop)
         self.set_up_main()
         status, detail = self.S.upgrade_repo(self.top, sys.executable, token="human")
         self.assertEqual(status, "error"); self.assertIn("signed release", detail)
