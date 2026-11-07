@@ -1,0 +1,8 @@
+{
+ "schema": 1,
+ "client": "claude-code",
+ "model": "claude-sonnet-5-5",
+ "branch": "fix/SGR-2-symlink-extras",
+ "claimed_at": "2026-11-07T02:53:25Z",
+ "at": "2026-11-07T02:53:25Z"
+}

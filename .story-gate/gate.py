@@ -4784,7 +4784,9 @@ def _ver(v):
 
 def runtime_copy_check(files, base):
     """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
-    branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
+    branch's, with no compiled files, no importable files it doesn't list, and no links it doesn't list (whatever their name:
+    a link called json to a folder holding __init__.py would load instead of json). -> (problem, note): one of them, or
+    both '' when the copy isn't changed.
     Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
     if ".story-gate" in files or (ROOT / ".story-gate").is_symlink():
         return ("This PR turns the .story-gate folder into a link. The checks would then run code from wherever it points, "
@@ -4821,6 +4823,11 @@ def runtime_copy_check(files, base):
     if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
         return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
                 "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
+    links = sorted(r for r in rels if r not in listed and "__pycache__" not in r.split("/")[:-1] and not r.startswith("stories/")
+                   and (ROOT / ".story-gate" / r).is_symlink())
+    if links:  # a link has no importable suffix, but a link called json to a folder holding __init__.py would load instead of json
+        return ("This PR's story-gate copy has links the signed release doesn't list (%s). A link can stand in for a Python "
+                "module whatever its name, and load instead of the signed code. Remove them." % ", ".join(links[:5])), ""
     now = man.get("version") or ""
     if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
         return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "

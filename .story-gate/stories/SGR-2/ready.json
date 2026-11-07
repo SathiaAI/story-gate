@@ -1,0 +1,154 @@
+{
+ "overall": "PASS",
+ "drift": "none",
+ "checks": {
+  "story_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "story_source": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "context_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "test_matrix": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "upstream_handoffs": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dependencies": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "blockers_resolved": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "risks_handled": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dor_value": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_scope": {
+   "status": "PASS",
+   "score": 0.9,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_interfaces": {
+   "status": "PASS",
+   "score": 0.92,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_dependencies": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_nfr": {
+   "status": "PASS",
+   "score": 0.87,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_small": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_no_blockers": {
+   "status": "PASS",
+   "score": 0.9,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "ac_testable": {
+   "status": "PASS",
+   "score": 0.84,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "ac_covers_scope": {
+   "status": "PASS",
+   "score": 0.75,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "tests_plan_adequate": {
+   "status": "PASS",
+   "score": 0.88,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "drift_prd": {
+   "status": "PASS",
+   "score": 0.72,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "drift_trd": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "handoff_in": {
+   "status": "PASS",
+   "score": 0.97,
+   "kind": "jev",
+   "group": "4-handoff"
+  }
+ },
+ "story": "SGR-2",
+ "phase": "ready",
+ "at": "2026-11-07T02:54:59Z",
+ "judge": "jev",
+ "judge_provider": "openrouter",
+ "judge_model": "typesafe/jev-1.13-20260917",
+ "judge_note": null,
+ "jev_error": null,
+ "inputs_hash": "0ca725077f1c5f78",
+ "inputs_hash_base": "0ca725077f1c5f78",
+ "drift_confidence": 0.92,
+ "cost": 0.000114324,
+ "gate_version": "0.10.1",
+ "writing": {
+  "score": 1.0,
+  "target": 0.8,
+  "checked": 5,
+  "passed": 5,
+  "status": "ok",
+  "parts": {
+   "story.md plain summary": {
+    "score": 1.0,
+    "checked": 5,
+    "long_paragraphs": 0,
+    "passive": 0,
+    "examples": []
+   }
+  },
+  "advice": []
+ }
+}

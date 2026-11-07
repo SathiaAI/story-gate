@@ -1016,6 +1016,30 @@ class TestStoryGateOnlyPullRequests(Base):
                     subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
                     subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
 
+    def test_a_link_the_signed_release_does_not_list_is_refused_whatever_its_name(self):
+        """A link `json` to a folder holding __init__.py has no importable suffix, but it would load instead of the json
+        module. runtime_copy_check fails on it (checked with a signature check that passes, so only the link is at fault)."""
+        g = load_gate(self.repo)
+        T = g.T
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        for name, dest in (("json", pkg), ("plain", pkg / "__init__.py"), ("dangling", pkg / "missing")):
+            with self.subTest(name=name):
+                link = self.repo / ".story-gate" / name
+                try:
+                    os.symlink(str(dest), str(link))
+                except (OSError, NotImplementedError):
+                    self.skipTest("no symlinks here")
+                try:
+                    bad, good = g.runtime_copy_check([".story-gate/" + name], "main")
+                    self.assertIn("links the signed release doesn't list", bad); self.assertIn(name, bad); self.assertEqual(good, "")
+                finally:
+                    os.unlink(str(link))
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # no link: still passes
+
     def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
         """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
         real = subprocess.run
@@ -3449,6 +3473,55 @@ class TestReleaseSignatures(unittest.TestCase):
     def test_added_file_fails(self):
         (self.rel / "evil.py").write_text("x")
         with self.assertRaises(self.T.TrustError):
+            self.T.verify_release(self.rel, self.signers)
+
+    def _link(self, name, target):
+        """Make link `name` in the release folder, or skip where links can't be made."""
+        try:
+            os.symlink(str(target), str(self.rel / name))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+
+    def test_an_extensionless_link_to_a_package_folder_fails(self):
+        """A link named `json` to a folder with __init__.py would load instead of the standard json module, because the
+        story-gate folder comes first on sys.path. It has no importable suffix, but it still fails."""
+        pkg = self.d / "pkg"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self._link("json", pkg)
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: json"):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_an_extensionless_link_to_a_file_fails(self):
+        """The same for a link to a file, and for a link that points nowhere."""
+        target = self.d / "plain"; target.write_text("x")
+        for name, dest in (("fileless", target), ("dangling", self.d / "missing")):
+            with self.subTest(name=name):
+                self._link(name, dest)
+                with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                    self.T.verify_release(self.rel, self.signers)
+                os.unlink(str(self.rel / name))
+
+    def test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed(self):
+        """Only real stories/ and __pycache__ folders are skipped: a link with one of those names is listed. A link to a
+        folder is one entry; the files inside the folder it points to are never listed."""
+        pkg = self.d / "pkg2"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n"); (pkg / "inner").mkdir()
+        for name in ("stories", "__pycache__"):
+            self._link(name, pkg)
+            self.assertEqual(self.T.stray_links(self.rel), [name])
+            with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                self.T.verify_release(self.rel, self.signers)
+            os.unlink(str(self.rel / name))
+        self._link("json", pkg)
+        self.assertEqual(self.T.stray_links(self.rel), ["json"])
+
+    def test_a_link_inside_a_real_subfolder_fails_but_stories_and_pycache_are_left_alone(self):
+        """A link in vendor/ (a real folder) fails. A link under stories/ or __pycache__ is not loaded by import, so it is
+        ignored like the other files there."""
+        (self.rel / "stories" / "SAT-1").mkdir(parents=True); (self.rel / "__pycache__").mkdir()
+        self._link("stories/SAT-1/note", self.d / "plain")
+        self._link("__pycache__/x", self.d / "plain")
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
+        self._link("vendor/extra", self.d / "plain")
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: vendor/extra"):
             self.T.verify_release(self.rel, self.signers)
 
     def test_wrong_key_fails(self):
