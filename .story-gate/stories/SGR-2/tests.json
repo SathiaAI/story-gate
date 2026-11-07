@@ -17,7 +17,11 @@
     "Existing linked-folder and linked-vendor tests still pass"
    ],
    "not_applicable": {},
-   "test_refs": []
+   "test_refs": [
+    "test_an_extensionless_link_to_a_package_folder_fails",
+    "test_an_extensionless_link_to_a_file_fails",
+    "test_a_link_inside_a_real_subfolder_fails_but_stories_and_pycache_are_left_alone"
+   ]
   },
   {
    "id": "AC-2",
@@ -35,7 +39,9 @@
     "Importable-suffix and compiled-file checks still work"
    ],
    "not_applicable": {},
-   "test_refs": []
+   "test_refs": [
+    "test_a_link_the_signed_release_does_not_list_is_refused_whatever_its_name"
+   ]
   },
   {
    "id": "AC-3",
@@ -53,7 +59,9 @@
     "Story folders with ordinary files still verify"
    ],
    "not_applicable": {},
-   "test_refs": []
+   "test_refs": [
+    "test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed"
+   ]
   },
   {
    "id": "AC-4",
@@ -71,7 +79,9 @@
     "os.walk is used without followlinks"
    ],
    "not_applicable": {},
-   "test_refs": []
+   "test_refs": [
+    "test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed"
+   ]
   }
  ],
  "proposed_missing_acs": []

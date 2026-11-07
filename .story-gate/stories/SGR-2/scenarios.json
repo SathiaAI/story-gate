@@ -1,0 +1,37 @@
+{
+ "story": "SGR-2",
+ "scenarios": [
+  {
+   "name": "link called json to a package folder fails verify_release",
+   "acs": [
+    "AC-1",
+    "AC-3",
+    "AC-4"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "\nimport sys,os,tempfile,pathlib,shutil\nsys.path.insert(0,\".story-gate\")\nimport sg_trust as T\nd=pathlib.Path(tempfile.mkdtemp());src=d/\"rel\";src.mkdir()\nfor f in T.runtime_files(\".story-gate\"):\n    (src/f).parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(\".story-gate/\"+f,src/f)\npkg=d/\"pkg\";pkg.mkdir();(pkg/\"__init__.py\").write_text(\"x=1\\n\")\nos.symlink(str(pkg),str(src/\"json\"))\nprint(\"links not covered by the signed release: \"+\", \".join(T.stray_links(src)))\n"
+   ],
+   "expect_exit": 0,
+   "expect_output": "links not covered by the signed release: json",
+   "timeout": 120,
+   "local_only": ""
+  },
+  {
+   "name": "runtime_copy_check refuses the json link",
+   "acs": [
+    "AC-2"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "\nimport sys,os,subprocess,tempfile,pathlib\ngp=os.path.abspath(\".story-gate/gate.py\");d=tempfile.mkdtemp()\nenv=dict(os.environ,STORY_GATE_ROOT=d)\nsubprocess.run([\"git\",\"init\",\"-q\",\"-b\",\"main\",\".\"],cwd=d)\nsd=pathlib.Path(d)/\".story-gate\";sd.mkdir()\npkg=pathlib.Path(d)/\"pkg\";pkg.mkdir();(pkg/\"__init__.py\").write_text(\"x=1\\n\")\nos.symlink(str(pkg),str(sd/\"json\"))\nsubprocess.run([\"git\",\"-c\",\"user.name=t\",\"-c\",\"user.email=t@t\",\"commit\",\"-q\",\"--allow-empty\",\"-m\",\"i\"],cwd=d)\ncode=\"import sys;sys.path.insert(0,%r);import gate as g,sg_trust as T;T.verify_release=lambda s,*a,**k:{\\\"version\\\":\\\"1\\\",\\\"files\\\":{}};print(g.runtime_copy_check([\\\".story-gate/json\\\"],\\\"main\\\")[0])\"%os.path.dirname(gp)\nprint(subprocess.run([sys.executable,\"-c\",code],cwd=d,env=env,capture_output=True,text=True).stdout)\n"
+   ],
+   "expect_exit": 0,
+   "expect_output": "has links the signed release doesn.t list.*json",
+   "timeout": 120,
+   "local_only": ""
+  }
+ ]
+}
