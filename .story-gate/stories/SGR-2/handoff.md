@@ -9,6 +9,8 @@
 - `verify_release` raises `TrustError` "links not covered by the signed release: ...".
 - `runtime_copy_check` returns the problem "has links the signed release doesn't list".
 
+- `cmd_ci` counts a link under `.story-gate/` (outside `stories/`) as story-gate code, so the signed-copy check and the code-owner rule apply to it.
+
 ## How to verify
 Run `python3 -m unittest tests.test_gate.TestReleaseSignatures tests.test_gate.TestStoryGateOnlyPullRequests`. It needs `ssh-keygen`.
 

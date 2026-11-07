@@ -28,6 +28,7 @@ c. Run the full suite, gitleaks chained to the push, and open a PR to main. In t
 - The README line about links ("no `.pyc`, `.so`, package folders or links") exists only on the v0.11.0 release branch (PR #104), not on main. It is updated there, after this PR merges, as the coordinator planned. On main only the docstring changes.
 - There is no PRD for this story. The rule it protects is the signed-copy check described in the v0.11.0 notes and in `runtime_copy_check`'s docstring.
 - No open question is left: the coordinator's message gives the reproduction, the fix and the PR steps.
+- AC-6: CI runs `runtime_copy_check` for a pull request that changes only a link under `.story-gate/` with no importable suffix. Before, `cmd_ci` ran it only for importable suffixes, `vendor/`, `__pycache__` and listed runtime files, so such a PR skipped the check and the code-owner rule. (Cursor Bugbot finding on PR #105.)
 
 ## Dependencies
 None

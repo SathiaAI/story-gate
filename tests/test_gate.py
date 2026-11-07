@@ -891,17 +891,29 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1"):
-        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1", links=None, keep_config=False):
+        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked. `links` maps
+        a path to the target of a link the branch adds there; `keep_config` leaves config.json alone, so the branch holds
+        only what `extra`, `touch` and `links` add."""
+        if keep_config:  # enforce mode comes from the base branch; the branch itself must not change config.json
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+            self.cfg(mode="enforce")
+            subprocess.run(["git", "commit", "-qam", "enforce on the base branch"], cwd=self.repo, check=True)
         subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
         (self.repo / ".github").mkdir(exist_ok=True)
-        self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
+        if not keep_config:
+            self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
         for f in touch or []:  # a story-gate file other than config.json
             (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
             with open(self.repo / f, "a", encoding="utf-8") as fh:
                 fh.write("\n# changed\n")
+        for f, target in (links or {}).items():
+            try:
+                os.symlink(str(target), str(self.repo / f))
+            except (OSError, NotImplementedError):
+                self.skipTest("no symlinks here")
         g = load_gate(self.repo)
         import sg_github as G
         keep_github_fakes_local(self, G)
@@ -1039,6 +1051,15 @@ class TestStoryGateOnlyPullRequests(Base):
                 finally:
                     os.unlink(str(link))
         self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # no link: still passes
+
+    def test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link(self):
+        """A branch that adds only `.story-gate/json` (a link to a folder holding __init__.py) has no importable suffix and is
+        not under vendor/, but it must still be checked as a story-gate code change and fail."""
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        rc, out, _ = self.ci(accepted=True, links={".story-gate/json": pkg}, keep_config=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("links the signed release doesn't list", out); self.assertIn("json", out)
 
     def test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass(self):
         """If a folder under .story-gate can't be listed, runtime_copy_check reports a problem instead of skipping it."""

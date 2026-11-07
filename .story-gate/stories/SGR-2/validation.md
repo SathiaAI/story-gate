@@ -11,6 +11,8 @@ The story is done. A link under story-gate's copy that the signed release does n
 
 - AC-5: met. A folder that cannot be listed fails `verify_release` ("couldn't list the folder ...") and gives `runtime_copy_check` a problem. Tests: `test_a_folder_that_cannot_be_listed_fails_verify_release`, `test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass`. The two chmod 000 versions skip on Windows and as root and print why; the mocked versions cover the same code everywhere.
 
+- AC-6: met. CI now runs the copy check for a pull request that adds only an extensionless link. Test: `test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link`. Before the change that test showed CI skipping the check (its only complaint was the missing story id).
+
 ## Scenarios run
 - A scratch copy of the release folder with a link `json` to a folder holding `__init__.py`: `verify_release` fails with "links not covered by the signed release: json".
 - The same link on the unfixed code (from main): the tests failed with "TrustError not raised" and an empty problem from `runtime_copy_check`. That was the reproduction.

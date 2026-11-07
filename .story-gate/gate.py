@@ -3953,7 +3953,9 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
                          or (f.startswith(".story-gate/") and (f.lower().endswith(IMPORTABLE) or f.startswith(".story-gate/vendor/")
-                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
+                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA
+                                                                # a link has no importable suffix, but may stand in for a module
+                                                                or (not f.startswith(".story-gate/stories/") and (ROOT / f).is_symlink()))))
         if touched:
             bad_copy, good_copy = runtime_copy_check(files, base)
             if bad_copy:

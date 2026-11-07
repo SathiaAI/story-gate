@@ -105,6 +105,26 @@
     "test_a_folder_with_mode_000_fails_verify_release",
     "test_a_folder_with_mode_000_is_a_problem_in_the_copy_check"
    ]
+  },
+  {
+   "id": "AC-6",
+   "text": "CI runs runtime_copy_check for a pull request that changes only an extensionless link under .story-gate/.",
+   "positive": [
+    "A branch adding only .story-gate/json (link to a folder with __init__.py) fails CI with the links message"
+   ],
+   "negative": [
+    "A link under stories/ is not treated as story-gate code"
+   ],
+   "edge": [
+    "The branch does not change config.json (which would already trigger the check)"
+   ],
+   "regression": [
+    "Branches that change importable files, vendor/ or config.json are checked as before"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link"
+   ]
   }
  ],
  "proposed_missing_acs": []
