@@ -32,6 +32,37 @@
    "expect_output": "has links the signed release doesn.t list.*json",
    "timeout": 120,
    "local_only": ""
+  },
+  {
+   "name": "an unlistable folder fails the link check closed",
+   "acs": [
+    "AC-5"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "\nimport sys,os,tempfile,pathlib\nsys.path.insert(0,\".story-gate\")\nimport sg_trust as T\nd=pathlib.Path(tempfile.mkdtemp());(d/\"hidden\").mkdir()\nreal=os.scandir\ndef scandir(p=\".\",*a,**k):\n    if isinstance(p,(str,os.PathLike)) and os.fspath(p)==str(d/\"hidden\"):\n        raise PermissionError(13,\"Permission denied\",str(d/\"hidden\"))\n    return real(p,*a,**k)\nos.scandir=scandir\ntry:\n    T.stray_links(d); print(\"PASSED OPEN\")\nexcept T.TrustError as e:\n    print(e)\n"
+   ],
+   "expect_exit": 0,
+   "expect_output": "couldn.t list the folder .*hidden",
+   "timeout": 120,
+   "local_only": ""
+  },
+  {
+   "name": "CI checks a pull request that adds only a link",
+   "acs": [
+    "AC-6"
+   ],
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "tests.test_gate.TestStoryGateOnlyPullRequests.test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link"
+   ],
+   "expect_exit": 0,
+   "expect_output": "OK",
+   "timeout": 120,
+   "local_only": ""
   }
  ]
 }

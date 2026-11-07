@@ -24,6 +24,7 @@ c. Run the full suite, gitleaks chained to the push, and open a PR to main. In t
 - AC-5: A folder that cannot be listed makes `verify_release` raise TrustError naming the folder, and makes `runtime_copy_check` return a problem. The check fails closed; it never skips what it cannot see. (CodeRabbit finding 4499800452 on PR #105, relayed by the coordinator.)
 
 ## Decisions for this story
+- In scope for the later review findings: `stray_links` fails closed on an unreadable folder (AC-5) and `cmd_ci` counts a link under `.story-gate/` as story-gate code (AC-6). The test helper `ci` gains two options for AC-6 (`links`, to add a link, and `keep_config`, so the branch changes only what the test adds). Links elsewhere in a repository and settings files such as `judge-calibration.json` stay out of scope: they can't shadow the gate's imports, and widening the rule would put those files under the code-owner rule.
 - Scope is `.story-gate/gate.py` (`runtime_copy_check`), `.story-gate/sg_trust.py` (`verify_release`) and tests. Both are runtime and code-owner files, so Paul approves the PR.
 - The README line about links ("no `.pyc`, `.so`, package folders or links") exists only on the v0.11.0 release branch (PR #104), not on main. It is updated there, after this PR merges, as the coordinator planned. On main only the docstring changes.
 - There is no PRD for this story. The rule it protects is the signed-copy check described in the v0.11.0 notes and in `runtime_copy_check`'s docstring.

@@ -11,6 +11,8 @@
 
 - `cmd_ci` counts a link under `.story-gate/` (outside `stories/`) as story-gate code, so the signed-copy check and the code-owner rule apply to it.
 
+- Test helper `ci` (in `tests/test_gate.py`) takes `links` and `keep_config`; default behaviour is unchanged.
+
 ## How to verify
 Run `python3 -m unittest tests.test_gate.TestReleaseSignatures tests.test_gate.TestStoryGateOnlyPullRequests`. It needs `ssh-keygen`.
 

@@ -1,5 +1,5 @@
 {
- "overall": "PASS",
+ "overall": "CONCERNS",
  "drift": "none",
  "checks": {
   "ready_gate_passed": {
@@ -44,72 +44,72 @@
   },
   "impl_matches_acs": {
    "status": "PASS",
-   "score": 0.87,
+   "score": 0.85,
    "kind": "jev",
    "group": "3-tests"
   },
   "impl_no_unplanned_scope": {
-   "status": "PASS",
-   "score": 0.81,
+   "status": "CONCERNS",
+   "score": 0.68,
    "kind": "jev",
    "group": "2-drift"
   },
   "drift_trd_after": {
    "status": "PASS",
-   "score": 0.79,
+   "score": 0.75,
    "kind": "jev",
    "group": "2-drift"
   },
   "tests_implemented": {
    "status": "PASS",
-   "score": 0.84,
+   "score": 0.89,
    "kind": "jev",
    "group": "3-tests"
   },
   "no_deferrals": {
    "status": "PASS",
-   "score": 0.94,
+   "score": 0.92,
    "kind": "jev",
    "group": "3-tests"
   },
   "handoff_out": {
    "status": "PASS",
-   "score": 0.84,
+   "score": 0.89,
    "kind": "jev",
    "group": "4-handoff"
   },
   "learnings_specific": {
    "status": "PASS",
-   "score": 0.9,
+   "score": 0.89,
    "kind": "jev",
    "group": "5-learnings"
   }
  },
  "story": "SGR-2",
  "phase": "done",
- "at": "2026-11-07T03:06:06Z",
+ "at": "2026-11-07T03:27:04Z",
  "judge": "jev",
  "judge_provider": "openrouter",
  "judge_model": "typesafe/jev-1.13-20260917",
  "judge_note": null,
  "jev_error": null,
- "inputs_hash": "e43d320356ec9090",
+ "inputs_hash": "8ea70cf5360a8fdc",
  "inputs_hash_base": null,
- "drift_confidence": 0.97,
- "cost": 0.00031647,
+ "drift_confidence": 0.93,
+ "cost": 0.00048867,
  "gate_version": "0.10.1",
  "writing": {
-  "score": 0.957,
+  "score": 0.95,
   "target": 0.8,
-  "checked": 47,
-  "passed": 45,
+  "checked": 60,
+  "passed": 57,
   "status": "ok",
   "parts": {
    "validation.md": {
-    "score": 0.935,
-    "checked": 31,
+    "score": 0.949,
+    "checked": 39,
     "long_paragraphs": 0,
-    "passive": 5,
+    "passive": 6,
     "examples": [
      "28 words (max 25): A link under story-gate's copy that the signed release does not list now fails both the release check and the CI signed-copy check, whatever the link is called.",
      "27 words (max 25): A scratch copy of the release folder with a link  CODE  to a folder holding  CODE :  CODE  fails with \"links not covered by the signed release: json\"."
@@ -117,22 +117,24 @@
    },
    "handoff.md": {
     "score": 1.0,
-    "checked": 14,
+    "checked": 18,
     "long_paragraphs": 0,
-    "passive": 0,
+    "passive": 2,
     "examples": []
    },
    "learnings": {
-    "score": 1.0,
-    "checked": 2,
+    "score": 0.667,
+    "checked": 3,
     "long_paragraphs": 0,
     "passive": 0,
-    "examples": []
+    "examples": [
+     "36 words (max 25): When a check lists files to find code Python could load, also list links, and skip only real folders by name A CI trigger list hid a gap: the check never ran fo"
+    ]
    }
   },
   "diagram_missing": true,
   "advice": [
-   "this change touches 6 code files: add a ```mermaid diagram to handoff.md that shows how the parts connect"
+   "this change touches 10 code files: add a ```mermaid diagram to handoff.md that shows how the parts connect"
   ]
  }
 }
