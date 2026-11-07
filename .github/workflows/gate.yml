@@ -15,7 +15,7 @@ on:
         required: false
         default: false
       runner:
-        description: "Runner label for the secret-free `tests` and `measure` jobs only (for example a cheaper hosted runner). The `story-gate` job holds the secrets and always runs on ubuntu-latest."
+        description: "Runner label for the `tests` and `measure` jobs only (for example a cheaper hosted runner). These jobs hold no GitHub secrets but run the pull request's code, so use a hosted runner unless a self-hosted one is isolated. The `story-gate` job holds the secrets and always runs on ubuntu-latest."
         type: string
         required: false
         default: "ubuntu-latest"
