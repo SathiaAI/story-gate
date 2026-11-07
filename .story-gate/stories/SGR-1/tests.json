@@ -63,7 +63,7 @@
   },
   {
    "id": "AC-4",
-   "text": "A caller that does not pass `runner` behaves as before: with the default filled in, every job of gate.yml, audit.yml and dashboard.yml runs on ubuntu-latest, and the gate.yml diff touches nothing but the input and the two runs-on lines.",
+   "text": "When `runner` is not passed, every job of gate.yml, audit.yml and dashboard.yml resolves to `ubuntu-latest`.",
    "positive": [
     "Resolving inputs.runner to its default gives ubuntu-latest for every job"
    ],

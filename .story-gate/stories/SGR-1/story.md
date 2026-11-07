@@ -25,9 +25,20 @@ Also: check how `sg_reusable.py` / `caller_files()` render the caller file. Call
 
 Done means: a draft PR with green checks, a story at score done, and a message to the coordinator with the PR link, its head sha, and the release step.
 
+## Scope and acceptance criteria
+In scope: the `runner` input on gate.yml, the two `runs-on` lines, and tests.
+Out of scope: cutting or signing a release, merging, changing repo settings, a `--runner` flag on `install`, and the `vkgate-lock` workflow.
+- AC-1: gate.yml declares an optional `workflow_call` input `runner`, type string, default `ubuntu-latest`, whose description names `tests` and `measure`.
+- AC-2: Exactly two jobs of gate.yml, `tests` and `measure`, set `runs-on: ${{ inputs.runner }}`, and neither reads a secret.
+- AC-3: The `story-gate` job of gate.yml, and every job in audit.yml and dashboard.yml, set `runs-on: ubuntu-latest` and never mention `inputs.runner`.
+- AC-4: When `runner` is not passed, every job of the three workflows resolves to `ubuntu-latest`.
+- AC-5: `story-gate doctor` accepts a caller file that sets `runner` by hand.
+
 ## Decisions for this story
 - Scope stays `.github/workflows/gate.yml` plus tests, as the brief says. `story-gate install` is not changed. The PR reports what install does with a hand-added `runner:` line (it drops it; checked by hand), and the coordinator decides on a follow-up.
-- The brief's "lock job" is the `story-gate` job: it has no job of that name, and `story-gate` is the only job that reads secrets.
+- Confirmed by the coordinator (7 Nov 2026): the keep-on-GitHub-hosted "lock job" is `vkgate-lock`, which lives in Viaknox/vkgate, not here. In story-gate only `tests` and `measure` take the input. The `story-gate` job, `audit.yml` and `dashboard.yml` stay hard-coded `ubuntu-latest`.
+- Confirmed by the coordinator: a `--runner` flag on `install` is a follow-up PR. Until it ships, a re-install removes a hand-added `runner:` line and the jobs return to GitHub-hosted runners. That costs more but is safe.
+- No question about scope or the install flag is open.
 
 ## Dependencies
 None

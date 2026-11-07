@@ -9329,6 +9329,7 @@ class TestReusableWorkflow(Base):
         return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
 
     def test_gate_has_an_optional_runner_input_that_defaults_to_ubuntu_latest(self):
+        """gate.yml declares an optional string input `runner` that defaults to ubuntu-latest."""
         t = (self.WF / "gate.yml").read_text()
         block = t.split("\n      runner:\n", 1)[1].split("\n    secrets:\n", 1)[0] + "\n"
         self.assertIn("        type: string\n", block); self.assertIn("        required: false\n", block)
@@ -9338,6 +9339,7 @@ class TestReusableWorkflow(Base):
         self.assertIn("release-key-fingerprint:", t); self.assertIn("allow-unsigned:", t)  # the older inputs stay
 
     def test_only_the_tests_and_measure_jobs_run_on_the_runner_input(self):
+        """Exactly the secret-free `tests` and `measure` jobs run on the caller's runner."""
         t = (self.WF / "gate.yml").read_text()
         jobs = self._jobs("gate.yml")
         self.assertEqual(set(jobs), {"tests", "measure", "story-gate"})
@@ -9349,6 +9351,7 @@ class TestReusableWorkflow(Base):
         self.assertEqual(t.count("${{ inputs.runner }}"), 2)
 
     def test_secret_jobs_and_the_other_workflows_never_use_the_runner_input(self):
+        """The secret-holding job, audit.yml and dashboard.yml stay on ubuntu-latest, whatever the caller passes."""
         gate = self._jobs("gate.yml")["story-gate"]
         self.assertIn("    runs-on: ubuntu-latest\n", gate); self.assertNotIn("inputs.runner", gate)
         self.assertIn("secrets.OPENROUTER_API_KEY", gate)  # this is the job that holds the secrets
@@ -9361,6 +9364,7 @@ class TestReusableWorkflow(Base):
             self.assertEqual("secrets." in body, j == "story-gate", j)
 
     def test_without_a_runner_every_job_of_every_workflow_stays_on_ubuntu_latest(self):
+        """A caller that passes no runner sees every job on ubuntu-latest, as before."""
         import re as _re
         t = (self.WF / "gate.yml").read_text()
         default = _re.search(r'runner:\n(?:.*\n)*?        default: "([^"]+)"', t).group(1)
@@ -9371,6 +9375,7 @@ class TestReusableWorkflow(Base):
                 self.assertEqual(label, "ubuntu-latest", (name, j))
 
     def test_doctor_accepts_a_caller_that_passes_a_runner_by_hand(self):
+        """`doctor` accepts a hand-added runner line and still rejects a second uses: line."""
         run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
         g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
         self.assertNotIn("runner:", t)  # install writes no runner of its own: callers on ubuntu-latest see no change

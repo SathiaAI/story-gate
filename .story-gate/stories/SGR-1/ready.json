@@ -1,5 +1,5 @@
 {
- "overall": "CONCERNS",
+ "overall": "PASS",
  "drift": "none",
  "checks": {
   "story_present": {
@@ -44,13 +44,13 @@
   },
   "dor_value": {
    "status": "PASS",
-   "score": 0.77,
+   "score": 0.78,
    "kind": "jev",
    "group": "1-ready"
   },
   "dor_scope": {
    "status": "PASS",
-   "score": 0.93,
+   "score": 0.95,
    "kind": "jev",
    "group": "1-ready"
   },
@@ -68,43 +68,43 @@
   },
   "dor_nfr": {
    "status": "PASS",
-   "score": 0.84,
+   "score": 0.85,
    "kind": "jev",
    "group": "1-ready"
   },
   "dor_small": {
    "status": "PASS",
-   "score": 0.91,
+   "score": 0.92,
    "kind": "jev",
    "group": "1-ready"
   },
   "dor_no_blockers": {
-   "status": "CONCERNS",
-   "score": 0.4,
+   "status": "PASS",
+   "score": 0.88,
    "kind": "jev",
    "group": "1-ready"
   },
   "ac_testable": {
-   "status": "CONCERNS",
-   "score": 0.69,
+   "status": "PASS",
+   "score": 0.74,
    "kind": "jev",
    "group": "3-tests"
   },
   "ac_covers_scope": {
-   "status": "CONCERNS",
-   "score": 0.66,
+   "status": "PASS",
+   "score": 0.82,
    "kind": "jev",
    "group": "3-tests"
   },
   "tests_plan_adequate": {
    "status": "PASS",
-   "score": 0.85,
+   "score": 0.87,
    "kind": "jev",
    "group": "3-tests"
   },
   "drift_prd": {
    "status": "PASS",
-   "score": 0.75,
+   "score": 0.72,
    "kind": "jev",
    "group": "2-drift"
   },
@@ -123,16 +123,16 @@
  },
  "story": "SGR-1",
  "phase": "ready",
- "at": "2026-11-07T00:25:42Z",
+ "at": "2026-11-07T00:49:58Z",
  "judge": "jev",
  "judge_provider": "openrouter",
  "judge_model": "typesafe/jev-1.13-20260917",
  "judge_note": null,
  "jev_error": null,
- "inputs_hash": "f07edfe27aa50d3d",
- "inputs_hash_base": "f07edfe27aa50d3d",
- "drift_confidence": 0.91,
- "cost": 0.000118944,
+ "inputs_hash": "2c591e0b360c2948",
+ "inputs_hash_base": "2c591e0b360c2948",
+ "drift_confidence": 0.92,
+ "cost": 0.000137802,
  "gate_version": "0.10.1",
  "writing": {
   "score": 0.8,
