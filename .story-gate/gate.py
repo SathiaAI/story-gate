@@ -4823,8 +4823,11 @@ def runtime_copy_check(files, base):
     if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
         return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
                 "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
-    links = sorted(r for r in rels if r not in listed and "__pycache__" not in r.split("/")[:-1] and not r.startswith("stories/")
-                   and (ROOT / ".story-gate" / r).is_symlink())
+    try:  # walks the folder itself: a folder it can't list is a problem, never a pass
+        links = [r for r in T.stray_links(ROOT / ".story-gate") if r not in listed]
+    except T.TrustError as ex:
+        return ("story-gate couldn't check this PR's story-gate copy for links (%s), so it can't confirm the copy holds only "
+                "signed code. Re-run the check." % ex), ""
     if links:  # a link has no importable suffix, but a link called json to a folder holding __init__.py would load instead of json
         return ("This PR's story-gate copy has links the signed release doesn't list (%s). A link can stand in for a Python "
                 "module whatever its name, and load instead of the signed code. Remove them." % ", ".join(links[:5])), ""

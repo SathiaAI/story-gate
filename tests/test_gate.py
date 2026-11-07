@@ -1040,6 +1040,44 @@ class TestStoryGateOnlyPullRequests(Base):
                     os.unlink(str(link))
         self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # no link: still passes
 
+    def test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass(self):
+        """If a folder under .story-gate can't be listed, runtime_copy_check reports a problem instead of skipping it."""
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "hidden"; sub.mkdir()
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(sub):
+                raise PermissionError(13, "Permission denied", str(sub))
+            return real(path, *a, **k)
+        with patch("os.scandir", scandir):
+            bad, good = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad); self.assertIn("hidden", bad)
+        self.assertEqual(good, "")
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # listable again: passes
+
+    def test_a_folder_with_mode_000_is_a_problem_in_the_copy_check(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        bad, _ = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad)
+
     def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
         """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
         real = subprocess.run
@@ -3499,6 +3537,37 @@ class TestReleaseSignatures(unittest.TestCase):
                 with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
                     self.T.verify_release(self.rel, self.signers)
                 os.unlink(str(self.rel / name))
+
+    def _cant_list(self, folder):
+        """Make listing `folder` fail the way a folder with mode 000 does, on any OS and even as root."""
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(folder):
+                raise PermissionError(13, "Permission denied", str(folder))
+            return real(path, *a, **k)
+        return patch("os.scandir", scandir)
+
+    def test_a_folder_that_cannot_be_listed_fails_verify_release(self):
+        """os.walk skips a folder it can't list. The check must not pass a copy it could not look at."""
+        sub = self.rel / "hidden"; sub.mkdir()
+        with self._cant_list(sub):
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder .*hidden"):
+                self.T.verify_release(self.rel, self.signers)
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+                self.T.stray_links(self.rel)
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")  # listable again: passes
+
+    def test_a_folder_with_mode_000_fails_verify_release(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        sub = self.rel / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+            self.T.verify_release(self.rel, self.signers)
 
     def test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed(self):
         """Only real stories/ and __pycache__ folders are skipped: a link with one of those names is listed. A link to a

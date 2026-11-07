@@ -9,6 +9,8 @@ The story is done. A link under story-gate's copy that the signed release does n
 - AC-3: met. Links inside a real `stories/` or `__pycache__` folder are ignored. A link named `stories` or `__pycache__` fails. Test: `test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed`.
 - AC-4: met. A folder link is listed as one entry and never followed. Same test.
 
+- AC-5: met. A folder that cannot be listed fails `verify_release` ("couldn't list the folder ...") and gives `runtime_copy_check` a problem. Tests: `test_a_folder_that_cannot_be_listed_fails_verify_release`, `test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass`. The two chmod 000 versions skip on Windows and as root and print why; the mocked versions cover the same code everywhere.
+
 ## Scenarios run
 - A scratch copy of the release folder with a link `json` to a folder holding `__init__.py`: `verify_release` fails with "links not covered by the signed release: json".
 - The same link on the unfixed code (from main): the tests failed with "TrustError not raised" and an empty problem from `runtime_copy_check`. That was the reproduction.

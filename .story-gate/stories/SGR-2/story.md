@@ -21,6 +21,7 @@ c. Run the full suite, gitleaks chained to the push, and open a PR to main. In t
 - AC-2: `runtime_copy_check` returns a problem naming the link for the same cases, and still passes a copy with no link.
 - AC-3: Links inside a real `stories/` or `__pycache__` folder are left alone. A link that is itself named `stories` or `__pycache__` is not.
 - AC-4: Folder links are not followed (checked with `is_symlink()` before walking).
+- AC-5: A folder that cannot be listed makes `verify_release` raise TrustError naming the folder, and makes `runtime_copy_check` return a problem. The check fails closed; it never skips what it cannot see. (CodeRabbit finding 4499800452 on PR #105, relayed by the coordinator.)
 
 ## Decisions for this story
 - Scope is `.story-gate/gate.py` (`runtime_copy_check`), `.story-gate/sg_trust.py` (`verify_release`) and tests. Both are runtime and code-owner files, so Paul approves the PR.

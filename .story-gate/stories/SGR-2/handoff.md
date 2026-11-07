@@ -4,6 +4,7 @@
 `.story-gate/sg_trust.py`: new `stray_links()`, and `verify_release` fails when it lists any link. `.story-gate/gate.py`: `runtime_copy_check` fails on any link the signed release does not list, and its docstring says so. Tests in `tests/test_gate.py`.
 
 ## Interfaces and contracts
+- `stray_links` raises `TrustError` when a folder can't be listed (`os.walk` gets an `onerror`). `runtime_copy_check` uses `stray_links` for its link check and returns a problem for that error.
 - `stray_links(src)` returns the relative paths of links under `src`, leaving out real `stories/` and `__pycache__` folders. It never follows folder links.
 - `verify_release` raises `TrustError` "links not covered by the signed release: ...".
 - `runtime_copy_check` returns the problem "has links the signed release doesn't list".

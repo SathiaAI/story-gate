@@ -50,7 +50,7 @@
   },
   "dor_scope": {
    "status": "PASS",
-   "score": 0.9,
+   "score": 0.89,
    "kind": "jev",
    "group": "1-ready"
   },
@@ -68,13 +68,13 @@
   },
   "dor_nfr": {
    "status": "PASS",
-   "score": 0.88,
+   "score": 0.87,
    "kind": "jev",
    "group": "1-ready"
   },
   "dor_small": {
    "status": "PASS",
-   "score": 0.92,
+   "score": 0.91,
    "kind": "jev",
    "group": "1-ready"
   },
@@ -86,13 +86,13 @@
   },
   "ac_testable": {
    "status": "PASS",
-   "score": 0.83,
+   "score": 0.82,
    "kind": "jev",
    "group": "3-tests"
   },
   "ac_covers_scope": {
    "status": "PASS",
-   "score": 0.79,
+   "score": 0.75,
    "kind": "jev",
    "group": "3-tests"
   },
@@ -104,7 +104,7 @@
   },
   "drift_prd": {
    "status": "PASS",
-   "score": 0.73,
+   "score": 0.75,
    "kind": "jev",
    "group": "2-drift"
   },
@@ -123,16 +123,16 @@
  },
  "story": "SGR-2",
  "phase": "ready",
- "at": "2026-11-07T03:06:06Z",
+ "at": "2026-11-07T03:13:26Z",
  "judge": "jev",
  "judge_provider": "openrouter",
  "judge_model": "typesafe/jev-1.13-20260917",
  "judge_note": null,
  "jev_error": null,
- "inputs_hash": "1747cc5fd571f31b",
- "inputs_hash_base": "1747cc5fd571f31b",
- "drift_confidence": 0.92,
- "cost": 0.000120036,
+ "inputs_hash": "17ebf735ffcc0144",
+ "inputs_hash_base": "17ebf735ffcc0144",
+ "drift_confidence": 0.96,
+ "cost": 0.000132846,
  "gate_version": "0.10.1",
  "writing": {
   "score": 1.0,

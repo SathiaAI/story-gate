@@ -82,6 +82,29 @@
    "test_refs": [
     "test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed"
    ]
+  },
+  {
+   "id": "AC-5",
+   "text": "A folder that cannot be listed makes verify_release raise TrustError naming the folder and makes runtime_copy_check return a problem.",
+   "positive": [
+    "A folder whose listing raises PermissionError fails both checks"
+   ],
+   "negative": [
+    "The same copy passes once the folder is listable again"
+   ],
+   "edge": [
+    "A real chmod 000 folder (skipped on Windows and as root, with the reason printed)"
+   ],
+   "regression": [
+    "Link checks and the clean-copy pass still work"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_a_folder_that_cannot_be_listed_fails_verify_release",
+    "test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass",
+    "test_a_folder_with_mode_000_fails_verify_release",
+    "test_a_folder_with_mode_000_is_a_problem_in_the_copy_check"
+   ]
   }
  ],
  "proposed_missing_acs": []

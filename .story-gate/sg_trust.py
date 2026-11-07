@@ -163,10 +163,15 @@ def stray_links(src):
     """Every link under src, as relative paths, except inside a real stories/ or __pycache__ folder. A link named `json`
     that points to a folder holding __init__.py would load instead of the standard json module, because this folder comes
     first on sys.path, and its name has no .py to give it away. Folder links are listed, never followed. A link that is
-    itself called stories or __pycache__ is listed too: only real folders of those names are left out."""
+    itself called stories or __pycache__ is listed too: only real folders of those names are left out. A folder that can't
+    be listed raises TrustError: the check fails closed rather than skipping what it can't see."""
     src = Path(src)
     out = []
-    for root, dirs, files in os.walk(str(src)):
+    def unreadable(err):
+        """os.walk skips a folder it can't list unless told otherwise; here that would pass the copy unseen."""
+        raise TrustError("couldn't list the folder %s (%s), so it can't confirm the copy holds no links not covered by the "
+                         "signed release" % (getattr(err, "filename", None) or src, getattr(err, "strerror", None) or err))
+    for root, dirs, files in os.walk(str(src), onerror=unreadable):
         here = Path(root)
         for name in dirs + files:
             if (here / name).is_symlink():
