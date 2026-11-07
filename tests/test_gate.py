@@ -9320,6 +9320,72 @@ class TestReusableWorkflow(Base):
         declared = set(_re.findall(r"\n      ([A-Z_]+):\n        required: false", t))
         self.assertEqual(declared, set(R.SECRETS))
 
+    # ---- the `runner` input: callers move only the secret-free jobs
+    def _jobs(self, name):
+        """{job id: text} of a published workflow."""
+        import re as _re
+        body = (self.WF / name).read_text().split("\njobs:\n", 1)[1]
+        parts = _re.split(r"(?m)^  ([a-z-]+):\n", "\n" + body)
+        return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+
+    def test_gate_has_an_optional_runner_input_that_defaults_to_ubuntu_latest(self):
+        """gate.yml declares an optional string input `runner` that defaults to ubuntu-latest."""
+        t = (self.WF / "gate.yml").read_text()
+        block = t.split("\n      runner:\n", 1)[1].split("\n    secrets:\n", 1)[0] + "\n"
+        self.assertIn("        type: string\n", block); self.assertIn("        required: false\n", block)
+        self.assertIn('        default: "ubuntu-latest"\n', block)
+        desc = block.split("description:", 1)[1].split("\n", 1)[0]
+        self.assertIn("`tests`", desc); self.assertIn("`measure`", desc); self.assertIn("secret", desc)
+        self.assertIn("release-key-fingerprint:", t); self.assertIn("allow-unsigned:", t)  # the older inputs stay
+
+    def test_only_the_tests_and_measure_jobs_run_on_the_runner_input(self):
+        """Exactly the secret-free `tests` and `measure` jobs run on the caller's runner."""
+        t = (self.WF / "gate.yml").read_text()
+        jobs = self._jobs("gate.yml")
+        self.assertEqual(set(jobs), {"tests", "measure", "story-gate"})
+        for j in ("tests", "measure"):
+            self.assertIn("    runs-on: ${{ inputs.runner }}\n", jobs[j], j)
+            self.assertNotIn("secrets.", jobs[j], j)  # the jobs a caller can move never see a secret
+            self.assertIn("      contents: read\n", jobs[j])
+        self.assertEqual(t.count("inputs.runner"), 2)  # no third use, in `runs-on` or anywhere else
+        self.assertEqual(t.count("${{ inputs.runner }}"), 2)
+
+    def test_secret_jobs_and_the_other_workflows_never_use_the_runner_input(self):
+        """The secret-holding job, audit.yml and dashboard.yml stay on ubuntu-latest, whatever the caller passes."""
+        gate = self._jobs("gate.yml")["story-gate"]
+        self.assertIn("    runs-on: ubuntu-latest\n", gate); self.assertNotIn("inputs.runner", gate)
+        self.assertIn("secrets.OPENROUTER_API_KEY", gate)  # this is the job that holds the secrets
+        for name in ("audit.yml", "dashboard.yml"):
+            t = (self.WF / name).read_text()
+            self.assertNotIn("inputs.runner", t, name); self.assertNotIn("runner:", t, name)
+            for j, body in self._jobs(name).items():
+                self.assertIn("    runs-on: ubuntu-latest\n", body, (name, j))
+        for j, body in self._jobs("gate.yml").items():  # secrets are read in the story-gate job only
+            self.assertEqual("secrets." in body, j == "story-gate", j)
+
+    def test_without_a_runner_every_job_of_every_workflow_stays_on_ubuntu_latest(self):
+        """A caller that passes no runner sees every job on ubuntu-latest, as before."""
+        import re as _re
+        t = (self.WF / "gate.yml").read_text()
+        default = _re.search(r'runner:\n(?:.*\n)*?        default: "([^"]+)"', t).group(1)
+        for name in ("gate.yml", "audit.yml", "dashboard.yml"):
+            for j, body in self._jobs(name).items():
+                label = _re.search(r"(?m)^    runs-on: (.+)$", body).group(1).strip()
+                label = default if label == "${{ inputs.runner }}" else label
+                self.assertEqual(label, "ubuntu-latest", (name, j))
+
+    def test_doctor_accepts_a_caller_that_passes_a_runner_by_hand(self):
+        """`doctor` accepts a hand-added runner line and still rejects a second uses: line."""
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
+        self.assertNotIn("runner:", t)  # install writes no runner of its own: callers on ubuntu-latest see no change
+        g.write_text(t.replace("    with:\n", "    with:\n      runner: ubicloud-standard-2\n", 1))
+        self.assertIn("runner: ubicloud-standard-2", g.read_text())
+        out = run(self.repo, "doctor").stdout
+        self.assertIn("story-gate.yml           ok (SathiaAI/story-gate at v", out)
+        g.write_text(g.read_text() + "  other:\n    uses: evil/repo/.github/workflows/x.yml@" + "c" * 40 + "\n")
+        self.assertIn("has 2 `uses:` lines", run(self.repo, "doctor").stdout)  # the hand-added line did not loosen the checks
+
 
 
 def _re_sub(pat, rep, text):

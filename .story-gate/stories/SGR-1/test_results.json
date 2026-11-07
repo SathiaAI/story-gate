@@ -1,0 +1,9 @@
+{
+ "command": "python3 -m unittest tests.test_gate.TestReusableWorkflow tests.test_gate.TestReviewLessons",
+ "exit_code": 0,
+ "seconds": 13.0,
+ "head": "935d92a53a202f17dda809ae1ea60bedc1c9cd49",
+ "fingerprint": "4dbe94801a35d1a6",
+ "at": "2026-11-07T00:50:14Z",
+ "output_tail": "...........................\n----------------------------------------------------------------------\nRan 27 tests in 12.818s\n\nOK\n"
+}
