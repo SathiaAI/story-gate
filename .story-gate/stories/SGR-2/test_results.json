@@ -1,0 +1,9 @@
+{
+ "command": "python3 -m unittest tests.test_gate.TestReleaseSignatures tests.test_gate.TestStoryGateOnlyPullRequests tests.test_gate.TestReviewLessons",
+ "exit_code": 0,
+ "seconds": 8.4,
+ "head": "983bf347752c7d8d9d62a45432f08f53853147d8",
+ "fingerprint": "cf8bf14f9dc4f7b6",
+ "at": "2026-11-07T03:26:46Z",
+ "output_tail": ".s.................s............................\n----------------------------------------------------------------------\nRan 48 tests in 8.311s\n\nOK (skipped=2)\n"
+}

@@ -891,17 +891,29 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1"):
-        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1", links=None, keep_config=False):
+        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked. `links` maps
+        a path to the target of a link the branch adds there; `keep_config` leaves config.json alone, so the branch holds
+        only what `extra`, `touch` and `links` add."""
+        if keep_config:  # enforce mode comes from the base branch; the branch itself must not change config.json
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+            self.cfg(mode="enforce")
+            subprocess.run(["git", "commit", "-qam", "enforce on the base branch"], cwd=self.repo, check=True)
         subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
         (self.repo / ".github").mkdir(exist_ok=True)
-        self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
+        if not keep_config:
+            self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
         for f in touch or []:  # a story-gate file other than config.json
             (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
             with open(self.repo / f, "a", encoding="utf-8") as fh:
                 fh.write("\n# changed\n")
+        for f, target in (links or {}).items():
+            try:
+                os.symlink(str(target), str(self.repo / f))
+            except (OSError, NotImplementedError):
+                self.skipTest("no symlinks here")
         g = load_gate(self.repo)
         import sg_github as G
         keep_github_fakes_local(self, G)
@@ -1015,6 +1027,77 @@ class TestStoryGateOnlyPullRequests(Base):
                     subprocess.run(["git", "checkout", "-qf", "main"], cwd=self.repo, check=True)
                     subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
                     subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
+
+    def test_a_link_the_signed_release_does_not_list_is_refused_whatever_its_name(self):
+        """A link `json` to a folder holding __init__.py has no importable suffix, but it would load instead of the json
+        module. runtime_copy_check fails on it (checked with a signature check that passes, so only the link is at fault)."""
+        g = load_gate(self.repo)
+        T = g.T
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        for name, dest in (("json", pkg), ("plain", pkg / "__init__.py"), ("dangling", pkg / "missing")):
+            with self.subTest(name=name):
+                link = self.repo / ".story-gate" / name
+                try:
+                    os.symlink(str(dest), str(link))
+                except (OSError, NotImplementedError):
+                    self.skipTest("no symlinks here")
+                try:
+                    bad, good = g.runtime_copy_check([".story-gate/" + name], "main")
+                    self.assertIn("links the signed release doesn't list", bad); self.assertIn(name, bad); self.assertEqual(good, "")
+                finally:
+                    os.unlink(str(link))
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # no link: still passes
+
+    def test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link(self):
+        """A branch that adds only `.story-gate/json` (a link to a folder holding __init__.py) has no importable suffix and is
+        not under vendor/, but it must still be checked as a story-gate code change and fail."""
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        rc, out, _ = self.ci(accepted=True, links={".story-gate/json": pkg}, keep_config=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("links the signed release doesn't list", out); self.assertIn("json", out)
+
+    def test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass(self):
+        """If a folder under .story-gate can't be listed, runtime_copy_check reports a problem instead of skipping it."""
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "hidden"; sub.mkdir()
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(sub):
+                raise PermissionError(13, "Permission denied", str(sub))
+            return real(path, *a, **k)
+        with patch("os.scandir", scandir):
+            bad, good = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad); self.assertIn("hidden", bad)
+        self.assertEqual(good, "")
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # listable again: passes
+
+    def test_a_folder_with_mode_000_is_a_problem_in_the_copy_check(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": "0.10.1", "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        bad, _ = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad)
 
     def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
         """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
@@ -3449,6 +3532,86 @@ class TestReleaseSignatures(unittest.TestCase):
     def test_added_file_fails(self):
         (self.rel / "evil.py").write_text("x")
         with self.assertRaises(self.T.TrustError):
+            self.T.verify_release(self.rel, self.signers)
+
+    def _link(self, name, target):
+        """Make link `name` in the release folder, or skip where links can't be made."""
+        try:
+            os.symlink(str(target), str(self.rel / name))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+
+    def test_an_extensionless_link_to_a_package_folder_fails(self):
+        """A link named `json` to a folder with __init__.py would load instead of the standard json module, because the
+        story-gate folder comes first on sys.path. It has no importable suffix, but it still fails."""
+        pkg = self.d / "pkg"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self._link("json", pkg)
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: json"):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_an_extensionless_link_to_a_file_fails(self):
+        """The same for a link to a file, and for a link that points nowhere."""
+        target = self.d / "plain"; target.write_text("x")
+        for name, dest in (("fileless", target), ("dangling", self.d / "missing")):
+            with self.subTest(name=name):
+                self._link(name, dest)
+                with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                    self.T.verify_release(self.rel, self.signers)
+                os.unlink(str(self.rel / name))
+
+    def _cant_list(self, folder):
+        """Make listing `folder` fail the way a folder with mode 000 does, on any OS and even as root."""
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(folder):
+                raise PermissionError(13, "Permission denied", str(folder))
+            return real(path, *a, **k)
+        return patch("os.scandir", scandir)
+
+    def test_a_folder_that_cannot_be_listed_fails_verify_release(self):
+        """os.walk skips a folder it can't list. The check must not pass a copy it could not look at."""
+        sub = self.rel / "hidden"; sub.mkdir()
+        with self._cant_list(sub):
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder .*hidden"):
+                self.T.verify_release(self.rel, self.signers)
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+                self.T.stray_links(self.rel)
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")  # listable again: passes
+
+    def test_a_folder_with_mode_000_fails_verify_release(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        sub = self.rel / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed(self):
+        """Only real stories/ and __pycache__ folders are skipped: a link with one of those names is listed. A link to a
+        folder is one entry; the files inside the folder it points to are never listed."""
+        pkg = self.d / "pkg2"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n"); (pkg / "inner").mkdir()
+        for name in ("stories", "__pycache__"):
+            self._link(name, pkg)
+            self.assertEqual(self.T.stray_links(self.rel), [name])
+            with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                self.T.verify_release(self.rel, self.signers)
+            os.unlink(str(self.rel / name))
+        self._link("json", pkg)
+        self.assertEqual(self.T.stray_links(self.rel), ["json"])
+
+    def test_a_link_inside_a_real_subfolder_fails_but_stories_and_pycache_are_left_alone(self):
+        """A link in vendor/ (a real folder) fails. A link under stories/ or __pycache__ is not loaded by import, so it is
+        ignored like the other files there."""
+        (self.rel / "stories" / "SAT-1").mkdir(parents=True); (self.rel / "__pycache__").mkdir()
+        self._link("stories/SAT-1/note", self.d / "plain")
+        self._link("__pycache__/x", self.d / "plain")
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
+        self._link("vendor/extra", self.d / "plain")
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: vendor/extra"):
             self.T.verify_release(self.rel, self.signers)
 
     def test_wrong_key_fails(self):
