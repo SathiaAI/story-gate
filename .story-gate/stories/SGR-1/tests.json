@@ -1,0 +1,109 @@
+{
+ "story": "SGR-1",
+ "acceptance_criteria": [
+  {
+   "id": "AC-1",
+   "text": "gate.yml declares an optional workflow_call input `runner`: type string, default `ubuntu-latest`, not required, with a description that says it applies only to the secret-free tests and measure jobs.",
+   "positive": [
+    "The input block exists with type string, default ubuntu-latest, required false"
+   ],
+   "negative": [
+    "A required: true or a non-string type would fail the test"
+   ],
+   "edge": [
+    "The description names both `tests` and `measure` and says no secrets"
+   ],
+   "regression": [
+    "The existing inputs release-key-fingerprint and allow-unsigned are unchanged"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_gate_has_an_optional_runner_input_that_defaults_to_ubuntu_latest"
+   ]
+  },
+  {
+   "id": "AC-2",
+   "text": "Exactly the `tests` and `measure` jobs of gate.yml set `runs-on: ${{ inputs.runner }}`.",
+   "positive": [
+    "Both jobs use the input"
+   ],
+   "negative": [
+    "No other job of gate.yml uses the input"
+   ],
+   "edge": [
+    "Exactly two runs-on lines in gate.yml read the input"
+   ],
+   "regression": [
+    "Both jobs keep permissions: contents: read and no secrets"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_only_the_tests_and_measure_jobs_run_on_the_runner_input"
+   ]
+  },
+  {
+   "id": "AC-3",
+   "text": "The `story-gate` job of gate.yml, audit.yml and dashboard.yml run on a hard-coded `ubuntu-latest` and never mention `inputs.runner`.",
+   "positive": [
+    "story-gate job has runs-on: ubuntu-latest"
+   ],
+   "negative": [
+    "audit.yml and dashboard.yml do not contain inputs.runner anywhere"
+   ],
+   "edge": [
+    "The story-gate job text contains neither inputs.runner nor a ${{ expression in runs-on"
+   ],
+   "regression": [
+    "Secrets are still read only in the story-gate job"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_secret_jobs_and_the_other_workflows_never_use_the_runner_input"
+   ]
+  },
+  {
+   "id": "AC-4",
+   "text": "A caller that does not pass `runner` behaves as before: with the default filled in, every job of gate.yml, audit.yml and dashboard.yml runs on ubuntu-latest, and the gate.yml diff touches nothing but the input and the two runs-on lines.",
+   "positive": [
+    "Resolving inputs.runner to its default gives ubuntu-latest for every job"
+   ],
+   "negative": [
+    "A default other than ubuntu-latest would fail the test"
+   ],
+   "edge": [
+    "Callers can pass a Ubicloud label and only tests and measure change"
+   ],
+   "regression": [
+    "The existing workflow-pinning and no-secrets test still passes"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_without_a_runner_every_job_of_every_workflow_stays_on_ubuntu_latest",
+    "test_the_published_workflows_are_pinned_and_keep_secrets_away_from_pr_code"
+   ]
+  },
+  {
+   "id": "AC-5",
+   "text": "A caller that passes `runner` by hand in the `with:` block of its story-gate.yml is accepted by `story-gate doctor`. How `story-gate install` treats that line is stated in the PR.",
+   "positive": [
+    "doctor reports ok for a caller file that also sets runner: ubicloud-standard-2"
+   ],
+   "negative": [
+    "doctor still rejects a caller file with a second uses: line or its own steps"
+   ],
+   "edge": [
+    "A runner value with a dash and digits is accepted"
+   ],
+   "regression": [
+    "The caller files install writes still pass doctor with no runner line"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_doctor_accepts_a_caller_that_passes_a_runner_by_hand"
+   ]
+  }
+ ],
+ "proposed_missing_acs": [
+  "install --ci reusable should carry a runner choice through (a --runner flag). Today it drops a hand-added runner line when it rewrites the caller file. That needs a change in sg_reusable.py, outside this story."
+ ]
+}

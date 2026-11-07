@@ -1,0 +1,156 @@
+{
+ "overall": "CONCERNS",
+ "drift": "none",
+ "checks": {
+  "story_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "story_source": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "context_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "test_matrix": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "upstream_handoffs": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dependencies": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "blockers_resolved": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "risks_handled": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dor_value": {
+   "status": "PASS",
+   "score": 0.77,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_scope": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_interfaces": {
+   "status": "PASS",
+   "score": 0.94,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_dependencies": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_nfr": {
+   "status": "PASS",
+   "score": 0.84,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_small": {
+   "status": "PASS",
+   "score": 0.91,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_no_blockers": {
+   "status": "CONCERNS",
+   "score": 0.4,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "ac_testable": {
+   "status": "CONCERNS",
+   "score": 0.69,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "ac_covers_scope": {
+   "status": "CONCERNS",
+   "score": 0.66,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "tests_plan_adequate": {
+   "status": "PASS",
+   "score": 0.85,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "drift_prd": {
+   "status": "PASS",
+   "score": 0.75,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "drift_trd": {
+   "status": "PASS",
+   "score": 0.92,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "handoff_in": {
+   "status": "PASS",
+   "score": 0.95,
+   "kind": "jev",
+   "group": "4-handoff"
+  }
+ },
+ "story": "SGR-1",
+ "phase": "ready",
+ "at": "2026-11-07T00:25:42Z",
+ "judge": "jev",
+ "judge_provider": "openrouter",
+ "judge_model": "typesafe/jev-1.13-20260917",
+ "judge_note": null,
+ "jev_error": null,
+ "inputs_hash": "f07edfe27aa50d3d",
+ "inputs_hash_base": "f07edfe27aa50d3d",
+ "drift_confidence": 0.91,
+ "cost": 0.000118944,
+ "gate_version": "0.10.1",
+ "writing": {
+  "score": 0.8,
+  "target": 0.8,
+  "checked": 5,
+  "passed": 4,
+  "status": "ok",
+  "parts": {
+   "story.md plain summary": {
+    "score": 0.8,
+    "checked": 5,
+    "long_paragraphs": 0,
+    "passive": 0,
+    "examples": [
+     "26 words (max 25): The  CODE  job, the audit workflow and the dashboard workflow stay on  CODE  and ignore the input, because they get API keys or a write token."
+    ]
+   }
+  },
+  "advice": []
+ }
+}
