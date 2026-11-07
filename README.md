@@ -32,6 +32,9 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 - **CI checks the copied code is a signed release.** A pull request that changes story-gate's code in a repository must carry a signed, same-or-newer release with nothing extra Python could load (no `.pyc`, `.so`, package folders or links). Hand-edited story-gate code fails.
 - **Tighter AI access:** every agent token is capped at what a builder needs (no workflows, secrets or settings), even when the App was given more.
 - **Safer setup:** setup and upgrades stop when the default branch has a link where story-gate writes, in any letter case, and send Windows line endings as LF.
+- **Files in a story folder count as code.** Only the gate's own records there are left out of checks now. Before, a script placed in a story folder could be run by ordinary code and never be judged ([decision](docs/decisions/2026-10-22-story-folder-files.md)).
+- **Clearer CI isolation messages.** When CI can't set up its throwaway account, the message now says which administrative command timed out and why.
+- **Pick the runner for the secret-free CI jobs.** The reusable `gate.yml` has an optional `runner` input for the `tests` and `measure` jobs, which hold no secrets. It defaults to `ubuntu-latest`. The `story-gate` job, the audit and the dashboard always run on `ubuntu-latest`. `story-gate install` does not write this line yet, so add it by hand and add it again after a re-install.
 
 ## New in v0.10.1
 
