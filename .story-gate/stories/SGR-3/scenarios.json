@@ -1,0 +1,84 @@
+{
+ "story": "SGR-3",
+ "scenarios": [
+  {
+   "name": "on is refused with the message naming issue 106",
+   "acs": [
+    "AC-1"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "import sys; sys.path.insert(0,'.story-gate'); import sg_decompose as D; print(D.settings_problem({'decompose':'on'}))"
+   ],
+   "expect_exit": 0,
+   "expect_output": "judge\\.decompose:\\ on\\ is\\ disabled\\ in\\ this\\ release\\ until\\ the\\ narrow\\-check\\ hardening\\ \\(issue\\ \\#106\\)\\ is\\ done\\.\\ Use\\ shadow\\ or\\ off\\.",
+   "timeout": 120,
+   "local_only": ""
+  },
+  {
+   "name": "shadow and off are accepted by the settings check",
+   "acs": [
+    "AC-1",
+    "AC-3"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "import sys; sys.path.insert(0,'.story-gate'); import sg_decompose as D; print([D.settings_problem({'decompose':m}) for m in ('shadow','off')])"
+   ],
+   "expect_exit": 0,
+   "expect_output": "\\[None,\\ None\\]",
+   "timeout": 120,
+   "local_only": ""
+  },
+  {
+   "name": "score with on in the config stops and writes no verdict",
+   "acs": [
+    "AC-2"
+   ],
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "tests.test_gate.TestDecompose.test_scoring_with_on_set_fails_and_never_falls_back_to_shadow"
+   ],
+   "expect_exit": 0,
+   "expect_output": "OK",
+   "timeout": 300,
+   "local_only": ""
+  },
+  {
+   "name": "shadow records decomposed and off records none",
+   "acs": [
+    "AC-3"
+   ],
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "tests.test_gate.TestDecompose.test_shadow_and_off_still_score"
+   ],
+   "expect_exit": 0,
+   "expect_output": "OK",
+   "timeout": 300,
+   "local_only": ""
+  },
+  {
+   "name": "the docs say on is disabled and name issue 106",
+   "acs": [
+    "AC-4"
+   ],
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "tests.test_gate.TestDecomposePure.test_the_docs_say_on_is_disabled_and_name_the_issue"
+   ],
+   "expect_exit": 0,
+   "expect_output": "OK",
+   "timeout": 120,
+   "local_only": ""
+  }
+ ]
+}

@@ -1,0 +1,667 @@
+{
+ "overall": "FAIL",
+ "drift": "none",
+ "checks": {
+  "ready_gate_passed": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "handoff_written": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "learnings_recorded": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "tests_ran_green": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "code_changed": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "traceability": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "validation_written": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "scenarios_prove_acs": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "evidence_complete": {
+   "status": "CONCERNS",
+   "why": "the change is too large for one judge pass; split the story or get a human review of the whole diff",
+   "kind": "structural"
+  },
+  "impl_matches_acs": {
+   "status": "PASS",
+   "score": 0.82,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "impl_no_unplanned_scope": {
+   "status": "FAIL",
+   "score": 0.11,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "drift_trd_after": {
+   "status": "PASS",
+   "score": 0.72,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "tests_implemented": {
+   "status": "CONCERNS",
+   "score": 0.65,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "no_deferrals": {
+   "status": "PASS",
+   "score": 0.76,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "handoff_out": {
+   "status": "PASS",
+   "score": 0.87,
+   "kind": "jev",
+   "group": "4-handoff"
+  },
+  "learnings_specific": {
+   "status": "PASS",
+   "score": 0.86,
+   "kind": "jev",
+   "group": "5-learnings"
+  }
+ },
+ "decomposed": {
+  "schema": "decompose-1",
+  "mode": "shadow",
+  "model": "typesafe/jev-1.13-20260917",
+  "evidence_hash": "29718a747253f60b",
+  "requests": 32,
+  "cost": 0.006753,
+  "max_requests": 60,
+  "checks": {
+   "handoff_out": {
+    "score": 0.72,
+    "band": "CONCERNS",
+    "why": ".story-gate/sg_decompose.py is over the 45000-character budget and was cut; tests/test_gate.py is over the 45000-character budget and was cut",
+    "items": [
+     {
+      "id": "the story records",
+      "score": 0.84,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "group 1 of 4",
+      "score": 0.76,
+      "files": [
+       ".claude-plugin/plugin.json",
+       ".github/workflows/gate.yml",
+       ".story-gate/PROTOCOL.md",
+       ".story-gate/SKILL.md",
+       ".story-gate/gate.py"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 2 of 4",
+      "score": 0.85,
+      "files": [
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "group 3 of 4",
+      "score": 0.72,
+      "files": [
+       ".story-gate/sg_judges.py",
+       ".story-gate/sg_report.py",
+       ".story-gate/sg_settings.py",
+       ".story-gate/sg_setup.py",
+       ".story-gate/sg_trust.py",
+       "README.md",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md",
+       "docs/guide.md",
+       "gemini-extension.json",
+       "install.ps1",
+       "install.sh",
+       "plugin.json",
+       "plugin/.claude-plugin/plugin.json",
+       "plugin/skills/story-gate/SKILL.md",
+       "pyproject.toml",
+       "skills/story-gate/SKILL.md"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 4 of 4",
+      "score": 0.76,
+      "files": [
+       "tests/test_gate.py"
+      ],
+      "truncated": true
+     }
+    ]
+   },
+   "learnings_specific": {
+    "score": 0.33,
+    "band": "FAIL",
+    "why": "group 4 of 4 0.33 (files: tests/test_gate.py); group 1 of 4 0.35 (files: .claude-plugin/plugin.json, .github/workflows/gate.yml, .story-gate/PROTOCOL.md, .story-gate/SKILL.md +1 more); group 3 of 4 0.38 (files: .story-gate/sg_judges.py, .story-gate/sg_report.py, .story-gate/sg_settings.py, .story-gate/sg_setup.py +12 more); .story-gate/sg_decompose.py is over the 45000-character budget and was cut; tests/test_gate.py is over the 45000-character budget and was cut",
+    "items": [
+     {
+      "id": "the story records",
+      "score": 0.86,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "group 1 of 4",
+      "score": 0.35,
+      "files": [
+       ".claude-plugin/plugin.json",
+       ".github/workflows/gate.yml",
+       ".story-gate/PROTOCOL.md",
+       ".story-gate/SKILL.md",
+       ".story-gate/gate.py"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 2 of 4",
+      "score": 0.58,
+      "files": [
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "group 3 of 4",
+      "score": 0.38,
+      "files": [
+       ".story-gate/sg_judges.py",
+       ".story-gate/sg_report.py",
+       ".story-gate/sg_settings.py",
+       ".story-gate/sg_setup.py",
+       ".story-gate/sg_trust.py",
+       "README.md",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md",
+       "docs/guide.md",
+       "gemini-extension.json",
+       "install.ps1",
+       "install.sh",
+       "plugin.json",
+       "plugin/.claude-plugin/plugin.json",
+       "plugin/skills/story-gate/SKILL.md",
+       "pyproject.toml",
+       "skills/story-gate/SKILL.md"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 4 of 4",
+      "score": 0.33,
+      "files": [
+       "tests/test_gate.py"
+      ],
+      "truncated": true
+     }
+    ]
+   },
+   "impl_matches_acs": {
+    "score": 0.86,
+    "band": "CONCERNS",
+    "why": "left out after relevance read only part of tests/test_gate.py (edits outside its linked tests); .story-gate/gate.py was read only in part when its relevance was judged; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md, README.md and 2 more cut or left out; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md cut or left out; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md, docs/guide.md and 1 more cut or left out; left out after relevance read only part of .story-gate/gate.py, .story-gate/sg_decompose.py, tests/test_gate.py (edits outside its linked tests)",
+    "items": [
+     {
+      "id": "AC-1",
+      "score": 0.92,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-2",
+      "score": 0.92,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-3",
+      "score": 0.9,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-4",
+      "score": 0.86,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/PROTOCOL.md",
+       "README.md",
+       "docs/guide.md",
+       ".story-gate/sg_settings.py",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md"
+      ],
+      "truncated": true
+     }
+    ]
+   },
+   "tests_implemented": {
+    "score": 0.27,
+    "band": "FAIL",
+    "why": "AC-2 0.27 (files: tests/test_gate.py, .story-gate/gate.py, .story-gate/sg_decompose.py); AC-3 0.58 (files: tests/test_gate.py, .story-gate/gate.py, .story-gate/sg_decompose.py); AC-4 0.58 (files: tests/test_gate.py, .story-gate/PROTOCOL.md, README.md, docs/guide.md +2 more); left out after relevance read only part of tests/test_gate.py (edits outside its linked tests); .story-gate/gate.py was read only in part when its relevance was judged; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md, README.md and 2 more cut or left out; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md cut or left out; evidence over the 45000-character budget: .story-gate/sg_decompose.py, docs/decisions/2026-10-22-judge-evidence-packs.md, docs/guide.md and 1 more cut or left out; left out after relevance read only part of .story-gate/gate.py, .story-gate/sg_decompose.py, tests/test_gate.py (edits outside its linked tests); no per-test results (junit_path): a test shown here may never run (one written inside a string, say), so tests_implemented cannot PASS on what the gate can see alone",
+    "items": [
+     {
+      "id": "AC-1",
+      "score": 0.88,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-2",
+      "score": 0.27,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-3",
+      "score": 0.58,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/gate.py",
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "AC-4",
+      "score": 0.58,
+      "files": [
+       "tests/test_gate.py",
+       ".story-gate/PROTOCOL.md",
+       "README.md",
+       "docs/guide.md",
+       ".story-gate/sg_settings.py",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "per-test results",
+      "score": null,
+      "files": [],
+      "truncated": true
+     }
+    ]
+   },
+   "impl_no_unplanned_scope": {
+    "score": 0.17,
+    "band": "FAIL",
+    "why": "group 1 of 4 0.17 (files: .claude-plugin/plugin.json, .github/workflows/gate.yml, .story-gate/PROTOCOL.md, .story-gate/SKILL.md +1 more); group 3 of 4 0.17 (files: .story-gate/sg_judges.py, .story-gate/sg_report.py, .story-gate/sg_settings.py, .story-gate/sg_setup.py +12 more); group 4 of 4 0.28 (files: tests/test_gate.py); .story-gate/sg_decompose.py is over the 45000-character budget and was cut; tests/test_gate.py is over the 45000-character budget and was cut; the change was split into 4 groups, so effects across files in different groups were not judged together",
+    "items": [
+     {
+      "id": "group 1 of 4",
+      "score": 0.17,
+      "files": [
+       ".claude-plugin/plugin.json",
+       ".github/workflows/gate.yml",
+       ".story-gate/PROTOCOL.md",
+       ".story-gate/SKILL.md",
+       ".story-gate/gate.py"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 2 of 4",
+      "score": 0.38,
+      "files": [
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "group 3 of 4",
+      "score": 0.17,
+      "files": [
+       ".story-gate/sg_judges.py",
+       ".story-gate/sg_report.py",
+       ".story-gate/sg_settings.py",
+       ".story-gate/sg_setup.py",
+       ".story-gate/sg_trust.py",
+       "README.md",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md",
+       "docs/guide.md",
+       "gemini-extension.json",
+       "install.ps1",
+       "install.sh",
+       "plugin.json",
+       "plugin/.claude-plugin/plugin.json",
+       "plugin/skills/story-gate/SKILL.md",
+       "pyproject.toml",
+       "skills/story-gate/SKILL.md"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 4 of 4",
+      "score": 0.28,
+      "files": [
+       "tests/test_gate.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "all groups together",
+      "score": null,
+      "files": [],
+      "truncated": true
+     }
+    ]
+   },
+   "no_deferrals": {
+    "score": 0.74,
+    "band": "CONCERNS",
+    "why": ".story-gate/sg_decompose.py is over the 45000-character budget and was cut; tests/test_gate.py is over the 45000-character budget and was cut; the change was split into 4 groups, so effects across files in different groups were not judged together",
+    "items": [
+     {
+      "id": "group 1 of 4",
+      "score": 0.83,
+      "files": [
+       ".claude-plugin/plugin.json",
+       ".github/workflows/gate.yml",
+       ".story-gate/PROTOCOL.md",
+       ".story-gate/SKILL.md",
+       ".story-gate/gate.py"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 2 of 4",
+      "score": 0.74,
+      "files": [
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "group 3 of 4",
+      "score": 0.82,
+      "files": [
+       ".story-gate/sg_judges.py",
+       ".story-gate/sg_report.py",
+       ".story-gate/sg_settings.py",
+       ".story-gate/sg_setup.py",
+       ".story-gate/sg_trust.py",
+       "README.md",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md",
+       "docs/guide.md",
+       "gemini-extension.json",
+       "install.ps1",
+       "install.sh",
+       "plugin.json",
+       "plugin/.claude-plugin/plugin.json",
+       "plugin/skills/story-gate/SKILL.md",
+       "pyproject.toml",
+       "skills/story-gate/SKILL.md"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 4 of 4",
+      "score": 0.78,
+      "files": [
+       "tests/test_gate.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "all groups together",
+      "score": null,
+      "files": [],
+      "truncated": true
+     }
+    ]
+   },
+   "drift_trd_after": {
+    "score": 0.52,
+    "band": "CONCERNS",
+    "why": "group 3 of 4 0.52 (files: .story-gate/sg_judges.py, .story-gate/sg_report.py, .story-gate/sg_settings.py, .story-gate/sg_setup.py +12 more); group 1 of 4 0.57 (files: .claude-plugin/plugin.json, .github/workflows/gate.yml, .story-gate/PROTOCOL.md, .story-gate/SKILL.md +1 more); group 4 of 4 0.60 (files: tests/test_gate.py); .story-gate/sg_decompose.py is over the 45000-character budget and was cut; tests/test_gate.py is over the 45000-character budget and was cut; the change was split into 4 groups, so effects across files in different groups were not judged together",
+    "items": [
+     {
+      "id": "group 1 of 4",
+      "score": 0.57,
+      "files": [
+       ".claude-plugin/plugin.json",
+       ".github/workflows/gate.yml",
+       ".story-gate/PROTOCOL.md",
+       ".story-gate/SKILL.md",
+       ".story-gate/gate.py"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 2 of 4",
+      "score": 0.66,
+      "files": [
+       ".story-gate/sg_decompose.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "group 3 of 4",
+      "score": 0.52,
+      "files": [
+       ".story-gate/sg_judges.py",
+       ".story-gate/sg_report.py",
+       ".story-gate/sg_settings.py",
+       ".story-gate/sg_setup.py",
+       ".story-gate/sg_trust.py",
+       "README.md",
+       "docs/decisions/2026-10-22-judge-evidence-packs.md",
+       "docs/guide.md",
+       "gemini-extension.json",
+       "install.ps1",
+       "install.sh",
+       "plugin.json",
+       "plugin/.claude-plugin/plugin.json",
+       "plugin/skills/story-gate/SKILL.md",
+       "pyproject.toml",
+       "skills/story-gate/SKILL.md"
+      ],
+      "truncated": false
+     },
+     {
+      "id": "group 4 of 4",
+      "score": 0.6,
+      "files": [
+       "tests/test_gate.py"
+      ],
+      "truncated": true
+     },
+     {
+      "id": "all groups together",
+      "score": null,
+      "files": [],
+      "truncated": true
+     }
+    ]
+   }
+  },
+  "packs": {
+   "AC-1": {
+    "files": [
+     "tests/test_gate.py",
+     ".story-gate/gate.py",
+     ".story-gate/sg_decompose.py"
+    ],
+    "truncated": true
+   },
+   "AC-2": {
+    "files": [
+     "tests/test_gate.py",
+     ".story-gate/gate.py",
+     ".story-gate/sg_decompose.py"
+    ],
+    "truncated": true
+   },
+   "AC-3": {
+    "files": [
+     "tests/test_gate.py",
+     ".story-gate/gate.py",
+     ".story-gate/sg_decompose.py"
+    ],
+    "truncated": true
+   },
+   "AC-4": {
+    "files": [
+     "tests/test_gate.py",
+     ".story-gate/PROTOCOL.md",
+     "README.md",
+     "docs/guide.md",
+     ".story-gate/sg_settings.py",
+     "docs/decisions/2026-10-22-judge-evidence-packs.md"
+    ],
+    "truncated": true
+   }
+  },
+  "groups": [
+   {
+    "files": [
+     ".claude-plugin/plugin.json",
+     ".github/workflows/gate.yml",
+     ".story-gate/PROTOCOL.md",
+     ".story-gate/SKILL.md",
+     ".story-gate/gate.py"
+    ],
+    "truncated": false
+   },
+   {
+    "files": [
+     ".story-gate/sg_decompose.py"
+    ],
+    "truncated": true
+   },
+   {
+    "files": [
+     ".story-gate/sg_judges.py",
+     ".story-gate/sg_report.py",
+     ".story-gate/sg_settings.py",
+     ".story-gate/sg_setup.py",
+     ".story-gate/sg_trust.py",
+     "README.md",
+     "docs/decisions/2026-10-22-judge-evidence-packs.md",
+     "docs/guide.md",
+     "gemini-extension.json",
+     "install.ps1",
+     "install.sh",
+     "plugin.json",
+     "plugin/.claude-plugin/plugin.json",
+     "plugin/skills/story-gate/SKILL.md",
+     "pyproject.toml",
+     "skills/story-gate/SKILL.md"
+    ],
+    "truncated": false
+   },
+   {
+    "files": [
+     "tests/test_gate.py"
+    ],
+    "truncated": true
+   }
+  ],
+  "drift": "none",
+  "tier": "jev",
+  "would_be_overall": "FAIL"
+ },
+ "story": "SGR-3",
+ "phase": "done",
+ "at": "2026-11-08T01:17:51Z",
+ "judge": "jev",
+ "judge_provider": "openrouter",
+ "judge_model": "typesafe/jev-1.13-20260917",
+ "judge_note": null,
+ "jev_error": null,
+ "inputs_hash": "f8fb2bfacf36878c",
+ "inputs_hash_base": null,
+ "drift_confidence": 0.93,
+ "cost": 0.007534,
+ "gate_version": "0.11.0",
+ "writing": {
+  "score": 0.898,
+  "target": 0.8,
+  "checked": 49,
+  "passed": 44,
+  "status": "ok",
+  "parts": {
+   "validation.md": {
+    "score": 0.906,
+    "checked": 32,
+    "long_paragraphs": 0,
+    "passive": 6,
+    "examples": [
+     "32 words (max 25): CODE  is disabled in Release 1: config loading refuses it with a message that names issue #106,  CODE  refuses it too and writes no verdict, and  CODE  and  COD",
+     "29 words (max 25): A first version of the test helper switched  CODE  back on only after the stale-verdict test had scored, which changed the signed-copy bytes mid-test and made t",
+     "22 words (max 20): Make test switches change a fixed line in the test's own copy, not an environment variable that real callers could also set."
+    ]
+   },
+   "handoff.md": {
+    "score": 0.933,
+    "checked": 15,
+    "long_paragraphs": 0,
+    "passive": 1,
+    "examples": [
+     "30 words (max 25): CODE  stays disabled until issue #106 is done: cross-AC test side effects in packs, a large file cut from a pack, and the request cap on changes with many files"
+    ]
+   },
+   "learnings": {
+    "score": 0.5,
+    "checked": 2,
+    "long_paragraphs": 0,
+    "passive": 0,
+    "examples": [
+     "33 words (max 25): When a pull request changes runtime files, delete release.json and release.json.sig (RELEASING.md); also remove a stale build/ folder before the packaging tests"
+    ]
+   }
+  },
+  "advice": []
+ }
+}

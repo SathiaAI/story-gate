@@ -237,7 +237,7 @@ def changed_lines(diff, is_record):
     """(added and removed lines of a unified diff, outside story records, whole; complete). complete is False when the
     diff passed DIFF_CAP or changes a binary file, so content triggers can't be ruled out. Lines are never cut: a pattern past a cut would be missed."""
     out, keep, header, size = [], True, False, 0
-    for line in diff.splitlines():
+    for line in (x[:-1] if x.endswith("\r") else x for x in diff.split("\n")):  # git's lines: only \n ends one (splitlines also cuts at \f, U+2028...)
         if line.startswith("diff --git "):
             parts = line.split(" b/", 1)
             keep, header = not (len(parts) == 2 and is_record(parts[1])), True
@@ -253,6 +253,9 @@ def changed_lines(diff, is_record):
             if size > DIFF_CAP:
                 return out, False
             out.append(line[1:])
+            parts = line[1:].splitlines()  # a pattern anchored to a line start or end must also see the pieces around \f, a lone CR, U+2028...
+            if parts != [line[1:]]:  # a line ending in such a character gives one part without it, so the count alone is no test
+                out.extend(parts)
     return out, True
 
 
