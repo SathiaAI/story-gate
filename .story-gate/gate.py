@@ -239,7 +239,8 @@ DEFAULT_CONFIG = {
     "judge_mode": "full",
     # decompose (sg_decompose.py): "off" asks the judge broad questions over the whole diff, as before. "shadow" (default) does
     # that and ALSO asks narrow questions over evidence packs, recording the result beside the verdict without using it.
-    # "on" lets the narrow questions decide. max_requests caps the narrow requests per score; past it a check cannot PASS.
+    # "on" is disabled in this release (sg_decompose.ON_ENABLED; check_config refuses it) until the hardening in issue #106.
+    # max_requests caps the narrow requests per score; past it a check cannot PASS.
     "judge": {"provider": "openrouter", "emulated_allow_pass": False,
               "allow_self_judge_pass": False, "max_chars": 90000, "decompose": "shadow", "max_requests": 60},
     "approvers": [],
@@ -2872,6 +2873,9 @@ def cmd_score(sid, phase, base=None, ci_trust=None, results=None, quiet=False):
     if (c.get("writing") or {}).get("enforce"):  # opt-in, after calibration: plain writing becomes a real check
         structural["plain_writing"] = (not wr["advice"], "; ".join(wr["advice"]))
     dmode = "off" if objective(c) else DC.mode(c)  # no judge in objective mode, so nothing to decompose
+    if dmode == "on" and not DC.ON_ENABLED:  # check_config refuses it first; this stops any path that skipped it
+        raise ConfigError("judge.decompose: on is disabled in this release until the narrow-check hardening (issue #%d) is done. "
+                          "Use shadow or off." % DC.HARDENING_ISSUE)
     dgot, drec = None, None
     ddiff = diff if phase == "done" else ""
     executed = phase == "done" and bool(results)  # CI's per-test results: a linked test really ran

@@ -13019,12 +13019,25 @@ class TestDecompose(Base):
         super().setUp()
         self.judges = []
         self.addCleanup(lambda: [j.close() for j in self.judges])
+        self.set_on_enabled(True)
+        self.addCleanup(lambda: setattr(sys.modules["sg_decompose"], "ON_ENABLED", False) if "sg_decompose" in sys.modules else None)
 
     def judge(self, **kw):
         """Judge."""
         j = MarkerJudge(**kw)
         self.judges.append(j)
         return j
+
+    def set_on_enabled(self, flag):
+        """`on` is disabled in the shipped code (issue #106). Tests of the narrow-check path that decides switch it back on in this
+        repository's own copy of sg_decompose.py (for the commands the test runs) and in the copy this process imported. setUp
+        does it for every test here, so the copy's bytes stay the same from start to end; the tests of the refusal switch it off."""
+        cp = self.repo / ".story-gate/sg_decompose.py"
+        want, was = ("True", "False") if flag else ("False", "True")
+        cp.write_text(cp.read_text().replace("ON_ENABLED = %s" % was, "ON_ENABLED = %s" % want, 1))
+        m = sys.modules.get("sg_decompose")
+        if m is not None:
+            m.ON_ENABLED = flag
 
     def configure(self, j, decompose, **extra):
         """Configure."""
@@ -13442,6 +13455,39 @@ class TestDecompose(Base):
         self.assertEqual(c["judge"]["decompose"], "shadow")
         self.assertEqual(c["judge"]["max_requests"], 60)
 
+    def test_on_is_refused_loudly_and_shadow_and_off_are_accepted(self):
+        """`on` is disabled until issue #106: config loading names the issue and the allowed values; `shadow` and `off` load."""
+        self.set_on_enabled(False)  # the code as shipped
+        g = self.gate()
+        c = g.cfg()
+        c2 = json.loads(json.dumps(c)); c2["judge"]["decompose"] = "on"
+        with self.assertRaises(g.ConfigError) as cm:
+            g.check_config(c2)
+        msg = str(cm.exception)
+        self.assertIn("judge.decompose: on is disabled in this release until the narrow-check hardening (issue #106) is done", msg)
+        self.assertIn("Use shadow or off.", msg)
+        for ok in ("shadow", "off"):
+            c3 = json.loads(json.dumps(c)); c3["judge"]["decompose"] = ok
+            self.assertIs(g.check_config(c3), c3, ok)
+        self.assertEqual(g.DC.mode(c), "shadow")  # the default is still shadow
+
+    def test_scoring_with_on_set_fails_and_never_falls_back_to_shadow(self):
+        """A config that sets `on` stops the gate with the message; no verdict is written, so nothing was quietly downgraded."""
+        j = self.judge(); self.build(n=1); self.set_on_enabled(False)  # the code as shipped
+        self.cfg(judge={"provider": "decisions-proxy", "api_key_env": "JUDGE_API_KEY", "base_url": j.url + "/decisions", "decompose": "on"})
+        r = run(self.repo, "score", "SAT-1", "done", env={"JUDGE_API_KEY": "k"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("judge.decompose: on is disabled in this release", r.stdout + r.stderr)
+        self.assertFalse((self.repo / ".story-gate/stories/SAT-1/done.json").exists())
+        self.assertEqual(j.requests, [])
+
+    def test_shadow_and_off_still_score(self):
+        """`shadow` records `decomposed` beside the binding verdict and `off` records none, as before."""
+        for mode in ("shadow", "off"):
+            j = self.judge(); self.build(n=1); self.configure(j, mode)
+            v, r = self.score()
+            self.assertEqual("decomposed" in v, mode == "shadow", mode + r.stdout + r.stderr)
+
     def test_objective_mode_asks_nothing(self):
         """Objective mode asks nothing."""
         j = self.judge(); self.configure(j, "on")
@@ -13466,6 +13512,15 @@ class TestDecompose(Base):
 
 class TestDecomposePure(unittest.TestCase):
     """sg_decompose.py without a repository: a fake judge, a fixture shaped like VKG-005, and order independence."""
+    def test_the_docs_say_on_is_disabled_and_name_the_issue(self):
+        """Every doc that mentions `judge.decompose: on` says it is disabled for now and names issue #106."""
+        root = SRC.parent
+        for rel in ("docs/decisions/2026-10-22-judge-evidence-packs.md", "docs/guide.md", ".story-gate/PROTOCOL.md", "README.md"):
+            text = (root / rel).read_text(encoding="utf-8")
+            self.assertIn("disabled", text, rel)
+            self.assertIn("#106", text, rel)
+            self.assertNotIn("until you set `judge.decompose` to `on`", text, rel)
+
     def test_the_story_records_stay_out_of_the_packs(self):
         """The gate's own records in the story folder are not evidence (the judge has the story); a copy named <ID>.md
         stays out of AC packs but in the file groups; any other file is ordinary evidence."""
