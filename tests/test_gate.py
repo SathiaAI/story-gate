@@ -13404,6 +13404,14 @@ class TestDecompose(Base):
         self.assertTrue(complete)
         diff = "diff --git a/t.py b/t.py\n--- a/t.py\n+++ b/t.py\n@@ -1 +1 @@\n-old\n+a\u2028password = 1\n"
         self.assertEqual(A.changed_lines(diff, g.is_record)[0], ["old", "a\u2028password = 1"])
+        # an enforced content trigger fires on that file before it is staged (untracked) and after (git's own diff)
+        base = {"mode": "enforce", "paths": [], "content": ["password"], "checks": []}
+        (self.repo / "t.py").write_bytes(b'x = 1;\x0cpassword = "secret"\n')
+        text, whole = g.untracked_text(["t.py"])
+        self.assertIn("sec", A.applicable({"sec": base}, ["t.py"], text, g.is_record, whole)[0])
+        subprocess.run(["git", "add", "t.py"], cwd=self.repo, check=True, capture_output=True)
+        staged = subprocess.run(["git", "diff", "--cached"], cwd=self.repo, check=True, capture_output=True, text=True).stdout
+        self.assertIn("sec", A.applicable({"sec": base}, ["t.py"], staged, g.is_record)[0])
 
     def test_evidence_reads_never_leave_the_repository(self):
         """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
