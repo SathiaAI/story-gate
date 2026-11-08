@@ -253,6 +253,9 @@ def changed_lines(diff, is_record):
             if size > DIFF_CAP:
                 return out, False
             out.append(line[1:])
+            parts = line[1:].splitlines()  # a pattern anchored to a line start must also see what follows \f, a lone CR or U+2028
+            if len(parts) > 1:
+                out.extend(parts)
     return out, True
 
 

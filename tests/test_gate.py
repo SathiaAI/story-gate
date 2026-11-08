@@ -13399,19 +13399,28 @@ class TestDecompose(Base):
         (self.repo / "t.py").write_bytes(b'x = 1;\x0cpassword = "secret"\r\ny = 2\r\n')
         text, _ = g.untracked_text(["t.py"])
         lines, complete = A.changed_lines(text, g.is_record)
-        self.assertIn('x = 1;\x0cpassword = "secret"', lines)  # one line, the form feed inside it, so a trigger can match past it
-        self.assertEqual(lines[1:], ["y = 2"])  # CRLF: the CR is not part of the line
+        self.assertIn('x = 1;\x0cpassword = "secret"', lines)  # git's line, the form feed inside it
+        self.assertIn('password = "secret"', lines)  # and the piece after it, so a pattern anchored to a line start can match
+        self.assertEqual(lines[-1], "y = 2")  # CRLF: the CR is not part of the line
         self.assertTrue(complete)
         diff = "diff --git a/t.py b/t.py\n--- a/t.py\n+++ b/t.py\n@@ -1 +1 @@\n-old\n+a\u2028password = 1\n"
-        self.assertEqual(A.changed_lines(diff, g.is_record)[0], ["old", "a\u2028password = 1"])
+        self.assertEqual(A.changed_lines(diff, g.is_record)[0], ["old", "a\u2028password = 1", "a", "password = 1"])  # the line, then its pieces
         # an enforced content trigger fires on that file before it is staged (untracked) and after (git's own diff)
         base = {"mode": "enforce", "paths": [], "content": ["password"], "checks": []}
         (self.repo / "t.py").write_bytes(b'x = 1;\x0cpassword = "secret"\n')
         text, whole = g.untracked_text(["t.py"])
         self.assertIn("sec", A.applicable({"sec": base}, ["t.py"], text, g.is_record, whole)[0])
         subprocess.run(["git", "add", "t.py"], cwd=self.repo, check=True, capture_output=True)
-        staged = subprocess.run(["git", "diff", "--cached"], cwd=self.repo, check=True, capture_output=True, text=True).stdout
+        staged = subprocess.run(["git", "diff", "--cached"], cwd=self.repo, check=True, capture_output=True).stdout.decode("utf-8")  # bytes: text mode would turn a lone CR into a newline
         self.assertIn("sec", A.applicable({"sec": base}, ["t.py"], staged, g.is_record)[0])
+        # a lone CR (an old Mac line ending) joins two statements in one git line: a pattern anchored to a line start still fires
+        anchored = dict(base, content=["^password"])
+        (self.repo / "u.py").write_bytes(b'pass\rpassword = "secret"\n')
+        text, whole = g.untracked_text(["u.py"])
+        self.assertIn("sec", A.applicable({"sec": anchored}, ["u.py"], text, g.is_record, whole)[0])
+        subprocess.run(["git", "add", "u.py"], cwd=self.repo, check=True, capture_output=True)
+        staged = subprocess.run(["git", "diff", "--cached", "--", "u.py"], cwd=self.repo, check=True, capture_output=True).stdout.decode("utf-8")
+        self.assertIn("sec", A.applicable({"sec": anchored}, ["u.py"], staged, g.is_record)[0])
 
     def test_evidence_reads_never_leave_the_repository(self):
         """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
