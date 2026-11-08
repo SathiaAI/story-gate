@@ -253,8 +253,8 @@ def changed_lines(diff, is_record):
             if size > DIFF_CAP:
                 return out, False
             out.append(line[1:])
-            parts = line[1:].splitlines()  # a pattern anchored to a line start must also see what follows \f, a lone CR or U+2028
-            if len(parts) > 1:
+            parts = line[1:].splitlines()  # a pattern anchored to a line start or end must also see the pieces around \f, a lone CR, U+2028...
+            if parts != [line[1:]]:  # a line ending in such a character gives one part without it, so the count alone is no test
                 out.extend(parts)
     return out, True
 

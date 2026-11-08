@@ -13436,6 +13436,21 @@ class TestDecompose(Base):
         staged = subprocess.run(["git", "diff", "--cached", "--", "u.py"], cwd=self.repo, check=True, capture_output=True).stdout.decode("utf-8")
         self.assertIn("sec", A.applicable({"sec": anchored}, ["u.py"], staged, g.is_record)[0])
 
+    def test_an_end_anchored_trigger_fires_on_a_line_ending_in_any_line_break_character(self):
+        """A line that ends in \\f, \\v, \\x1c-\\x1e, \\x85 or U+2028/9 is one git line, and splitlines() gives it one part: that part
+        must still reach the triggers, so `^import subprocess$` matches it. Before the PR, splitting the whole diff gave
+        "import subprocess" (Gemini/GPT-6 panel finding)."""
+        g = self.gate()
+        import sg_areas as A  # after gate(): it puts this repository's .story-gate on the path
+        area = {"mode": "enforce", "paths": [], "content": ["^import subprocess$"], "checks": []}
+        for x in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            diff = "diff --git a/t.py b/t.py\n--- a/t.py\n+++ b/t.py\n@@ -0,0 +1 @@\n+import subprocess%s\n" % x
+            self.assertIn("import subprocess", A.changed_lines(diff, g.is_record)[0], repr(x))
+            self.assertIn("sec", A.applicable({"sec": area}, ["t.py"], diff, g.is_record)[0], repr(x))  # a git diff
+            (self.repo / "u.py").write_bytes(("import subprocess%s\n" % x).encode("utf-8"))
+            text, whole = g.untracked_text(["u.py"])  # a new untracked file
+            self.assertIn("sec", A.applicable({"sec": area}, ["u.py"], text, g.is_record, whole)[0], repr(x))
+
     def test_evidence_reads_never_leave_the_repository(self):
         """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
         resolves outside the repository (.., a link, a linked folder), and a name with a line break is not shown, so it
