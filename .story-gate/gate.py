@@ -2734,7 +2734,7 @@ def untracked_text(untracked):
             out += "\ndiff --git a/%s b/%s\nnew file (untracked)\nBinary files /dev/null and b/%s differ\n" % (n, n, n)
             continue
         body = data.decode("utf-8", errors="ignore")
-        out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + l + "\n" for l in body.splitlines())
+        out += "\ndiff --git a/%s b/%s\nnew file (untracked)\n+++ b/%s\n" % (n, n, n) + "".join("+" + (l[:-1] if l.endswith("\n") else l).removesuffix("\r") + "\n" for l in DC.diff_lines(body))  # lines as git counts them
     return out, whole
 
 

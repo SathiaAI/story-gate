@@ -13380,6 +13380,17 @@ class TestDecompose(Base):
         self.assertIn("Binary files /dev/null and b/logo.png differ", text); self.assertNotIn("secretish", text)
         self.assertTrue(whole)
 
+    def test_a_new_file_is_split_into_lines_at_newlines_only_like_git(self):
+        """A form feed, U+2028 or a lone carriage return inside a line does not start a new diff line, so `def test_…` after one
+        in a string is not shown as a line of its own (Cursor Bugbot); a CRLF still ends a line without the CR."""
+        g = self.gate()
+        (self.repo / "t.py").write_bytes('s = "a\u2028def test_ac1_x(): pass\fdef test_ac2_y(): pass"\r\nx = 1\r\nlast'.encode("utf-8"))
+        text, whole = g.untracked_text(["t.py"])
+        body = text.split("+++ b/t.py\n", 1)[1]
+        self.assertEqual(body.count("\n"), 3)  # three lines: the odd characters made no extra ones
+        self.assertEqual(body.split("\n")[1], "+x = 1")  # CRLF: the CR is not part of the line
+        self.assertTrue(whole)
+
     def test_evidence_reads_never_leave_the_repository(self):
         """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
         resolves outside the repository (.., a link, a linked folder), and a name with a line break is not shown, so it
