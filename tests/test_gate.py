@@ -6529,6 +6529,31 @@ class TestValidation(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(g.struct_done(self.sd, "SAT-1", ["app.py"], c, in_ci=True)["scenarios_prove_acs"][0], "CONCERNS")
 
+    def test_done_evidence_hash_is_the_same_locally_and_in_ci_when_junit_path_is_set(self):
+        """The per-test results are in the DONE hash, so CI keeps them in test_results.json as record-tests does: a decision or
+        waiver made locally still applies in CI (CodeRabbit)."""
+        self.ready()
+        (self.repo / "app.py").write_text("x = 5\n")
+        (self.repo / "reports").mkdir()
+        self.cfg(junit_path="reports/junit.xml")
+        ok = '<testsuite><testcase classname="t" name="test_ac1_x"/></testsuite>'
+        w = "import pathlib; pathlib.Path('reports/junit.xml').write_text(%r)" % ok
+        r = run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", w)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = json.loads((self.sd / "test_results.json").read_text())
+        self.assertEqual(rec["junit"].get("test_ac1_x"), "passed")
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        local = g.inputs_hash(self.sd, "done")
+        td = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, td, True)  # outside the repository: it must not change the fingerprint
+        (td / "results.json").write_text(json.dumps({"exit_code": 0, "command": rec["command"]}))
+        (td / "junit.xml").write_text(ok)
+        run(self.repo, "ci", "--tests", str(td), env={"SG_HEAD_REF": "feat/SAT-1-x"})
+        ci = json.loads((self.sd / "test_results.json").read_text())
+        self.assertEqual(ci["source"], "ci")
+        self.assertEqual(ci["junit"], rec["junit"])  # CI keeps the parsed report
+        self.assertEqual(ci["fingerprint"], rec["fingerprint"])
+        self.assertEqual(g.inputs_hash(self.sd, "done"), local)  # decisions and waivers made locally still apply in CI
+
     def test_ci_merge_keeps_only_ci_runs_and_local_only_runs(self):
         """`ci` replaces local results with CI's own run, keeps local-only results as is, and drops an agent's forged pass."""
         self.ready()

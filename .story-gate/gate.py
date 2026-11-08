@@ -4299,7 +4299,8 @@ def cmd_ci(tests_dir=None, measures_dir=None):
                 if isolation_required():
                     tr["isolated"] = tr.get("isolated") is True
                 if sd.exists():  # CI's own run replaces anything the agent recorded
-                    wj(sd / "test_results.json", dict(tr, fingerprint=work_fingerprint(), head=git("rev-parse", "HEAD").strip(), source="ci"))
+                    wj(sd / "test_results.json", dict(tr, fingerprint=work_fingerprint(), head=git("rev-parse", "HEAD").strip(), source="ci",
+                                                      junit=results or tr.get("junit")))  # as record-tests stores it: the DONE hash matches
                 if tr.get("exit_code") != 0:
                     problems.append("tests failed or did not run in CI (%s)" % (tr.get("error") or "exit %s" % tr.get("exit_code")))
             if sd.exists():  # scenario results: CI's own runs only; the agent's runs count only for local-only scenarios
