@@ -1,0 +1,8 @@
+{
+ "schema": 1,
+ "client": "claude-code",
+ "model": "claude-sonnet-5-5",
+ "branch": "feat/SGR-1-runner-input",
+ "claimed_at": "2026-11-07T00:24:41Z",
+ "at": "2026-11-07T00:24:41Z"
+}

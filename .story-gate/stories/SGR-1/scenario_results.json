@@ -1,0 +1,31 @@
+{
+ "story": "SGR-1",
+ "results": {
+  "caller with runner set by hand passes doctor in a scratch repo": {
+   "spec": "94cd91d47a65eff9",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 1.1,
+   "fingerprint": "4dbe94801a35d1a6",
+   "source": "local",
+   "at": "2026-11-07T00:50:15Z",
+   "output_tail": "doctor-says-ok\n"
+  },
+  "default keeps ubuntu-latest and ubicloud moves only tests and measure": {
+   "spec": "9e2ed96be48cfd74",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.1,
+   "fingerprint": "4dbe94801a35d1a6",
+   "source": "local",
+   "at": "2026-11-07T00:50:15Z",
+   "output_tail": "default tests=ubuntu-latest measure=ubuntu-latest story-gate=ubuntu-latest audit=ubuntu-latest dashboard=ubuntu-latest\nubicloud tests=ubicloud-standard-2 measure=ubicloud-standard-2 story-gate=ubuntu-latest audit=ubuntu-latest dashboard=ubuntu-latest\n"
+  }
+ }
+}

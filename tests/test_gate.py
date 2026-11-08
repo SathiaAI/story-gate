@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 SRC = Path(__file__).resolve().parents[1] / ".story-gate"
+CUR_VERSION = __import__("re").search(r'^VERSION = "([^"]+)"', (SRC / "gate.py").read_text(encoding="utf-8"), __import__("re").M).group(1)  # signed-release fixtures use the current release
 PY = sys.executable
 
 
@@ -472,7 +473,7 @@ class TestRound1Fixes(Base):
         import importlib.util
         spec = importlib.util.spec_from_file_location("g", self.repo / ".story-gate/gate.py"); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
         self.assertIn("## Drift decisions", g.HANDOFF_SECTIONS)
-        self.assertEqual(g.VERSION, "0.10.1")
+        self.assertEqual(g.VERSION, "0.11.0")
         self.assertIn("head.sha", g.CI_YML); self.assertIn("persist-credentials: false", g.CI_YML)
 
 
@@ -891,17 +892,29 @@ class TestV03Integrity(Base):
 class TestStoryGateOnlyPullRequests(Base):
     """A pull request that changes only story-gate's own files: a code owner's approval confirms it (no label, no story)."""
 
-    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed="0.10.1"):
-        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked."""
+    def ci(self, accepted=False, label_by=None, extra=None, thresholds=None, touch=None, signed=CUR_VERSION, links=None, keep_config=False):
+        """Run CI in-process on a branch that tightens config.json (plus `extra` app files), with GitHub faked. `links` maps
+        a path to the target of a link the branch adds there; `keep_config` leaves config.json alone, so the branch holds
+        only what `extra`, `touch` and `links` add."""
+        if keep_config:  # enforce mode comes from the base branch; the branch itself must not change config.json
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True)
+            self.cfg(mode="enforce")
+            subprocess.run(["git", "commit", "-qam", "enforce on the base branch"], cwd=self.repo, check=True)
         subprocess.run(["git", "checkout", "-qb", "chore/stricter-config"], cwd=self.repo, check=True)
         (self.repo / ".github").mkdir(exist_ok=True)
-        self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
+        if not keep_config:
+            self.cfg(mode="enforce", thresholds=thresholds or {"pass": 0.8, "concerns": 0.5})
         for f in extra or []:
             (self.repo / f).write_text("y = 2\n")
         for f in touch or []:  # a story-gate file other than config.json
             (self.repo / f).parent.mkdir(parents=True, exist_ok=True)
             with open(self.repo / f, "a", encoding="utf-8") as fh:
                 fh.write("\n# changed\n")
+        for f, target in (links or {}).items():
+            try:
+                os.symlink(str(target), str(self.repo / f))
+            except (OSError, NotImplementedError):
+                self.skipTest("no symlinks here")
         g = load_gate(self.repo)
         import sg_github as G
         keep_github_fakes_local(self, G)
@@ -972,7 +985,7 @@ class TestStoryGateOnlyPullRequests(Base):
     def test_gate_code_from_a_signed_release_is_named(self):
         rc, out, _ = self.ci(accepted=True, touch=[".story-gate/sg_report.py"])
         self.assertEqual(rc, 0, out)
-        self.assertIn("is the signed story-gate 0.10.1 release", out)
+        self.assertIn("is the signed story-gate %s release" % CUR_VERSION, out)
 
     def test_protocol_changes_also_need_a_signed_release(self):
         """PROTOCOL.md and SKILL.md are part of the signed release too."""
@@ -1015,6 +1028,77 @@ class TestStoryGateOnlyPullRequests(Base):
                     subprocess.run(["git", "checkout", "-qf", "main"], cwd=self.repo, check=True)
                     subprocess.run(["git", "branch", "-qD", "chore/stricter-config"], cwd=self.repo, check=True)
                     subprocess.run(["git", "clean", "-qfd", "--", ".story-gate"], cwd=self.repo, check=True)
+
+    def test_a_link_the_signed_release_does_not_list_is_refused_whatever_its_name(self):
+        """A link `json` to a folder holding __init__.py has no importable suffix, but it would load instead of the json
+        module. runtime_copy_check fails on it (checked with a signature check that passes, so only the link is at fault)."""
+        g = load_gate(self.repo)
+        T = g.T
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
+        for name, dest in (("json", pkg), ("plain", pkg / "__init__.py"), ("dangling", pkg / "missing")):
+            with self.subTest(name=name):
+                link = self.repo / ".story-gate" / name
+                try:
+                    os.symlink(str(dest), str(link))
+                except (OSError, NotImplementedError):
+                    self.skipTest("no symlinks here")
+                try:
+                    bad, good = g.runtime_copy_check([".story-gate/" + name], "main")
+                    self.assertIn("links the signed release doesn't list", bad); self.assertIn(name, bad); self.assertEqual(good, "")
+                finally:
+                    os.unlink(str(link))
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # no link: still passes
+
+    def test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link(self):
+        """A branch that adds only `.story-gate/json` (a link to a folder holding __init__.py) has no importable suffix and is
+        not under vendor/, but it must still be checked as a story-gate code change and fail."""
+        pkg = self.repo.parent / (self.repo.name + "-pkg"); pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self.addCleanup(shutil.rmtree, pkg, True)
+        rc, out, _ = self.ci(accepted=True, links={".story-gate/json": pkg}, keep_config=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("links the signed release doesn't list", out); self.assertIn("json", out)
+
+    def test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass(self):
+        """If a folder under .story-gate can't be listed, runtime_copy_check reports a problem instead of skipping it."""
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "hidden"; sub.mkdir()
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(sub):
+                raise PermissionError(13, "Permission denied", str(sub))
+            return real(path, *a, **k)
+        with patch("os.scandir", scandir):
+            bad, good = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad); self.assertIn("hidden", bad)
+        self.assertEqual(good, "")
+        self.assertEqual(g.runtime_copy_check([".story-gate/sg_report.py"], "main")[0], "")  # listable again: passes
+
+    def test_a_folder_with_mode_000_is_a_problem_in_the_copy_check(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        g = load_gate(self.repo)
+        T = g.T
+        saved = T.verify_release
+        self.addCleanup(setattr, T, "verify_release", saved)
+        T.verify_release = lambda src, *a, **k: {"version": CUR_VERSION, "files": {f: "h" for f in T.runtime_files(src)}}
+        sub = self.repo / ".story-gate" / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(shutil.rmtree, str(sub), True)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        bad, _ = g.runtime_copy_check([".story-gate/sg_report.py"], "main")
+        self.assertIn("couldn't check this PR's story-gate copy for links", bad)
 
     def test_signed_copy_check_fails_when_git_cannot_list_the_files(self):
         """If git ls-files fails, the copy can't be inspected, so the check fails instead of passing it unseen."""
@@ -3495,6 +3579,86 @@ class TestReleaseSignatures(unittest.TestCase):
         with self.assertRaises(self.T.TrustError):
             self.T.verify_release(self.rel, self.signers)
 
+    def _link(self, name, target):
+        """Make link `name` in the release folder, or skip where links can't be made."""
+        try:
+            os.symlink(str(target), str(self.rel / name))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+
+    def test_an_extensionless_link_to_a_package_folder_fails(self):
+        """A link named `json` to a folder with __init__.py would load instead of the standard json module, because the
+        story-gate folder comes first on sys.path. It has no importable suffix, but it still fails."""
+        pkg = self.d / "pkg"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n")
+        self._link("json", pkg)
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: json"):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_an_extensionless_link_to_a_file_fails(self):
+        """The same for a link to a file, and for a link that points nowhere."""
+        target = self.d / "plain"; target.write_text("x")
+        for name, dest in (("fileless", target), ("dangling", self.d / "missing")):
+            with self.subTest(name=name):
+                self._link(name, dest)
+                with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                    self.T.verify_release(self.rel, self.signers)
+                os.unlink(str(self.rel / name))
+
+    def _cant_list(self, folder):
+        """Make listing `folder` fail the way a folder with mode 000 does, on any OS and even as root."""
+        real = os.scandir
+        def scandir(path=".", *a, **k):
+            """Fail for the one folder; list every other folder for real."""
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(folder):
+                raise PermissionError(13, "Permission denied", str(folder))
+            return real(path, *a, **k)
+        return patch("os.scandir", scandir)
+
+    def test_a_folder_that_cannot_be_listed_fails_verify_release(self):
+        """os.walk skips a folder it can't list. The check must not pass a copy it could not look at."""
+        sub = self.rel / "hidden"; sub.mkdir()
+        with self._cant_list(sub):
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder .*hidden"):
+                self.T.verify_release(self.rel, self.signers)
+            with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+                self.T.stray_links(self.rel)
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")  # listable again: passes
+
+    def test_a_folder_with_mode_000_fails_verify_release(self):
+        """The same with a real chmod 000 folder. Skipped where chmod can't block reads: Windows, and root."""
+        if os.name == "nt":
+            self.skipTest("chmod 000 does not block reads on Windows (the mocked test covers the same code)")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("running as root: chmod 000 does not block root's reads (the mocked test covers the same code)")
+        sub = self.rel / "locked"; sub.mkdir(); os.chmod(str(sub), 0)
+        self.addCleanup(os.chmod, str(sub), 0o700)
+        with self.assertRaisesRegex(self.T.TrustError, "couldn't list the folder"):
+            self.T.verify_release(self.rel, self.signers)
+
+    def test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed(self):
+        """Only real stories/ and __pycache__ folders are skipped: a link with one of those names is listed. A link to a
+        folder is one entry; the files inside the folder it points to are never listed."""
+        pkg = self.d / "pkg2"; pkg.mkdir(); (pkg / "__init__.py").write_text("x = 1\n"); (pkg / "inner").mkdir()
+        for name in ("stories", "__pycache__"):
+            self._link(name, pkg)
+            self.assertEqual(self.T.stray_links(self.rel), [name])
+            with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: " + name):
+                self.T.verify_release(self.rel, self.signers)
+            os.unlink(str(self.rel / name))
+        self._link("json", pkg)
+        self.assertEqual(self.T.stray_links(self.rel), ["json"])
+
+    def test_a_link_inside_a_real_subfolder_fails_but_stories_and_pycache_are_left_alone(self):
+        """A link in vendor/ (a real folder) fails. A link under stories/ or __pycache__ is not loaded by import, so it is
+        ignored like the other files there."""
+        (self.rel / "stories" / "SAT-1").mkdir(parents=True); (self.rel / "__pycache__").mkdir()
+        self._link("stories/SAT-1/note", self.d / "plain")
+        self._link("__pycache__/x", self.d / "plain")
+        self.assertEqual(self.T.verify_release(self.rel, self.signers)["version"], "9.9.9")
+        self._link("vendor/extra", self.d / "plain")
+        with self.assertRaisesRegex(self.T.TrustError, "links not covered by the signed release: vendor/extra"):
+            self.T.verify_release(self.rel, self.signers)
+
     def test_wrong_key_fails(self):
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.d / "other")], check=True)
         other = "story-gate-release " + " ".join((self.d / "other.pub").read_text().split()[:2])
@@ -5142,6 +5306,10 @@ class TestGuidedSetup(unittest.TestCase):
 
     def test_upgrade_repo_refuses_an_unsigned_story_gate(self):
         """Only a signed release is ever copied into repositories."""
+        from unittest import mock
+        import sg_trust as T
+        p = mock.patch.object(T, "verify_release", side_effect=T.TrustError("no signature"))  # this checkout may be signed
+        p.start(); self.addCleanup(p.stop)
         self.set_up_main()
         status, detail = self.S.upgrade_repo(self.top, sys.executable, token="human")
         self.assertEqual(status, "error"); self.assertIn("signed release", detail)
@@ -9375,6 +9543,72 @@ class TestReusableWorkflow(Base):
         declared = set(_re.findall(r"\n      ([A-Z_]+):\n        required: false", t))
         self.assertEqual(declared, set(R.SECRETS))
 
+    # ---- the `runner` input: callers move only the secret-free jobs
+    def _jobs(self, name):
+        """{job id: text} of a published workflow."""
+        import re as _re
+        body = (self.WF / name).read_text().split("\njobs:\n", 1)[1]
+        parts = _re.split(r"(?m)^  ([a-z-]+):\n", "\n" + body)
+        return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+
+    def test_gate_has_an_optional_runner_input_that_defaults_to_ubuntu_latest(self):
+        """gate.yml declares an optional string input `runner` that defaults to ubuntu-latest."""
+        t = (self.WF / "gate.yml").read_text()
+        block = t.split("\n      runner:\n", 1)[1].split("\n    secrets:\n", 1)[0] + "\n"
+        self.assertIn("        type: string\n", block); self.assertIn("        required: false\n", block)
+        self.assertIn('        default: "ubuntu-latest"\n', block)
+        desc = block.split("description:", 1)[1].split("\n", 1)[0]
+        self.assertIn("`tests`", desc); self.assertIn("`measure`", desc); self.assertIn("secret", desc)
+        self.assertIn("release-key-fingerprint:", t); self.assertIn("allow-unsigned:", t)  # the older inputs stay
+
+    def test_only_the_tests_and_measure_jobs_run_on_the_runner_input(self):
+        """Exactly the secret-free `tests` and `measure` jobs run on the caller's runner."""
+        t = (self.WF / "gate.yml").read_text()
+        jobs = self._jobs("gate.yml")
+        self.assertEqual(set(jobs), {"tests", "measure", "story-gate"})
+        for j in ("tests", "measure"):
+            self.assertIn("    runs-on: ${{ inputs.runner }}\n", jobs[j], j)
+            self.assertNotIn("secrets.", jobs[j], j)  # the jobs a caller can move never see a secret
+            self.assertIn("      contents: read\n", jobs[j])
+        self.assertEqual(t.count("inputs.runner"), 2)  # no third use, in `runs-on` or anywhere else
+        self.assertEqual(t.count("${{ inputs.runner }}"), 2)
+
+    def test_secret_jobs_and_the_other_workflows_never_use_the_runner_input(self):
+        """The secret-holding job, audit.yml and dashboard.yml stay on ubuntu-latest, whatever the caller passes."""
+        gate = self._jobs("gate.yml")["story-gate"]
+        self.assertIn("    runs-on: ubuntu-latest\n", gate); self.assertNotIn("inputs.runner", gate)
+        self.assertIn("secrets.OPENROUTER_API_KEY", gate)  # this is the job that holds the secrets
+        for name in ("audit.yml", "dashboard.yml"):
+            t = (self.WF / name).read_text()
+            self.assertNotIn("inputs.runner", t, name); self.assertNotIn("runner:", t, name)
+            for j, body in self._jobs(name).items():
+                self.assertIn("    runs-on: ubuntu-latest\n", body, (name, j))
+        for j, body in self._jobs("gate.yml").items():  # secrets are read in the story-gate job only
+            self.assertEqual("secrets." in body, j == "story-gate", j)
+
+    def test_without_a_runner_every_job_of_every_workflow_stays_on_ubuntu_latest(self):
+        """A caller that passes no runner sees every job on ubuntu-latest, as before."""
+        import re as _re
+        t = (self.WF / "gate.yml").read_text()
+        default = _re.search(r'runner:\n(?:.*\n)*?        default: "([^"]+)"', t).group(1)
+        for name in ("gate.yml", "audit.yml", "dashboard.yml"):
+            for j, body in self._jobs(name).items():
+                label = _re.search(r"(?m)^    runs-on: (.+)$", body).group(1).strip()
+                label = default if label == "${{ inputs.runner }}" else label
+                self.assertEqual(label, "ubuntu-latest", (name, j))
+
+    def test_doctor_accepts_a_caller_that_passes_a_runner_by_hand(self):
+        """`doctor` accepts a hand-added runner line and still rejects a second uses: line."""
+        run(self.repo, "install", "--ci", "reusable", "--ref", self.SHA)
+        g = self.repo / ".github/workflows/story-gate.yml"; t = g.read_text()
+        self.assertNotIn("runner:", t)  # install writes no runner of its own: callers on ubuntu-latest see no change
+        g.write_text(t.replace("    with:\n", "    with:\n      runner: ubicloud-standard-2\n", 1))
+        self.assertIn("runner: ubicloud-standard-2", g.read_text())
+        out = run(self.repo, "doctor").stdout
+        self.assertIn("story-gate.yml           ok (SathiaAI/story-gate at v", out)
+        g.write_text(g.read_text() + "  other:\n    uses: evil/repo/.github/workflows/x.yml@" + "c" * 40 + "\n")
+        self.assertIn("has 2 `uses:` lines", run(self.repo, "doctor").stdout)  # the hand-added line did not loosen the checks
+
 
 
 def _re_sub(pat, rep, text):
@@ -11621,6 +11855,96 @@ class TestCiIsolation(Base):
                 a.teardown()
         self.assertEqual([c[0] for c in calls], ["chown", "chmod", "chmod", "userdel"])
         self.assertIn("1 process(es) left", str(cm.exception)); self.assertIn("remove them by hand", str(cm.exception))
+
+    def timed_out_useradd(self, I, probe):
+        """The message of the IsolationError _run raises when useradd times out; probe(argv, **kw) answers the
+        diagnostic commands."""
+        def fake(argv, **kw):
+            """useradd times out as on the stalled runner; every other command is a diagnostic probe."""
+            if "useradd" in argv:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return probe(argv, **kw)
+        held = self.repo / "passwd.lock"; held.write_text("")
+        with patch.object(I.subprocess, "run", fake), patch.object(I, "LOCK_FILES", (str(held), str(self.repo / "shadow.lock"))), \
+                patch.object(I.shutil, "which", lambda tool: "/usr/bin/" + tool):
+            with self.assertRaises(I.IsolationError) as cm:
+                I._run(I._priv() + ["useradd", "--create-home", "sgpr-x"])
+        return str(cm.exception)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_a_timed_out_admin_command_says_what_may_have_stalled_it(self):
+        """_run(): when the command times out, the error keeps its first words and adds a bounded diagnosis: lock files,
+        the account-database processes (program names only, never arguments; after sudo, only a known command name), sudo's time, the host name lookup and the
+        name-service caches. Each probe runs with its own short timeout, and the whole diagnosis stays under the cap."""
+        I = self.I()
+        ps = ("    PID     ELAPSED STAT CMD\n      1    01:00:00 Ss   /sbin/init\n"
+              "    812       02:01 S    sudo -n useradd --create-home sgpr-x\n    813       02:01 D    useradd --create-home sgpr-x\n"
+              "    814       05:00 D    userdel --remove sgpr-old\n"
+              "    900       10:00 Ssl  /usr/sbin/nscd\n    901       10:00 S    /usr/libexec/sssd/sssd_nss --uid 0\n"
+              "    950       00:10 S    sudo curl -u alice:s3cr3t -H Authorization: Bearer s3cr3t https://example.com\n"
+              "    951       00:09 S    sudo -n API_TOKEN=s3cr3t useradd x\n"
+              + "    999       00:01 S    passwd %s\n" % ("x" * 400) * 40)
+        answers = {"ps": (0, ps), "sudo": (0, ""), "getent": (2, ""), "systemctl": (3, "inactive\nactive\n")}
+
+        def probe(argv, **kw):
+            """Canned answers for the probes; each must carry the short probe timeout."""
+            self.assertEqual(kw.get("timeout"), I.DIAG_TIMEOUT, argv)
+            code, out = answers[argv[0]]
+            return subprocess.CompletedProcess(argv, code, out, "")
+        msg = self.timed_out_useradd(I, probe)
+        self.assertTrue(msg.startswith("useradd couldn't run (Command "), msg); self.assertIn("timed out after", msg)
+        head, diag = msg.split("; diagnostics: ", 1)
+        self.assertLessEqual(len(diag), I.DIAG_CAP)
+        self.assertIn("lock files present: %s;" % (self.repo / "passwd.lock"), diag); self.assertNotIn("shadow.lock", diag)
+        flat = " ".join(diag.split())
+        for line in ("812 02:01 S sudo useradd |", "813 02:01 D useradd |", "814 05:00 D userdel |", "900 10:00 Ssl nscd |",
+                     "901 10:00 S sssd_nss |", "950 00:10 S sudo |", "951 00:09 S sudo |", "(39 more)"):  # 43: 8 listed, then a count
+            self.assertIn(line, flat)
+        for absent in ("init", "s3cr3t", "API_TOKEN", "alice", "curl", "--create-home", "PATH="):
+            self.assertNotIn(absent, diag)
+        self.assertRegex(diag, r"; sudo -n true: exit 0 in \d+\.\d\d s; getent hosts \S+: no answer \(exit 2\); "
+                               r"systemctl is-active: nscd inactive, sssd active$")  # the long process list crowds out nothing
+        with patch.object(I, "DIAG_CAP", 300):
+            diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
+        self.assertEqual(len(diag), 300); self.assertTrue(diag.endswith("..."))
+        answers["ps"] = (1, "")  # ps itself failed: say so, never "processes: none"
+        diag = self.timed_out_useradd(I, probe).split("; diagnostics: ", 1)[1]
+        self.assertIn("; ps failed (exit 1);", diag); self.assertNotIn("processes:", diag)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_a_hanging_probe_is_cut_off_by_its_own_timeout(self):
+        """A probe that hangs (here a real process that sleeps) is stopped after DIAG_TIMEOUT; the other probes still
+        report and the error comes back long before the hung probe would have ended."""
+        I = self.I()
+        real = subprocess.run
+
+        def probe(argv, **kw):
+            """ps hangs for real; the rest answer at once."""
+            if argv[0] == "ps":
+                return real([sys.executable, "-c", "import time; time.sleep(60)"], **kw)
+            return subprocess.CompletedProcess(argv, 0, "active\nactive\n" if argv[0] == "systemctl" else "", "")
+        start = time.monotonic()
+        with patch.object(I, "DIAG_TIMEOUT", 0.5):
+            msg = self.timed_out_useradd(I, probe)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn("ps timed out after 0.5 s", msg); self.assertIn("sudo -n true: exit 0", msg)
+        self.assertIn("systemctl is-active: nscd active, sssd active", msg)
+
+    @unittest.skipIf(os.name == "nt", "accounts exist only on Linux")
+    def test_the_timeout_is_still_reported_when_a_probe_misbehaves(self):
+        """A probe printing bytes that aren't text is read with replacements, and any other failure while diagnosing
+        still raises IsolationError with the timeout, so callers that catch only IsolationError keep cleaning up."""
+        I = self.I()
+        with patch.object(I.subprocess, "run", wraps=subprocess.run) as run:  # real process, real decoding
+            code, out = I._probe([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\xff\\n')"])
+        self.assertEqual(code, 0); self.assertTrue(out.startswith("ok ")); self.assertEqual(run.call_count, 1)
+
+        def probe(argv, **kw):
+            """Something unexpected goes wrong while diagnosing."""
+            raise ValueError("boom")
+        msg = self.timed_out_useradd(I, probe)
+        self.assertTrue(msg.startswith("useradd couldn't run (Command "), msg); self.assertIn("timed out after", msg)
+        self.assertTrue(msg.endswith("; diagnostics failed (ValueError)"), msg)
 
     def test_file_evidence_covers_the_whole_file(self):
         """sha256_regular() hashes every byte, in chunks: a change after the first chunk (or past read_regular's cap)
@@ -14087,3 +14411,77 @@ class TestDecomposePure(unittest.TestCase):
         c = D.run("done", self.ev(diff.replace("padding", "paddinx", 1), acs_), self.fake_ask())
         self.assertEqual(a["evidence_hash"], b["evidence_hash"])
         self.assertNotEqual(a["evidence_hash"], c["evidence_hash"])
+
+
+class TestStoryFolderFiles(Base):
+    """Only the gate's own records in .story-gate/stories/<ID>/ are left out of the checks. Any other file there is work,
+    so code can't be hidden from the judges, guardrails and fingerprint by putting it in a story folder
+    (docs/decisions/2026-10-22-story-folder-files.md)."""
+    SD = ".story-gate/stories/SAT-1/"
+
+    def gate(self):
+        """The test repository's gate.py, loaded in this process."""
+        g = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        return g
+
+    def test_records_are_the_gate_names_only(self):
+        """is_record(): the gate's own names and copies are records; anything else in a story folder is not."""
+        g = self.gate()
+        for n in ("story.md", "tests.json", "handoff.md", "ready.json", "done.self.json", "drift.md", "issue-12.md",
+                  "issue-acme--web-12.md", "linear-ENG-4.md", "jira-OPS-77.md", "evidence/0123456789abcdef.png"):
+            self.assertTrue(g.is_record(self.SD + n), n)
+        for n in ("payload.py", "helper.js", "notes.md", "issue-x.md", "issue-payload1.md", "linear-payload-1.md",
+                  "jira-eng-1.md", "evidence/run.py", "evidence/payload.png", "evidence/0123456789abcdef.png.js",
+                  "sub/story.md", "story.md.py"):  # a name a writer would never produce is work, whatever it looks like
+            self.assertFalse(g.is_record(self.SD + n), n)
+        self.assertFalse(g.is_record(".story-gate/stories/loose.py"))  # a file beside the story folders is work too
+        self.assertTrue(g.is_record(".story-gate/learnings.jsonl"))
+
+    def test_the_diff_and_the_file_list_agree(self):
+        """diff_against(): a hidden module is in the diff the judges read, and records stay out of it. git's pathspec
+        excludes leave out exactly the files is_record() leaves out."""
+        g = self.gate()
+        names = ["story.md", "ready.json", "issue-3.md", "linear-ENG-4.md", "evidence/0123456789abcdef.png",
+                 "payload.py", "issue-x.md", "issue-payload1.md", "evidence/run.py", "evidence/payload.png", "sub/story.md"]
+        for n in names:
+            f = self.repo / self.SD / n; f.parent.mkdir(parents=True, exist_ok=True); f.write_text("MARK_%s\n" % n)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "story"], cwd=self.repo, check=True)
+        _, files, diff = g.diff_against("main")
+        for n in names:
+            self.assertIn(self.SD + n, files)
+            self.assertEqual("MARK_" + n in diff, not g.is_record(self.SD + n), n)
+        self.assertIn(self.SD + "payload.py", g.changed_paths("main"))  # budgets and guardrail areas see it too
+        self.assertNotIn(self.SD + "story.md", g.changed_paths("main"))
+
+    def test_an_untracked_module_counts_too(self):
+        """A new file not yet added to git is evidence in a story folder as anywhere else."""
+        g = self.gate()
+        (self.repo / self.SD).mkdir(parents=True); (self.repo / self.SD / "payload.py").write_text("SECRET = 1\n")
+        (self.repo / self.SD / "story.md").write_text("STORY_TEXT\n")
+        _, _, diff = g.diff_against("main")
+        self.assertIn("SECRET = 1", diff); self.assertNotIn("STORY_TEXT", diff)
+
+    def test_changing_a_hidden_module_makes_verdicts_stale(self):
+        """work_fingerprint(): editing a module in the story folder changes it; writing a verdict or the handoff doesn't."""
+        g = self.gate()
+        (self.repo / self.SD).mkdir(parents=True); (self.repo / self.SD / "payload.py").write_text("x = 1\n")
+        fp = g.work_fingerprint()
+        (self.repo / self.SD / "ready.json").write_text("{}"); (self.repo / self.SD / "handoff.md").write_text("h\n")
+        (self.repo / self.SD / "evidence").mkdir(); (self.repo / self.SD / "evidence/0123456789abcdef.png").write_bytes(b"\x89PNG")
+        self.assertEqual(g.work_fingerprint(), fp)
+        (self.repo / self.SD / "payload.py").write_text("x = 2\n")
+        self.assertNotEqual(g.work_fingerprint(), fp)
+
+    def test_every_file_the_gate_writes_is_a_record(self):
+        """The record list is complete for a normal run: start, READY, a scenario. A missing name would make writing a
+        record change the work fingerprint, so a verdict would go stale as soon as it was written."""
+        run(self.repo, "start", "SAT-1"); self.fill_ready()
+        self.cfg(judge={"jev": False, "allow_self_judge_pass": True})
+        run(self.repo, "score", "SAT-1", "ready"); self.fill_validation()
+        run(self.repo, "checkpoint", "SAT-1"); run(self.repo, "record-tests", "SAT-1", "--", PY, "-c", "pass")
+        g = self.gate()
+        sd = self.repo / self.SD
+        written = sorted(p.relative_to(self.repo).as_posix() for p in sd.rglob("*") if p.is_file())
+        self.assertIn(self.SD + "ready.json", written)
+        self.assertEqual([f for f in written if not g.is_record(f)], [])

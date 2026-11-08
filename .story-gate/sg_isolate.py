@@ -17,7 +17,7 @@ Where isolation can't be set up (not Linux, no root and no password-free sudo), 
 `ci_isolation: "strict"` (the default) CI then runs nothing and says so; with "relaxed" it runs as before and every
 result counts as reported, not checked. Stdlib only.
 """
-import hashlib, os, posixpath, re, secrets, shutil, stat, subprocess, time
+import hashlib, os, posixpath, re, secrets, shutil, socket, stat, subprocess, time
 
 NAME_PREFIX = "sgpr-"
 KILL_WAIT = 15            # seconds to wait for the account's processes to end before failing closed
@@ -44,12 +44,81 @@ def _priv():
     return [] if os.geteuid() == 0 else ["sudo", "-n"]
 
 
+DIAG_TIMEOUT = 5          # seconds each probe may take when an administrative command timed out
+DIAG_CAP = 2000           # characters of those probes' findings added to the error
+LOCK_FILES = ("/etc/passwd.lock", "/etc/shadow.lock", "/etc/group.lock", "/etc/gshadow.lock", "/etc/.pwd.lock")
+DIAG_PROCS = 8            # processes listed, so the probes after them always fit in DIAG_CAP
+DIAG_PROGRAMS = re.compile(r"useradd|userdel|passwd|nscd|sssd\w*|systemd-userdbd|sudo")
+SUDO_TARGETS = re.compile(r"pkill|pgrep|chown|chmod|mkdir|setpriv|true")  # story-gate's own sudo commands
+
+
+def _probe(argv):
+    """One diagnostic command (no shell, own short timeout): (exit code, output), or (None, why it gave nothing)."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=DIAG_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, "timed out after %s s" % DIAG_TIMEOUT
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "couldn't run (%s)" % type(e).__name__
+    return r.returncode, (r.stdout or "")
+
+
+def _program(cmd):
+    """The program a process runs, never its arguments (those can hold credentials). For sudo, also the program sudo
+    runs, but only when it is one of the commands story-gate runs or probes: nothing else from the line is shown."""
+    words = cmd.split()
+    name = posixpath.basename(words[0])
+    target = next((w for w in words[1:] if not w.startswith("-")), "") if name == "sudo" else ""
+    target = posixpath.basename(target)
+    return name + (" " + target if DIAG_PROGRAMS.fullmatch(target) or SUDO_TARGETS.fullmatch(target) else "")
+
+
+def _timeout_diagnostics():
+    """Why an administrative command may have stalled, in one bounded line: lock files of the account database, the
+    processes that touch it, how long sudo takes, whether this host's name resolves (slow sudo when it doesn't), and
+    the name-service caches. Each probe has its own DIAG_TIMEOUT; never environment variables."""
+    found = ["lock files present: %s" % (", ".join(p for p in LOCK_FILES if os.path.exists(p)) or "none")]
+    code, out = _probe(["ps", "-eo", "pid,etime,stat,cmd"])
+    if code is None:
+        found.append("ps %s" % out)
+    elif code != 0:
+        found.append("ps failed (exit %d)" % code)  # not "none": no list says nothing about the processes
+    else:
+        procs = []
+        for line in out.splitlines()[1:]:
+            f = line.split(None, 3)
+            if len(f) == 4 and DIAG_PROGRAMS.fullmatch(posixpath.basename(f[3].split()[0])):
+                procs.append(" ".join(f[:3] + [_program(f[3])])[:160])
+        more = " | (%d more)" % (len(procs) - DIAG_PROCS) if len(procs) > DIAG_PROCS else ""
+        found.append("processes: %s%s" % (" | ".join(procs[:DIAG_PROCS]) or "none", more))
+    if shutil.which("sudo"):
+        start = time.monotonic()
+        code, out = _probe(["sudo", "-n", "true"])
+        found.append("sudo -n true: %s" % (out if code is None else "exit %d in %.2f s" % (code, time.monotonic() - start)))
+    host = socket.gethostname()
+    code, out = _probe(["getent", "hosts", host])
+    found.append("getent hosts %s: %s" % (host, out if code is None else "answers" if code == 0 and out.strip() else "no answer (exit %d)" % code))
+    if shutil.which("systemctl"):
+        code, out = _probe(["systemctl", "is-active", "nscd", "sssd"])
+        states = ", ".join("%s %s" % kv for kv in zip(("nscd", "sssd"), out.split())) if code is not None else ""
+        found.append("systemctl is-active: %s" % (out if code is None else states or "no answer (exit %d)" % code))
+    text = "; ".join(found)
+    return text if len(text) <= DIAG_CAP else text[:DIAG_CAP - 3] + "..."
+
+
 def _run(argv, timeout=120, check=True):
-    """Run an administrative command (no shell) and return it; IsolationError when it fails and check is set."""
+    """Run an administrative command (no shell) and return it; IsolationError when it fails and check is set. When it
+    times out, the error ends with a short, bounded diagnosis of what may have stalled it."""
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        raise IsolationError("%s couldn't run (%s)" % (argv[len(_priv())] if len(argv) > len(_priv()) else argv[0], e))
+        msg = "%s couldn't run (%s)" % (argv[len(_priv())] if len(argv) > len(_priv()) else argv[0], e)
+        if isinstance(e, subprocess.TimeoutExpired):
+            try:
+                msg += "; diagnostics: " + _timeout_diagnostics()
+            except Exception as e2:  # never let the diagnosis replace the timeout itself
+                msg += "; diagnostics failed (%s)" % type(e2).__name__
+        raise IsolationError(msg)
     if check and r.returncode != 0:
         raise IsolationError("%s failed: %s" % (" ".join(argv[len(_priv()):][:3]), (r.stderr or r.stdout).strip()[:200]))
     return r

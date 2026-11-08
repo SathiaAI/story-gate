@@ -1,0 +1,57 @@
+{
+ "story": "SGR-2",
+ "results": {
+  "link called json to a package folder fails verify_release": {
+   "spec": "0fa10b6d48351b98",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.1,
+   "fingerprint": "cf8bf14f9dc4f7b6",
+   "source": "local",
+   "at": "2026-11-07T03:26:46Z",
+   "output_tail": "links not covered by the signed release: json\n"
+  },
+  "runtime_copy_check refuses the json link": {
+   "spec": "8efc478a817718e7",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.3,
+   "fingerprint": "cf8bf14f9dc4f7b6",
+   "source": "local",
+   "at": "2026-11-07T03:26:47Z",
+   "output_tail": "This PR's story-gate copy has links the signed release doesn't list (json). A link can stand in for a Python module whatever its name, and load instead of the signed code. Remove them.\n\n"
+  },
+  "an unlistable folder fails the link check closed": {
+   "spec": "f244692a3728925d",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.1,
+   "fingerprint": "cf8bf14f9dc4f7b6",
+   "source": "local",
+   "at": "2026-11-07T03:26:56Z",
+   "output_tail": "couldn't list the folder /tmp/tmpy_uuply4/hidden (Permission denied), so it can't confirm the copy holds no links not covered by the signed release\n"
+  },
+  "CI checks a pull request that adds only a link": {
+   "spec": "a0a8505a78e72e08",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.7,
+   "fingerprint": "cf8bf14f9dc4f7b6",
+   "source": "local",
+   "at": "2026-11-07T03:26:57Z",
+   "output_tail": ".\n----------------------------------------------------------------------\nRan 1 test in 0.541s\n\nOK\n"
+  }
+ }
+}

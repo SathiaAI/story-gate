@@ -167,7 +167,7 @@ import sg_decompose as DC  # noqa: E402
 import sg_trust as T  # noqa: E402
 import sg_stories as SS  # noqa: E402
 
-VERSION = "0.10.1"
+VERSION = "0.11.0"
 RUNTIME = T.is_runtime(HERE)  # True when running the trusted copy installed with `gate.py install --user`
 
 
@@ -192,8 +192,18 @@ LEARNINGS = GATE / "learnings.jsonl"
 OUTBOX = GATE / "outbox.jsonl"
 ACTIVE = GATE / ".active"
 CALIB = GATE / "calibration.jsonl"
-RECORD_PATHS = (".story-gate/stories", ".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
+RECORD_PATHS = (".story-gate/features.json", ".story-gate/learnings.jsonl", ".story-gate/calibration.jsonl", ".story-gate/outbox.jsonl",
                 ".story-gate/.outbox.sent", ".story-gate/.edits", ".story-gate/.stops", ".story-gate/.active", ".story-gate/__pycache__")  # records, not code
+# The files the gate itself keeps in a story folder (.story-gate/stories/<ID>/...). Only these are records: any other file
+# there is ordinary work and counts as code evidence (docs/decisions/2026-10-22-story-folder-files.md). Besides these fixed
+# names, is_record() accepts only the exact names the gate writes for pulled issues, tracker tickets and screenshots
+# (snapshot_name, TRACKER_NAME, EVIDENCE_NAME). record_excludes() builds the diff's pathspecs from the same rule.
+STORY_RECORDS = ("story.md", "context.md", "tests.json", "handoff.md", "validation.md", "trace.md", "drift.md",
+                 "scenarios.json", "scenario_results.json", "test_results.json", "budgets.json", "budget_results.json",
+                 "guardrail_results.json", "checkpoints.jsonl", "decisions.jsonl", "coder.json", "pitfalls.json",
+                 "evidence.json", "ready.json", "done.json", "ready.self.json", "done.self.json")
+STORY_RECORD_RE = re.compile(r"\.story-gate/stories/[^/]+/(?:%s)" % "|".join(re.escape(n) for n in STORY_RECORDS))
+EVIDENCE_NAME = re.compile(r"\.story-gate/stories/[^/]+/evidence/[0-9a-f]{16}\.(?:png|jpg)")  # sg_report's names only
 
 
 class ConfigError(Exception):
@@ -2037,7 +2047,7 @@ def cmd_source(sid):
 
 
 def work_fingerprint():
-    """Hash of the changed files' current content vs the base branch, ignoring .story-gate/.
+    """Hash of the changed files' current content vs the base branch, ignoring records (is_record).
     Content-based, so git add / commit do not invalidate a green test run; any edit does."""
     h = hashlib.sha256()
     for n, body in sorted(work_state().items()):
@@ -2104,7 +2114,17 @@ def locked_digest(f):
 
 
 def is_record(path):
-    return any(path == r or path.startswith(r + "/") for r in RECORD_PATHS)
+    return (any(path == r or path.startswith(r + "/") for r in RECORD_PATHS) or bool(STORY_RECORD_RE.fullmatch(path))
+            or snapshot_name(path) is not None or bool(TRACKER_NAME.fullmatch(path)) or bool(EVIDENCE_NAME.fullmatch(path)))
+
+
+def record_excludes(names):
+    """git pathspecs that leave every record out of a diff: the same files is_record() leaves out of the file lists. The
+    fixed names go in as globs; issue, tracker and screenshot copies, whose names a glob can't check exactly, go in one by
+    one from `names` (the paths the diff covers)."""
+    return ([":(exclude)%s" % r for r in RECORD_PATHS] + [":(exclude,glob).story-gate/stories/*/%s" % n for n in STORY_RECORDS]
+            + [":(exclude,literal)%s" % n for n in sorted(names) if is_record(n) and not STORY_RECORD_RE.fullmatch(n)
+               and not any(n == r or n.startswith(r + "/") for r in RECORD_PATHS)])
 
 
 def budgets_policy():
@@ -2172,9 +2192,9 @@ def areas_that_apply(c, base):
         must("rev-parse", "--verify", "--quiet", mb + "^{commit}")
         z = lambda *a: [x for x in must("-c", "core.quotepath=false", *a, "-z").split("\0") if x]
         untracked = [n for n in z("ls-files", "--others", "--exclude-standard") if not is_record(n)]
-        files = sorted(n for n in set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
-                       | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
-        excl = [":(exclude)%s" % r for r in RECORD_PATHS]
+        tracked = set(z("diff", "--name-only", "--no-renames", mb)) | set(z("diff", "--name-only", "--no-renames"))
+        files = sorted(n for n in tracked | set(untracked) if not is_record(n))  # both names of a renamed file, deletions, untracked files
+        excl = record_excludes(tracked)
         new, read_all = untracked_text(untracked)
         diff = must("diff", mb, "--", ".", *excl) + new
         binary = any(l.startswith("-\t-\t") for l in must("diff", "--numstat", "--no-renames", mb, "--", ".", *excl).splitlines())
@@ -2653,8 +2673,7 @@ def diff_against(base):
     mb = resolve_base(base)
     untracked = [n for n in zlist("ls-files", "--others", "--exclude-standard") if not is_record(n)]
     names = set(zlist("diff", "--name-only", mb)) | set(zlist("diff", "--name-only")) | set(untracked)
-    excl = [":(exclude)%s" % r for r in RECORD_PATHS]
-    diff = git("diff", mb, "--", ".", *excl)  # story records never count as code evidence; the gate's own code does
+    diff = git("diff", mb, "--", ".", *record_excludes(names))  # records never count as code evidence; other files in a story folder do
     return mb, sorted(names), diff + untracked_diff(untracked)
 
 
@@ -4091,7 +4110,9 @@ def cmd_ci(tests_dir=None, measures_dir=None):
         token = os.environ.get("GITHUB_TOKEN")
         touched = sorted(f for f in files if f in GATE_FILES or f.startswith(".github/workflows/") or f.startswith(".grok/hooks/")
                          or (f.startswith(".story-gate/") and (f.lower().endswith(IMPORTABLE) or f.startswith(".story-gate/vendor/")
-                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA)))
+                                                                or "__pycache__" in f or f in RUNTIME_COPY_EXTRA
+                                                                # a link has no importable suffix, but may stand in for a module
+                                                                or (not f.startswith(".story-gate/stories/") and (ROOT / f).is_symlink()))))
         if touched:
             bad_copy, good_copy = runtime_copy_check(files, base)
             if bad_copy:
@@ -4922,7 +4943,9 @@ def _ver(v):
 
 def runtime_copy_check(files, base):
     """When a pull request changes story-gate's copied code, that copy must be a signed release no older than the base
-    branch's, with no symlinks or compiled files. -> (problem, note): one of them, or both '' when the copy isn't changed.
+    branch's, with no compiled files, no importable files it doesn't list, and no links it doesn't list (whatever their name:
+    a link called json to a folder holding __init__.py would load instead of json). -> (problem, note): one of them, or
+    both '' when the copy isn't changed.
     Runs from the base branch's trusted copy; it only reads and hashes the pull request's files."""
     if ".story-gate" in files or (ROOT / ".story-gate").is_symlink():
         return ("This PR turns the .story-gate folder into a link. The checks would then run code from wherever it points, "
@@ -4959,6 +4982,14 @@ def runtime_copy_check(files, base):
     if extra:  # python3 .story-gate/gate.py imports from this folder first, so such a file could run instead of the signed code
         return ("This PR's story-gate copy has importable files the signed release doesn't list (%s). Python could load them "
                 "instead of the signed code. Remove them." % ", ".join(extra[:5])), ""
+    try:  # walks the folder itself: a folder it can't list is a problem, never a pass
+        links = [r for r in T.stray_links(ROOT / ".story-gate") if r not in listed]
+    except T.TrustError as ex:
+        return ("story-gate couldn't check this PR's story-gate copy for links (%s), so it can't confirm the copy holds only "
+                "signed code. Re-run the check." % ex), ""
+    if links:  # a link has no importable suffix, but a link called json to a folder holding __init__.py would load instead of json
+        return ("This PR's story-gate copy has links the signed release doesn't list (%s). A link can stand in for a Python "
+                "module whatever its name, and load instead of the signed code. Remove them." % ", ".join(links[:5])), ""
     now = man.get("version") or ""
     if _ver(was) and (not _ver(now) or _ver(now) < _ver(was)):
         return ("This PR changes story-gate's copied code to release %s, older than the %s on the base branch. An older "

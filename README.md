@@ -25,6 +25,18 @@ story-gate makes your AI coding tool plan before it builds, check its course whi
 | **Short CI setup** | Three short workflow files that call story-gate's own, pinned to a signed release (new) |
 | **Built to be trusted** | Your AI uses its own GitHub login, branches can't switch the checks off, and every release is signed |
 
+## New in v0.11.0
+
+- **Solo builders can approve their AI's setup PR.** GitHub never counts an approval from whoever opened a pull request. Now your AI's own GitHub App opens it and makes the last commit, so your approval counts. Your login commits only the workflow files, which the App is never allowed to change ([guide](docs/guide.md)).
+- **Upgrade every repository in one go:** `story-gate upgrade-repo` opens one upgrade pull request per repository (`--org NAME` for all of them, `--dry-run` to preview, `--report` for a version table). Your own workflow steps, settings, budgets, stories and files are kept.
+- **CI checks the copied code is a signed release.** A pull request that changes story-gate's code in a repository must carry a signed, same-or-newer release with nothing extra Python could load (no `.pyc`, `.so`, package folders, or links of any name). Hand-edited story-gate code fails.
+- **Tighter AI access:** every token story-gate creates for an agent is capped at what a builder needs (no workflows, secrets or settings), even when the App was given more. Anyone who holds the App's private key can still mint a broader token, so give the App itself only the access you want to allow.
+- **Safer setup:** setup and upgrades stop when the default branch has a link where story-gate writes, in any letter case, and send Windows line endings as LF.
+- **Files in a story folder count as code.** Only the gate's own records there are left out of the diff and the work fingerprint now. The `exempt_globs` in your settings still apply: by default Markdown files are exempt, so a Markdown-only change in a story folder may not trigger the gates, even if app code loads that file. Before, a script placed in a story folder could be run by ordinary code and never be judged ([decision](docs/decisions/2026-10-22-story-folder-files.md)).
+- **Clearer CI isolation messages.** When CI can't set up its throwaway account, the message now says which administrative command timed out and why.
+- **Pick the runner for the secret-free CI jobs.** The reusable `gate.yml` has an optional `runner` input for the `tests` and `measure` jobs, which hold no GitHub secrets. Those jobs run the pull request's code. A self-hosted runner that keeps files or credentials between jobs can expose them to that code, so use a hosted runner unless the self-hosted runner is isolated. The default is `ubuntu-latest`. With the default `ci_isolation: "strict"`, the runner must be Linux with `useradd`, `userdel`, `pkill`, `pgrep`, `chown` and `setpriv`, and run as root or have password-free `sudo`; Windows and macOS runners can't run the pull request's tests under strict isolation. The `story-gate` job, the audit and the dashboard always run on `ubuntu-latest`. `story-gate install` does not write this line yet, so add it by hand and add it again after a re-install.
+- **The signed-copy check catches links of any name.** A link called `json` that points to a folder with an `__init__.py` would have loaded instead of Python's own `json` module, and its name had no `.py` to give it away. Now any link the signed release does not list fails the check, a folder the check can't list fails it too, and a pull request that adds only such a link is checked.
+
 ## New in v0.10.1
 
 - **Setup no longer writes your computer's Python path** into the committed `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`. The cloud fallback is now `python3 .story-gate/gate.py` (`python` on Windows). If you set up a repository with v0.10.0, run `story-gate install` in it again to refresh those files.
@@ -84,18 +96,18 @@ Nothing to set up, and your own projects aren't touched.
 **Mac or Linux** (Terminal):
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.1/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
+curl -LsSf https://raw.githubusercontent.com/SathiaAI/story-gate/v0.11.0/install.sh -o /tmp/story-gate-install.sh && sh /tmp/story-gate-install.sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.10.1/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/SathiaAI/story-gate/v0.11.0/install.ps1 | iex"
 ```
 
 Then run `story-gate try`. It makes a throwaway project with one small story and a real bug, runs each goal, shows one pass and one fail, and opens the validation page. No GitHub, no judge key, no network.
 
-**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.1` instead.
+**What the installer does:** it installs [uv](https://docs.astral.sh/uv/) (a Python tool manager) if you don't have it, then story-gate at this exact release, and puts `story-gate` on your PATH. Nothing else. Read [install.sh](install.sh) or [install.ps1](install.ps1) first if you like. Already have uv? Run `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.11.0` instead.
 
 ## Set it up in 5 steps
 
@@ -252,7 +264,7 @@ When the person asks you to set up story-gate:
 1. Make sure `uv` is installed (`uv --version`). If it isn't, install it with the official installer:
    - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
    - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.10.1`, then `uv tool update-shell` if `story-gate` isn't found.
+2. Install story-gate: `uv tool install --python 3.12 git+https://github.com/SathiaAI/story-gate@v0.11.0`, then `uv tool update-shell` if `story-gate` isn't found.
 3. Find how the project's tests run on a clean Linux machine, including installing what they need (for example `npm ci && npm test`). In the project folder, run `story-gate init --test-command "<that command>"` **in the background** (leave the flag out if there are no tests yet). It prints a local page address and opens it in the browser. Keep it running until it prints `story-gate: story-gate is protecting ...`.
 4. Tell the person: "A setup page opened in your browser. Follow it; I'll wait." Do not click, sign in, create apps or type the judge key for them. Those steps are theirs.
 5. When it finishes, run `story-gate doctor` and report its summary in plain words. Tell the person where their dashboard is (the link `doctor` prints).

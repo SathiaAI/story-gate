@@ -1,0 +1,131 @@
+{
+ "story": "SGR-2",
+ "acceptance_criteria": [
+  {
+   "id": "AC-1",
+   "text": "verify_release raises TrustError 'links not covered by the signed release' for a link the manifest does not list: link to a package folder, link to a file, dangling link, link inside vendor/.",
+   "positive": [
+    "Link json to a folder with __init__.py fails"
+   ],
+   "negative": [
+    "A clean signed release still verifies"
+   ],
+   "edge": [
+    "A dangling link and a link inside vendor/ fail"
+   ],
+   "regression": [
+    "Existing linked-folder and linked-vendor tests still pass"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_an_extensionless_link_to_a_package_folder_fails",
+    "test_an_extensionless_link_to_a_file_fails",
+    "test_a_link_inside_a_real_subfolder_fails_but_stories_and_pycache_are_left_alone"
+   ]
+  },
+  {
+   "id": "AC-2",
+   "text": "runtime_copy_check returns a problem naming the link, for the same cases, and passes a copy with no link.",
+   "positive": [
+    "Link json, a link to a file and a dangling link each give a problem"
+   ],
+   "negative": [
+    "A copy with only a changed listed file passes"
+   ],
+   "edge": [
+    "Checked with a passing signature check, so only the link is at fault"
+   ],
+   "regression": [
+    "Importable-suffix and compiled-file checks still work"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_a_link_the_signed_release_does_not_list_is_refused_whatever_its_name"
+   ]
+  },
+  {
+   "id": "AC-3",
+   "text": "Links inside a real stories/ or __pycache__ folder are ignored; a link itself named stories or __pycache__ is not.",
+   "positive": [
+    "A link under stories/SAT-1 and under __pycache__ still verifies"
+   ],
+   "negative": [
+    "A link named stories fails"
+   ],
+   "edge": [
+    "The walk prunes real folders of those names"
+   ],
+   "regression": [
+    "Story folders with ordinary files still verify"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed"
+   ]
+  },
+  {
+   "id": "AC-4",
+   "text": "Folder links are never followed: the check lists a folder link without walking into it.",
+   "positive": [
+    "A link to a folder with __init__.py is reported as one entry"
+   ],
+   "negative": [
+    "Files inside the linked folder are not listed"
+   ],
+   "edge": [
+    "A link to a folder outside the tree does not hang the walk"
+   ],
+   "regression": [
+    "os.walk is used without followlinks"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_a_link_called_stories_or_pycache_is_not_left_alone_and_folder_links_are_not_followed"
+   ]
+  },
+  {
+   "id": "AC-5",
+   "text": "A folder that cannot be listed makes verify_release raise TrustError naming the folder and makes runtime_copy_check return a problem.",
+   "positive": [
+    "A folder whose listing raises PermissionError fails both checks"
+   ],
+   "negative": [
+    "The same copy passes once the folder is listable again"
+   ],
+   "edge": [
+    "A real chmod 000 folder (skipped on Windows and as root, with the reason printed)"
+   ],
+   "regression": [
+    "Link checks and the clean-copy pass still work"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_a_folder_that_cannot_be_listed_fails_verify_release",
+    "test_a_folder_the_copy_check_cannot_list_is_a_problem_not_a_pass",
+    "test_a_folder_with_mode_000_fails_verify_release",
+    "test_a_folder_with_mode_000_is_a_problem_in_the_copy_check"
+   ]
+  },
+  {
+   "id": "AC-6",
+   "text": "CI runs runtime_copy_check for a pull request that changes only an extensionless link under .story-gate/.",
+   "positive": [
+    "A branch adding only .story-gate/json (link to a folder with __init__.py) fails CI with the links message"
+   ],
+   "negative": [
+    "A link under stories/ is not treated as story-gate code"
+   ],
+   "edge": [
+    "The branch does not change config.json (which would already trigger the check)"
+   ],
+   "regression": [
+    "Branches that change importable files, vendor/ or config.json are checked as before"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_ci_runs_the_copy_check_for_a_pull_request_that_only_adds_an_extensionless_link"
+   ]
+  }
+ ],
+ "proposed_missing_acs": []
+}

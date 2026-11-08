@@ -1,0 +1,38 @@
+{
+ "story": "SGR-1",
+ "scenarios": [
+  {
+   "name": "caller with runner set by hand passes doctor in a scratch repo",
+   "acs": [
+    "AC-5"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "\nimport subprocess,tempfile,os,sys,pathlib\ngp=os.path.abspath(\".story-gate/gate.py\");d=tempfile.mkdtemp()\nenv=dict(os.environ,STORY_GATE_ROOT=d)\nr=lambda *a:subprocess.run([sys.executable,gp,*a],cwd=d,env=env,capture_output=True,text=True)\nsubprocess.run([\"git\",\"init\",\"-q\",\".\"],cwd=d);subprocess.run([\"git\",\"-c\",\"user.name=t\",\"-c\",\"user.email=t@t\",\"commit\",\"-q\",\"--allow-empty\",\"-m\",\"i\"],cwd=d)\nr(\"install\",\"--ci\",\"reusable\",\"--ref\",\"a\"*40)\np=pathlib.Path(d)/\".github/workflows/story-gate.yml\";p.write_text(p.read_text().replace(\"    with:\\n\",\"    with:\\n      runner: ubicloud-standard-2\\n\",1))\nout=r(\"doctor\").stdout\nprint(\"doctor-says-ok\" if \"story-gate.yml           ok (SathiaAI/story-gate at v\" in out and \"runner: ubicloud-standard-2\" in p.read_text() else out)\n"
+   ],
+   "expect_exit": 0,
+   "expect_output": "doctor-says-ok",
+   "timeout": 120,
+   "local_only": ""
+  },
+  {
+   "name": "default keeps ubuntu-latest and ubicloud moves only tests and measure",
+   "acs": [
+    "AC-1",
+    "AC-2",
+    "AC-3",
+    "AC-4"
+   ],
+   "argv": [
+    "python3",
+    "-c",
+    "\nimport re\ndef jobs(n):\n    b=open(\".github/workflows/\"+n).read().split(\"\\njobs:\\n\",1)[1]\n    p=re.split(r\"(?m)^  ([a-z-]+):\\n\",\"\\n\"+b)\n    return {p[i]:re.search(r\"(?m)^    runs-on: (.+)$\",p[i+1]).group(1).strip() for i in range(1,len(p)-1,2)}\ng=jobs(\"gate.yml\");default=re.search(r\"runner:\\n(?:.*\\n)*?        default: \\\"([^\\\"]+)\\\"\",open(\".github/workflows/gate.yml\").read()).group(1)\nfor label,val in ((\"default\",default),(\"ubicloud\",\"ubicloud-standard-2\")):\n    r={k:(val if v==\"${{ inputs.runner }}\" else v) for k,v in g.items()}\n    r[\"audit\"]=jobs(\"audit.yml\")[\"audit\"];r[\"dashboard\"]=jobs(\"dashboard.yml\")[\"dashboard\"]\n    print(label,\"tests=%s measure=%s story-gate=%s audit=%s dashboard=%s\"%(r[\"tests\"],r[\"measure\"],r[\"story-gate\"],r[\"audit\"],r[\"dashboard\"]))\n"
+   ],
+   "expect_exit": 0,
+   "expect_output": "ubicloud tests=ubicloud-standard-2 measure=ubicloud-standard-2 story-gate=ubuntu-latest audit=ubuntu-latest dashboard=ubuntu-latest",
+   "timeout": 120,
+   "local_only": ""
+  }
+ ]
+}
