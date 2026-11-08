@@ -13391,6 +13391,20 @@ class TestDecompose(Base):
         self.assertEqual(body.split("\n")[1], "+x = 1")  # CRLF: the CR is not part of the line
         self.assertTrue(whole)
 
+    def test_a_content_trigger_sees_text_after_a_form_feed_in_a_new_file(self):
+        """changed_lines splits a diff at newlines only: text after a form feed or U+2028 in an added line still reaches the
+        content triggers (CodeRabbit), for an untracked file and for a git diff alike."""
+        g = self.gate()
+        import sg_areas as A  # after gate(): it puts this repository's .story-gate on the path
+        (self.repo / "t.py").write_bytes(b'x = 1;\x0cpassword = "secret"\r\ny = 2\r\n')
+        text, _ = g.untracked_text(["t.py"])
+        lines, complete = A.changed_lines(text, g.is_record)
+        self.assertIn('x = 1;\x0cpassword = "secret"', lines)  # one line, the form feed inside it, so a trigger can match past it
+        self.assertEqual(lines[1:], ["y = 2"])  # CRLF: the CR is not part of the line
+        self.assertTrue(complete)
+        diff = "diff --git a/t.py b/t.py\n--- a/t.py\n+++ b/t.py\n@@ -1 +1 @@\n-old\n+a\u2028password = 1\n"
+        self.assertEqual(A.changed_lines(diff, g.is_record)[0], ["old", "a\u2028password = 1"])
+
     def test_evidence_reads_never_leave_the_repository(self):
         """A path from the diff can be injected by a crafted file name: the test-file reader refuses anything that
         resolves outside the repository (.., a link, a linked folder), and a name with a line break is not shown, so it
