@@ -506,16 +506,17 @@ def git(*args):
 def must(*args):
     """git(), but a failure or a time-out raises RuntimeError instead of looking like empty output. Only for commands
     whose non-zero exit means failure (not `git diff --quiet` or `--exit-code`)."""
+    raw = args[:1] == ("diff",)  # a diff is read as bytes: text mode turns a lone CR into a newline, which splits a line git counts as one
     try:
         args = (GIT_LOCK_ARGS + args) if GIT_LOCKED else args
         env = dict(git_env() or os.environ, LC_ALL="C", LANGUAGE="C")  # git's messages in English, whatever the runner's locale
-        r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                           env=env)
+        text = {} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}
+        r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, timeout=60, env=env, **text)
     except (OSError, subprocess.SubprocessError) as e:
         raise RuntimeError("git %s failed: %s" % (args[0] if args else "", e.__class__.__name__))
     if r.returncode != 0:
         raise RuntimeError("git %s failed (exit %d)" % (args[0] if args else "", r.returncode))
-    return r.stdout
+    return r.stdout.decode("utf-8", errors="replace") if raw else r.stdout
 
 
 UNREAD = "story-gate couldn't read which files the change touches, so it can't tell whether pinned files changed"

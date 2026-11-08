@@ -11347,6 +11347,20 @@ class TestGuardrails(Base):
         self.assertIn("secrets", A.applicable(areas, ["x"], far, rec)[0])
         self.assertTrue(A.applicable(areas, ["src/web\\x.js"], "", rec)[0].get("web") is None)  # globs are forward-slash paths
 
+    def test_an_anchored_content_trigger_fires_on_a_lone_cr_before_and_after_staging(self):
+        """git counts a lone CR as part of a line. areas_that_apply reads git's diff without text-mode newline translation, so
+        `pass\\rpassword` is one added line, and the anchored `^password` trigger still sees its second half, for an untracked
+        file and for a staged one (CodeRabbit)."""
+        g = lambda *x: subprocess.run(["git", *x], cwd=self.repo, capture_output=True, check=True)
+        gate = load_gate(self.repo); self.addCleanup(os.environ.pop, "STORY_GATE_ROOT", None)
+        cfg = dict(gate.cfg(), guardrails={"areas": {"c": {"content": ["^password"], "checks": [self.check()]}}})
+        (self.repo / "u.py").write_bytes(b'pass\rpassword = "secret"\n')
+        self.assertIn("c", gate.areas_that_apply(cfg, "main")[0])  # untracked
+        g("add", "u.py")
+        self.assertIn("c", gate.areas_that_apply(cfg, "main")[0])  # staged
+        (self.repo / "u.py").write_bytes(b'pass\rpassword = "secret"\r\nx = 1\r\n')  # a CRLF after it: still one line each
+        self.assertIn("c", gate.areas_that_apply(cfg, "main")[0])
+
     def test_renames_and_an_unreadable_change_make_areas_apply(self):
         """In a real repository: the old name of a renamed file triggers an area; a merge base story-gate can't read makes
         every area that isn't off apply (a failed git diff never looks like "nothing changed")."""
