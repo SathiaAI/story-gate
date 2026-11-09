@@ -14970,6 +14970,8 @@ class TestReviewRecord(Base):
         got = self.g.review_record_of(sd, self.c, True)
         self.assertIsNone(got["rec"]); self.assertTrue(got["stale"])
         self.no_lift(self.verdict(review=got), "made on different evidence", ("evidence_complete",) + GROUP_CHECKS)
+        self.assertEqual(got["stale_by"], "Paul")
+        self.assertEqual(self.verdict(review=got)["review_record"]["by"], "Paul")  # not "None" in the message
 
     def test_a_head_commit_without_a_code_owner_approval_lifts_nothing(self):
         """A head commit without a code owner approval lifts nothing."""

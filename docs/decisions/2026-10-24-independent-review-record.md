@@ -105,7 +105,7 @@ flowchart LR
   The owner accepted this limit on 2026-10-25 (option A): no comment trigger.
 - Who wrote the head commit is read from the commit's author and committer, which come from the commit's email. Anyone
   who can push can set that email. So a listed reviewer that also pushes to the branch could hide behind another
-  account's email. A code owner's approval of the head and a second listed reviewer are still required. Requiring
+  account's email. A code owner's approval of the head and a second listed reviewer are still required. This holds only when the second reviewer is a different login: a Codex-only policy counts its two parts (code and security review) as two reviewers, so there the code owner's approval is the only protection. Add one more native reviewer login to a Codex-only policy. Requiring
   verified commit signatures, and excluding the signer, would close this. The owner accepted the limit on 2026-10-25
   (option A): signatures are not required.
 - Decompose `on` mode (owner decision 6, 2026-10-25): no repository switches `judge.decompose` to `on` when this and

@@ -1914,7 +1914,7 @@ def verdict(structural, judged, decisions, waivers, c, review=None):
                             "%s (reviews %s on %s; recorded by %s: %s)" % (REVIEW_NOTE, ", ".join(live.get("review_ids") or []),
                                                                           (live.get("head") or "")[:12], rec.get("by"), rec.get("why_not_split")))
                 lifted.append(k)
-        rv = {"by": rec.get("by"), "why_not_split": rec.get("why_not_split"), "lifted": lifted, "blocked": block,
+        rv = {"by": rec.get("by") or review.get("stale_by") or "unknown", "why_not_split": rec.get("why_not_split"), "lifted": lifted, "blocked": block,
               "proposal": rec.get("_where") == "local",
               "head": (review.get("live") or {}).get("head"), "review_ids": (review.get("live") or {}).get("review_ids") or []}
     for k, w in waivers.items():
@@ -1961,15 +1961,15 @@ def review_record_of(sd, c=None, trusted=None):
     """-> {"rec": the newest independent review record made on the current DONE evidence (or None), "stale": whether
     a record exists but was made on other evidence}. trusted: None = this computer, False = CI without a code owner's
     approval of the head, True = CI with it. The record only counts in CI (see review_blocked)."""
-    cur, rec, stale = inputs_hash(sd, "done", c), None, False
+    cur, rec, stale, old = inputs_hash(sd, "done", c), None, False, None
     for r in jsonl(sd / "decisions.jsonl"):
         if r.get("kind") != "review" or r.get("phase", "done") != "done":
             continue
         if r.get("evidence") == cur:
             rec, stale = dict(r, _where="local" if trusted is None else "ci" if trusted else "unapproved"), False
         elif rec is None:
-            stale = True
-    return {"rec": rec, "stale": stale}
+            stale, old = True, r
+    return {"rec": rec, "stale": stale, "stale_by": (old or {}).get("by")}
 
 
 def review_live(c):
