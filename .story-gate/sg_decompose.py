@@ -16,6 +16,11 @@ import concurrent.futures, hashlib, json, re
 SCHEMA = "decompose-1"
 MODES = ("off", "shadow", "on")
 DEFAULT_MODE = "shadow"
+# Release 1 ships with "on" switched off: a narrow check must not decide a verdict until the hardening in issue #106 is done
+# (a test in one AC's pack can change what another AC's checks see; a file larger than a pack is cut; many small files hit the
+# request cap). Config loading refuses "on" and says so. Nothing quietly downgrades it to "shadow".
+ON_ENABLED = False
+HARDENING_ISSUE = 106
 DEFAULT_MAX_REQUESTS = 60
 MAX_REQUESTS_LIMIT = 1000
 PARALLEL = 4  # requests in flight at once
@@ -64,7 +69,10 @@ def settings_problem(j):
     if not isinstance(j, dict):
         return None
     if j.get("decompose", DEFAULT_MODE) not in MODES:
-        return '"judge" > "decompose" must be "off", "shadow" or "on" (got %r)' % (j.get("decompose"),)
+        return '"judge" > "decompose" must be "off" or "shadow" (got %r)' % (j.get("decompose"),)
+    if j.get("decompose", DEFAULT_MODE) == "on" and not ON_ENABLED:
+        return ("judge.decompose: on is disabled in this release until the narrow-check hardening (issue #%d) is done. "
+                "Use shadow or off." % HARDENING_ISSUE)
     v = j.get("max_requests", DEFAULT_MAX_REQUESTS)
     if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= MAX_REQUESTS_LIMIT:
         return '"judge" > "max_requests" must be a whole number from 1 to %d (got %r)' % (MAX_REQUESTS_LIMIT, v)

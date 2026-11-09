@@ -67,8 +67,8 @@ ELSEWHERE = {
     "project_hooks_allowed": "your own AI-tool hooks allowed to run; edit config.json in a pull request of its own",
     "judge.provider": "which AI judge scores the work; edit config.json in a pull request of its own",
     "judge.max_chars": "how much text the judge reads; edit config.json in a pull request of its own",
-    "judge.decompose": "off, shadow (default) or on: whether the judge also answers narrow questions over evidence packs, and whether "
-                       "they decide; edit config.json in a pull request of its own",
+    "judge.decompose": "off or shadow (default): whether the judge also answers narrow questions over evidence packs, recorded "
+                       "beside the verdict and never deciding; on is disabled in this release; edit config.json in a pull request of its own",
     "judge.max_requests": "most narrow judge requests per score (default 60); past it a check cannot pass; edit config.json in a pull request of its own",
     "models": "model size per task; edit config.json in a pull request of its own",
     "model_tiers": "what each model size means; edit config.json in a pull request of its own",

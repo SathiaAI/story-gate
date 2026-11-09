@@ -1,0 +1,298 @@
+{
+ "overall": "PASS",
+ "drift": "none",
+ "checks": {
+  "story_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "story_source": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "context_present": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "test_matrix": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "upstream_handoffs": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dependencies": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "blockers_resolved": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "risks_handled": {
+   "status": "PASS",
+   "why": "",
+   "kind": "structural"
+  },
+  "dor_value": {
+   "status": "PASS",
+   "score": 0.9,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_scope": {
+   "status": "PASS",
+   "score": 0.87,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_interfaces": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_dependencies": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_nfr": {
+   "status": "PASS",
+   "score": 0.79,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_small": {
+   "status": "PASS",
+   "score": 0.91,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "dor_no_blockers": {
+   "status": "PASS",
+   "score": 0.93,
+   "kind": "jev",
+   "group": "1-ready"
+  },
+  "ac_testable": {
+   "status": "PASS",
+   "score": 0.79,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "ac_covers_scope": {
+   "status": "PASS",
+   "score": 0.78,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "tests_plan_adequate": {
+   "status": "PASS",
+   "score": 0.78,
+   "kind": "jev",
+   "group": "3-tests"
+  },
+  "drift_prd": {
+   "status": "PASS",
+   "score": 0.81,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "drift_trd": {
+   "status": "PASS",
+   "score": 0.86,
+   "kind": "jev",
+   "group": "2-drift"
+  },
+  "handoff_in": {
+   "status": "PASS",
+   "score": 0.97,
+   "kind": "jev",
+   "group": "4-handoff"
+  }
+ },
+ "decomposed": {
+  "schema": "decompose-1",
+  "mode": "shadow",
+  "model": "typesafe/jev-1.13-20260917",
+  "evidence_hash": "a6b9960f3d3d58fa",
+  "requests": 5,
+  "cost": 0.00046,
+  "max_requests": 60,
+  "checks": {
+   "dor_value": {
+    "score": 0.9,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_scope": {
+    "score": 0.89,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_interfaces": {
+    "score": 0.93,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_dependencies": {
+    "score": 0.92,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_nfr": {
+    "score": 0.8,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_small": {
+    "score": 0.91,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "dor_no_blockers": {
+    "score": 0.93,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "ac_covers_scope": {
+    "score": 0.79,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "drift_prd": {
+    "score": 0.8,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "drift_trd": {
+    "score": 0.87,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "handoff_in": {
+    "score": 0.97,
+    "band": "PASS",
+    "why": "",
+    "items": []
+   },
+   "ac_testable": {
+    "score": 0.64,
+    "band": "CONCERNS",
+    "why": "AC-4 0.64",
+    "items": [
+     {
+      "id": "AC-1",
+      "score": 0.87,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-2",
+      "score": 0.89,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-3",
+      "score": 0.84,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-4",
+      "score": 0.64,
+      "files": [],
+      "truncated": false
+     }
+    ]
+   },
+   "tests_plan_adequate": {
+    "score": 0.74,
+    "band": "PASS",
+    "why": "",
+    "items": [
+     {
+      "id": "AC-1",
+      "score": 0.86,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-2",
+      "score": 0.92,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-3",
+      "score": 0.74,
+      "files": [],
+      "truncated": false
+     },
+     {
+      "id": "AC-4",
+      "score": 0.78,
+      "files": [],
+      "truncated": false
+     }
+    ]
+   }
+  },
+  "packs": {},
+  "groups": [],
+  "drift": "none",
+  "tier": "jev",
+  "would_be_overall": "CONCERNS"
+ },
+ "story": "SGR-3",
+ "phase": "ready",
+ "at": "2026-11-08T01:17:47Z",
+ "judge": "jev",
+ "judge_provider": "openrouter",
+ "judge_model": "typesafe/jev-1.13-20260917",
+ "judge_note": null,
+ "jev_error": null,
+ "inputs_hash": "0fa7fd98f276a0fc",
+ "inputs_hash_base": "0fa7fd98f276a0fc",
+ "drift_confidence": 0.91,
+ "cost": 0.000589,
+ "gate_version": "0.11.0",
+ "writing": {
+  "score": 1.0,
+  "target": 0.8,
+  "checked": 6,
+  "passed": 6,
+  "status": "ok",
+  "parts": {
+   "story.md plain summary": {
+    "score": 1.0,
+    "checked": 6,
+    "long_paragraphs": 0,
+    "passive": 0,
+    "examples": []
+   }
+  },
+  "advice": []
+ }
+}

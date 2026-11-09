@@ -1,0 +1,70 @@
+{
+ "story": "SGR-3",
+ "results": {
+  "on is refused with the message naming issue 106": {
+   "spec": "16c225cca3a9c2ff",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.1,
+   "fingerprint": "d39947597008b67b",
+   "source": "local",
+   "at": "2026-11-08T01:17:08Z",
+   "output_tail": "judge.decompose: on is disabled in this release until the narrow-check hardening (issue #106) is done. Use shadow or off.\n"
+  },
+  "shadow and off are accepted by the settings check": {
+   "spec": "bf964f3da4104648",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.1,
+   "fingerprint": "d39947597008b67b",
+   "source": "local",
+   "at": "2026-11-08T01:17:08Z",
+   "output_tail": "[None, None]\n"
+  },
+  "score with on in the config stops and writes no verdict": {
+   "spec": "78b3b77b8908481a",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 1.3,
+   "fingerprint": "d39947597008b67b",
+   "source": "local",
+   "at": "2026-11-08T01:17:10Z",
+   "output_tail": ".\n----------------------------------------------------------------------\nRan 1 test in 1.146s\n\nOK\n"
+  },
+  "shadow records decomposed and off records none": {
+   "spec": "cfe505ad71037704",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 2.3,
+   "fingerprint": "d39947597008b67b",
+   "source": "local",
+   "at": "2026-11-08T01:17:12Z",
+   "output_tail": ".\n----------------------------------------------------------------------\nRan 1 test in 2.106s\n\nOK\n"
+  },
+  "the docs say on is disabled and name issue 106": {
+   "spec": "5eae541c4d30a3ee",
+   "passed": true,
+   "exit_code": 0,
+   "expect_exit": 0,
+   "output_matched": true,
+   "note": "",
+   "seconds": 0.2,
+   "fingerprint": "d39947597008b67b",
+   "source": "local",
+   "at": "2026-11-08T01:17:12Z",
+   "output_tail": ".\n----------------------------------------------------------------------\nRan 1 test in 0.002s\n\nOK\n"
+  }
+ }
+}

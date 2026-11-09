@@ -1,0 +1,86 @@
+{
+ "story": "SGR-3",
+ "acceptance_criteria": [
+  {
+   "id": "AC-1",
+   "text": "check_config refuses judge.decompose: on with the message naming issue #106 and 'Use shadow or off.'; shadow and off load.",
+   "positive": [
+    "on raises ConfigError with the message"
+   ],
+   "negative": [
+    "shadow and off load; the default is still shadow"
+   ],
+   "edge": [
+    "A value that is not off, shadow or on is still refused, without calling on a valid choice"
+   ],
+   "regression": [
+    "Existing bad-setting tests (maybe, True, max_requests) still raise"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_on_is_refused_loudly_and_shadow_and_off_are_accepted",
+    "test_bad_decompose_settings_are_a_config_error"
+   ]
+  },
+  {
+   "id": "AC-2",
+   "text": "score with on in the config stops with the message and writes no verdict; nothing falls back to shadow.",
+   "positive": [
+    "score exits non-zero and prints the message"
+   ],
+   "negative": [
+    "No done.json is written and the judge gets no request"
+   ],
+   "edge": [
+    "The narrow path itself still works when a test switches the flag on in its own copy"
+   ],
+   "regression": [
+    "The 90+ existing TestDecompose tests pass with the flag switched on in their copy"
+   ],
+   "not_applicable": {},
+   "test_refs": [
+    "test_scoring_with_on_set_fails_and_never_falls_back_to_shadow"
+   ]
+  },
+  {
+   "id": "AC-3",
+   "text": "shadow records decomposed beside the binding verdict; off records none.",
+   "positive": [
+    "shadow verdict has decomposed"
+   ],
+   "negative": [
+    "off verdict has no decomposed"
+   ],
+   "edge": [],
+   "regression": [
+    "TestDecompose shadow and off tests pass"
+   ],
+   "not_applicable": {
+    "edge": "two values only"
+   },
+   "test_refs": [
+    "test_shadow_and_off_still_score"
+   ]
+  },
+  {
+   "id": "AC-4",
+   "text": "Docs that said on can be set now say it is disabled and why (decision record, guide, PROTOCOL.md, README, settings text, PR body).",
+   "positive": [
+    "Each doc names issue #106 and says on is disabled"
+   ],
+   "negative": [
+    "No doc still tells people to set on"
+   ],
+   "edge": [],
+   "regression": [],
+   "not_applicable": {
+    "edge": "documentation only",
+    "regression": "documentation only"
+   },
+   "test_refs": [
+    "test_the_docs_say_on_is_disabled_and_name_the_issue"
+   ]
+  }
+ ],
+ "proposed_missing_acs": []
+}

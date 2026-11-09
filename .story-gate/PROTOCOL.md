@@ -108,7 +108,7 @@ Checkpoints are appended to `stories/<ID>/checkpoints.jsonl` and published as `s
 
 1. `gate.py record-tests <ID>` runs the pinned `test_command`.
    - Set `junit_path` too, so each test's own result is recorded.
-   - With `judge.decompose: on`, `tests_implemented` cannot PASS without these per-test results; it shows CONCERNS at best.
+   - When `judge.decompose: on` is enabled again (it is disabled in this release), `tests_implemented` cannot PASS without these per-test results; it shows CONCERNS at best.
    - The tests must be green on the current code.
    - CI repeats this run itself and ignores the local record. The local run is an early warning; CI's run is the proof.
 
@@ -214,13 +214,13 @@ It is advice. It blocks only when the owner sets `writing.enforce` to `true`, af
 - **First, split the story.** A change too big for one judge pass (the judge reads at most `judge.max_chars / 2` of diff, or splits it into groups) cannot reach DONE by itself. Splitting is the fix. Use a record only after you tried, and say why you could not.
 - **Recording it:** `gate.py review-record <ID> --by <who> --why-not-split "…"`. The reason is required. Like a waiver, it is tied to the exact evidence and goes stale when anything changes. Never record a review that did not happen.
 - **What CI does with it:** it counts only after a code owner approves the head commit, and only when GitHub shows a finished review of that commit from every reviewer in `config.json` → `review_record.reviewers` (at least two, one marked `security`, never the pull request's author, and each one's latest review of that commit an approval) and no open review thread. Any doubt lifts nothing. On this computer the record is applied as a proposal; CI decides.
-- **What it lifts:** the "too large for one judge pass" caps, and only where the judge's own score for that item already passes. A low score, a group never asked, a cut file and any FAIL stay as they were. The result is **REVIEWED**, never PASS. It is not a waiver.
+- **What it lifts:** the "too large for one judge pass" caps, and only where the judge's own score for that item already passes. A low score, a group never asked, a cut file and any FAIL stay as they were. The result is **REVIEWED**, never PASS. It is not a waiver. With `judge.decompose` limited to off or shadow (issue #106), the `evidence_complete` check is the one that lifts; group caps lift only under `on`. A record goes stale when `judge.decompose` changes.
 
 ## Tuning
 - `gate.py label <ID> ready|done correct|wrong --note "…"` records whether a verdict was right.
 - Thresholds are tuned from `calibration.jsonl`.
 - A non-Jev judge stays capped at CONCERNS until it passes `gate.py judge-calibrate` and the owner sets `judge.emulated_allow_pass`. Every model that answers a score must also have answered the calibration run, so a load-balanced alias that adds a model needs calibrating again.
-- **What the judge sees.** With `judge.decompose` set to `on`, the judge answers small questions, one acceptance criterion or one group of files at a time. Each question gets only the evidence that relates to it (an evidence pack). Code takes the lowest score and the report names the criterion or files that scored low, for example `AC3 0.21 (files: scripts/check.mjs, test/check.test.mjs)`. If evidence was cut or the request cap was reached, that check shows CONCERNS at best and says what was cut. A change too large for one group of files caps the scope, deferral and drift checks the same way, because no question saw every file together. `shadow` (the default) keeps the old broad verdict and records the new scores beside it; `off` is the old method only.
+- **What the judge sees.** `judge.decompose: on` is disabled in this release (issue #106: the narrow-check hardening comes first); config loading refuses it, so use `shadow` or `off`. Once enabled, the judge answers small questions, one acceptance criterion or one group of files at a time. Each question gets only the evidence that relates to it (an evidence pack). Code takes the lowest score and the report names the criterion or files that scored low, for example `AC3 0.21 (files: scripts/check.mjs, test/check.test.mjs)`. If evidence was cut or the request cap was reached, that check shows CONCERNS at best and says what was cut. A change too large for one group of files caps the scope, deferral and drift checks the same way, because no question saw every file together. `shadow` (the default) keeps the old broad verdict and records the new scores beside it; `off` is the old method only.
 
 ## Rules
 - Fail closed. If the judge is unavailable, the verdict can't be PASS. Say so; don't work around it.

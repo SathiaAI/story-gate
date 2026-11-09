@@ -110,6 +110,10 @@ flowchart LR
   (option A): signatures are not required.
 - Decompose `on` mode (owner decision 6, 2026-10-25): no repository switches `judge.decompose` to `on` when this and
   the evidence-pack change ship. `on` waits for the hardening story; until then `shadow` stays the default.
+  Since the evidence-pack change merged (#99), config loading refuses `on` (issue #106). In the shipped modes, `off` and
+  `shadow`, a record lifts the structural `evidence_complete` check, which is the cap that holds a large change; the group
+  caps exist only in `on` mode, so their lift stays in the code and applies once `on` is enabled again. A record is bound
+  to the evidence hash, which includes the mode, so changing `judge.decompose` makes it stale: record it again.
 
 ## Out of scope
 - A cross-group judge question (Release 1.1). It stays on the roadmap. This record is the compensating control until it
