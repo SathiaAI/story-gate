@@ -216,7 +216,9 @@ def to_html(f):
                 '<div class="h1">%s</div><div class="sg-est">%s</div></div></div></div>' % (
                     esc(label), D.pill(st if not stale else None) if st else D.pill(None),
                     "out of date: the work changed since" if stale else ("not run yet" if not st else "on this exact code" + (
-                        ", checked without a judge" if v.get("judge") == "objective" else ""))))
+                        ", checked without a judge" if v.get("judge") == "objective" else "") + (
+                        (". Proposal, not yet checked in CI: independent review" if (v.get("review_record") or {}).get("proposal")
+                         else ". Passed on independent review: too large for one judge pass") if st == "REVIEWED" else ""))))
     tr = f.get("tests") or {}
     tests_line = ("no recorded test run" if not tr else "%s · exit %s%s" % (
         "CI's own run" if tr.get("source") == "ci" else "the agent's run", esc(tr.get("exit_code"), 10),
@@ -278,6 +280,14 @@ def to_html(f):
     import sg_decompose as DC
     judge_html = "".join("<p><strong>%s</strong></p>%s" % (label, "".join("<p class=\"small\">%s</p>" % esc(l.strip(), 400) for l in lines))
                          for label, lines in (("READY", DC.summary_lines(f.get("ready"))), ("DONE", DC.summary_lines(f.get("done")))) if lines)
+    rr = (f.get("done") or {}).get("review_record")  # a recorded independent review (gate.py review-record), lifted or not
+    if isinstance(rr, dict):
+        judge_html += "<p><strong>Independent review</strong></p><p class=\"small\">%s</p>" % esc(
+            ("%sPassed on independent review: too large for one judge pass. Checks: %s. Review IDs: %s. Head commit: %s. Recorded by %s. "
+             "Why it was not split: %s" % ("Proposal, not yet checked in CI (a code owner's approval and the live GitHub check decide): "
+                                           if rr.get("proposal") else "", ", ".join(rr.get("lifted") or []), ", ".join(map(str, rr.get("review_ids") or [])) or "none",
+                                           (rr.get("head") or "")[:12], rr.get("by"), rr.get("why_not_split")))
+            if rr.get("lifted") else "A review record by %s lifted nothing: %s" % (rr.get("by"), rr.get("blocked") or "see the checks"), 700)
     card = lambda title, body, note="": ('<div class="card mb-3"><div class="card-header"><h3 class="card-title">%s</h3>%s</div>%s</div>'
                                          % (title, ('<div class="card-actions">%s</div>' % note) if note else "", body))
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
